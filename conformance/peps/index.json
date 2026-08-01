@@ -1,0 +1,6604 @@
+{
+ "generated_from": "peps.python.org",
+ "generated_at": "2026-08-01T21:48:13.495157+00:00",
+ "pep_count": 733,
+ "peps": [
+  {
+   "number": 0,
+   "title": "Index of Python Enhancement Proposals (PEPs)",
+   "status": "Active",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 1,
+   "title": "PEP Purpose and Guidelines",
+   "status": "Active",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 2,
+   "title": "Procedure for Adding New Modules",
+   "status": "Active",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3,
+   "title": "Guidelines for Handling Bug Reports",
+   "status": "Withdrawn",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 4,
+   "title": "Deprecation of Standard Modules",
+   "status": "Active",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 5,
+   "title": "Guidelines for Language Evolution",
+   "status": "Superseded",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": "387",
+   "replaces": null
+  },
+  {
+   "number": 6,
+   "title": "Bug Fix Releases",
+   "status": "Superseded",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 7,
+   "title": "Style Guide for C Code",
+   "status": "Active",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 8,
+   "title": "Style Guide for Python Code",
+   "status": "Active",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 9,
+   "title": "Sample Plaintext PEP Template",
+   "status": "Withdrawn",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 10,
+   "title": "Voting Guidelines",
+   "status": "Active",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 11,
+   "title": "CPython platform support",
+   "status": "Active",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 12,
+   "title": "Sample reStructuredText PEP Template",
+   "status": "Active",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 13,
+   "title": "Python Language Governance",
+   "status": "Active",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 20,
+   "title": "The Zen of Python",
+   "status": "Active",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 42,
+   "title": "Feature Requests",
+   "status": "Withdrawn",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 100,
+   "title": "Python Unicode Integration",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 101,
+   "title": "Doing Python Releases 101",
+   "status": "Active",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": "102"
+  },
+  {
+   "number": 102,
+   "title": "Doing Python Micro Releases",
+   "status": "Superseded",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": "101",
+   "replaces": null
+  },
+  {
+   "number": 103,
+   "title": "Collecting information about git",
+   "status": "Withdrawn",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 160,
+   "title": "Python 1.6 Release Schedule",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "1.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 200,
+   "title": "Python 2.0 Release Schedule",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "2.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 201,
+   "title": "Lockstep Iteration",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 202,
+   "title": "List Comprehensions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 203,
+   "title": "Augmented Assignments",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 204,
+   "title": "Range Literals",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 205,
+   "title": "Weak References",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 206,
+   "title": "Python Advanced Library",
+   "status": "Withdrawn",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 207,
+   "title": "Rich Comparisons",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 208,
+   "title": "Reworking the Coercion Model",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 209,
+   "title": "Multi-dimensional Arrays",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 210,
+   "title": "Decoupling the Interpreter Loop",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 211,
+   "title": "Adding A New Outer Product Operator",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 212,
+   "title": "Loop Counter Iteration",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 213,
+   "title": "Attribute Access Handlers",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 214,
+   "title": "Extended Print Statement",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 215,
+   "title": "String Interpolation",
+   "status": "Superseded",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": "292",
+   "replaces": null
+  },
+  {
+   "number": 216,
+   "title": "Docstring Format",
+   "status": "Withdrawn",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": "287",
+   "replaces": null
+  },
+  {
+   "number": 217,
+   "title": "Display Hook for Interactive Use",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 218,
+   "title": "Adding a Built-In Set Object Type",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 219,
+   "title": "Stackless Python",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 220,
+   "title": "Coroutines, Generators, Continuations",
+   "status": "Rejected",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 221,
+   "title": "Import As",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 222,
+   "title": "Web Library Enhancements",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 223,
+   "title": "Change the Meaning of ``\\x`` Escapes",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 224,
+   "title": "Attribute Docstrings",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 225,
+   "title": "Elementwise/Objectwise Operators",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 226,
+   "title": "Python 2.1 Release Schedule",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 227,
+   "title": "Statically Nested Scopes",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 228,
+   "title": "Reworking Python's Numeric Model",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 229,
+   "title": "Using Distutils to Build Python",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 230,
+   "title": "Warning Framework",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 231,
+   "title": "__findattr__()",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 232,
+   "title": "Function Attributes",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 233,
+   "title": "Python Online Help",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 234,
+   "title": "Iterators",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 235,
+   "title": "Import on Case-Insensitive Platforms",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 236,
+   "title": "Back to the __future__",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 237,
+   "title": "Unifying Long Integers and Integers",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 238,
+   "title": "Changing the Division Operator",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 239,
+   "title": "Adding a Rational Type to Python",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 240,
+   "title": "Adding a Rational Literal to Python",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 241,
+   "title": "Metadata for Python Software Packages",
+   "status": "Superseded",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": "314",
+   "replaces": null
+  },
+  {
+   "number": 242,
+   "title": "Numeric Kinds",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 243,
+   "title": "Module Repository Upload Mechanism",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 244,
+   "title": "The ``directive`` statement",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 245,
+   "title": "Python Interface Syntax",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 246,
+   "title": "Object Adaptation",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 247,
+   "title": "API for Cryptographic Hash Functions",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 248,
+   "title": "Python Database API Specification v1.0",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": "249",
+   "replaces": null
+  },
+  {
+   "number": 249,
+   "title": "Python Database API Specification v2.0",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": "248"
+  },
+  {
+   "number": 250,
+   "title": "Using site-packages on Windows",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 251,
+   "title": "Python 2.2 Release Schedule",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 252,
+   "title": "Making Types Look More Like Classes",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 253,
+   "title": "Subtyping Built-in Types",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 254,
+   "title": "Making Classes Look More Like Types",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 255,
+   "title": "Simple Generators",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 256,
+   "title": "Docstring Processing System Framework",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 257,
+   "title": "Docstring Conventions",
+   "status": "Active",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 258,
+   "title": "Docutils Design Specification",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 259,
+   "title": "Omit printing newline after newline",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 260,
+   "title": "Simplify xrange()",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 261,
+   "title": "Support for \"wide\" Unicode characters",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 262,
+   "title": "A Database of Installed Python Packages",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 263,
+   "title": "Defining Python Source Code Encodings",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 264,
+   "title": "Future statements in simulated shells",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 265,
+   "title": "Sorting Dictionaries by Value",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 266,
+   "title": "Optimizing Global Variable/Attribute Access",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 267,
+   "title": "Optimized Access to Module Namespaces",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 268,
+   "title": "Extended HTTP functionality and WebDAV",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.x",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 269,
+   "title": "Pgen Module for Python",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 270,
+   "title": "uniq method for list objects",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 271,
+   "title": "Prefixing sys.path by command line option",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 272,
+   "title": "API for Block Encryption Algorithms v1.0",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 273,
+   "title": "Import Modules from Zip Archives",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 274,
+   "title": "Dict Comprehensions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.7, 3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 275,
+   "title": "Switching on Multiple Values",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 276,
+   "title": "Simple Iterator for ints",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 277,
+   "title": "Unicode file name support for Windows NT",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 278,
+   "title": "Universal Newline Support",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 279,
+   "title": "The enumerate() built-in function",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 280,
+   "title": "Optimizing access to globals",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 281,
+   "title": "Loop Counter Iteration with range and xrange",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 282,
+   "title": "A Logging System",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 283,
+   "title": "Python 2.3 Release Schedule",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 284,
+   "title": "Integer for-loops",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 285,
+   "title": "Adding a bool type",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 286,
+   "title": "Enhanced Argument Tuples",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 287,
+   "title": "reStructuredText Docstring Format",
+   "status": "Active",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": "216"
+  },
+  {
+   "number": 288,
+   "title": "Generators Attributes and Exceptions",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 289,
+   "title": "Generator Expressions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 290,
+   "title": "Code Migration and Modernization",
+   "status": "Active",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 291,
+   "title": "Backward Compatibility for the Python 2 Standard Library",
+   "status": "Superseded",
+   "type": "Informational",
+   "python_version": "2.3",
+   "superseded_by": "387",
+   "replaces": null
+  },
+  {
+   "number": 292,
+   "title": "Simpler String Substitutions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.4",
+   "superseded_by": null,
+   "replaces": "215"
+  },
+  {
+   "number": 293,
+   "title": "Codec Error Handling Callbacks",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 294,
+   "title": "Type Names in the types Module",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 295,
+   "title": "Interpretation of multiline string constants",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 296,
+   "title": "Adding a bytes Object Type",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 297,
+   "title": "Support for System Upgrades",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 298,
+   "title": "The Locked Buffer Interface",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 299,
+   "title": "Special __main__() function in modules",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 301,
+   "title": "Package Index and Metadata for Distutils",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 302,
+   "title": "New Import Hooks",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 303,
+   "title": "Extend divmod() for Multiple Divisors",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 304,
+   "title": "Controlling Generation of Bytecode Files",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 305,
+   "title": "CSV File API",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 306,
+   "title": "How to Change Python's Grammar",
+   "status": "Withdrawn",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 307,
+   "title": "Extensions to the pickle protocol",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 308,
+   "title": "Conditional Expressions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 309,
+   "title": "Partial Function Application",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 310,
+   "title": "Reliable Acquisition/Release Pairs",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 311,
+   "title": "Simplified Global Interpreter Lock Acquisition for Extensions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 312,
+   "title": "Simple Implicit Lambda",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "2.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 313,
+   "title": "Adding Roman Numeral Literals to Python",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 314,
+   "title": "Metadata for Python Software Packages 1.1",
+   "status": "Superseded",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": "345",
+   "replaces": "241"
+  },
+  {
+   "number": 315,
+   "title": "Enhanced While Loop",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 316,
+   "title": "Programming by Contract for Python",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 317,
+   "title": "Eliminate Implicit Exception Instantiation",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 318,
+   "title": "Decorators for Functions and Methods",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 319,
+   "title": "Python Synchronize/Asynchronize Block",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 320,
+   "title": "Python 2.4 Release Schedule",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "2.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 321,
+   "title": "Date/Time Parsing and Formatting",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "2.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 322,
+   "title": "Reverse Iteration",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 323,
+   "title": "Copyable Iterators",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 324,
+   "title": "subprocess - New process module",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 325,
+   "title": "Resource-Release Support for Generators",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 326,
+   "title": "A Case for Top and Bottom Values",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 327,
+   "title": "Decimal Data Type",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 328,
+   "title": "Imports: Multi-Line and Absolute/Relative",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.4, 2.5, 2.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 329,
+   "title": "Treating Builtins as Constants in the Standard Library",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 330,
+   "title": "Python Bytecode Verification",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 331,
+   "title": "Locale-Independent Float/String Conversions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 332,
+   "title": "Byte vectors and String/Unicode Unification",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 333,
+   "title": "Python Web Server Gateway Interface v1.0",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": "3333",
+   "replaces": null
+  },
+  {
+   "number": 334,
+   "title": "Simple Coroutines via SuspendIteration",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 335,
+   "title": "Overloadable Boolean Operators",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 336,
+   "title": "Make None Callable",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 337,
+   "title": "Logging Usage in the Standard Library",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 338,
+   "title": "Executing modules as scripts",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 339,
+   "title": "Design of the CPython Compiler",
+   "status": "Withdrawn",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 340,
+   "title": "Anonymous Block Statements",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 341,
+   "title": "Unifying try-except and try-finally",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 342,
+   "title": "Coroutines via Enhanced Generators",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 343,
+   "title": "The \"with\" Statement",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 344,
+   "title": "Exception Chaining and Embedded Tracebacks",
+   "status": "Superseded",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 345,
+   "title": "Metadata for Python Software Packages 1.2",
+   "status": "Superseded",
+   "type": "Standards Track",
+   "python_version": "2.7",
+   "superseded_by": "566",
+   "replaces": "314"
+  },
+  {
+   "number": 346,
+   "title": "User Defined (\"``with``\") Statements",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 347,
+   "title": "Migrating the Python CVS to Subversion",
+   "status": "Final",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 348,
+   "title": "Exception Reorganization for Python 3.0",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 349,
+   "title": "Allow str() to return unicode strings",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 350,
+   "title": "Codetags",
+   "status": "Rejected",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 351,
+   "title": "The freeze protocol",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 352,
+   "title": "Required Superclass for Exceptions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 353,
+   "title": "Using ssize_t as the index type",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 354,
+   "title": "Enumerations in Python",
+   "status": "Superseded",
+   "type": "Standards Track",
+   "python_version": "2.6",
+   "superseded_by": "435",
+   "replaces": null
+  },
+  {
+   "number": 355,
+   "title": "Path - Object oriented filesystem paths",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 356,
+   "title": "Python 2.5 Release Schedule",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 357,
+   "title": "Allowing Any Object to be Used for Slicing",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 358,
+   "title": "The \"bytes\" Object",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.6, 3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 359,
+   "title": "The \"make\" Statement",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "2.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 360,
+   "title": "Externally Maintained Packages",
+   "status": "Final",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 361,
+   "title": "Python 2.6 and 3.0 Release Schedule",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "2.6, 3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 362,
+   "title": "Function Signature Object",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 363,
+   "title": "Syntax For Dynamic Attribute Access",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 364,
+   "title": "Transitioning to the Py3K Standard Library",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "2.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 365,
+   "title": "Adding the pkg_resources module",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 366,
+   "title": "Main module explicit relative imports",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.6, 3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 367,
+   "title": "New Super",
+   "status": "Superseded",
+   "type": "Standards Track",
+   "python_version": "2.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 368,
+   "title": "Standard image protocol and class",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "2.6, 3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 369,
+   "title": "Post import hooks",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "2.6, 3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 370,
+   "title": "Per user site-packages directory",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.6, 3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 371,
+   "title": "Addition of the multiprocessing package to the standard library",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.6, 3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 372,
+   "title": "Adding an ordered dictionary to collections",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.7, 3.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 373,
+   "title": "Python 2.7 Release Schedule",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "2.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 374,
+   "title": "Choosing a distributed VCS for the Python project",
+   "status": "Final",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 375,
+   "title": "Python 3.1 Release Schedule",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "3.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 376,
+   "title": "Database of Installed Python Distributions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.7, 3.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 377,
+   "title": "Allow __enter__() methods to skip the statement body",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.7, 3.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 378,
+   "title": "Format Specifier for Thousands Separator",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.7, 3.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 379,
+   "title": "Adding an Assignment Expression",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "2.7, 3.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 380,
+   "title": "Syntax for Delegating to a Subgenerator",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 381,
+   "title": "Mirroring infrastructure for PyPI",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 382,
+   "title": "Namespace Packages",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 383,
+   "title": "Non-decodable Bytes in System Character Interfaces",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 384,
+   "title": "Defining a Stable ABI",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 385,
+   "title": "Migrating from Subversion to Mercurial",
+   "status": "Final",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 386,
+   "title": "Changing the version comparison module in Distutils",
+   "status": "Superseded",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": "440",
+   "replaces": null
+  },
+  {
+   "number": 387,
+   "title": "Backwards Compatibility Policy",
+   "status": "Active",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": "291"
+  },
+  {
+   "number": 389,
+   "title": "argparse - New Command Line Parsing Module",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.7, 3.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 390,
+   "title": "Static metadata for Distutils",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.7, 3.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 391,
+   "title": "Dictionary-Based Configuration For Logging",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.7, 3.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 392,
+   "title": "Python 3.2 Release Schedule",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "3.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 393,
+   "title": "Flexible String Representation",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 394,
+   "title": "The \"python\" Command on Unix-Like Systems",
+   "status": "Active",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 395,
+   "title": "Qualified Names for Modules",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 396,
+   "title": "Module Version Numbers",
+   "status": "Withdrawn",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 397,
+   "title": "Python launcher for Windows",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 398,
+   "title": "Python 3.3 Release Schedule",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 399,
+   "title": "Pure Python/C Accelerator Module Compatibility Requirements",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 400,
+   "title": "Deprecate codecs.StreamReader and codecs.StreamWriter",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 401,
+   "title": "BDFL Retirement",
+   "status": "Rejected",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 402,
+   "title": "Simplified Package Layout and Partitioning",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": "382"
+  },
+  {
+   "number": 403,
+   "title": "General purpose decorator clause (aka \"@in\" clause)",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 404,
+   "title": "Python 2.8 Un-release Schedule",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "2.8",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 405,
+   "title": "Python Virtual Environments",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 406,
+   "title": "Improved Encapsulation of Import State",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 407,
+   "title": "New release cycle and introducing long-term support versions",
+   "status": "Deferred",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 408,
+   "title": "Standard library __preview__ package",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 409,
+   "title": "Suppressing exception context",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": "415",
+   "replaces": null
+  },
+  {
+   "number": 410,
+   "title": "Use decimal.Decimal type for timestamps",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 411,
+   "title": "Provisional packages in the Python standard library",
+   "status": "Superseded",
+   "type": "Informational",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 412,
+   "title": "Key-Sharing Dictionary",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 413,
+   "title": "Faster evolution of the Python Standard Library",
+   "status": "Withdrawn",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 414,
+   "title": "Explicit Unicode Literal for Python 3.3",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 415,
+   "title": "Implement context suppression with exception attributes",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": "409"
+  },
+  {
+   "number": 416,
+   "title": "Add a frozendict builtin type",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 417,
+   "title": "Including mock in the Standard Library",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 418,
+   "title": "Add monotonic time, performance counter, and process time functions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 419,
+   "title": "Protecting cleanup statements from interruptions",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 420,
+   "title": "Implicit Namespace Packages",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 421,
+   "title": "Adding sys.implementation",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 422,
+   "title": "Simpler customisation of class creation",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 423,
+   "title": "Naming conventions and recipes related to packaging",
+   "status": "Deferred",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 424,
+   "title": "A method for exposing a length hint",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 425,
+   "title": "Compatibility Tags for Built Distributions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 426,
+   "title": "Metadata for Python Software Packages 2.0",
+   "status": "Withdrawn",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": "566",
+   "replaces": "345"
+  },
+  {
+   "number": 427,
+   "title": "The Wheel Binary Package Format 1.0",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 428,
+   "title": "The pathlib module -- object-oriented filesystem paths",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 429,
+   "title": "Python 3.4 Release Schedule",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 430,
+   "title": "Migrating to Python 3 as the default online documentation",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 431,
+   "title": "Time zone support improvements",
+   "status": "Superseded",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": "615",
+   "replaces": null
+  },
+  {
+   "number": 432,
+   "title": "Restructuring the CPython startup sequence",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 433,
+   "title": "Easier suppression of file descriptor inheritance",
+   "status": "Superseded",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": "446",
+   "replaces": null
+  },
+  {
+   "number": 434,
+   "title": "IDLE Enhancement Exception for All Branches",
+   "status": "Active",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 435,
+   "title": "Adding an Enum type to the Python standard library",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": "354"
+  },
+  {
+   "number": 436,
+   "title": "The Argument Clinic DSL",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 437,
+   "title": "A DSL for specifying signatures, annotations and argument converters",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 438,
+   "title": "Transitioning to release-file hosting on PyPI",
+   "status": "Superseded",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": "470",
+   "replaces": null
+  },
+  {
+   "number": 439,
+   "title": "Inclusion of implicit pip bootstrap in Python installation",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 440,
+   "title": "Version Identification and Dependency Specification",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": "386"
+  },
+  {
+   "number": 441,
+   "title": "Improving Python ZIP Application Support",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 442,
+   "title": "Safe object finalization",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 443,
+   "title": "Single-dispatch generic functions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": "245, 246, 3124"
+  },
+  {
+   "number": 444,
+   "title": "Python Web3 Interface",
+   "status": "Deferred",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 445,
+   "title": "Add new APIs to customize Python memory allocators",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 446,
+   "title": "Make newly created file descriptors non-inheritable",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": "433"
+  },
+  {
+   "number": 447,
+   "title": "Add __getdescriptor__ method to metaclass",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 448,
+   "title": "Additional Unpacking Generalizations",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 449,
+   "title": "Removal of the PyPI Mirror Auto Discovery and Naming Scheme",
+   "status": "Final",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": "381"
+  },
+  {
+   "number": 450,
+   "title": "Adding A Statistics Module To The Standard Library",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 451,
+   "title": "A ModuleSpec Type for the Import System",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 452,
+   "title": "API for Cryptographic Hash Functions v2.0",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": "247"
+  },
+  {
+   "number": 453,
+   "title": "Explicit bootstrapping of pip in Python installations",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 454,
+   "title": "Add a new tracemalloc module to trace Python memory allocations",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 455,
+   "title": "Adding a key-transforming dictionary to collections",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 456,
+   "title": "Secure and interchangeable hash algorithm",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 457,
+   "title": "Notation For Positional-Only Parameters",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 458,
+   "title": "Secure PyPI downloads with signed repository metadata",
+   "status": "Accepted",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 459,
+   "title": "Standard Metadata Extensions for Python Software Packages",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 460,
+   "title": "Add binary interpolation and formatting",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 461,
+   "title": "Adding % formatting to bytes and bytearray",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 462,
+   "title": "Core development workflow automation for CPython",
+   "status": "Withdrawn",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 463,
+   "title": "Exception-catching expressions",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 464,
+   "title": "Removal of the PyPI Mirror Authenticity API",
+   "status": "Final",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": "381"
+  },
+  {
+   "number": 465,
+   "title": "A dedicated infix operator for matrix multiplication",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 466,
+   "title": "Network Security Enhancements for Python 2.7.x",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.7.9",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 467,
+   "title": "Minor API improvements for binary sequences",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 468,
+   "title": "Preserving the order of \\*\\*kwargs in a function.",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 469,
+   "title": "Migration of dict iteration code to Python 3",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 470,
+   "title": "Removing External Hosting Support on PyPI",
+   "status": "Final",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": "438"
+  },
+  {
+   "number": 471,
+   "title": "os.scandir() function -- a better and faster directory iterator",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 472,
+   "title": "Support for indexing with keyword arguments",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 473,
+   "title": "Adding structured data to built-in exceptions",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 474,
+   "title": "Creating forge.python.org",
+   "status": "Withdrawn",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 475,
+   "title": "Retry system calls failing with EINTR",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 476,
+   "title": "Enabling certificate verification by default for stdlib http clients",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.7.9, 3.4.3, 3.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 477,
+   "title": "Backport ensurepip (PEP 453) to Python 2.7",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 478,
+   "title": "Python 3.5 Release Schedule",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "3.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 479,
+   "title": "Change StopIteration handling inside generators",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 480,
+   "title": "Surviving a Compromise of PyPI: End-to-end signing of packages",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 481,
+   "title": "Migrate CPython to Git, Github, and Phabricator",
+   "status": "Withdrawn",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 482,
+   "title": "Literature Overview for Type Hints",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 483,
+   "title": "The Theory of Type Hints",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 484,
+   "title": "Type Hints",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 485,
+   "title": "A Function for testing approximate equality",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 486,
+   "title": "Make the Python Launcher aware of virtual environments",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 487,
+   "title": "Simpler customisation of class creation",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": "422"
+  },
+  {
+   "number": 488,
+   "title": "Elimination of PYO files",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 489,
+   "title": "Multi-phase extension module initialization",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 490,
+   "title": "Chain exceptions at C level",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 491,
+   "title": "The Wheel Binary Package Format 1.9",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 492,
+   "title": "Coroutines with async and await syntax",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.5",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 493,
+   "title": "HTTPS verification migration tools for Python 2.7",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "2.7.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 494,
+   "title": "Python 3.6 Release Schedule",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 495,
+   "title": "Local Time Disambiguation",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 496,
+   "title": "Environment Markers",
+   "status": "Rejected",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 497,
+   "title": "A standard mechanism for backward compatibility",
+   "status": "Rejected",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 498,
+   "title": "Literal String Interpolation",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 499,
+   "title": "``python -m foo`` should also bind ``'foo'`` in ``sys.modules``",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "3.10",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 500,
+   "title": "A protocol for delegating datetime methods to their tzinfo implementations",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 501,
+   "title": "General purpose template literal strings",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": "750",
+   "replaces": null
+  },
+  {
+   "number": 502,
+   "title": "String Interpolation - Extended Discussion",
+   "status": "Rejected",
+   "type": "Informational",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 503,
+   "title": "Simple Repository API",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 504,
+   "title": "Using the System RNG by default",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 505,
+   "title": "None-aware operators",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "3.8",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 506,
+   "title": "Adding A Secrets Module To The Standard Library",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 507,
+   "title": "Migrate CPython to Git and GitLab",
+   "status": "Rejected",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 508,
+   "title": "Dependency specification for Python Software Packages",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 509,
+   "title": "Add a private version to dict",
+   "status": "Superseded",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": "699",
+   "replaces": null
+  },
+  {
+   "number": 510,
+   "title": "Specialize functions with guards",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 511,
+   "title": "API for code transformers",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 512,
+   "title": "Migrating from hg.python.org to GitHub",
+   "status": "Final",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 513,
+   "title": "A Platform Tag for Portable Linux Built Distributions",
+   "status": "Superseded",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": "600",
+   "replaces": null
+  },
+  {
+   "number": 514,
+   "title": "Python registration in the Windows registry",
+   "status": "Active",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 515,
+   "title": "Underscores in Numeric Literals",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 516,
+   "title": "Build system abstraction for pip/conda etc",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 517,
+   "title": "A build-system independent format for source trees",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 518,
+   "title": "Specifying Minimum Build System Requirements for Python Projects",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 519,
+   "title": "Adding a file system path protocol",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 520,
+   "title": "Preserving Class Attribute Definition Order",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 521,
+   "title": "Managing global context via 'with' blocks in generators and coroutines",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 522,
+   "title": "Allow BlockingIOError in security sensitive APIs",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 523,
+   "title": "Adding a frame evaluation API to CPython",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 524,
+   "title": "Make os.urandom() blocking on Linux",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 525,
+   "title": "Asynchronous Generators",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 526,
+   "title": "Syntax for Variable Annotations",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 527,
+   "title": "Removing Un(der)used file types/extensions on PyPI",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 528,
+   "title": "Change Windows console encoding to UTF-8",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 529,
+   "title": "Change Windows filesystem encoding to UTF-8",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 530,
+   "title": "Asynchronous Comprehensions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 531,
+   "title": "Existence checking operators",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 532,
+   "title": "A circuit breaking protocol and binary operators",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "3.8",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 533,
+   "title": "Deterministic cleanup for iterators",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 534,
+   "title": "Improved Errors for Missing Standard Library Modules",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 535,
+   "title": "Rich comparison chaining",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "3.8",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 536,
+   "title": "Final Grammar for Literal String Interpolation",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 537,
+   "title": "Python 3.7 Release Schedule",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 538,
+   "title": "Coercing the legacy C locale to a UTF-8 based locale",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 539,
+   "title": "A New C-API for Thread-Local Storage in CPython",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 540,
+   "title": "Add a new UTF-8 Mode",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 541,
+   "title": "Package Index Name Retention",
+   "status": "Final",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 542,
+   "title": "Dot Notation Assignment In Function Header",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 543,
+   "title": "A Unified TLS API for Python",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": "748",
+   "replaces": null
+  },
+  {
+   "number": 544,
+   "title": "Protocols: Structural subtyping (static duck typing)",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.8",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 545,
+   "title": "Python Documentation Translations",
+   "status": "Active",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 546,
+   "title": "Backport ssl.MemoryBIO and ssl.SSLObject to Python 2.7",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 547,
+   "title": "Running extension modules using the -m option",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 548,
+   "title": "More Flexible Loop Control",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 549,
+   "title": "Instance Descriptors",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 550,
+   "title": "Execution Context",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 551,
+   "title": "Security transparency in the Python runtime",
+   "status": "Withdrawn",
+   "type": "Informational",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 552,
+   "title": "Deterministic pycs",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 553,
+   "title": "Built-in breakpoint()",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 554,
+   "title": "Multiple Interpreters in the Stdlib",
+   "status": "Superseded",
+   "type": "Standards Track",
+   "python_version": "3.13",
+   "superseded_by": "734",
+   "replaces": null
+  },
+  {
+   "number": 555,
+   "title": "Context-local variables (contextvars)",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 556,
+   "title": "Threaded garbage collection",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 557,
+   "title": "Data Classes",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 558,
+   "title": "Defined semantics for locals()",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.13",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 559,
+   "title": "Built-in noop()",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 560,
+   "title": "Core support for typing module and generic types",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 561,
+   "title": "Distributing and Packaging Type Information",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 562,
+   "title": "Module __getattr__ and __dir__",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 563,
+   "title": "Postponed Evaluation of Annotations",
+   "status": "Superseded",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": "649, 749",
+   "replaces": null
+  },
+  {
+   "number": 564,
+   "title": "Add new time functions with nanosecond resolution",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 565,
+   "title": "Show DeprecationWarning in __main__",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 566,
+   "title": "Metadata for Python Software Packages 2.1",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.x",
+   "superseded_by": null,
+   "replaces": "345"
+  },
+  {
+   "number": 567,
+   "title": "Context Variables",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.7",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 568,
+   "title": "Generator-sensitivity for Context Variables",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "3.8",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 569,
+   "title": "Python 3.8 Release Schedule",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "3.8",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 570,
+   "title": "Python Positional-Only Parameters",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.8",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 571,
+   "title": "The manylinux2010 Platform Tag",
+   "status": "Superseded",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": "600",
+   "replaces": null
+  },
+  {
+   "number": 572,
+   "title": "Assignment Expressions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.8",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 573,
+   "title": "Module State Access from C Extension Methods",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.9",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 574,
+   "title": "Pickle protocol 5 with out-of-band data",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.8",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 575,
+   "title": "Unifying function/method classes",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.8",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 576,
+   "title": "Rationalize Built-in function classes",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.8",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 577,
+   "title": "Augmented Assignment Expressions",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.8",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 578,
+   "title": "Python Runtime Audit Hooks",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.8",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 579,
+   "title": "Refactoring C functions and methods",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 580,
+   "title": "The C call protocol",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.8",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 581,
+   "title": "Using GitHub Issues for CPython",
+   "status": "Final",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 582,
+   "title": "Python local packages directory",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 583,
+   "title": "A Concurrency Memory Model for Python",
+   "status": "Withdrawn",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 584,
+   "title": "Add Union Operators To dict",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.9",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 585,
+   "title": "Type Hinting Generics In Standard Collections",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.9",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 586,
+   "title": "Literal Types",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.8",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 587,
+   "title": "Python Initialization Configuration",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.8",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 588,
+   "title": "GitHub Issues Migration Plan",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 589,
+   "title": "TypedDict: Type Hints for Dictionaries with a Fixed Set of Keys",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.8",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 590,
+   "title": "Vectorcall: a fast calling protocol for CPython",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.8",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 591,
+   "title": "Adding a final qualifier to typing",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.8",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 592,
+   "title": "Adding \"Yank\" Support to the Simple API",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 593,
+   "title": "Flexible function and variable annotations",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.9",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 594,
+   "title": "Removing dead batteries from the standard library",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.11",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 595,
+   "title": "Improving bugs.python.org",
+   "status": "Withdrawn",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 596,
+   "title": "Python 3.9 Release Schedule",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "3.9",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 597,
+   "title": "Add optional EncodingWarning",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.10",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 598,
+   "title": "Introducing incremental feature releases",
+   "status": "Withdrawn",
+   "type": "Informational",
+   "python_version": "3.9",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 599,
+   "title": "The manylinux2014 Platform Tag",
+   "status": "Superseded",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": "600",
+   "replaces": null
+  },
+  {
+   "number": 600,
+   "title": "Future 'manylinux' Platform Tags for Portable Linux Built Distributions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": "513, 571, 599"
+  },
+  {
+   "number": 601,
+   "title": "Forbid return/break/continue breaking out of finally",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.8",
+   "superseded_by": "765",
+   "replaces": null
+  },
+  {
+   "number": 602,
+   "title": "Annual Release Cycle for Python",
+   "status": "Active",
+   "type": "Process",
+   "python_version": "3.9",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 603,
+   "title": "Adding a frozenmap type to collections",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 604,
+   "title": "Allow writing union types as ``X | Y``",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.10",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 605,
+   "title": "A rolling feature release stream for CPython",
+   "status": "Rejected",
+   "type": "Informational",
+   "python_version": "3.9",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 606,
+   "title": "Python Compatibility Version",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.9",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 607,
+   "title": "Reducing CPython's Feature Delivery Latency",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "3.9",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 608,
+   "title": "Coordinated Python release",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.9",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 609,
+   "title": "Python Packaging Authority (PyPA) Governance",
+   "status": "Active",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 610,
+   "title": "Recording the Direct URL Origin of installed distributions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 611,
+   "title": "The one million limit",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 612,
+   "title": "Parameter Specification Variables",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.10",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 613,
+   "title": "Explicit Type Aliases",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.10",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 614,
+   "title": "Relaxing Grammar Restrictions On Decorators",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.9",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 615,
+   "title": "Support for the IANA Time Zone Database in the Standard Library",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.9",
+   "superseded_by": null,
+   "replaces": "431"
+  },
+  {
+   "number": 616,
+   "title": "String methods to remove prefixes and suffixes",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.9",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 617,
+   "title": "New PEG parser for CPython",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.9",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 618,
+   "title": "Add Optional Length-Checking To zip",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.10",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 619,
+   "title": "Python 3.10 Release Schedule",
+   "status": "Active",
+   "type": "Informational",
+   "python_version": "3.10",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 620,
+   "title": "Hide implementation details from the C API",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 621,
+   "title": "Storing project metadata in pyproject.toml",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 622,
+   "title": "Structural Pattern Matching",
+   "status": "Superseded",
+   "type": "Standards Track",
+   "python_version": "3.10",
+   "superseded_by": "634",
+   "replaces": null
+  },
+  {
+   "number": 623,
+   "title": "Remove wstr from Unicode",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.10",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 624,
+   "title": "Remove Py_UNICODE encoder APIs",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.11",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 625,
+   "title": "Filename of a Source Distribution",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 626,
+   "title": "Precise line numbers for debugging and other tools.",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.10",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 627,
+   "title": "Recording installed projects",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 628,
+   "title": "Add ``math.tau``",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.6",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 629,
+   "title": "Versioning PyPI's Simple API",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 630,
+   "title": "Isolating Extension Modules",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 631,
+   "title": "Dependency specification in pyproject.toml based on PEP 508",
+   "status": "Superseded",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": "621",
+   "replaces": null
+  },
+  {
+   "number": 632,
+   "title": "Deprecate distutils module",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.10",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 633,
+   "title": "Dependency specification in pyproject.toml using an exploded TOML table",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 634,
+   "title": "Structural Pattern Matching: Specification",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.10",
+   "superseded_by": null,
+   "replaces": "622"
+  },
+  {
+   "number": 635,
+   "title": "Structural Pattern Matching: Motivation and Rationale",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "3.10",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 636,
+   "title": "Structural Pattern Matching: Tutorial",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "3.10",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 637,
+   "title": "Support for indexing with keyword arguments",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.10",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 638,
+   "title": "Syntactic Macros",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 639,
+   "title": "Improving License Clarity with Better Package Metadata",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 640,
+   "title": "Unused variable syntax",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.10",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 641,
+   "title": "Using an underscore in the version portion of Python 3.10 compatibility tags",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.10",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 642,
+   "title": "Explicit Pattern Syntax for Structural Pattern Matching",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.10",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 643,
+   "title": "Metadata for Package Source Distributions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 644,
+   "title": "Require OpenSSL 1.1.1 or newer",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.10",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 645,
+   "title": "Allow writing optional types as ``x?``",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 646,
+   "title": "Variadic Generics",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.11",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 647,
+   "title": "User-Defined Type Guards",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.10",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 648,
+   "title": "Extensible customizations of the interpreter at startup",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.11",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 649,
+   "title": "Deferred Evaluation Of Annotations Using Descriptors",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": "563"
+  },
+  {
+   "number": 650,
+   "title": "Specifying Installer Requirements for Python Projects",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 651,
+   "title": "Robust Stack Overflow Handling",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 652,
+   "title": "Maintaining the Stable ABI",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.10",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 653,
+   "title": "Precise Semantics for Pattern Matching",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 654,
+   "title": "Exception Groups and except*",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.11",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 655,
+   "title": "Marking individual TypedDict items as required or potentially-missing",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.11",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 656,
+   "title": "Platform Tag for Linux Distributions Using Musl",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 657,
+   "title": "Include Fine Grained Error Locations in Tracebacks",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.11",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 658,
+   "title": "Serve Distribution Metadata in the Simple Repository API",
+   "status": "Accepted",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 659,
+   "title": "Specializing Adaptive Interpreter",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 660,
+   "title": "Editable installs for pyproject.toml based builds (wheel based)",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 661,
+   "title": "Sentinel Values",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 662,
+   "title": "Editable installs via virtual wheels",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 663,
+   "title": "Standardizing Enum str(), repr(), and format() behaviors",
+   "status": "Rejected",
+   "type": "Informational",
+   "python_version": "3.11",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 664,
+   "title": "Python 3.11 Release Schedule",
+   "status": "Active",
+   "type": "Informational",
+   "python_version": "3.11",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 665,
+   "title": "A file format to list Python dependencies for reproducibility of an application",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": "751",
+   "replaces": null
+  },
+  {
+   "number": 666,
+   "title": "Reject Foolish Indentation",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 667,
+   "title": "Consistent views of namespaces",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.13",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 668,
+   "title": "Marking Python base environments as \u201cexternally managed\u201d",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 669,
+   "title": "Low Impact Monitoring for CPython",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 670,
+   "title": "Convert macros to functions in the Python C API",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.11",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 671,
+   "title": "Syntax for late-bound function argument defaults",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 672,
+   "title": "Unicode-related Security Considerations for Python",
+   "status": "Active",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 673,
+   "title": "Self Type",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.11",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 674,
+   "title": "Disallow using macros as l-values",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 675,
+   "title": "Arbitrary Literal String Type",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.11",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 676,
+   "title": "PEP Infrastructure Process",
+   "status": "Active",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 677,
+   "title": "Callable Type Syntax",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.11",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 678,
+   "title": "Enriching Exceptions with Notes",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.11",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 679,
+   "title": "New assert statement syntax with parentheses",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 680,
+   "title": "tomllib: Support for Parsing TOML in the Standard Library",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.11",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 681,
+   "title": "Data Class Transforms",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.11",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 682,
+   "title": "Format Specifier for Signed Zero",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.11",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 683,
+   "title": "Immortal Objects, Using a Fixed Refcount",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 684,
+   "title": "A Per-Interpreter GIL",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 685,
+   "title": "Comparison of extra names for optional distribution dependencies",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 686,
+   "title": "Make UTF-8 mode default",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 687,
+   "title": "Isolating modules in the standard library",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 688,
+   "title": "Making the buffer protocol accessible in Python",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 689,
+   "title": "Unstable C API tier",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 690,
+   "title": "Lazy Imports",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 691,
+   "title": "JSON-based Simple API for Python Package Indexes",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 692,
+   "title": "Using TypedDict for more precise \\*\\*kwargs typing",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 693,
+   "title": "Python 3.12 Release Schedule",
+   "status": "Active",
+   "type": "Informational",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 694,
+   "title": "Upload 2.0 API for Python Package Indexes",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 695,
+   "title": "Type Parameter Syntax",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 696,
+   "title": "Type Defaults for Type Parameters",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.13",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 697,
+   "title": "Limited C API for Extending Opaque Types",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 698,
+   "title": "Override Decorator for Static Typing",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 699,
+   "title": "Remove private dict version field added in PEP 509",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": "509"
+  },
+  {
+   "number": 700,
+   "title": "Additional Fields for the Simple API for Package Indexes",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 701,
+   "title": "Syntactic formalization of f-strings",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 702,
+   "title": "Marking deprecations using the type system",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.13",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 703,
+   "title": "Making the Global Interpreter Lock Optional in CPython",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.13",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 704,
+   "title": "Require virtual environments by default for package installers",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 705,
+   "title": "TypedDict: Read-only items",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.13",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 706,
+   "title": "Filter for tarfile.extractall",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 707,
+   "title": "A simplified signature for __exit__ and __aexit__",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 708,
+   "title": "Extending the Repository API to Mitigate Dependency Confusion Attacks",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 709,
+   "title": "Inlined comprehensions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 710,
+   "title": "Recording the provenance of installed packages",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 711,
+   "title": "PyBI: a standard format for distributing Python Binaries",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 712,
+   "title": "Adding a \"converter\" parameter to dataclasses.field",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.13",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 713,
+   "title": "Callable Modules",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 714,
+   "title": "Rename dist-info-metadata in the Simple API",
+   "status": "Accepted",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 715,
+   "title": "Disabling bdist_egg distribution uploads on PyPI",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 718,
+   "title": "Subscriptable functions",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 719,
+   "title": "Python 3.13 Release Schedule",
+   "status": "Active",
+   "type": "Informational",
+   "python_version": "3.13",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 720,
+   "title": "Cross-compiling Python packages",
+   "status": "Draft",
+   "type": "Informational",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 721,
+   "title": "Using tarfile.data_filter for source distribution extraction",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.12",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 722,
+   "title": "Dependency specification for single-file scripts",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": "723",
+   "replaces": null
+  },
+  {
+   "number": 723,
+   "title": "Inline script metadata",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": "722"
+  },
+  {
+   "number": 724,
+   "title": "Stricter Type Guards",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.13",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 725,
+   "title": "Specifying external dependencies in pyproject.toml",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 726,
+   "title": "Module ``__setattr__`` and ``__delattr__``",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.13",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 727,
+   "title": "Documentation in Annotated Metadata",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.13",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 728,
+   "title": "TypedDict with Typed Extra Items",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 729,
+   "title": "Typing governance process",
+   "status": "Active",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 730,
+   "title": "Adding iOS as a supported platform",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.13",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 731,
+   "title": "C API Working Group Charter",
+   "status": "Active",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 732,
+   "title": "The Python Documentation Editorial Board",
+   "status": "Active",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 733,
+   "title": "An Evaluation of Python's Public C API",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 734,
+   "title": "Multiple Interpreters in the Stdlib",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": "554"
+  },
+  {
+   "number": 735,
+   "title": "Dependency Groups in pyproject.toml",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 736,
+   "title": "Shorthand syntax for keyword arguments at invocation",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 737,
+   "title": "C API to format a type fully qualified name",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.13",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 738,
+   "title": "Adding Android as a supported platform",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.13",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 739,
+   "title": "``build-details.json`` 1.0 \u2014 a static description file for Python build details",
+   "status": "Accepted",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 740,
+   "title": "Index support for digital attestations",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 741,
+   "title": "Python Configuration C API",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 742,
+   "title": "Narrowing types with TypeIs",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.13",
+   "superseded_by": null,
+   "replaces": "724"
+  },
+  {
+   "number": 743,
+   "title": "Add Py_OMIT_LEGACY_API to the Python C API",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 744,
+   "title": "JIT Compilation",
+   "status": "Draft",
+   "type": "Informational",
+   "python_version": "3.13",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 745,
+   "title": "Python 3.14 Release Schedule",
+   "status": "Active",
+   "type": "Informational",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 746,
+   "title": "Type checking Annotated metadata",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 747,
+   "title": "Annotating Type Forms",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 748,
+   "title": "A Unified TLS API for Python",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": "543"
+  },
+  {
+   "number": 749,
+   "title": "Implementing PEP 649",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 750,
+   "title": "Template Strings",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 751,
+   "title": "A file format to record Python dependencies for installation reproducibility",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": "665"
+  },
+  {
+   "number": 752,
+   "title": "Implicit namespaces for package repositories",
+   "status": "Accepted",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 753,
+   "title": "Uniform project URLs in core metadata",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 754,
+   "title": "IEEE 754 Floating Point Special Values",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 755,
+   "title": "Implicit namespace policy for PyPI",
+   "status": "Draft",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 756,
+   "title": "Add PyUnicode_Export() and PyUnicode_Import() C functions",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 757,
+   "title": "C API to import-export Python integers",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 758,
+   "title": "Allow ``except`` and ``except*`` expressions without parentheses",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 759,
+   "title": "External Wheel Hosting",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 760,
+   "title": "No More Bare Excepts",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 761,
+   "title": "Deprecating PGP signatures for CPython artifacts",
+   "status": "Active",
+   "type": "Process",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 762,
+   "title": "REPL-acing the default REPL",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": "3.13",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 763,
+   "title": "Limiting deletions on PyPI",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 764,
+   "title": "Inline typed dictionaries",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 765,
+   "title": "Disallow return/break/continue that exit a finally block",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": "601"
+  },
+  {
+   "number": 766,
+   "title": "Explicit Priority Choices Among Multiple Indexes",
+   "status": "Draft",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 767,
+   "title": "Annotating Read-Only Attributes",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 768,
+   "title": "Safe external debugger interface for CPython",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 769,
+   "title": "Add a 'default' keyword argument to 'attrgetter', 'itemgetter' and 'getitem'",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 770,
+   "title": "Improving measurability of Python packages with Software Bill-of-Materials",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 771,
+   "title": "Default Extras for Python Software Packages",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 772,
+   "title": "Packaging Council governance process",
+   "status": "Accepted",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": "609"
+  },
+  {
+   "number": 773,
+   "title": "A Python Installation Manager for Windows",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": "397, 486"
+  },
+  {
+   "number": 774,
+   "title": "Removing the LLVM requirement for JIT builds",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 775,
+   "title": "Make zlib required to build CPython",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 776,
+   "title": "Emscripten Support",
+   "status": "Active",
+   "type": "Informational",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 777,
+   "title": "How to Re-invent the Wheel",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 778,
+   "title": "Supporting Symlinks in Wheels",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 779,
+   "title": "Criteria for supported status for free-threaded Python",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 780,
+   "title": "ABI features as environment markers",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 781,
+   "title": "Make ``TYPE_CHECKING`` a built-in constant",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 782,
+   "title": "Add PyBytesWriter C API",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 783,
+   "title": "Emscripten Packaging",
+   "status": "Accepted",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 784,
+   "title": "Adding Zstandard to the standard library",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 785,
+   "title": "New methods for easier handling of ``ExceptionGroup``\\ s",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 786,
+   "title": "Precision and modulo-precision flag format specifiers for integer fields",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 787,
+   "title": "Safer subprocess usage using t-strings",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 788,
+   "title": "Protecting the C API from Interpreter Finalization",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 789,
+   "title": "Preventing task-cancellation bugs by limiting yield in async generators",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.14",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 790,
+   "title": "Python 3.15 Release Schedule",
+   "status": "Active",
+   "type": "Informational",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 791,
+   "title": "math.integer --- submodule for integer-specific mathematics functions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 792,
+   "title": "Project status markers in the simple index",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 793,
+   "title": "PyModExport: A new entry point for C extension modules",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 794,
+   "title": "Import Name Metadata",
+   "status": "Accepted",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 797,
+   "title": "Shared Object Proxies",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.16",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 798,
+   "title": "Unpacking in Comprehensions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 799,
+   "title": "A dedicated ``profiling`` package for organizing Python profiling tools",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 800,
+   "title": "Disjoint bases in the type system",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 801,
+   "title": "Reserved",
+   "status": "Active",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 802,
+   "title": "Display Syntax for the Empty Set",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 803,
+   "title": "\"abi3t\": Stable ABI for Free-Threaded Builds",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 804,
+   "title": "An external dependency registry and name mapping mechanism",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 806,
+   "title": "Mixed sync/async context managers with precise async marking",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 807,
+   "title": "Index support for Trusted Publishing",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 808,
+   "title": "Including static values in dynamic metadata",
+   "status": "Accepted",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 809,
+   "title": "Stable ABI for the Future",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 810,
+   "title": "Explicit lazy imports",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 811,
+   "title": "Defining Python Security Response Team membership and responsibilities",
+   "status": "Active",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 813,
+   "title": "The Pretty Print Protocol",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.16",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 814,
+   "title": "Add frozendict built-in type",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 815,
+   "title": "Deprecate ``RECORD.jws`` and ``RECORD.p7s``",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 816,
+   "title": "WASI Support",
+   "status": "Active",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 817,
+   "title": "Wheel Variants: Beyond Platform Tags",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 818,
+   "title": "Adding the Core of the Pyodide Foreign Function Interface to Python",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 819,
+   "title": "JSON Package Metadata",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 820,
+   "title": "PySlot: Unified slot system for the C API",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 821,
+   "title": "Support for unpacking TypedDicts in Callable type hints",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 822,
+   "title": "Dedented Multiline String (d-string)",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.16",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 825,
+   "title": "Wheel Variants: Package Format",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 826,
+   "title": "Python 3.16 Release Schedule",
+   "status": "Active",
+   "type": "Informational",
+   "python_version": "3.16",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 827,
+   "title": "Type Manipulation",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.16",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 828,
+   "title": "Supporting 'yield from' in asynchronous generators",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.16",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 829,
+   "title": "Package Startup Configuration Files",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 830,
+   "title": "Add timestamps to exceptions and tracebacks",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.16",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 831,
+   "title": "Frame Pointers Everywhere: Enabling System-Level Observability for Python",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 832,
+   "title": "Virtual environment discovery",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.15",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 833,
+   "title": "Freezing the HTML simple repository API",
+   "status": "Accepted",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 835,
+   "title": "Shorthand syntax for Annotated type metadata",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.16",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 836,
+   "title": "JIT Go Brrr: The Path to a Supported JIT Compiler for CPython",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.16",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 837,
+   "title": "Extensible JSON serialization",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.16",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 838,
+   "title": "Adding python-version to pyvenv.cfg",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.16",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 840,
+   "title": "Name Resolution in Class Namespaces",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.16",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 842,
+   "title": "Module Exports",
+   "status": "Draft",
+   "type": "Standards Track",
+   "python_version": "3.16",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 2026,
+   "title": "Calendar versioning for Python",
+   "status": "Rejected",
+   "type": "Process",
+   "python_version": "3.26",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3000,
+   "title": "Python 3000",
+   "status": "Final",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3001,
+   "title": "Procedure for reviewing and improving standard library modules",
+   "status": "Withdrawn",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3002,
+   "title": "Procedure for Backwards-Incompatible Changes",
+   "status": "Final",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3003,
+   "title": "Python Language Moratorium",
+   "status": "Final",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3099,
+   "title": "Things that will Not Change in Python 3000",
+   "status": "Final",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3100,
+   "title": "Miscellaneous Python 3.0 Plans",
+   "status": "Final",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3101,
+   "title": "Advanced String Formatting",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3102,
+   "title": "Keyword-Only Arguments",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3103,
+   "title": "A Switch/Case Statement",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3104,
+   "title": "Access to Names in Outer Scopes",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3105,
+   "title": "Make print a function",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3106,
+   "title": "Revamping dict.keys(), .values() and .items()",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3107,
+   "title": "Function Annotations",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3108,
+   "title": "Standard Library Reorganization",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3109,
+   "title": "Raising Exceptions in Python 3000",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3110,
+   "title": "Catching Exceptions in Python 3000",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3111,
+   "title": "Simple input built-in in Python 3000",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3112,
+   "title": "Bytes literals in Python 3000",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3113,
+   "title": "Removal of Tuple Parameter Unpacking",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3114,
+   "title": "Renaming iterator.next() to iterator.__next__()",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3115,
+   "title": "Metaclasses in Python 3000",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3116,
+   "title": "New I/O",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3117,
+   "title": "Postfix type declarations",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3118,
+   "title": "Revising the buffer protocol",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3119,
+   "title": "Introducing Abstract Base Classes",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3120,
+   "title": "Using UTF-8 as the default source encoding",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3121,
+   "title": "Extension Module Initialization and Finalization",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3122,
+   "title": "Delineation of the main module",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3123,
+   "title": "Making PyObject_HEAD conform to standard C",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3124,
+   "title": "Overloading, Generic Functions, Interfaces, and Adaptation",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": "245, 246"
+  },
+  {
+   "number": 3125,
+   "title": "Remove Backslash Continuation",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3126,
+   "title": "Remove Implicit String Concatenation",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3127,
+   "title": "Integer Literal Support and Syntax",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3128,
+   "title": "BList: A Faster List-like Type",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "2.6, 3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3129,
+   "title": "Class Decorators",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3130,
+   "title": "Access to Current Module/Class/Function",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3131,
+   "title": "Supporting Non-ASCII Identifiers",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3132,
+   "title": "Extended Iterable Unpacking",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3133,
+   "title": "Introducing Roles",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3134,
+   "title": "Exception Chaining and Embedded Tracebacks",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3135,
+   "title": "New Super",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3136,
+   "title": "Labeled break and continue",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.1",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3137,
+   "title": "Immutable Bytes and Mutable Buffer",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3138,
+   "title": "String representation in Python 3000",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3139,
+   "title": "Cleaning out sys and the \"interpreter\" module",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3140,
+   "title": "str(container) should call str(item), not repr(item)",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3141,
+   "title": "A Type Hierarchy for Numbers",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3142,
+   "title": "Add a \"while\" clause to generator expressions",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.0",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3143,
+   "title": "Standard daemon process library",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "3.x",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3144,
+   "title": "IP Address Manipulation Library for the Python Standard Library",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3145,
+   "title": "Asynchronous I/O For subprocess.Popen",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3146,
+   "title": "Merging Unladen Swallow into CPython",
+   "status": "Withdrawn",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3147,
+   "title": "PYC Repository Directories",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3148,
+   "title": "futures - execute computations asynchronously",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3149,
+   "title": "ABI version tagged .so files",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.2",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3150,
+   "title": "Statement local namespaces (aka \"given\" clause)",
+   "status": "Deferred",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3151,
+   "title": "Reworking the OS and IO exception hierarchy",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3152,
+   "title": "Cofunctions",
+   "status": "Rejected",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3153,
+   "title": "Asynchronous IO support",
+   "status": "Superseded",
+   "type": "Standards Track",
+   "python_version": null,
+   "superseded_by": "3156",
+   "replaces": null
+  },
+  {
+   "number": 3154,
+   "title": "Pickle protocol version 4",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.4",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3155,
+   "title": "Qualified name for classes and functions",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 3156,
+   "title": "Asynchronous IO Support Rebooted: the \"asyncio\" Module",
+   "status": "Final",
+   "type": "Standards Track",
+   "python_version": "3.3",
+   "superseded_by": null,
+   "replaces": "3153"
+  },
+  {
+   "number": 3333,
+   "title": "Python Web Server Gateway Interface v1.0.1",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": "333"
+  },
+  {
+   "number": 8000,
+   "title": "Python Language Governance Proposal Overview",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 8001,
+   "title": "Python Governance Voting Process",
+   "status": "Final",
+   "type": "Process",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 8002,
+   "title": "Open Source Governance Survey",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 8010,
+   "title": "The Technical Leader Governance Model",
+   "status": "Rejected",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 8011,
+   "title": "Python Governance Model Lead by Trio of Pythonistas",
+   "status": "Rejected",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 8012,
+   "title": "The Community Governance Model",
+   "status": "Rejected",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 8013,
+   "title": "The External Council Governance Model",
+   "status": "Rejected",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 8014,
+   "title": "The Commons Governance Model",
+   "status": "Rejected",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 8015,
+   "title": "Organization of the Python community",
+   "status": "Rejected",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 8016,
+   "title": "The Steering Council Model",
+   "status": "Accepted",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 8100,
+   "title": "January 2019 Steering Council election",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 8101,
+   "title": "2020 Term Steering Council election",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 8102,
+   "title": "2021 Term Steering Council election",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 8103,
+   "title": "2022 Term Steering Council election",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 8104,
+   "title": "2023 Term Steering Council election",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 8105,
+   "title": "2024 Term Steering Council election",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 8106,
+   "title": "2025 Term Steering Council election",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  },
+  {
+   "number": 8107,
+   "title": "2026 Term Steering Council election",
+   "status": "Final",
+   "type": "Informational",
+   "python_version": null,
+   "superseded_by": null,
+   "replaces": null
+  }
+ ]
+}

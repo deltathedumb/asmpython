@@ -1,5 +1,5 @@
-# tier: spec
-# ref: tutorial/floatingpoint.html
+# tier: cpython
+# ref: library/stdtypes.html#typesnumeric
 # expect:
 # 0.30000000000000004
 # False
