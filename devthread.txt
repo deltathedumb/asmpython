@@ -623,3 +623,63 @@ was not yet allowed to measure.
 
 Re-apply it only together with the ASM half, and gate BOTH against the pinned
 baseline in one measurement.
+
+--------------------------------------------------------------------------------
+ROUND 5 -- bool is not one bug, it is one RULE missing from ten slot sites
+--------------------------------------------------------------------------------
+
+pyconform is now 1196 cases (CPython 1193/1193) with a third cross-product,
+`operator` (16 ops x 19 operand pairs). Full asmpython score: 540/1163 (46.4%),
+split 540 PASS / 463 FAIL / 159 REFUSED. The percentage is LOWER than the
+308/582 recorded earlier and that is not a regression -- the denominator
+doubled onto ground never measured before. Read the split and the matrices, not
+the fraction.
+
+The boundary matrix produced the finding of the round by showing bool failing on
+`identity` -- a trip containing no boundary at all. That is not a lossy
+boundary; it means the value was already wrong before any trip started:
+
+    _original = True        # module binding typed "int"
+    move(_original)         # -> 1
+
+043a965b had already made a bool ARGUMENT force a dynamic slot, but the
+ordinary shape passes a NAME, so it almost never fired. Fixed in c2a48552 by
+tracking module names bound once to True/False/None separately from their
+"kind", since "int" is simply the wrong answer for them.
+
+Then b4792e76: a dynamic parameter that gets FORWARDED was losing its
+dynamism, because `_param_kind_in` reported ("any",...) which
+`_INFERRED_PARAM_KINDS` drops. Also had to add polymorphic_params to the
+fixpoint loop's convergence test -- watching only inferred_param_types stopped
+the loop on the round a forwarded parameter first became dynamic, so
+propagation reached one call deep and no further. That is exactly the
+difference between fixing `unannotated-param` and fixing `two-calls`.
+
+Measured: +16 then +6 boundary cells, zero regressions either time.
+
+THE PATTERN, which is the part worth acting on. Ten trips still lose bool:
+
+    class-attribute  default-argument  dict-key       exception-payload
+    global           instance-field    list-append    returned-from-closure
+    set-element      tuple
+
+Every one is a distinct STORAGE SLOT with its own kind-inference code. The rule
+"True/False/None cannot live in a concrete slot" now exists in three places
+(call-site literal, module binding, forwarded parameter) and is missing from
+about ten more. This is the same shape as the element choke point: not a bug,
+an unfinished migration, where the policy is re-decided per site instead of
+living in one place.
+
+The root fix is to make `_literal_arg_type` itself report these as
+dynamic rather than "int", so every slot site inherits the rule. I did NOT do
+that here, deliberately: that function also feeds field inference and container
+element inference, and the mixed-container path already uses ("any",...) to mean
+something different (report it so that NOTHING is written through). Changing it
+is a single edit with about ten downstream consumers, which is exactly the kind
+of change that needs its own session and its own gate rather than being tacked
+onto the end of a long one.
+
+`none` is a separate story: it fails on all 20 trips including identity, and
+that is NOT slot typing -- the slots are right now. It is the formatter, and
+the formatter is half lowering and half hand-written assembly. See the previous
+entry.
