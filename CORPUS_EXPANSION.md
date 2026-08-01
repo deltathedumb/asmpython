@@ -560,10 +560,26 @@ broken independent of element kind.
 but pass for `int`**, which is the boxing boundary showing up at the call
 edge rather than in the container.
 
-**Nested containers**: the inner container's elements survive a single level
-(`elem_nested_dict_of_lists_read` passes) but `comprehension_nested` leaks
-pointers for `str`, `float` and `mixed` alike — a comprehension over rows is
-one of the paths that re-reads elements without carrying their kind.
+**Nested containers** — corrected. An earlier draft of this paragraph said the
+inner container's elements "survive a single level" and cited
+`elem_nested_dict_of_lists_read` as passing. That was wrong: the case has
+failed in every run it has ever been in. 6 of the 14 nested probes fail, and
+the axis is **element kind, not nesting depth**:
+
+```text
+groups = {"x": [1, 2], "y": ["a"]}
+groups["x"]      [1, 2]      correct
+groups["x"][1]   2           correct
+groups["y"][0]   'a' -> 5368762372     str leaks at depth 2
+```
+
+`int` elements survive nesting; `str` elements leak as soon as they are read
+back out of one, at depth 2 — so "holds to depth two" is also wrong. Printing a
+container that *holds* containers leaks as well: `([1, 2, 3], ['a'])` renders
+as `(11936704, 11936784)`, even though indexing each element individually
+returns it intact. `comprehension_nested` leaks for `str`, `float` and `mixed`
+alike, being one of the paths that re-reads elements without carrying their
+kind.
 
 ## 3. Hit rate per wave
 
