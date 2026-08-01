@@ -1526,8 +1526,7 @@ def _lower_comprehension_enumerate(ctx: _FuncCtx, e: A.Comprehension) -> IRValue
             ctx.emit(IRInstr("call", elem_v, ["_abi_str_char_at", body_iter_v, body_idx_v]))
         else:
             addr = _list_elem_addr(ctx, body_iter_v, body_idx_v)
-            elem_v = ctx.tmp(ir_type_for(elem_ty))
-            ctx.emit(IRInstr("load", elem_v, [addr]))
+            elem_v = _load_list_elem(ctx, addr, elem_ty)
         _store_loop_target(ctx, e.targets[1], elem_v, elem_ty)
 
         if e.cond is not None:
@@ -2401,8 +2400,7 @@ def _lower_dict_comprehension(ctx: _FuncCtx, e: A.DictComprehension) -> IRValue:
             ctx.emit(IRInstr("call", elem_v, ["_abi_str_char_at", body_iter_v, body_idx_v]))
         else:
             addr = _list_elem_addr(ctx, body_iter_v, body_idx_v)
-            elem_v = ctx.tmp(ir_type_for(elem_ty))
-            ctx.emit(IRInstr("load", elem_v, [addr]))
+            elem_v = _load_list_elem(ctx, addr, elem_ty)
         _store_loop_target(ctx, e.targets[1], elem_v, elem_ty)
         if e.cond is not None:
             keep_v = _lower_truthy(ctx, e.cond)
@@ -7123,8 +7121,7 @@ def _lower_sort_key_call(ctx: _FuncCtx, sort_key: A.Lambda, el_kind: str, item_v
         key_idx = ctx.tmp(I64)
         ctx.emit(IRInstr("const", key_idx, [int(key_body.index.value)]))
         key_addr = _list_elem_addr(ctx, item_v, key_idx)
-        key_v = ctx.tmp(ir_type_for(A.expr_type(key_body)))
-        ctx.emit(IRInstr("load", key_v, [key_addr]))
+        key_v = _load_list_elem(ctx, key_addr, A.expr_type(key_body))
         return key_v
     if (
         el_kind == "str"
@@ -9182,8 +9179,7 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         xs_v2 = ctx.tmp(PTR)
         ctx.emit(IRInstr("load", xs_v2, [xs_ptr]))
         addr = _list_elem_addr(ctx, xs_v2, idx_v2)
-        elem_v = ctx.tmp(ir_type_for(el_ty))
-        ctx.emit(IRInstr("load", elem_v, [addr]))
+        elem_v = _load_list_elem(ctx, addr, el_ty)
 
         if is_truthy_filter:
             # `filter(None, xs)` keeps the TRUTHY elements, and a str/container
@@ -9572,8 +9568,7 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         src_v = ctx.tmp(PTR)
         ctx.emit(IRInstr("load", src_v, [src_ptr]))
         addr = _list_elem_addr(ctx, src_v, idx_v2)
-        elem_v = ctx.tmp(ir_type_for(el_ty))
-        ctx.emit(IRInstr("load", elem_v, [addr]))
+        elem_v = _load_list_elem(ctx, addr, el_ty)
         key_v = _lower_encode_member_key(ctx, elem_v, el_ty)
         out_v = ctx.tmp(PTR)
         ctx.emit(IRInstr("load", out_v, [out_ptr]))
@@ -11110,8 +11105,7 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                         ctx, pk_v, _pkt, f"dpopitem_{id(e)}"
                     )
                     pdec_addr = _list_elem_addr(ctx, pdec_v, plast_v)
-                    pkey_out = ctx.tmp(ir_type_for(_pkt))
-                    ctx.emit(IRInstr("load", pkey_out, [pdec_addr]))
+                    pkey_out = _load_list_elem(ctx, pdec_addr, _pkt)
                 else:
                     pkey_out = pkey_v
                 ctx.emit(IRInstr("call", None, ["_abi_list_append", ppair_v, pkey_out]))
@@ -11362,8 +11356,7 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                     other_v = ctx.tmp(PTR)
                     ctx.emit(IRInstr("load", other_v, [other_ptr]))
                     addr = _list_elem_addr(ctx, other_v, idx_v2)
-                    elem_v = ctx.tmp(ir_type_for(el_ty))
-                    ctx.emit(IRInstr("load", elem_v, [addr]))
+                    elem_v = _load_list_elem(ctx, addr, el_ty)
                     if el_ty == "int":
                         base10 = ctx.tmp(I64)
                         ctx.emit(IRInstr("const", base10, [10]))
@@ -11487,8 +11480,7 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                         ctx, keys_v, _pel, f"setpop_{id(e)}"
                     )
                     dec_addr = _list_elem_addr(ctx, dec_list, idx0)
-                    dec_v = ctx.tmp(ir_type_for(_pel))
-                    ctx.emit(IRInstr("load", dec_v, [dec_addr]))
+                    dec_v = _load_list_elem(ctx, dec_addr, _pel)
                     return dec_v
                 return first_key
             raise LowerError(f"unsupported expr MethodCall (set.{e.method})")
@@ -15176,8 +15168,7 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
                 idx_v = ctx.tmp(I64)
                 ctx.emit(IRInstr("const", idx_v, [i]))
                 addr = _list_elem_addr(ctx, cur_src, idx_v)
-                val = ctx.tmp(ir_type_for(el_ty))
-                ctx.emit(IRInstr("load", val, [addr]))
+                val = _load_list_elem(ctx, addr, el_ty)
                 _store_loop_target(ctx, s.targets[i].name, val, el_ty)
 
             for j in range(n_after):
@@ -15192,8 +15183,7 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
                 idx_v2 = ctx.tmp(I64)
                 ctx.emit(IRInstr("isub", idx_v2, [len_v, n_after_j]))
                 addr2 = _list_elem_addr(ctx, cur_src2, idx_v2)
-                val2 = ctx.tmp(ir_type_for(el_ty))
-                ctx.emit(IRInstr("load", val2, [addr2]))
+                val2 = _load_list_elem(ctx, addr2, el_ty)
                 _store_loop_target(ctx, s.targets[star_i + 1 + j].name, val2, el_ty)
 
             rest_src = ctx.tmp(PTR)
@@ -15590,8 +15580,7 @@ def _lower_stmt(ctx: _FuncCtx, s: A.Stmt) -> None:
                 ctx.emit(IRInstr("call", elem_v, ["_abi_str_char_at", body_list_v, body_idx_v]))
             else:
                 addr = _list_elem_addr(ctx, body_list_v, body_idx_v)
-                elem_v = ctx.tmp(ir_type_for(elem_ty))
-                ctx.emit(IRInstr("load", elem_v, [addr]))
+                elem_v = _load_list_elem(ctx, addr, elem_ty)
             _store_loop_target(ctx, s.targets[1], elem_v, elem_ty)
 
             ctx.push_loop(cont_b.label, end_b.label)
