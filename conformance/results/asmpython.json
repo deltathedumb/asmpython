@@ -185,6 +185,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "datamodel/descriptor-delete-and-class-access": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
     "datamodel/descriptor-precedence-over-instance-dict": {
       "counted": true,
       "status": "FAIL",
@@ -239,6 +244,11 @@
       "counted": true,
       "status": "REFUSED",
       "tier": "spec"
+    },
+    "datamodel/method-objects-are-created-per-access": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "cpython"
     },
     "datamodel/module-level-getattr": {
       "counted": true,
@@ -385,9 +395,24 @@
       "status": "PASS",
       "tier": "spec"
     },
+    "exceptions/error-in-key-function-propagates": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
     "exceptions/exception-group-split": {
       "counted": true,
       "status": "REFUSED",
+      "tier": "spec"
+    },
+    "exceptions/exception-inside-exit": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "exceptions/exception-inside-finally-replaces": {
+      "counted": true,
+      "status": "FAIL",
       "tier": "spec"
     },
     "exceptions/exceptiongroup-nesting-and-subgroup": {
@@ -425,6 +450,11 @@
       "status": "PASS",
       "tier": "cpython"
     },
+    "exceptions/nested-exception-groups-flatten": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
     "exceptions/notes-are-attached": {
       "counted": true,
       "status": "REFUSED",
@@ -446,6 +476,11 @@
       "tier": "spec"
     },
     "exceptions/reraise-preserves-type": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "exceptions/stopiteration-does-not-escape-for": {
       "counted": true,
       "status": "PASS",
       "tier": "spec"
@@ -639,6 +674,11 @@
       "counted": true,
       "status": "PASS",
       "tier": "spec"
+    },
+    "functions/recursion-limit-is-enforced": {
+      "counted": false,
+      "status": "REFUSED",
+      "tier": "impl"
     },
     "functions/repr-vs-ascii": {
       "counted": true,
@@ -3960,6 +4000,726 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/conversion/dict/dict": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/dict/empty-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/dict/generator": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/dict/list-int": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/dict/list-mixed": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/dict/list-nested": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/dict/list-pairs": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/dict/list-str": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/dict/range": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/dict/set-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/conversion/dict/str": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/conversion/dict/tuple-int": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/enumerate-list/dict": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/enumerate-list/empty-list": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/conversion/enumerate-list/generator": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/enumerate-list/list-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/enumerate-list/list-mixed": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/enumerate-list/list-nested": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/enumerate-list/list-pairs": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/enumerate-list/list-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/enumerate-list/range": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/enumerate-list/set-int": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/enumerate-list/str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/enumerate-list/tuple-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/frozenset/dict": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/frozenset/empty-list": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/frozenset/generator": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/frozenset/list-int": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/frozenset/list-mixed": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/frozenset/list-nested": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/frozenset/list-pairs": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/frozenset/list-str": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/frozenset/range": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/frozenset/set-int": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/frozenset/str": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/conversion/frozenset/tuple-int": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/iter-next/dict": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/iter-next/empty-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/iter-next/generator": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/iter-next/list-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/iter-next/list-mixed": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/iter-next/list-nested": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/iter-next/list-pairs": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/iter-next/list-str": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/iter-next/range": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/iter-next/set-int": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/iter-next/str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/iter-next/tuple-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/join-repr/dict": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/join-repr/empty-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/join-repr/generator": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/join-repr/list-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/join-repr/list-mixed": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/join-repr/list-nested": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/join-repr/list-pairs": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/join-repr/list-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/join-repr/range": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/join-repr/set-int": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/join-repr/str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/join-repr/tuple-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/len/dict": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/len/empty-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/len/generator": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/len/list-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/len/list-mixed": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/len/list-nested": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/len/list-pairs": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/len/list-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/len/range": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/len/set-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/len/str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/len/tuple-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/list/dict": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/list/empty-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/list/generator": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/list/list-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/list/list-mixed": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/list/list-nested": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/list/list-pairs": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/list/list-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/list/range": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/list/set-int": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/list/str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/list/tuple-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/reversed-list/dict": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/reversed-list/empty-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/reversed-list/generator": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/reversed-list/list-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/reversed-list/list-mixed": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/reversed-list/list-nested": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/reversed-list/list-pairs": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/reversed-list/list-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/reversed-list/range": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/reversed-list/set-int": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/reversed-list/str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/reversed-list/tuple-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/set/dict": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/set/empty-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/set/generator": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/set/list-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/set/list-mixed": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/set/list-nested": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/set/list-pairs": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/set/list-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/set/range": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/set/set-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/set/str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/set/tuple-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/sorted/dict": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/sorted/empty-list": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/conversion/sorted/generator": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/sorted/list-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/sorted/list-mixed": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/conversion/sorted/list-nested": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/sorted/list-pairs": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/sorted/list-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/sorted/range": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/sorted/set-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/sorted/str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/sorted/tuple-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/tuple/dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/conversion/tuple/empty-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/tuple/generator": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/tuple/list-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/tuple/list-mixed": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/tuple/list-nested": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/tuple/list-pairs": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/tuple/list-str": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/tuple/range": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/tuple/set-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/conversion/tuple/str": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/conversion/tuple/tuple-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/unpack-star/dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/conversion/unpack-star/empty-list": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/conversion/unpack-star/generator": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/unpack-star/list-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/unpack-star/list-mixed": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/unpack-star/list-nested": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/unpack-star/list-pairs": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/unpack-star/list-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/unpack-star/range": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/conversion/unpack-star/set-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/conversion/unpack-star/str": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/conversion/unpack-star/tuple-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
     "generated/operator/add/bool-bool": {
       "counted": true,
       "status": "PASS",
@@ -5535,6 +6295,11 @@
       "status": "PASS",
       "tier": "spec"
     },
+    "iteration/generator-as-context-manager": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
     "iteration/generator-close-and-return": {
       "counted": true,
       "status": "REFUSED",
@@ -5570,6 +6335,16 @@
       "status": "REFUSED",
       "tier": "spec"
     },
+    "iteration/iter-requires-an-iterator": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "iteration/iterating-a-non-iterable-raises": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "iteration/iterating-exhausts-once": {
       "counted": true,
       "status": "FAIL",
@@ -5593,6 +6368,11 @@
     "iteration/nested-comprehension-order": {
       "counted": true,
       "status": "PASS",
+      "tier": "spec"
+    },
+    "iteration/nested-generators-compose": {
+      "counted": true,
+      "status": "REFUSED",
       "tier": "spec"
     },
     "iteration/nested-yield-from-order": {
@@ -5860,6 +6640,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "numeric/fractions-are-exact": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "numeric/int-float-equality-and-hash": {
       "counted": true,
       "status": "FAIL",
@@ -5995,6 +6780,11 @@
       "status": "PASS",
       "tier": "spec"
     },
+    "objects/decorator-may-return-anything": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "objects/decorator-with-arguments": {
       "counted": true,
       "status": "FAIL",
@@ -6050,6 +6840,11 @@
       "status": "REFUSED",
       "tier": "spec"
     },
+    "objects/metaclass-prepare-returns-mapping": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "objects/mro-and-super-diamond": {
       "counted": true,
       "status": "FAIL",
@@ -6090,6 +6885,11 @@
       "status": "PASS",
       "tier": "spec"
     },
+    "objects/slots-and-class-attribute-conflict": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "objects/slots-rejects-new-attribute": {
       "counted": true,
       "status": "FAIL",
@@ -6104,6 +6904,11 @@
       "counted": true,
       "status": "PASS",
       "tier": "spec"
+    },
+    "objects/weakref-callback-and-proxy": {
+      "counted": false,
+      "status": "FAIL",
+      "tier": "impl"
     },
     "operators/and-or-return-operands": {
       "counted": true,
@@ -6179,6 +6984,11 @@
       "counted": true,
       "status": "PASS",
       "tier": "spec"
+    },
+    "pep/0205-weak-references/weakref-does-not-keep-alive": {
+      "counted": false,
+      "status": "FAIL",
+      "tier": "impl"
     },
     "pep/0207-rich-comparisons/all-six-are-independent": {
       "counted": true,
@@ -7080,6 +7890,11 @@
       "status": "PASS",
       "tier": "spec"
     },
+    "statements/augmented-assign-to-attribute-and-subscript": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
     "statements/chained-assignment-order": {
       "counted": true,
       "status": "PASS",
@@ -7140,6 +7955,11 @@
       "status": "REFUSED",
       "tier": "spec"
     },
+    "statements/toplevel-name-and-main-guard": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "statements/type-statement": {
       "counted": true,
       "status": "REFUSED",
@@ -7153,6 +7973,56 @@
     "statements/with-calls-enter-and-exit": {
       "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "syntax/break-continue-outside-loop": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "syntax/decorator-and-class-forms": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "syntax/duplicate-and-reserved-names": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "syntax/f-string-and-literal-errors": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "syntax/invalid-assignment-targets": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "syntax/match-is-a-soft-keyword": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "syntax/nonlocal-and-global-rules": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "syntax/return-yield-outside-function": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "syntax/starred-and-parameter-rules": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "syntax/walrus-restrictions": {
+      "counted": true,
+      "status": "REFUSED",
       "tier": "spec"
     },
     "text/bytes/bytearray-is-mutable": {
@@ -7240,6 +8110,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "text/str/encodings-roundtrip": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "text/str/escapes-and-raw": {
       "counted": true,
       "status": "FAIL",
@@ -7305,6 +8180,11 @@
       "status": "PASS",
       "tier": "spec"
     },
+    "text/str/ord-chr-boundaries": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "text/str/partition-and-splitlines": {
       "counted": true,
       "status": "REFUSED",
@@ -7334,10 +8214,15 @@
       "counted": true,
       "status": "REFUSED",
       "tier": "spec"
+    },
+    "text/str/unicode-normalization": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
     }
   },
-  "counted": 1460,
-  "passed": 616,
+  "counted": 1634,
+  "passed": 712,
   "shim": "asmpython",
   "tiers": [
     "spec",
