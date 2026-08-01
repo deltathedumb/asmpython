@@ -202,57 +202,50 @@ which is why it stays `"int"` for now.
 
 The audit has two halves.
 
-**Producer side -- sites that RETURN the sentinel: essentially done.** All six
-`_*_el_type` / `_*_value_type` helpers documented "'int' if unknown" are
-migrated (`_list_el_type` -- the helper behind `deque._data` -- plus
-`_list_el_value_type`, `_dict_inner_value_type`, `_resolve_field_el`,
-`_resolve_field_inner_value`, `_inparam_el_type`, `_outparam_el_type`):
-**25 of 28 literals**, 42 `UNKNOWN_TY` uses in sema.py. The 3 left are in
-`_gen_iter_elem_kind`, which is genuinely mixed -- its
-`return "int" if range_args else ""` is a real int, because `range` yields
-ints -- so it needs per-branch judgement rather than a mechanical pass.
+**Producer side -- sites that RETURN the sentinel: done.** Every helper
+documented "'int' if unknown" is migrated -- `_list_el_type` (the one behind
+`deque._data`), `_list_el_value_type`, `_dict_value_type_inner`,
+`_dict_inner_value_type`, `_resolve_field_el`, `_resolve_field_inner_value`,
+`_inparam_el_type`, `_outparam_el_type`. 70 `UNKNOWN_TY` uses in sema.py.
 
-**Consumer side -- sites that COMPARE against it: not started.** 106
-`== "int"` / `!= "int"` comparisons (sema 44, ir_lower 33, codegen 25,
-ast_nodes 4). Of these, **17 pair the comparison with a side-channel kind
-flag** (`is_bool_expr`, `is_none_expr`, `el_is_bool`) -- e.g. ir_lower's
-`arg_t == "int" and A.is_none_expr(arg)`. Those are not migrations: they are
-the workaround itself, and the split deletes them.
+Two deliberate exceptions, both verified by reading rather than by pattern:
 
-### Where the split most likely lands: `UNKNOWN_TY = "any"`
+- `_gen_iter_elem_kind` keeps its `"int"`: `return "int" if range_args else ""`
+  is a REAL int, because `range` yields ints.
+- `_merge_el_type` keeps its `"int"`: `{a, b} == {"int", "bool"} -> "int"` is
+  bool widening, not a sentinel. A mechanical sweep would have broken this
+  one silently.
 
-The endpoint probably does not need a brand-new third type. `"any"` already
-means exactly "kind not statically known, so box it and dispatch on the tag at
-read time" -- that is what `_lower_box_any` and `_lower_value_into_any_slot`
-implement. The defect is only that the DEFAULT, when no kind was recorded, is
-`"int"` rather than `"any"`.
+**Consumer side -- sites that COMPARE against it: 106 -> 86.** What remains
+splits three ways, and only one of them is real work:
 
-The strongest evidence is that 15 sites in sema.py were already hand-writing
-the conversion at the point of use:
+| | sema | ir_lower | codegen | disposition |
+|---|---|---|---|---|
+| workaround pairs | 2 | 11 | 8 | **deleted** by the split, not migrated |
+| element-kind | few | 3 | 2 | need a behaviour decision (below) |
+| genuine `int` | most | 19 | 15 | left alone |
 
-```python
-el_type = inner if inner != "int" else "any"      # sema.py, x15
+The five element-kind sites are the actual remaining engineering:
+
+```text
+ir_lower.py:3382   if key_ty == "int":     # dict-key encoding
+ir_lower.py:3490   if el_ty  == "int":     # set/dict key decoding
+ir_lower.py:10833  if el_ty  == "int":     # list element decoding
+codegen.py:12067   if A.expr_type(el) == "int":
+codegen.py:12732   if el_t == "int":
 ```
 
-Those are now spelled `!= A.UNKNOWN_TY`, and when the constant flips to
-`"any"` each collapses to plain `inner`. So the flip is the fix, not a
-prerequisite for one.
-
-**What the flip is gated on.** Some consumer sites treat "int" as a catch-all
-that unknown currently falls into, and would silently change branch:
+Each has the shape
 
 ```python
-if key_ty in ("str", "any"): ...      # handled
-if key_ty == "int":                   # <- unknown lands here today and is
-    ...encode as base-10...           #    encoded as an integer
+if key_ty in ("str", "any"): ...   # handled
+if key_ty == "int":                # unknown lands HERE and is encoded as an integer
 ```
 
-(`ir_lower.py` dict-key encoding, set/dict key decoding, and list-element
-decoding all have this shape.) These are not renames; each needs a decision
-about what an unknown-kind value should actually do there -- almost certainly
-"box and tag-dispatch" rather than "assume int". That is the real remaining
-work of step 1, and it is why the constant does not flip until every one is
-reviewed.
+so an unknown-kind value is silently treated as an int. Fixing them means
+deciding what unknown should do there -- almost certainly box-and-tag-dispatch,
+matching what `"any"` already does one branch up -- rather than renaming
+anything. That decision is what the constant flip is waiting on.
 
 Every step is verified against the pinned baseline and must leave it at
 809/1142 exactly; both steps so far did.

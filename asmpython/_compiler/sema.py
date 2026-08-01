@@ -3156,7 +3156,7 @@ class SemaAnalyzer:
                 fty = self._resolve_field_type(cls_name, fname)
                 if fty in ("list", "dict"):
                     el = self._resolve_field_el(cls_name, fname)
-                    if el != "int":
+                    if el != A.UNKNOWN_TY:
                         lit = (el, None, None, None)
             if (
                 lit is None
@@ -3178,7 +3178,7 @@ class SemaAnalyzer:
                     el = self._resolve_field_el(cls_name, fname)
                     if el == "dict":
                         lit = ("dict", None, "any", None)
-                    elif el != "int":
+                    elif el != A.UNKNOWN_TY:
                         lit = (el, None, None, None)
             if (
                 lit is None
@@ -6758,29 +6758,29 @@ class SemaAnalyzer:
 
     def _dict_value_type_inner(self, e, scope: Scope) -> str:
         if isinstance(e, A.DictLit):
-            return getattr(e, "value_type", "int")
+            return getattr(e, "value_type", A.UNKNOWN_TY)
         if isinstance(e, A.DictComprehension):
-            return getattr(e, "value_type", "int")
+            return getattr(e, "value_type", A.UNKNOWN_TY)
         if isinstance(e, A.Name):
-            return scope.dict_value_types.get(e.name, "int")
+            return scope.dict_value_types.get(e.name, A.UNKNOWN_TY)
         if isinstance(e, A.Attr):
-            return getattr(e, "value_type", "int")
+            return getattr(e, "value_type", A.UNKNOWN_TY)
         if isinstance(e, A.Call):
             # A function / method annotated `-> dict[.., V]` stamps the value
             # kind onto the call node (sema fills it from the callee's sig).
-            return getattr(e, "value_type", "int")
+            return getattr(e, "value_type", A.UNKNOWN_TY)
         if isinstance(e, A.MethodCall):
-            return getattr(e, "value_type", "int")
+            return getattr(e, "value_type", A.UNKNOWN_TY)
         if isinstance(e, A.Subscript):
             # A dict read out of an outer container: sema stamped "any" for the
             # untracked inner value kind.
-            return getattr(e, "value_type", "int")
+            return getattr(e, "value_type", A.UNKNOWN_TY)
         if isinstance(e, A.BinOp) and e.op == "|":
             # `d1 | d2`: the merged dict's value kind, preferring whichever
             # side has a known (non-default) value type.
             lvt = self._dict_value_type(e.left, scope)
-            return lvt if lvt != "int" else self._dict_value_type(e.right, scope)
-        return "int"
+            return lvt if lvt != A.UNKNOWN_TY else self._dict_value_type(e.right, scope)
+        return A.UNKNOWN_TY
 
     def _dict_inner_value_type(self, e, scope: Scope) -> str:
         """Inner value/element kind of a dict whose values are themselves
@@ -10089,7 +10089,7 @@ class SemaAnalyzer:
             # the inner element type so `_list_el_type(var, child)` returns T.
             if el == "list" and not e.targets:
                 inner_el = self._list_el_value_type(e.iter, scope)
-                if inner_el != "int":
+                if inner_el != A.UNKNOWN_TY:
                     child.list_el_types[e.var] = inner_el
             loop_vars = set(self._flat_target_names(e.targets)) if e.targets else {e.var}
             if e.cond is not None:
@@ -10124,7 +10124,7 @@ class SemaAnalyzer:
                     # Propagate inner element type for list[list[T]] case
                     if ef_el == "list":
                         ef_inner = self._list_el_value_type(ef_iter, child)
-                        if ef_inner != "int":
+                        if ef_inner != A.UNKNOWN_TY:
                             child.list_el_types[ef_evar] = ef_inner
                     elif ef_el == "dict":
                         ef_inner = self._list_el_value_type(ef_iter, child)
