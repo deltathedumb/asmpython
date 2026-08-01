@@ -408,7 +408,12 @@ argument for continuing to report per area rather than per wave.
 
 # Round 3 — the container-element consumer matrix
 
-Measured at `ae1dc7ae`.
+Measured at `ae1dc7ae`, then re-run at `6112d342` — which includes `5c7e27a3`
+("relabel, don't convert, a float already wearing an i64 label"). **The matrix
+is byte-identical across the two.** That fix moved no cell in the consumer
+matrix, including the twelve `float` failures, which says the consumer paths
+are a separate axis from the value-level float handling rather than downstream
+of it.
 
 ## 1. Re-measurement, and a correction to round 2
 
