@@ -590,3 +590,36 @@ This also revises the effort estimate downward in a useful way: the queue is
 roughly 10-12 real sites, not 33 and certainly not 57. The rest are either copy
 sites that are already right or internal keys/pairs reads that were never in
 scope.
+
+--------------------------------------------------------------------------------
+THE None FORMATTER ARM: half of it works, and the other half is in assembly
+--------------------------------------------------------------------------------
+
+Re-tried the arm the formatter's own note says is blocked, on the theory that
+boxing dynamic parameters (043a965b) and bool/None list elements (c2098516) may
+have moved the -6/+10 balance. Partial result, and the split is informative:
+
+    xs = [1, "two", 3.5, True, None]
+    for v in xs: print(v)   ->  1 two 3.5 True None    CORRECT with the arm
+    print(xs)               ->  [1, 'two', 3.5, True, 0]   still wrong
+
+So `_lower_format_any_value` is only ONE of the two formatters. The per-value
+path is lowered IR and takes the new arm; the CONTAINER repr path calls
+`_abi_list_repr` with element kind 6 (_TAGGED), and that helper is hand-written
+assembly in asmpython/_runtime/abi_shims.asm. Rendering None inside a container
+means teaching the ASM tag dispatch about a null element, not editing ir_lower.
+
+That is worth knowing before anyone re-attempts this: the change is not "two
+lines in the formatter", it is two lines in the formatter plus an assembly
+change, and only doing the first half fixes iteration while leaving every
+container repr wrong -- which is a WORSE state than either end, because the same
+value now prints two different ways depending on how it is reached.
+
+The 23-line lowering half is saved as a patch (scratchpad/none-formatter-arm.patch)
+and REVERTED out of the tree rather than left sitting there, because an ungated
+compiler edit in the working tree silently contaminates the next corpus run --
+the same contamination rule this file already documents, applied to a change I
+was not yet allowed to measure.
+
+Re-apply it only together with the ASM half, and gate BOTH against the pinned
+baseline in one measurement.
