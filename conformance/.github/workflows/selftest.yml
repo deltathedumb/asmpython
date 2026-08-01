@@ -1,0 +1,41 @@
+# The suite's own correctness check.
+#
+# CPython must score 100% on the counted tiers. A failure here is a bug in the
+# SUITE -- a hand-written expectation, a nondeterministic case, or a CPython
+# implementation accident mis-tiered as though the language required it -- and
+# never a bug in an implementation under test.
+#
+# Runs across versions because a case can be correct on one and wrong on
+# another: behaviour genuinely changes (dict ordering became guaranteed in 3.7,
+# f-string grammar in 3.12), and a case pinning the newer behaviour must be
+# tiered and gated accordingly rather than silently failing older CPythons.
+name: selftest
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '0 6 * * 1'   # weekly: catches drift as CPython itself moves
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: CPython must pass every counted case
+        run: python selftest.py
+
+      # Expectations are DERIVED, never typed. If regen would rewrite anything,
+      # a case was hand-edited or has drifted, and the tree is not reproducible.
+      - name: expectations are reproducible
+        run: |
+          python regen.py --force
+          git diff --exit-code -- cases/ \
+            || (echo "::error::regen changed a case: an expectation was hand-edited or has drifted" && exit 1)

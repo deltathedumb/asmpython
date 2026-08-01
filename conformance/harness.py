@@ -189,6 +189,76 @@ def run_case(case: Case, shim, timeout: int, paranoid: bool) -> Result:
     return Result(case, "PASS")
 
 
+#: Marks used in the matrix view. Deliberately single-character so a wide grid
+#: still fits, and deliberately distinct for REFUSED: "cannot compile this" and
+#: "compiles to the wrong answer" are both non-conformance but different bugs,
+#: and collapsing them loses the distinction that tells you where to look.
+_MARK = {"PASS": ".", "FAIL": "X", "REFUSED": "C", "TIMEOUT": "T",
+         "ERROR": "E", "SKIP": "-"}
+
+
+def print_matrix(results: list[Result]) -> None:
+    """Collapse a generated cross-product into a grid.
+
+    This is the whole reason generated cases are named after their axis
+    coordinates. `generated/boundary/list-roundtrip/str` is the cell
+    (list-roundtrip x str); if it fails while (list-roundtrip x int) passes,
+    the defect IS that cell and no program needs reading.
+
+    Without this, a generated suite just inflates a failure count that is
+    already beyond anyone's capacity to triage. With it, hundreds of failures
+    become a shape: a row that fails everywhere is a broken consumer, a column
+    that fails everywhere is a broken value kind, and a scatter is neither.
+    """
+    families: dict[str, dict[str, dict[str, str]]] = {}
+    for r in results:
+        parts = r.case.id.split("/")
+        if len(parts) != 4 or parts[0] != "generated":
+            continue
+        _, family, row, col = parts
+        families.setdefault(family, {}).setdefault(row, {})[col] = r.status
+
+    for family, rows in sorted(families.items()):
+        cols = sorted({c for cells in rows.values() for c in cells})
+        width = max((len(r) for r in rows), default=8) + 2
+        colw = max((len(c) for c in cols), default=4) + 1
+
+        print(f"\n=== {family} ===")
+        # Column headers written vertically: names are long and a grid this
+        # wide is unreadable with them inline.
+        for depth in range(max(len(c) for c in cols)):
+            line = " " * width
+            for c in cols:
+                line += (c[depth] if depth < len(c) else " ").ljust(colw)
+            print(line)
+        print("-" * (width + colw * len(cols)))
+
+        row_fail: dict[str, int] = {}
+        col_fail: dict[str, int] = {c: 0 for c in cols}
+        for row in sorted(rows):
+            line = row.ljust(width)
+            fails = 0
+            for c in cols:
+                st = rows[row].get(c, "SKIP")
+                line += _MARK.get(st, "?").ljust(colw)
+                if st not in ("PASS", "SKIP"):
+                    fails += 1
+                    col_fail[c] += 1
+            row_fail[row] = fails
+            print(f"{line} {fails}" if fails else line)
+        print("-" * (width + colw * len(cols)))
+        totals = "".join(str(col_fail[c] % 10).ljust(colw) for c in cols)
+        print("fail".ljust(width) + totals)
+
+        worst_row = sorted(row_fail.items(), key=lambda kv: -kv[1])[:3]
+        worst_col = sorted(col_fail.items(), key=lambda kv: -kv[1])[:3]
+        print(f"  legend: {'  '.join(f'{v}={k.lower()}' for k, v in _MARK.items())}")
+        if any(n for _, n in worst_row):
+            print("  worst rows: " + ", ".join(f"{k} ({n})" for k, n in worst_row if n))
+        if any(n for _, n in worst_col):
+            print("  worst cols: " + ", ".join(f"{k} ({n})" for k, n in worst_col if n))
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--shim", default="cpython")
@@ -200,6 +270,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--paranoid", action="store_true",
                     help="run every case twice and fail on disagreement")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--matrix", action="store_true",
+                    help="collapse generated cross-products into a grid")
     args = ap.parse_args(argv)
 
     tiers = tuple(t.strip() for t in args.tier.split(",") if t.strip())
@@ -236,6 +308,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  [{mark}] {r.case.id}{scored}")
         if r.detail and (args.verbose or r.counted):
             print("      " + r.detail.replace("\n", "\n      "))
+
+    if args.matrix:
+        print_matrix(results)
 
     pct = (100.0 * len(passed) / len(counted)) if counted else 100.0
     print(f"\nconformance: {len(passed)}/{len(counted)} ({pct:.1f}%) "
