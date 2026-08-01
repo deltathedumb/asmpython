@@ -10533,6 +10533,23 @@ class SemaAnalyzer:
             e.list_el_type = A.expr_type(e.elt)
             if e.list_el_type == "tuple":
                 e.el_tuple_types = self._tuple_elem_types(e.elt, child)
+            elif e.list_el_type in ("list", "dict"):
+                # A comprehension whose ELEMENT is itself a container: record
+                # the inner kind too. Only the tuple case was recorded, so
+                # `[[0] * n for _ in range(n)]` produced a list[list] with no
+                # inner element kind -- `matrix[i][j]` then read as "any", and
+                # a raw 0 element is indistinguishable from None at that point,
+                # so genuine zeros printed as `None` (409_list_repeat).
+                #
+                # This is the nesting-depth-2 boundary the triage agent found
+                # ("containers are fine only to nesting depth 2; depth 3 prints
+                # a raw pointer") -- the kind is not lost by the container
+                # machinery, it is simply never recorded one level down.
+                e.el_value_type = (
+                    self._list_el_type(e.elt, child)
+                    if e.list_el_type == "list"
+                    else self._dict_value_type(e.elt, child)
+                )
             self._merge_walrus_bindings(scope, child, loop_vars)
             return
         if isinstance(e, A.DictComprehension):

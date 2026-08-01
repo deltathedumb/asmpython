@@ -14160,6 +14160,24 @@ def _lower_format_any_value(ctx: "_FuncCtx", val_v: IRValue, repr_mode: bool = F
         ctx.emit(IRInstr("global_addr", v, [sym]))
         ctx.emit(IRInstr("store", None, [v, out_ptr]))
 
+    # NOTE: a None branch here was implemented, measured and REVERTED.
+    # `_lower_read_any_tag` already classifies a null pointer as NONE_TYPE_ID,
+    # so adding an arm that renders "None" is a two-line change and it fixed
+    # ten cases -- seven consumer-matrix mixed-column cells plus
+    # vm_container_heterogeneous.
+    #
+    # It also broke six, and the reason is not incidental: a bare 0 reaching
+    # this formatter is genuinely ambiguous. `Point.origin()` returning
+    # `cls(0, 0)` reads `p.x` through an "any" path, and that raw integer zero
+    # is bit-identical to None. Field-type recovery cannot disambiguate it
+    # either, because `x` is a common enough field name across the corpus to
+    # stay ambiguous.
+    #
+    # So this trades one known-wrong behaviour (None prints as 0) for another
+    # (0 prints as None), and the precondition that would make it sound --
+    # every value in an "any" slot actually BEING boxed -- is exactly what the
+    # element choke-point refactor delivers. Blocked on that, not on
+    # cleverness. See PHASE1.md.
     bool_b = ctx.new_block("fmtanybool")
     after_bool_b = ctx.new_block("fmtanyafterbool")
     bt = ctx.tmp(I64)
