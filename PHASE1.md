@@ -482,27 +482,39 @@ value model and from each other.
 
 ---
 
-## 4. Revised estimate
+## 4. Estimate, with actuals
 
-The original plan priced Phase 1 at 3–4 months to build a value representation,
-type lattice, and object model. The representation already exists on the live
-backend, so the remaining work splits differently:
+Two items are now measured rather than guessed, and both moved.
 
-| work | est. |
-|---|---|
-| 1. Split UNKNOWN out of `int`: migrate the 105 `== "int"` sites to say which meaning they want, then give `UNKNOWN_TY` a value of its own | 3–5 wks |
-| 2. Boxing coverage, which (1) unblocks: `any`-receiver field reads, tuple/container elements, bare-`list` fields, indirect-call returns | 2–3 wks |
-| 3. `None` + `bool` as real static types on top of (1) | 2–3 wks |
-| **Phase 1 proper** | **7–11 wks** |
-| `dtoa` in the runtime (fixes `round`, `%f` accuracy, float `repr` past 17 digits) | 2–3 wks |
-| `bytes` / `bytearray` | 3–4 wks |
-| Arbitrary-precision `int` | 4–6 wks |
+| work | est. | actual |
+|---|---|---|
+| 1. Split UNKNOWN out of `int` | 3-5 wks | **DONE** -- 5 commits, zero regressions, +4 cases |
+| 2. Boxing coverage (read side must move first) | 2-3 wks | started; write-side-only measured as a net -5 |
+| 3. `None` + `bool` as real static types | 2-3 wks | not started |
+| 4. `dtoa` in the runtime | 2-3 wks | not started |
+| 5. `bytes` / `bytearray` | 3-4 wks | **re-scoped up** -- see below |
+| 6. Arbitrary-precision `int` | 4-6 wks | not started |
 
-The last three are independently schedulable features rather than foundation
-work, and each has its own probe already pinned.
+**Item 1 came in far under.** The audit was the work; the flip was one line and
+free. The lesson generalizes: for a type-system change in this codebase, cost
+is dominated by auditing the sites that PRODUCE a type, not by the change
+itself.
 
-`None`-with-a-type is the highest-leverage item and should go first: it is the
-sole blocker on three probes, it is what makes the existing boxing machinery
-apply to the one value it currently cannot represent, and every workaround
-around it (`is_none_expr`, `is_bool_expr`, the `0`-vs-`None` formatter
-trade-off) is deleted by it.
+**Item 5 is bigger than it looks, in the opposite direction.** `bytes` and
+`bytearray` are not absent -- they are implemented as `list[int]` and work
+correctly for `len`, indexing and mutation. Only `repr` is wrong
+(`[97, 98, 99]` where CPython gives `b'abc'`), which reads like a small fix.
+It is not: `sema` maps `bytes` to the static type `"list"`, so making `repr`
+correct requires a distinct static type, and that means auditing **145
+`== "list"` comparison sites** -- more than the 106 the `int` split needed.
+
+There is no cheap correct shortcut. Tagging the AST node (`is_bytes`, the way
+`is_bool`/`is_none` work today) would fix `print(b"abc")` for a literal and
+fail the moment the value passes through a variable -- which is exactly the
+defect §3 is about. Doing it properly is the only option that does not add a
+fourth side-channel flag to `IntLit`'s three.
+
+**Revised total for Phase 1 proper (items 1-3): 5-8 weeks remaining**, item 1
+being complete. Items 4-6 stay independently schedulable, with item 5 now
+looking closer to 4-6 weeks than 3-4.
+
