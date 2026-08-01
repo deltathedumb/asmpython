@@ -31,16 +31,16 @@ class Builder:
         self.func = func
         self.span: Span = NO_SPAN
         self._cur: Block | None = func.blocks[0] if func.blocks else None
-        self._next_reg = max(func.registers, default=-1) + 1
         self._next_label = 0
 
     # ── registers and blocks ────────────────────────────────────────────────
     def reg(self, ty: T.Type) -> int:
-        """Allocate a fresh virtual register of `ty`."""
-        r = self._next_reg
-        self._next_reg += 1
-        self.func.registers[r] = ty
-        return r
+        """Allocate a fresh virtual register of `ty`.
+
+        Delegates to the function so there is exactly one allocator; see
+        `Function.new_register`.
+        """
+        return self.func.new_register(ty)
 
     def new_block(self, hint: str = "b") -> Block:
         """Create a block with a unique label. It is NOT made current."""

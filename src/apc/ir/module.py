@@ -151,6 +151,9 @@ class Function:
     #: True when declared but not defined here.
     external: bool = False
     span: Span = NO_SPAN
+    #: Next register number to hand out. Never decreases, so a register number
+    #: is never reused even after a pass deletes the instruction defining it.
+    _next_register: int = 0
 
     @property
     def entry(self) -> Block | None:
@@ -180,7 +183,17 @@ class Function:
                 yield b, ins
 
     def new_register(self, ty: T.Type) -> Register:
-        reg = max(self.registers, default=-1) + 1
+        """Allocate a fresh register. THE single allocator.
+
+        `Builder.reg` delegates here rather than keeping its own counter. Two
+        counters is one desync away from handing the same number to two values
+        -- which does not crash, it silently aliases them, and the symptom is a
+        type error somewhere far from the cause. That happened: a parameter and
+        a comparison result both got %0, and the verifier reported "lt compares
+        i64 values but %0 is i1" in a function whose comparison was fine.
+        """
+        reg = self._next_register
+        self._next_register += 1
         self.registers[reg] = ty
         return reg
 
