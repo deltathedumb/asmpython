@@ -1144,13 +1144,18 @@ def _lower_membership(ctx: _FuncCtx, needle_e: A.Expr, hay_e: A.Expr, negate: bo
     hay_tuple_elem_tys = A.tuple_element_types(hay_e)
     eq_v = ctx.tmp(I64)
     if (
-        needle_ty in ("str", "any")
-        and (
-            hay_elem_ty in ("str", "any")
-            or "str" in hay_tuple_elem_tys
-            or "any" in hay_tuple_elem_tys
-        )
+        needle_ty == "str"
+        and (hay_elem_ty == "str" or "str" in hay_tuple_elem_tys)
     ):
+        # Both sides statically str. This used to fire whenever EITHER side was
+        # merely "any", which is not evidence of a string: `_abi_str_eq` then
+        # dereferenced whatever the value happened to be, so `xs[0] in xs` over
+        # [True, False, True] segfaulted on address 1.
+        #
+        # An "any" operand now falls to the `icmp.eq` below, which is exactly
+        # what `==` does for the same pair -- both operands arrive unboxed, so
+        # the payloads compare directly. Reusing `==`'s answer rather than
+        # inventing a second one is the same rule the container branch follows.
         ctx.emit(IRInstr("call", eq_v, ["_abi_str_eq", cur_needle, elem_v]))
     elif needle_ty in ("list", "tuple"):
         # A CONTAINER needle compares BY VALUE, like `==` does. This fell to
