@@ -224,6 +224,26 @@ def run_positive(case: Path, target: str) -> TestResult:
     cp = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
     if cp.returncode != 0:
         return TestResult(case.name, False, f"compile failed:\n{cp.stderr}{cp.stdout}")
+    if not out.exists():
+        # The CLI exited 0 but wrote no binary: the native backend REFUSED the
+        # source, and the driver's pyinbin fallback interpreted it instead --
+        # which succeeds, prints "pyinbin fallback executed successfully", and
+        # exits 0. The missing artifact then surfaced only when we tried to run
+        # it, as `runner error: [WinError 2] The system cannot find the file
+        # specified`: a FAIL naming neither the case nor the cause.
+        #
+        # Measured at 63 cases of the expanded corpus (22% of its failures),
+        # every one of which looks like a SUCCESS at the CLI. The compiler's own
+        # stdout already carries the real diagnostic, so surface it rather than
+        # requiring the reader to know to re-run with --no-pyinbin-fallback.
+        detail = (cp.stdout + cp.stderr).strip()
+        return TestResult(
+            case.name,
+            False,
+            "native backend refused this source; the pyinbin fallback ran it "
+            "and wrote no binary (re-run with --no-pyinbin-fallback for the "
+            f"full diagnostic):\n{detail}",
+        )
 
     stdin_data = _parse_stdin(case.read_text(encoding="utf-8"))
     try:
