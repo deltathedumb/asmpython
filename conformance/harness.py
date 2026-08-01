@@ -273,7 +273,13 @@ def print_matrix(results: list[Result]) -> None:
     for family, rows in sorted(families.items()):
         cols = sorted({c for cells in rows.values() for c in cells})
         width = max((len(r) for r in rows), default=8) + 2
-        colw = max((len(c) for c in cols), default=4) + 1
+        # Each cell is ONE character and the headers run vertically, so the
+        # column width has nothing to do with the name length. Deriving it from
+        # the longest name made every column ~13 wide: a 19-column product came
+        # out 250 characters across, wrapped in any terminal, and wrapping is
+        # exactly what destroys a grid -- the whole point is that a row and a
+        # column are visually straight.
+        colw = 2
 
         print(f"\n=== {family} ===")
         # Column headers written vertically: names are long and a grid this
