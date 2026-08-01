@@ -27,7 +27,25 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 CASES = ROOT / "cases"
 
-_FIELD_ORDER = ("tier", "ref", "skip")
+# Every field regen must PRESERVE when it rewrites a header. A field missing
+# from this tuple is silently dropped on the next regen, so adding a header
+# field to the harness without adding it here deletes it from every case.
+_FIELD_ORDER = ("tier", "ref", "min-python", "skip")
+
+
+def _min_python(path: Path) -> tuple[int, ...]:
+    """The case's `# min-python:` as (major, minor), or () if absent."""
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        s = raw.strip()
+        if s.startswith("# expect:") or not s.startswith("#"):
+            break
+        key, _, val = s[1:].partition(":")
+        if key.strip() == "min-python" and val.strip():
+            try:
+                return tuple(int(p) for p in val.strip().split("."))
+            except ValueError:
+                return ()
+    return ()
 
 
 def _run_once(path: Path, timeout: int) -> tuple[str, str, int]:
@@ -104,10 +122,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--timeout", type=int, default=30)
     args = ap.parse_args(argv)
 
-    wrote = kept = failed = 0
+    wrote = kept = failed = gated = 0
     for path in sorted(CASES.rglob("*.py")):
         cid = path.relative_to(CASES).with_suffix("").as_posix()
         if args.filter and args.filter not in cid:
+            continue
+        # Same gate the harness applies. Deriving an expectation for 3.12
+        # syntax on 3.11 would record a SyntaxError as the expected output,
+        # which is worse than not recording one: it would then be enforced.
+        mp = _min_python(path)
+        if mp and sys.version_info[:len(mp)] < mp:
+            gated += 1
             continue
         status = regen(path, args.force, args.timeout)
         if status == "wrote":
@@ -117,7 +142,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             failed += 1
             print(f"  {cid}: {status}")
-    print(f"regen: {wrote} written, {kept} kept, {failed} refused")
+    tail = f", {gated} gated by min-python" if gated else ""
+    print(f"regen: {wrote} written, {kept} kept, {failed} refused{tail}")
     return 1 if failed else 0
 
 

@@ -36,6 +36,11 @@ class Case:
     ref: str
     expect: str
     skip_note: str = ""
+    #: Lowest CPython that has the feature, as (major, minor). A case for
+    #: syntax introduced in 3.12 is not a divergence on 3.11 -- it is a
+    #: SyntaxError, and scoring it as a failure would say the language requires
+    #: something the language did not yet have.
+    min_python: tuple[int, ...] = ()
 
 
 @dataclass
@@ -80,7 +85,7 @@ def parse_case(path: Path) -> Case:
             if s.startswith("#") and ":" in s:
                 key, _, val = s[1:].partition(":")
                 key = key.strip()
-                if key in ("tier", "ref", "skip"):
+                if key in ("tier", "ref", "skip", "min-python"):
                     fields[key] = val.strip()
             continue
         if s.startswith("#"):
@@ -107,6 +112,17 @@ def parse_case(path: Path) -> Case:
             f"must cite a reference section via `# ref:`. If no citation "
             f"exists, the honest tier is `cpython` or `impl`."
         )
+    min_python: tuple[int, ...] = ()
+    if fields.get("min-python"):
+        raw_mp = fields["min-python"]
+        try:
+            min_python = tuple(int(p) for p in raw_mp.split("."))
+        except ValueError:
+            raise CaseError(
+                f"{case_id}: min-python must be a dotted version like 3.12, "
+                f"got {raw_mp!r}"
+            ) from None
+
     return Case(
         id=case_id,
         path=path,
@@ -114,12 +130,14 @@ def parse_case(path: Path) -> Case:
         ref=ref,
         expect="\n".join(expect_lines).rstrip("\n"),
         skip_note=fields.get("skip", ""),
+        min_python=min_python,
     )
 
 
 def discover(filter_sub: str = "", tiers: tuple[str, ...] = VALID_TIERS) -> list[Case]:
     cases: list[Case] = []
     problems: list[str] = []
+    gated = 0
     for path in sorted(CASES.rglob("*.py")):
         try:
             case = parse_case(path)
@@ -130,9 +148,22 @@ def discover(filter_sub: str = "", tiers: tuple[str, ...] = VALID_TIERS) -> list
             continue
         if case.tier not in tiers:
             continue
+        if case.min_python and sys.version_info[:len(case.min_python)] < case.min_python:
+            # Gated on the CPython running the SUITE, because that is what
+            # derives and re-validates the expectation. A case using 3.12
+            # syntax is not a divergence on 3.11 -- regen cannot even parse it
+            # there, so there is no expectation to hold anyone to.
+            gated += 1
+            continue
         cases.append(case)
     if problems:
         raise CaseError("malformed cases:\n  " + "\n  ".join(problems))
+    if gated:
+        # Announced, never silent: a suite that quietly drops cases reports a
+        # score it did not earn.
+        v = ".".join(str(p) for p in sys.version_info[:2])
+        print(f"note: {gated} case(s) gated by `min-python` above this "
+              f"CPython ({v})")
     return cases
 
 

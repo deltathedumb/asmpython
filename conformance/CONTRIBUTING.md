@@ -33,6 +33,27 @@ python conformance/selftest.py      # must pass before you push
 
 4. Run the self-test.
 
+### Features newer than the oldest supported CPython
+
+Add `# min-python:` when the case uses syntax or a library that does not exist
+all the way back:
+
+```python
+# tier: spec
+# ref: reference/compound_stmts.html#type-params
+# min-python: 3.12
+def first[T](xs: list[T]) -> T:
+    return xs[0]
+```
+
+Both the harness and `regen.py` skip such a case on an older interpreter, and
+say so rather than skipping silently. Without the field, a 3.12 case run on 3.11
+is a `SyntaxError` recorded as the expected output — an expectation that then
+gets enforced forever.
+
+The gate keys on the CPython running the **suite**, because that is what derives
+and re-validates the expectation. Not having a feature yet is not a divergence.
+
 Never type an `# expect:` block yourself. A hand-written expectation is how a
 suite ends up asserting something the reference implementation doesn't actually
 do, and that failure is invisible — it reports as an implementation bug

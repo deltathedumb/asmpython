@@ -62,6 +62,10 @@ Rules the harness enforces:
 - Header fields come **before** `# expect:`. Everything after that marker is
   expected stdout, so a trailing field would silently become an expected line.
 - `tier: spec` requires a `ref:`.
+- `min-python: 3.12` marks a case whose feature does not exist further back.
+  The harness and `regen.py` both skip it on an older interpreter and announce
+  the count. Not having a feature yet is not a divergence, and without the field
+  a `SyntaxError` would be recorded as the expected output and then enforced.
 - Expected output is **derived, never hand-written** — `regen.py` runs the case
   under CPython and writes the block. A hand-typed expectation is how a suite
   ends up asserting something the reference implementation does not actually do.
