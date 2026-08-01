@@ -17,6 +17,25 @@ deliverable.
 
 ### Added
 
+- **pyconform, a CPython microbehaviour conformance suite** (`conformance/`) —
+  asmpython's correctness was measured against `tests/`, a corpus written
+  alongside the compiler, which cannot contain the shapes the compiler was
+  never asked to handle. pyconform baselines CPython instead and asserts the
+  *language*: 1166 cases whose expected output is DERIVED by running each under
+  CPython twice in separate processes (disagreement is refused, which catches
+  hash-seed and clock dependence), tiered `spec` / `cpython` / `impl` with
+  `spec` requiring a documentation citation, and a self-test asserting CPython
+  scores 100% on the counted tiers — so a case that asserts something no
+  implementation should satisfy fails loudly instead of being blamed on the
+  implementation forever. Three cross-products carry most of it: a value
+  through 20 storage trips, a container through 28 readers, a pair through 16
+  operators. Each case's PATH is its coordinates, so `--matrix` collapses
+  hundreds of failures into which axis is broken. 45 PEPs covered, with
+  `min-python:` gating for features newer than the oldest supported CPython.
+  `--groups`/`--list-groups` select subsets for a quick check, `--json` plus
+  `compare.py` diff two runs and exit nonzero only on a REGRESSION — a score
+  alone cannot distinguish "fixed three, broke three" from "changed nothing".
+
 - **External native libraries are declarable** (`_compiler/native_libraries.py`,
   `docs/NATIVE_LIBRARIES.md`) — linking against a shared library the compiler
   didn't ship with no longer means editing the compiler. Both linkers resolved
