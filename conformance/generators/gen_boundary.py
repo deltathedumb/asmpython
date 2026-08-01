@@ -51,6 +51,24 @@ KINDS: dict[str, str] = {
     "dict": "{'k': 1}",
     "tuple": "(1, 'two')",
     "tuple-empty": "()",
+    "bytes": "b'ab'",
+    "complex": "(1+2j)",
+    "set": "{1, 2}",
+    "frozenset": "frozenset([1, 2])",
+}
+
+#: (trip, kind) pairs that cannot exist, with the reason. A dict key or a set
+#: element must be HASHABLE, so pairing those trips with a list/dict/set kind
+#: is a TypeError under CPython -- there is no expectation to record, and a
+#: case the reference implementation cannot run is not a case.
+#:
+#: Kept as an explicit exclusion rather than silently dropping whatever fails
+#: to regen: "this pair is impossible" and "this pair broke" must not look the
+#: same, or a genuine regression in the oracle disappears into the noise.
+UNHASHABLE = {"list", "list-nested", "dict", "set"}
+INCOMPATIBLE: dict[str, set[str]] = {
+    "dict-key-roundtrip": UNHASHABLE,
+    "set-element-roundtrip": UNHASHABLE,
 }
 
 #: Each trip takes the literal in and must hand the SAME value back. The body
@@ -110,6 +128,35 @@ TRIPS: dict[str, str] = {
         "def _through(*a):\n    return a[0]\n\n"
         "def move(v):\n    return _through(v)\n"
     ),
+
+    "global-roundtrip": (
+        "_slot = None\n\n"
+        "def _put(x):\n    global _slot\n    _slot = x\n\n"
+        "def move(v):\n    _put(v)\n    return _slot\n"
+    ),
+
+    "class-attribute-roundtrip": (
+        "class _Holder:\n    attr = None\n\n"
+        "def move(v):\n    _Holder.attr = v\n    return _Holder.attr\n"
+    ),
+
+    # A value used as a KEY exercises hashing and key encoding, which is a
+    # different mechanism from storing it as a value -- an implementation can
+    # get one right and the other wrong.
+    "dict-key-roundtrip": (
+        "def move(v):\n    d = {v: 'x'}\n    for k in d:\n        return k\n"
+    ),
+
+    "set-element-roundtrip": (
+        "def move(v):\n    s = {v}\n    for x in s:\n        return x\n"
+    ),
+
+    "exception-payload": (
+        "class _E(Exception):\n    pass\n\n"
+        "def move(v):\n"
+        "    try:\n        raise _E(v)\n"
+        "    except _E as e:\n        return e.args[0]\n"
+    ),
 }
 
 TEMPLATE = """# tier: spec
@@ -124,17 +171,25 @@ print(type(_moved).__name__)
 
 
 def main() -> int:
-    written = 0
+    written = skipped = 0
     for trip_name, body in TRIPS.items():
+        excluded = INCOMPATIBLE.get(trip_name, set())
         for kind_name, literal in KINDS.items():
             path = OUT / trip_name / f"{kind_name}.py"
+            if kind_name in excluded:
+                # Remove a stale file so an exclusion added later cannot leave
+                # an orphaned case behind, still scored and no longer generated.
+                path.unlink(missing_ok=True)
+                skipped += 1
+                continue
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
                 TEMPLATE.format(body=body, literal=literal), encoding="utf-8"
             )
             written += 1
     print(f"gen_boundary: {written} cases "
-          f"({len(TRIPS)} trips x {len(KINDS)} kinds) -> {OUT}")
+          f"({len(TRIPS)} trips x {len(KINDS)} kinds, "
+          f"{skipped} impossible pair(s) excluded) -> {OUT}")
     print("now run: python conformance/regen.py --filter generated/boundary")
     return 0
 

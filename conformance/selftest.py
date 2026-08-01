@@ -26,13 +26,25 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from harness import (  # noqa: E402
-    CaseError, COUNTED_TIERS, VALID_TIERS, discover, load_shim, run_case,
+    CaseError, COUNTED_TIERS, VALID_TIERS, case_groups, discover, load_shim,
+    run_case,
 )
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    # `selftest.py pep,functions` restricts to those groups, for a quick check
+    # while iterating. CI runs it bare, over everything.
+    argv = sys.argv[1:] if argv is None else argv
+    groups = tuple(g.strip() for g in ",".join(argv).split(",") if g.strip())
+    known = case_groups()
+    unknown = [g for g in groups if g not in known]
+    if unknown:
+        print(f"unknown group(s): {', '.join(unknown)}")
+        print("valid groups:\n  " + "\n  ".join(known))
+        return 2
+
     try:
-        cases = discover(tiers=VALID_TIERS)
+        cases = discover(tiers=VALID_TIERS, groups=groups)
     except CaseError as exc:
         print("SUITE DEFECT -- malformed cases:\n")
         print(exc)

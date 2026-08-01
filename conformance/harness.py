@@ -134,7 +134,23 @@ def parse_case(path: Path) -> Case:
     )
 
 
-def discover(filter_sub: str = "", tiers: tuple[str, ...] = VALID_TIERS) -> list[Case]:
+def case_groups() -> list[str]:
+    """Selectable group names, in sorted order.
+
+    A group is any directory prefix of a case id, so both `pep` and the more
+    specific `generated/boundary` are selectable and the caller picks the
+    granularity they want.
+    """
+    groups: set[str] = set()
+    for path in CASES.rglob("*.py"):
+        parts = path.relative_to(CASES).with_suffix("").parts[:-1]
+        for i in range(1, len(parts) + 1):
+            groups.add("/".join(parts[:i]))
+    return sorted(groups)
+
+
+def discover(filter_sub: str = "", tiers: tuple[str, ...] = VALID_TIERS,
+             groups: tuple[str, ...] = ()) -> list[Case]:
     cases: list[Case] = []
     problems: list[str] = []
     gated = 0
@@ -143,6 +159,10 @@ def discover(filter_sub: str = "", tiers: tuple[str, ...] = VALID_TIERS) -> list
             case = parse_case(path)
         except CaseError as exc:
             problems.append(str(exc))
+            continue
+        if groups and not any(
+            case.id == g or case.id.startswith(g + "/") for g in groups
+        ):
             continue
         if filter_sub and filter_sub not in case.id:
             continue
@@ -313,6 +333,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tier", default=",".join(VALID_TIERS),
                     help="comma-separated tiers to RUN (scoring still excludes impl)")
     ap.add_argument("--filter", default="", help="substring of the case id")
+    ap.add_argument("--groups", default="",
+                    help="comma-separated case groups, e.g. pep,functions or "
+                         "generated/boundary. Use --list-groups to see them.")
+    ap.add_argument("--list-groups", action="store_true",
+                    help="print the selectable groups with case counts and exit")
     ap.add_argument("--timeout", type=int, default=30)
     ap.add_argument("-j", "--jobs", type=int, default=8)
     ap.add_argument("--paranoid", action="store_true",
@@ -329,7 +354,26 @@ def main(argv: list[str] | None = None) -> int:
         if t not in VALID_TIERS:
             raise SystemExit(f"unknown tier {t!r}; valid: {VALID_TIERS}")
 
-    cases = discover(args.filter, tiers)
+    known = case_groups()
+    if args.list_groups:
+        all_cases = discover(tiers=VALID_TIERS)
+        for g in known:
+            n = sum(1 for c in all_cases
+                    if c.id == g or c.id.startswith(g + "/"))
+            print(f"  {n:5d}  {g}")
+        return 0
+
+    groups = tuple(g.strip() for g in args.groups.split(",") if g.strip())
+    # A mistyped group must not quietly select nothing. Zero cases scores
+    # 100%, which is the most dangerous possible way to be wrong.
+    unknown = [g for g in groups if g not in known]
+    if unknown:
+        raise SystemExit(
+            f"unknown group(s): {', '.join(unknown)}\n"
+            f"valid groups:\n  " + "\n  ".join(known)
+        )
+
+    cases = discover(args.filter, tiers, groups)
     if not cases:
         print("no cases matched")
         return 0

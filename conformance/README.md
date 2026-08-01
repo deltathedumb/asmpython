@@ -97,9 +97,19 @@ should be expected to satisfy.
 ```
 python conformance/harness.py --shim cpython
 python conformance/harness.py --shim asmpython --tier spec,cpython
-python conformance/harness.py --shim asmpython --filter numeric/
-python conformance/harness.py --shim asmpython --matrix     # cross-product view
+python conformance/harness.py --shim asmpython --matrix          # cross-product view
+python conformance/harness.py --list-groups                      # what can be selected
+python conformance/harness.py --shim asmpython --groups pep,functions
+python conformance/harness.py --shim asmpython --groups generated/boundary
 ```
+
+Every run of the whole suite is a compile-and-link per case, so `--groups`
+exists for the quick check while you iterate; run it bare before you conclude
+anything. A group is any directory prefix of a case id, so you choose the
+granularity. An unknown group is a hard error rather than an empty selection —
+zero cases score 100%, which is the most dangerous way to be wrong.
+
+`selftest.py` takes the same groups positionally: `python selftest.py pep`.
 
 A shim is small — given a case file, produce its stdout:
 

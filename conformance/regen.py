@@ -119,12 +119,20 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--filter", default="")
+    ap.add_argument("--groups", default="",
+                    help="comma-separated case groups, e.g. pep,numeric")
     ap.add_argument("--timeout", type=int, default=30)
     args = ap.parse_args(argv)
+
+    groups = tuple(g.strip() for g in args.groups.split(",") if g.strip())
 
     wrote = kept = failed = gated = 0
     for path in sorted(CASES.rglob("*.py")):
         cid = path.relative_to(CASES).with_suffix("").as_posix()
+        if groups and not any(
+            cid == g or cid.startswith(g + "/") for g in groups
+        ):
+            continue
         if args.filter and args.filter not in cid:
             continue
         # Same gate the harness applies. Deriving an expectation for 3.12
