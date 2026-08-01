@@ -17,6 +17,7 @@ Exit codes: 0 = all pass; 1 = at least one failure.
 """
 from __future__ import annotations
 
+import atexit
 import os
 import subprocess
 import sys
@@ -311,6 +312,14 @@ def _diff(expected: str, got: str) -> str:
 
 def main() -> int:
     global _use_runtime_lib, _backend, _no_pyinbin_fallback
+    # Safety net for an INTERRUPTED run. Cleanup was only reachable at the end
+    # of a successful main(), so every killed run -- a timeout, a Ctrl-C, an
+    # agent stopping a background sweep -- left its entire artifact set behind
+    # forever. Registered HERE rather than at module scope on purpose: a
+    # process worker re-imports this module and `_worker_init` gives it the
+    # PARENT's _RUN_TAG, so a module-level registration would have each worker
+    # delete binaries the parent is still running.
+    atexit.register(_clean_run_artifacts)
     args = sys.argv[1:]
     _use_runtime_lib = "--use-runtime-lib" in args
     _no_pyinbin_fallback = "--no-pyinbin-fallback" in args
@@ -453,6 +462,8 @@ def main() -> int:
     # Only this run's binaries; a concurrent run's are left untouched. Without
     # this, C:\Temp accumulates one exe per case per run indefinitely (1045 had
     # piled up before the tagging above made them individually identifiable).
+    # Also registered atexit at the top of main(), so an INTERRUPTED run cleans
+    # up too -- this call only ever ran on the normal path.
     _clean_run_artifacts()
     return 0 if not fails else 1
 

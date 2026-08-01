@@ -13,12 +13,14 @@ loses the distinction.
 """
 from __future__ import annotations
 
+import atexit
 import itertools
 import os
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 # The compiler lives one directory up from the suite. This is the ONLY
@@ -62,6 +64,46 @@ def _artifact(stem: str) -> Path:
     return _BUILD / f"{stem}_{_TAG}_{n}{'.exe' if _IS_WIN else ''}"
 
 
+def _remove(path: Path) -> None:
+    """Delete a built binary, retrying briefly.
+
+    On Windows a just-exited process can still hold its own image mapped for a
+    moment, so the first unlink raises PermissionError. Swallowing that -- which
+    is what this used to do -- leaks the binary permanently, and `_BUILD` is
+    C:/Temp, shared with tests/runner.py: a directory with tens of thousands of
+    stale entries slows every create for both. A few short retries clear the
+    normal case; `_sweep` catches the rest.
+    """
+    for delay in (0.0, 0.02, 0.1):
+        if delay:
+            time.sleep(delay)
+        try:
+            path.unlink()
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            continue
+
+
+def _sweep() -> None:
+    """Remove anything this process built that `_remove` could not.
+
+    Registered atexit so a run that ends normally leaves nothing behind. Scoped
+    to this process's own `_TAG`, so a CONCURRENT run's artifacts are never
+    touched -- deleting those would make the other run execute a missing binary
+    and report it as a refusal.
+    """
+    for leftover in _BUILD.glob(f"*_{_TAG}_*"):
+        try:
+            leftover.unlink()
+        except OSError:
+            pass  # held by something still exiting; nothing further to try
+
+
+atexit.register(_sweep)
+
+
 def run(case_path: str, timeout: int):
     """-> (stdout, stderr, returncode); returncode None == refused to compile."""
     stem = Path(case_path).stem
@@ -89,9 +131,16 @@ def run(case_path: str, timeout: int):
                 cp = _compile()
                 _warmed = True
     except subprocess.TimeoutExpired:
+        # A timed-out compile can still have written a partial binary.
+        _remove(out_bin)
         raise TimeoutError(f"compile of {case_path}")
 
     if cp.returncode != 0:
+        # A REFUSED compile may leave a partial artifact behind. Cleanup used to
+        # happen only on the success path, so every refusal leaked -- and
+        # refusals are the single largest bucket when scoring a compiler that
+        # implements a subset.
+        _remove(out_bin)
         return "", (cp.stderr or "") + (cp.stdout or ""), None
     if not out_bin.exists():
         # Exit 0 with no binary: the fallback ran despite --no-pyinbin-fallback,
@@ -106,8 +155,5 @@ def run(case_path: str, timeout: int):
     except subprocess.TimeoutExpired:
         raise TimeoutError(f"run of {case_path}")
     finally:
-        try:
-            out_bin.unlink()
-        except OSError:
-            pass  # still mapped by a just-exited process; harmless
+        _remove(out_bin)
     return rp.stdout, rp.stderr, rp.returncode
