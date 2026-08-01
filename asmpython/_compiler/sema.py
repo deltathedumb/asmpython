@@ -2609,6 +2609,18 @@ class SemaAnalyzer:
                             break
                     if arg is None:
                         continue
+                if isinstance(arg, A.IntLit) and (
+                    arg.is_bool or arg.is_none or arg.is_ellipsis
+                ):
+                    # True/False/None/... all parse to IntLit, so
+                    # `_literal_arg_type` reports them as plain "int" -- and an
+                    # int slot cannot hold them, because what distinguishes
+                    # them is a FLAG ON THE AST NODE, not anything in the value.
+                    # The flag cannot survive being stored, so the callee has
+                    # nothing left to read and prints 1 / 0 rather than
+                    # True / None. Only a boxed "any" slot carries a tag.
+                    self.polymorphic_params.add(f"{qualname}:{i}")
+                    continue
                 lit = self._literal_arg_type(arg)
                 if lit is None and isinstance(arg, A.Call) and isinstance(arg.func, str):
                     lit = getattr(self, "_fn_return_kinds", {}).get(arg.func)
@@ -2792,10 +2804,15 @@ class SemaAnalyzer:
                 if i < start:
                     continue
                 inferred = self.inferred_param_types.get(f"{qualname}:{i}")
-                if inferred is None and f"{qualname}:{i}" in self.polymorphic_params:
-                    # Call sites disagreed on the base kind. Type the slot "any"
-                    # so the value travels boxed and tagged instead of being
-                    # reinterpreted as an int (see `_infer_call_target_params`).
+                if f"{qualname}:{i}" in self.polymorphic_params:
+                    # The slot must be dynamic: either the call sites disagreed
+                    # on the base kind, or one of them passed a value no
+                    # concrete slot can represent (True/False/None/...). Type
+                    # it "any" so the value travels boxed and tagged instead of
+                    # being reinterpreted as an int. Checked BEFORE `inferred`
+                    # because a mixed `f(True)` / `f(2)` records an "int"
+                    # candidate from the second site, and dynamic has to win --
+                    # int is exactly the answer that loses the first one.
                     if i < len(fn_pts) and fn_pts[i] is not None:
                         continue  # never override a real annotation
                     while len(fn_pts) <= i:
