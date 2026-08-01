@@ -518,3 +518,46 @@ fourth side-channel flag to `IntLit`'s three.
 being complete. Items 4-6 stay independently schedulable, with item 5 now
 looking closer to 4-6 weeks than 3-4.
 
+---
+
+## 5. Where the next session starts
+
+The read side is the next unit of work, and there is one question to answer
+before writing any of it. From `stdlib/queue.py`, which is the shape that
+regressed:
+
+```python
+def put(self, item: int, ...):
+    self._data.append(item)        # bare `list` FIELD: el kind "any" -> boxes
+
+def get(self, ...) -> int:
+    item: int = self._data[0]      # target ANNOTATED int -> read typed int
+    new_data: list = []
+    while i < len(self._data):
+        new_data.append(self._data[i])
+    self._data = new_data
+    return item
+```
+
+**The question:** `self._data`'s element kind is `"any"`, so its elements are
+boxed -- yet `item: int = self._data[0]` reads one into an `int`-annotated
+slot and the case PASSES today. Either the read choke is consulting the
+annotation rather than the element kind, or the field's element kind is not
+actually resolving to `"any"` at that site.
+
+Which of those it is decides the whole read-side design:
+
+- if the annotation wins, then an `int`-annotated read of an `"any"` element
+  silently skips unboxing, and every such site is a latent pointer leak that
+  the corpus happens not to exercise;
+- if the element kind is not `"any"` there, then the flip did not reach
+  instance fields the way the `box_element` gate assumes, and the gate's
+  Attr arm is dead or near-dead code.
+
+Answer it by instrumenting, not by reading -- both prior attempts to reason
+this out from the source were wrong (see the site-1 sequence in §3). Dump the
+IR for `queue.get` (`ASMPYTHON_EMIT_IR=out.ir`) and look for whether an unbox
+appears on that load.
+
+Only then is it worth touching subscript / iteration / `pop` / slicing /
+pass-through, which all have to agree on the same answer.
