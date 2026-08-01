@@ -710,5 +710,240 @@ print(s[::2])
 ''')
 
 
+# ===========================================================================
+# Wave 2. Wave 1 came back 53% failing. This wave adds the numeric-tower
+# dunders wave 1 left out, the builtin-container guarantees that are part of
+# the language rather than of CPython (dict insertion order, sort stability,
+# bool being an int subclass), and the set/frozenset/dict-view operations that
+# nothing in the corpus exercises.
+# ===========================================================================
+
+case("proto_pow_dunder", "__pow__ serves the ** operator", r'''
+class Num:
+    def __init__(self, n):
+        self.n = n
+
+    def __pow__(self, other):
+        return Num(self.n ** other)
+
+
+print((Num(2) ** 10).n)
+''')
+
+case("proto_shift_dunders", "__lshift__/__rshift__ serve << and >>", r'''
+class Bits:
+    def __init__(self, n):
+        self.n = n
+
+    def __lshift__(self, by):
+        return Bits(self.n << by)
+
+    def __rshift__(self, by):
+        return Bits(self.n >> by)
+
+
+print((Bits(1) << 4).n)
+print((Bits(16) >> 2).n)
+''')
+
+case("proto_divmod_dunder", "__divmod__ serves divmod()", r'''
+class Num:
+    def __init__(self, n):
+        self.n = n
+
+    def __divmod__(self, other):
+        return (self.n // other, self.n % other)
+
+
+print(divmod(Num(7), 2))
+''')
+
+case("proto_builtin_divmod", "divmod on ints returns quotient and remainder", r'''
+print(divmod(7, 2))
+print(divmod(-7, 2))
+''')
+
+case("proto_bool_is_int_subclass", "bool is a subclass of int", r'''
+print(issubclass(bool, int))
+print(isinstance(True, int))
+print(True + True)
+print(sum([True, False, True]))
+''')
+
+case("proto_dict_preserves_insertion_order", "a dict iterates in insertion order", r'''
+d = {}
+d["z"] = 1
+d["a"] = 2
+d["m"] = 3
+print(list(d.keys()))
+print(list(d.values()))
+''')
+
+case("proto_sorted_is_stable", "sorted preserves the order of equal keys", r'''
+pairs = [("b", 1), ("a", 2), ("b", 3), ("a", 4)]
+print(sorted(pairs, key=lambda p: p[0]))
+''')
+
+case("proto_list_sort_in_place", "list.sort sorts in place and returns None", r'''
+xs = [3, 1, 2]
+result = xs.sort()
+print(xs)
+print(result)
+''')
+
+case("proto_set_operations", "set supports union/intersection/difference", r'''
+a = {1, 2, 3}
+b = {2, 3, 4}
+print(sorted(a | b))
+print(sorted(a & b))
+print(sorted(a - b))
+print(sorted(a ^ b))
+''')
+
+case("proto_set_subset_superset", "set comparison operators test containment", r'''
+print({1, 2} <= {1, 2, 3})
+print({1, 2, 3} >= {1, 2})
+print({1, 4} <= {1, 2, 3})
+''')
+
+case("proto_frozenset_is_hashable", "a frozenset can be a dict key", r'''
+table = {frozenset([1, 2]): "pair"}
+print(table[frozenset([2, 1])])
+''')
+
+case("proto_dict_view_set_operations", "dict key views support set operations", r'''
+a = {"x": 1, "y": 2}
+b = {"y": 3, "z": 4}
+print(sorted(a.keys() & b.keys()))
+print(sorted(a.keys() | b.keys()))
+''')
+
+case("proto_dict_items_unpack", "dict.items yields key/value pairs", r'''
+d = {"a": 1, "b": 2}
+for key, value in d.items():
+    print(key, value)
+''')
+
+case("proto_dict_get_default", "dict.get returns its default for a missing key", r'''
+d = {"a": 1}
+print(d.get("a"))
+print(d.get("b"))
+print(d.get("b", "fallback"))
+''')
+
+case("proto_dict_setdefault", "setdefault inserts only when absent", r'''
+d = {"a": 1}
+print(d.setdefault("a", 99))
+print(d.setdefault("b", 2))
+print(d)
+''')
+
+case("proto_augmented_subscript", "d[k] += v reads, adds and stores back", r'''
+counts = {"a": 1}
+counts["a"] += 5
+print(counts["a"])
+xs = [1, 2]
+xs[0] += 10
+print(xs)
+''')
+
+case("proto_chained_assignment", "a = b = value binds both names", r'''
+a = b = [1]
+a.append(2)
+print(a)
+print(b)
+print(a is b)
+''')
+
+case("proto_iter_sentinel_form", "iter(callable, sentinel) stops at the sentinel", r'''
+values = [1, 2, 3, 0, 4]
+position = []
+
+
+def take():
+    index = len(position)
+    position.append(1)
+    return values[index]
+
+
+print(list(iter(take, 0)))
+''')
+
+case("proto_slice_object_attributes", "a slice object exposes start/stop/step", r'''
+s = slice(1, 10, 2)
+print(s.start)
+print(s.stop)
+print(s.step)
+print(list(range(20))[s])
+''')
+
+case("proto_multidimensional_key", "d[a, b] passes a tuple key", r'''
+grid = {}
+grid[1, 2] = "cell"
+print(grid[(1, 2)])
+print(list(grid.keys()))
+''')
+
+case("proto_cross_type_ordering_refused", "ordering unrelated types raises TypeError", r'''
+try:
+    print(1 < "a")
+except TypeError:
+    print("refused")
+print(1 == "a")
+''')
+
+case("proto_str_multiply_and_join", "str supports * and join", r'''
+print("ab" * 3)
+print("-".join(["a", "b", "c"]))
+''')
+
+case("proto_list_comparison_lexicographic", "lists compare element by element", r'''
+print([1, 2] < [1, 3])
+print([1, 2] < [1, 2, 0])
+print([2] > [1, 9, 9])
+''')
+
+case("proto_tuple_comparison_lexicographic", "tuples compare element by element", r'''
+print((1, 2) < (1, 3))
+print(sorted([(2, "b"), (1, "c"), (1, "a")]))
+''')
+
+case("proto_in_place_extend_vs_concat", "extend mutates while + rebinds", r'''
+base = [1]
+alias = base
+base.extend([2])
+print(alias)
+base = base + [3]
+print(alias)
+print(base)
+''')
+
+case("proto_any_all_short_circuit", "any/all stop at the deciding element", r'''
+def note(value):
+    print("checked " + str(value))
+    return value
+
+
+print(any([note(False), note(True), note(False)]))
+print(all([note(True), note(False), note(True)]))
+''')
+
+case("proto_generator_feeds_any", "any() consumes a generator lazily", r'''
+def values():
+    for n in [1, 2, 3]:
+        print("yielded " + str(n))
+        yield n > 1
+
+
+print(any(values()))
+''')
+
+case("proto_reversed_on_builtins", "reversed works on list, tuple and str", r'''
+print(list(reversed([1, 2, 3])))
+print(list(reversed((1, 2))))
+print("".join(reversed("abc")))
+''')
+
+
 if __name__ == "__main__":
     raise SystemExit(main(CASES, "gen_proto_cases.py", sys.argv))

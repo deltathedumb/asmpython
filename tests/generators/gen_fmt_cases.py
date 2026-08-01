@@ -387,5 +387,105 @@ print(str(f))
 ''')
 
 
+# ===========================================================================
+# Wave 2. Formatting came back the most conformant of the five areas (29%
+# failing against 46% overall), which is the signal to stop broadening it and
+# instead probe the edges: values whose float representation is delicate, the
+# specs that only apply to non-builtin numeric types, and the conversions wave
+# 1 did not reach.
+# ===========================================================================
+
+case("fmt_conversion_ascii", "!a formats with ascii()", r'''
+s = "café"
+print(f"{s!a}")
+''')
+
+case("fmt_negative_zero", "negative zero keeps its sign", r'''
+print(-0.0)
+print(f"{-0.0}")
+print(format(-0.0, ".1f"))
+''')
+
+case("fmt_float_extremes", "very large and very small floats round-trip", r'''
+print(1e308)
+print(1e-308)
+print(2.220446049250313e-16)
+''')
+
+case("fmt_float_repr_shortest", "float repr is the shortest round-tripping form", r'''
+print(0.3)
+print(1 / 3)
+print(2 / 3)
+print(1e16)
+print(1e17)
+''')
+
+case("fmt_infinity_and_nan", "inf and nan have canonical spellings", r'''
+inf = float("inf")
+nan = float("nan")
+print(inf)
+print(-inf)
+print(nan)
+print(f"{inf}")
+''')
+
+case("fmt_int_very_large", "a large int formats without loss", r'''
+n = 2 ** 100
+print(n)
+print(f"{n}")
+print(format(n, ","))
+''')
+
+case("fmt_spec_on_fraction", "a format spec applies to a Fraction", r'''
+from fractions import Fraction
+
+print(format(Fraction(1, 3), ".3f"))
+''')
+
+case("fmt_spec_on_decimal", "a format spec applies to a Decimal", r'''
+from decimal import Decimal
+
+print(format(Decimal("2.5"), ".3f"))
+print(format(Decimal("1234.5"), ","))
+''')
+
+case("fmt_spec_e_uppercase", "E renders the exponent marker in upper case", r'''
+print(format(1234.5, "E"))
+print(format(1234.5, ".1E"))
+''')
+
+case("fmt_spec_g_uppercase", "G renders general format in upper case", r'''
+print(format(0.000012345, "G"))
+''')
+
+case("fmt_thousands_on_negative", "grouping survives a minus sign", r'''
+print(format(-1234567, ","))
+print(format(-1234.5, ",.1f"))
+''')
+
+case("fmt_zero_pad_with_sign_and_group", "zero padding, sign and grouping combine", r'''
+print(format(1234, "+012,"))
+''')
+
+case("fmt_repr_escapes_quotes", "repr picks a quoting style and escapes", r'''
+print(repr("it's"))
+print(repr('say "hi"'))
+print(repr("back\\slash"))
+''')
+
+case("fmt_repr_of_nested_container", "repr renders nested containers", r'''
+print(repr({"k": [1, (2, 3)], "s": {"inner": None}}))
+''')
+
+case("fmt_format_nested_spec_in_method", "str.format supports a nested spec field", r'''
+print("{0:{1}}".format("x", ">6"))
+''')
+
+case("fmt_percent_multiple_padding_forms", "%-format combines flags, width and precision", r'''
+print("[%+08.2f]" % 3.14159)
+print("[%-8.3s]" % "abcdef")
+''')
+
+
 if __name__ == "__main__":
     raise SystemExit(main(CASES, "gen_fmt_cases.py", sys.argv))

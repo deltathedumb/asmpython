@@ -975,5 +975,451 @@ print(Square(3).area())
 ''')
 
 
+# ===========================================================================
+# Wave 2. Wave 1 came back 53% failing with 14 of its 62 probes crashing the
+# compiled binary outright, so this area is the opposite of sampled out. This
+# wave covers what wave 1 skipped: subclassing the BUILTIN types (where the
+# object model meets the value model), the parts of class creation that are
+# ordinary code running at definition time, and the dunders that make an
+# instance convertible rather than callable.
+# ===========================================================================
+
+case("obj_subclass_of_list", "a list subclass inherits list behaviour", r'''
+class Stack(list):
+    def push(self, value):
+        self.append(value)
+        return self
+
+
+s = Stack()
+s.push(1).push(2)
+print(len(s))
+print(s[0])
+print(list(s))
+''')
+
+case("obj_subclass_of_dict", "a dict subclass inherits dict behaviour", r'''
+class Config(dict):
+    def get_or(self, key, fallback):
+        return self[key] if key in self else fallback
+
+
+c = Config()
+c["a"] = 1
+print(c["a"])
+print(len(c))
+print(c.get_or("b", "default"))
+''')
+
+case("obj_dict_missing_hook", "__missing__ handles an absent dict key", r'''
+class Defaulting(dict):
+    def __missing__(self, key):
+        return "default-" + key
+
+
+d = Defaulting()
+d["present"] = "real"
+print(d["present"])
+print(d["absent"])
+''')
+
+case("obj_subclass_of_str", "a str subclass keeps str behaviour", r'''
+class Name(str):
+    def shout(self):
+        return self.upper()
+
+
+n = Name("ada")
+print(len(n))
+print(n.shout())
+print(n + "!")
+''')
+
+case("obj_subclass_of_exception", "an Exception subclass is catchable as Exception", r'''
+class AppError(Exception):
+    pass
+
+
+try:
+    raise AppError("failed")
+except Exception as err:
+    print(type(err).__name__)
+    print(str(err))
+''')
+
+case("obj_name_mangling", "a __private name is mangled per class", r'''
+class Holder:
+    def __init__(self):
+        self.__secret = "hidden"
+
+    def reveal(self):
+        return self.__secret
+
+
+h = Holder()
+print(h.reveal())
+print(hasattr(h, "_Holder__secret"))
+print(hasattr(h, "__secret"))
+''')
+
+case("obj_class_body_runs_at_definition", "a class body executes when defined", r'''
+class Built:
+    print("body ran")
+    computed = 2 * 3
+
+
+print(Built.computed)
+''')
+
+case("obj_annotations_recorded", "__annotations__ records declared types", r'''
+class Record:
+    name: str
+    count: int
+
+
+print(sorted(Record.__annotations__.keys()))
+''')
+
+case("obj_docstring_recorded", "__doc__ holds the class docstring", r'''
+class Documented:
+    """The documentation."""
+
+
+print(Documented.__doc__)
+''')
+
+case("obj_super_explicit_arguments", "the two-argument super() form works", r'''
+class Base:
+    def tag(self):
+        return "base"
+
+
+class Child(Base):
+    def tag(self):
+        return "child+" + super(Child, self).tag()
+
+
+print(Child().tag())
+''')
+
+case("obj_new_runs_before_init", "__new__ runs before __init__", r'''
+class Ordered:
+    def __new__(cls):
+        print("new")
+        return super().__new__(cls)
+
+    def __init__(self):
+        print("init")
+
+
+Ordered()
+''')
+
+case("obj_ne_derived_from_eq", "__ne__ defaults to the negation of __eq__", r'''
+class Version:
+    def __init__(self, n):
+        self.n = n
+
+    def __eq__(self, other):
+        return self.n == other.n
+
+
+print(Version(1) != Version(2))
+print(Version(1) != Version(1))
+''')
+
+case("obj_class_getitem", "__class_getitem__ makes a class subscriptable", r'''
+class Container:
+    def __class_getitem__(cls, item):
+        return "Container[" + item.__name__ + "]"
+
+
+print(Container[int])
+''')
+
+case("obj_instancecheck_on_metaclass", "__instancecheck__ overrides isinstance", r'''
+class AlwaysMeta(type):
+    def __instancecheck__(cls, obj):
+        return True
+
+
+class Anything(metaclass=AlwaysMeta):
+    pass
+
+
+print(isinstance("a string", Anything))
+print(isinstance(42, Anything))
+''')
+
+case("obj_abc_register_virtual_subclass", "ABCMeta.register creates a virtual subclass", r'''
+import abc
+
+
+class Drawable(abc.ABC):
+    pass
+
+
+class Circle:
+    pass
+
+
+Drawable.register(Circle)
+print(issubclass(Circle, Drawable))
+print(isinstance(Circle(), Drawable))
+''')
+
+case("obj_dataclass_frozen_rejects_write", "a frozen dataclass refuses assignment", r'''
+import dataclasses
+
+
+@dataclasses.dataclass(frozen=True)
+class Point:
+    x: int
+
+
+p = Point(1)
+print(p.x)
+try:
+    p.x = 2
+    print("assignment allowed")
+except dataclasses.FrozenInstanceError:
+    print("assignment refused")
+''')
+
+case("obj_dataclass_order_comparisons", "dataclass(order=True) derives comparisons", r'''
+import dataclasses
+
+
+@dataclasses.dataclass(order=True)
+class Version:
+    major: int
+    minor: int
+
+
+print(Version(1, 2) < Version(1, 3))
+print(sorted([Version(2, 0), Version(1, 5)])[0].major)
+''')
+
+case("obj_typing_namedtuple_class_syntax", "typing.NamedTuple's class form works", r'''
+import typing
+
+
+class Point(typing.NamedTuple):
+    x: int
+    y: int = 0
+
+
+p = Point(1)
+print(p.x)
+print(p.y)
+print(tuple(p))
+''')
+
+case("obj_enum_custom_method", "an Enum may define its own methods", r'''
+import enum
+
+
+class Color(enum.Enum):
+    RED = 1
+    GREEN = 2
+
+    def describe(self):
+        return self.name.lower() + "=" + str(self.value)
+
+
+print(Color.RED.describe())
+''')
+
+case("obj_slots_with_property", "a property coexists with __slots__", r'''
+class Point:
+    __slots__ = ("_x",)
+
+    def __init__(self, x):
+        self._x = x
+
+    @property
+    def x(self):
+        return self._x
+
+
+print(Point(4).x)
+''')
+
+case("obj_int_dunder_conversion", "__int__ and __float__ serve the conversions", r'''
+class Measure:
+    def __init__(self, n):
+        self.n = n
+
+    def __int__(self):
+        return int(self.n)
+
+    def __float__(self):
+        return float(self.n)
+
+
+print(int(Measure(3.7)))
+print(float(Measure(3)))
+''')
+
+case("obj_bytes_dunder", "__bytes__ serves bytes()", r'''
+class Blob:
+    def __bytes__(self):
+        return b"payload"
+
+
+print(bytes(Blob()))
+''')
+
+case("obj_round_dunder", "__round__ serves round()", r'''
+class Measure:
+    def __init__(self, n):
+        self.n = n
+
+    def __round__(self, digits=None):
+        return "rounded"
+
+
+print(round(Measure(1.23)))
+''')
+
+case("obj_copy_dunder", "__copy__ customises copy.copy", r'''
+import copy
+
+
+class Tagged:
+    def __copy__(self):
+        clone = Tagged()
+        clone.tag = "copied"
+        return clone
+
+
+print(copy.copy(Tagged()).tag)
+''')
+
+case("obj_delattr_removes", "delattr removes an instance attribute", r'''
+class Holder:
+    def __init__(self):
+        self.field = 1
+
+
+h = Holder()
+print(hasattr(h, "field"))
+delattr(h, "field")
+print(hasattr(h, "field"))
+''')
+
+case("obj_staticmethod_inherited", "a subclass inherits a staticmethod", r'''
+class Base:
+    @staticmethod
+    def helper():
+        return "helper"
+
+
+class Child(Base):
+    pass
+
+
+print(Child.helper())
+print(Child().helper())
+''')
+
+case("obj_cooperative_init_chain", "each __init__ in a diamond runs once", r'''
+class Base:
+    def __init__(self):
+        self.trail = ["Base"]
+
+
+class Left(Base):
+    def __init__(self):
+        super().__init__()
+        self.trail.append("Left")
+
+
+class Right(Base):
+    def __init__(self):
+        super().__init__()
+        self.trail.append("Right")
+
+
+class Both(Left, Right):
+    def __init__(self):
+        super().__init__()
+        self.trail.append("Both")
+
+
+print(Both().trail)
+''')
+
+case("obj_classvar_list_is_shared", "a mutable class attribute is shared", r'''
+class Registry:
+    entries = []
+
+    def add(self, value):
+        self.entries.append(value)
+
+
+Registry().add("a")
+Registry().add("b")
+print(Registry.entries)
+''')
+
+case("obj_method_is_class_attribute", "a method is reachable through the class", r'''
+class Greeter:
+    def greet(self):
+        return "hi"
+
+
+g = Greeter()
+print(Greeter.greet(g))
+print(g.greet())
+''')
+
+case("obj_callable_reports_instances", "callable() reflects __call__", r'''
+class WithCall:
+    def __call__(self):
+        return 1
+
+
+class WithoutCall:
+    pass
+
+
+print(callable(WithCall()))
+print(callable(WithoutCall()))
+print(callable(WithoutCall))
+''')
+
+case("obj_dir_includes_attributes", "dir() lists declared members", r'''
+class Widget:
+    field = 1
+
+    def method(self):
+        return 2
+
+
+names = dir(Widget())
+print("field" in names)
+print("method" in names)
+print("absent" in names)
+''')
+
+case("obj_inherited_property_override", "a subclass can override an inherited property", r'''
+class Base:
+    @property
+    def label(self):
+        return "base"
+
+
+class Child(Base):
+    @property
+    def label(self):
+        return "child"
+
+
+print(Base().label)
+print(Child().label)
+''')
+
+
 if __name__ == "__main__":
     raise SystemExit(main(CASES, "gen_obj_cases.py", sys.argv))

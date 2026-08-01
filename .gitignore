@@ -64,6 +64,15 @@ _smoke.log
 nasm*.log
 nasm*.txt
 
+# `*log*` above is meant for log FILES, but it matches any path containing the
+# three letters -- including test cases. `tests/cases/std_math_log_base.py` was
+# written by its generator, run by the runner, and silently skipped by
+# `git add`, which is how a probe can exist locally and never reach the repo.
+# A corpus case is never a log file, so re-include them explicitly. (Only
+# matters for files not already tracked; .gitignore does not affect those.)
+!/tests/cases/*.py
+!/tests/cases_fail/*.py
+
 # Unit test artifacts
 hi.txt
 test.zip
