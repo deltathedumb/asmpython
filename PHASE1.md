@@ -247,6 +247,30 @@ deciding what unknown should do there -- almost certainly box-and-tag-dispatch,
 matching what `"any"` already does one branch up -- rather than renaming
 anything. That decision is what the constant flip is waiting on.
 
+**Site 1 is already answerable**, and it sets the pattern for the rest.
+`_lower_dict_key` (ir_lower.py:3382) documents its own encoding contract:
+
+    str            -> itself
+    int            -> its decimal spelling
+    everything else -> its repr() string, because "repr_mode makes the
+                       encoding UNAMBIGUOUS across kinds"
+
+An unknown-kind key is precisely the case that contract was written for, so it
+belongs in the repr branch -- and `_lower_expr_as_str` in repr mode already
+performs the runtime tag dispatch (`_lower_format_any_value`) that a boxed
+unknown needs. No new machinery.
+
+The catch, and why this is not a one-line change: the function's first test is
+`if key_ty in ("str", "any")`, which passes an "any" key through as though it
+were already a string. Once UNKNOWN_TY becomes "any", unknown keys hit that
+arm instead of the repr arm. So the fix is to narrow that test to `"str"` and
+let "any" fall through to repr -- which also corrects the pre-existing case of
+an explicitly `object`-typed key, but is a behaviour change to something that
+is currently passing tests, and therefore needs its own verified step rather
+than riding along with the flip.
+
+
+
 Every step is verified against the pinned baseline and must leave it at
 809/1142 exactly; both steps so far did.
 
