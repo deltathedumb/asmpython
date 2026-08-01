@@ -597,3 +597,85 @@ divergence.
 
 The fixture convention was delivered in round 2 (`gen_fixture_cases.py`, 41
 probes) and is unchanged. It remains gated on `open(p).read()` returning `0`.
+
+## 6. Re-measured after the origin merge (`ad596be3`)
+
+`2d441f9c` merged origin and brought ~1,500 lines of compiler change
+(`sema.py` +599, `parser.py` +454, `ir_lower.py` +390, plus `codegen`,
+`program`, `lexer` and both `abi_shims`). All 785 probes were re-run against
+it.
+
+**30 fixed, 1 regressed.**
+
+### The round-2 silent miscompile is fixed
+
+21 of the 30 fixes are `alias_param_*`. The original reduction now matches
+CPython exactly:
+
+```text
+def f(xs): xs.append(2)      caller sees [1, 2]        (was [1])
+def m(xs): xs.sort()         caller sees [1, 2, 3]     (was [3, 1, 2])
+def m(xs): xs.reverse()      caller sees [3, 2, 1]     (was [1, 2, 3])
+def m(d):  d.clear()         caller sees len 0         (was len 1)
+callee's own view            len 2 / caller len 2      (was 1 / 1)
+```
+
+`alias_` went from 41.3% to **18.5%** failing — the largest single improvement
+any wave has recorded. The corrected round-2 diagnosis (a mutating *method* on
+a parameter has no effect; a subscript store does) is what the fix matched.
+
+What is **not** fixed, and is the residue worth naming:
+
+| still failing | symptom |
+|---|---|
+| `alias_mutation_through_object_annotation` | `def add(xs: object)` still loses the mutation — the fix covers unannotated parameters but not the `object`-annotated path |
+| `alias_set_constructor_copies` | `set(a)` still aliases instead of copying |
+| `copy.copy` / `copy.deepcopy` | exit 1 |
+| mutable default arguments (3 probes) | the default is re-created per call |
+| self-reference and cycles (4 probes) | crash or raw pointer |
+| `alias_param_slice_assign` | `[7, 8, 2]` → `[7, 2]` |
+
+So the copy-where-it-should-alias direction is fixed and the
+alias-where-it-should-copy direction is not.
+
+### The consumer matrix barely moved
+
+One row changed: `pass_to_function` went from failing on `str` and `float` to
+passing on all four kinds. **118 of 120 cells are unchanged.** Per-kind
+failures went `1 / 4 / 12 / 27` → `1 / 3 / 11 / 27`; the `mixed` column did not
+move at all, so the `None`-reads-back-as-`0` defect behind fifteen consumers is
+untouched. A 1,500-line merge moving 2 of 120 cells is the argument for the
+matrix: the consumer paths really are a separate axis from the value-level
+work, and they will not fall out of it.
+
+### One verified regression
+
+`obj_lt_drives_sorted` was passing at `00955558` and at `ae1dc7ae`, and fails
+at `ad596be3`:
+
+```text
+class Version:  __lt__ compares self.n
+sorted([Version(3), Version(1), Version(2)])
+    CPython    [v1, v2, v3]
+    asmpython  [v3, v1, v2]       -- input order; __lt__ is not consulted
+```
+
+Reproduced twice under `-j 1` in an isolated worktree and once by compiling the
+case directly, so it is not a phantom from the concurrent sweep that was
+running at the time. `obj_lt_drives_min_max` fails too but was already failing,
+so `sorted` is the part that moved. This is FAILURE_AUDIT rank 21
+("sort/sorted ignores `__lt__` on instances") coming back.
+
+### Rates after the merge
+
+| prefix | probes | failing | rate |
+|---|---:|---:|---:|
+| `fix_` | 41 | 39 | 95.1% |
+| `obj_` | 94 | 59 | 62.8% |
+| `std_` | 181 | 113 | 62.4% |
+| `proto_` | 81 | 40 | 49.4% |
+| `flow_` | 90 | 44 | 48.9% |
+| `elem_` | 134 | 47 | 35.1% |
+| `fmt_` | 72 | 21 | 29.2% |
+| `alias_` | 92 | 17 | 18.5% |
+| **all** | **785** | **380** | **48.4%** |
