@@ -32,10 +32,18 @@ jobs:
       - name: CPython must pass every counted case
         run: python selftest.py
 
-      # Expectations are DERIVED, never typed. If regen would rewrite anything,
-      # a case was hand-edited or has drifted, and the tree is not reproducible.
-      - name: expectations are reproducible
+      # The whole tree must be reproducible from its sources: generators for the
+      # bodies, CPython for the expectations. Anything that differs afterwards
+      # was hand-edited or has drifted.
+      #
+      # ORDER MATTERS and is easy to get wrong. A generator REWRITES the case
+      # body from scratch, which removes the `# expect:` block, so regen must
+      # run after them or every generated case looks changed. That also means
+      # the two properties cannot be checked separately -- diffing between the
+      # two steps compares against a deliberately half-written tree.
+      - name: cases are reproducible from generators + CPython
         run: |
+          for g in generators/gen_*.py; do python "$g"; done
           python regen.py --force
           git diff --exit-code -- cases/ \
-            || (echo "::error::regen changed a case: an expectation was hand-edited or has drifted" && exit 1)
+            || (echo "::error::cases/ is not reproducible: a generator was edited without regenerating, or an expectation was hand-written" && exit 1)

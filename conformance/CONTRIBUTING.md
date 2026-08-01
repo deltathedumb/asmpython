@@ -138,10 +138,10 @@ the case is about, its console representation is not.
 
 ## Generated cases
 
-`generators/` builds three cross-products — `boundary/` (a value across storage
-boundaries), `consumer/` (a container read by every consumer) and `operator/`
-(a pair of values under every operator). Edit the generator, never the
-generated files:
+`generators/` builds four cross-products — `boundary/` (a value across storage
+boundaries), `consumer/` (a container read by every consumer), `operator/`
+(a pair of values under every operator) and `conversion/` (a container through
+every constructor). Edit the generator, never the generated files:
 
 ```text
 python conformance/generators/gen_boundary.py
