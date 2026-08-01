@@ -1436,20 +1436,20 @@ class SemaAnalyzer:
 
     def _resolve_field_el(self, class_name: str, field_name: str) -> str:
         """Element kind (list element / dict value) of a collection field,
-        walking the parent chain. 'int' when unknown."""
+        walking the parent chain. `A.UNKNOWN_TY` when unknown."""
         cur = class_name
         seen = set()
         while cur is not None and cur not in seen:
             seen.add(cur)
             cls: ClassSig = self.classes.get(cur)
             if cls is None:
-                return "int"
+                return A.UNKNOWN_TY
             if field_name in cls.field_el_types:
                 return cls.field_el_types[field_name]
             if field_name in cls.fields:
-                return "int"  # declared here without an element kind
+                return A.UNKNOWN_TY  # declared here without an element kind
             cur = cls.parent
-        return "int"
+        return A.UNKNOWN_TY
 
     def _resolve_field_tuple(self, class_name: str, field_name: str) -> list:
         """Per-slot kinds of a tuple field, walking the parent chain; [] if
@@ -1474,20 +1474,20 @@ class SemaAnalyzer:
         For `list[dict[K,V]]` / `list[list[T]]` fields this is the nested dict
         value / list element kind recovered after indexing or iteration once.
         The same applies to dict-valued fields whose values are themselves
-        dicts/lists. Returns "int" when unknown."""
+        dicts/lists. Returns `A.UNKNOWN_TY` when unknown."""
         cur = class_name
         seen = set()
         while cur is not None and cur not in seen:
             seen.add(cur)
             cls: ClassSig = self.classes.get(cur)
             if cls is None:
-                return "int"
+                return A.UNKNOWN_TY
             if field_name in cls.field_inner_value_types:
                 return cls.field_inner_value_types[field_name]
             if field_name in cls.fields:
-                return "int"
+                return A.UNKNOWN_TY
             cur = cls.parent
-        return "int"
+        return A.UNKNOWN_TY
 
     def _resolve_field_value_tuple(self, class_name: str, field_name: str) -> list:
         """Per-slot kinds for tuple elements/values inside list/dict fields.
@@ -6344,22 +6344,22 @@ class SemaAnalyzer:
     def _list_el_value_type(self, e, scope: Scope) -> str:
         """For a list whose elements are themselves containers (list[dict] /
         list[list]), the common value/element kind of those nested containers.
-        'int' if unknown. Mirrors `_dict_inner_value_type` for lists."""
+        `A.UNKNOWN_TY` if unknown. Mirrors `_dict_inner_value_type` for lists."""
         if isinstance(e, A.ListLit):
-            return getattr(e, "el_value_type", "int")
+            return getattr(e, "el_value_type", A.UNKNOWN_TY)
         if isinstance(e, A.Comprehension):
-            return getattr(e, "el_value_type", "int")
+            return getattr(e, "el_value_type", A.UNKNOWN_TY)
         if isinstance(e, A.Name):
-            return scope.list_el_value_types.get(e.name, "int")
+            return scope.list_el_value_types.get(e.name, A.UNKNOWN_TY)
         if isinstance(e, A.Call):
-            return getattr(e, "el_value_type", "int")
+            return getattr(e, "el_value_type", A.UNKNOWN_TY)
         if isinstance(e, A.MethodCall):
-            return getattr(e, "el_value_type", "int")
+            return getattr(e, "el_value_type", A.UNKNOWN_TY)
         if isinstance(e, A.Attr):
-            return getattr(e, "el_value_type", "int")
+            return getattr(e, "el_value_type", A.UNKNOWN_TY)
         if isinstance(e, A.BinOp):
-            return getattr(e, "el_value_type", "int")
-        return "int"
+            return getattr(e, "el_value_type", A.UNKNOWN_TY)
+        return A.UNKNOWN_TY
 
     def _list_el_tuple_types(self, e, scope: Scope) -> list[str]:
         """For a list whose elements are tuples (list[tuple]), the common
@@ -6409,17 +6409,17 @@ class SemaAnalyzer:
         return []
 
     def _inparam_el_type(self, e, scope: Scope) -> str:
-        """Element kind of an inparam[T]-valued expression. 'int' if unknown.
+        """Element kind of an inparam[T]-valued expression. `A.UNKNOWN_TY` if unknown.
 
         Same "always a bare parameter reference" shape as
         _outparam_el_type -- see its docstring.
         """
         if isinstance(e, A.Name):
-            return scope.inparam_el_types.get(e.name, "int")
-        return "int"
+            return scope.inparam_el_types.get(e.name, A.UNKNOWN_TY)
+        return A.UNKNOWN_TY
 
     def _outparam_el_type(self, e, scope: Scope) -> str:
-        """Pointee kind of an outparam[T]-valued expression. 'int' if unknown.
+        """Pointee kind of an outparam[T]-valued expression. `A.UNKNOWN_TY` if unknown.
 
         Unlike list/dict, an outparam value can only ever be a bare
         parameter reference (there's no literal/comprehension/call syntax
@@ -6427,8 +6427,8 @@ class SemaAnalyzer:
         declared parameter.
         """
         if isinstance(e, A.Name):
-            return scope.outparam_el_types.get(e.name, "int")
-        return "int"
+            return scope.outparam_el_types.get(e.name, A.UNKNOWN_TY)
+        return A.UNKNOWN_TY
 
     def _list_el_is_bool(self, e, scope: Scope) -> bool:
         """Whether a list-valued expression's elements are all bools.
@@ -6446,32 +6446,44 @@ class SemaAnalyzer:
         return False
 
     def _list_el_type(self, e, scope: Scope) -> str:
-        """Element type of a list-valued expression. 'int' if unknown."""
+        """Element type of a list-valued expression, or `A.UNKNOWN_TY`.
+
+        Every fallback here means "no element kind was recorded", NOT "the
+        elements are ints" -- they are spelled `A.UNKNOWN_TY` so the two are
+        distinguishable in source. Today that constant IS "int", so this is
+        behaviour-preserving; see its docstring for why the distinction has to
+        exist before it can be given a value of its own.
+
+        The gap this feeds: a bare `list` field (e.g. `deque._data`) has no
+        recorded element kind, so it answers UNKNOWN_TY, which the caller
+        cannot tell from `list[int]` -- so its elements are appended RAW, and
+        a non-int stored there is unrecoverable when read back.
+        """
         if isinstance(e, A.ListLit):
             return e.el_type
         if isinstance(e, A.Comprehension):
             return e.list_el_type
         if isinstance(e, A.Name):
-            return scope.list_el_types.get(e.name, "int")
+            return scope.list_el_types.get(e.name, A.UNKNOWN_TY)
         if isinstance(e, A.MethodCall):
             # `dict.keys()` returns list[str]; `dict.values()` returns list[int].
-            return getattr(e, "list_el_type", "int")
+            return getattr(e, "list_el_type", A.UNKNOWN_TY)
         if isinstance(e, A.Call):
             # A user function annotated `-> list[T]` stamps T on the call node.
-            return getattr(e, "list_el_type", "int")
+            return getattr(e, "list_el_type", A.UNKNOWN_TY)
         if isinstance(e, A.Subscript):
             # List slicing preserves element kind; sema stamps it onto the
             # Subscript node.
-            return getattr(e, "list_el_type", "int")
+            return getattr(e, "list_el_type", A.UNKNOWN_TY)
         if isinstance(e, A.Attr):
             # An instance field typed list[T]: sema stamped T onto the Attr.
-            return getattr(e, "list_el_type", "int")
+            return getattr(e, "list_el_type", A.UNKNOWN_TY)
         if isinstance(e, A.BinOp):
-            return getattr(e, "list_el_type", "int")
+            return getattr(e, "list_el_type", A.UNKNOWN_TY)
         if isinstance(e, A.IfExp):
             # A conditional whose arms are lists: sema stamped the element kind.
-            return getattr(e, "list_el_type", "int")
-        return "int"
+            return getattr(e, "list_el_type", A.UNKNOWN_TY)
+        return A.UNKNOWN_TY
 
     def _set_el_type(self, e, scope: Scope) -> str:
         """Member type of a set-valued expression; "?" when still unknown.
@@ -6772,20 +6784,20 @@ class SemaAnalyzer:
 
     def _dict_inner_value_type(self, e, scope: Scope) -> str:
         """Inner value/element kind of a dict whose values are themselves
-        containers (one nesting level). 'int' if unknown."""
+        containers (one nesting level). `A.UNKNOWN_TY` if unknown."""
         if isinstance(e, A.DictLit):
-            return getattr(e, "inner_value_type", "int")
+            return getattr(e, "inner_value_type", A.UNKNOWN_TY)
         if isinstance(e, A.Name):
-            return scope.dict_inner_value_types.get(e.name, "int")
+            return scope.dict_inner_value_types.get(e.name, A.UNKNOWN_TY)
         if isinstance(e, A.Attr):
-            return getattr(e, "inner_value_type", "int")
+            return getattr(e, "inner_value_type", A.UNKNOWN_TY)
         if isinstance(e, A.Call):
-            return getattr(e, "inner_value_type", "int")
+            return getattr(e, "inner_value_type", A.UNKNOWN_TY)
         if isinstance(e, A.MethodCall):
-            return getattr(e, "inner_value_type", "int")
+            return getattr(e, "inner_value_type", A.UNKNOWN_TY)
         if isinstance(e, A.Subscript):
-            return getattr(e, "value_type", "int")
-        return "int"
+            return getattr(e, "value_type", A.UNKNOWN_TY)
+        return A.UNKNOWN_TY
 
     def _dict_value_tuple_types(self, e, scope: Scope) -> list[str]:
         """Per-slot element kinds of a dict's values, when the value kind is

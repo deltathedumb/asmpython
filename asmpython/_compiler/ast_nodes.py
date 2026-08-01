@@ -1286,6 +1286,33 @@ Expr = (
 )
 
 
+#: The type this compiler reports when it does not know a type.
+#:
+#: It is the string "int", because "int" has historically served three
+#: different jobs at once: the integer type, the unknown/not-yet-inferred
+#: type, and the None sentinel (None is parsed as `IntLit(0)` -- see
+#: `is_none_expr`). That conflation is the single root cause behind the
+#: value-model failures tracked in PHASE1.md: a value whose type is merely
+#: UNKNOWN is indistinguishable from one known to be an int, so it is stored
+#: raw instead of boxed, and its real runtime kind is unrecoverable at the
+#: read site (a str field read back through a helper prints as a pointer; a
+#: None prints as 0; a bool prints as 1).
+#:
+#: This constant exists to separate those jobs *at the source level first*,
+#: while the emitted value stays "int" and behaviour is therefore unchanged.
+#: Every site that means "I don't know" should say UNKNOWN_TY; the sites left
+#: saying "int" are the ones that genuinely mean the integer type. Only once
+#: that split is complete can this be given a value of its own ("unknown"),
+#: at which point the existing boxing machinery (`_lower_box_any`) starts
+#: applying to genuinely-unknown values -- which is what the remaining
+#: `vm_*` probes need.
+#:
+#: DO NOT change this value until the audit is finished; flipping it early
+#: turns every un-migrated `== "int"` comparison into a silent behaviour
+#: change rather than a compile error.
+UNKNOWN_TY = "int"
+
+
 def expr_type(e: Expr) -> str:
     """Static type of an expression: 'int', 'float', 'str', or 'list'.
 

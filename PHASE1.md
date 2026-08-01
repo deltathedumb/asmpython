@@ -131,9 +131,75 @@ any site requests, with the prebuilt-runtime path reserving the worst case.
 
 ---
 
-## 3. Not fixed, and precisely why
+## 3. Not fixed — and it is all one defect
 
-### `None` and `bool` have no static type — this is the real blocker
+Every remaining probe reduces to a single fact about the type lattice:
+
+> **`int` serves three jobs at once: the integer type, the unknown type, and
+> the None sentinel.**
+
+That is not an inference; the codebase names it:
+
+- `boolop_value_compat_fixes.py`: "`int` doubles as the unknown/None sentinel"
+- `sema.py`: "`int` as asmpython's generic unknown-sentinel"
+- six sema helpers documented "'int' if unknown"
+  (`_list_el_type`, `_dict_value_type`, `_resolve_field_el`, ...)
+- `ast_nodes.is_none_expr`: None "parsed as IntLit(0) ... though its
+  `expr_type` is 'int'"
+
+The consequences are the probe list:
+
+| conflation | probe(s) |
+|---|---|
+| unknown element/field/return type reads as `int`, so it is stored RAW instead of boxed and its kind is unrecoverable | `vm_str_field_via_helper`, `vm_tuple_through_any`, `vm_callable_param_result`, `vm_container_heterogeneous` |
+| `None` reads as `int`, so it is indistinguishable from `0` | `vm_none_is_not_zero` |
+| `bool` reads as `int`, so it renders `1`/`0` | `vm_bool_is_not_int` |
+
+This is why the runtime-side None fix in §2 had to fail: it tried to
+disambiguate at the read site what the type system had already merged at the
+write site. **No runtime-only fix exists for any of these.**
+
+It also fixes the ordering. An earlier draft of this file had "give None a
+type" first; that is wrong. `None` cannot be boxed distinctly until
+genuinely-unknown values are boxed at all, because both currently claim to be
+`int`. Splitting UNKNOWN out of `int` comes first and is what makes the
+existing `_lower_box_any` machinery start applying.
+
+### Work started: naming the sentinel
+
+`ast_nodes.UNKNOWN_TY` now exists, with the value `"int"` — deliberately
+unchanged, so behaviour is identical and the corpus result must not move.
+
+Its job is to separate the three meanings *at the source level first*. Sites
+that mean "I don't know" say `UNKNOWN_TY`; the ones still saying `"int"` are
+the ones that genuinely mean the integer type. Flipping the constant to a real
+distinct value before that audit is finished would turn every un-migrated
+`== "int"` comparison into a silent behaviour change instead of a visible one,
+which is why it stays `"int"` for now.
+
+The audit has two halves.
+
+**Producer side -- sites that RETURN the sentinel: essentially done.** All six
+`_*_el_type` / `_*_value_type` helpers documented "'int' if unknown" are
+migrated (`_list_el_type` -- the helper behind `deque._data` -- plus
+`_list_el_value_type`, `_dict_inner_value_type`, `_resolve_field_el`,
+`_resolve_field_inner_value`, `_inparam_el_type`, `_outparam_el_type`):
+**25 of 28 literals**, 42 `UNKNOWN_TY` uses in sema.py. The 3 left are in
+`_gen_iter_elem_kind`, which is genuinely mixed -- its
+`return "int" if range_args else ""` is a real int, because `range` yields
+ints -- so it needs per-branch judgement rather than a mechanical pass.
+
+**Consumer side -- sites that COMPARE against it: not started.** 106
+`== "int"` / `!= "int"` comparisons (sema 44, ir_lower 33, codegen 25,
+ast_nodes 4). Of these, **17 pair the comparison with a side-channel kind
+flag** (`is_bool_expr`, `is_none_expr`, `el_is_bool`) -- e.g. ir_lower's
+`arg_t == "int" and A.is_none_expr(arg)`. Those are not migrations: they are
+the workaround itself, and the split deletes them.
+
+Every step is verified against the pinned baseline and must leave it at
+809/1142 exactly; both steps so far did.
+
+### `None` and `bool` have no static type
 
 `vm_none_is_not_zero`, `vm_bool_is_not_int`, and the last element of
 `vm_container_heterogeneous` all reduce to one fact, stated in
@@ -220,9 +286,10 @@ backend, so the remaining work splits differently:
 
 | work | est. |
 |---|---|
-| `None` + `bool` as real static types (parser, sema, ir_lower, ~56 dependent sites) | 4–6 wks |
-| Boxing coverage: `any`-receiver field reads, tuple/container elements, indirect-call returns | 3–4 wks |
-| **Phase 1 proper** | **7–10 wks** |
+| 1. Split UNKNOWN out of `int`: migrate the 105 `== "int"` sites to say which meaning they want, then give `UNKNOWN_TY` a value of its own | 3–5 wks |
+| 2. Boxing coverage, which (1) unblocks: `any`-receiver field reads, tuple/container elements, bare-`list` fields, indirect-call returns | 2–3 wks |
+| 3. `None` + `bool` as real static types on top of (1) | 2–3 wks |
+| **Phase 1 proper** | **7–11 wks** |
 | `dtoa` in the runtime (fixes `round`, `%f` accuracy, float `repr` past 17 digits) | 2–3 wks |
 | `bytes` / `bytearray` | 3–4 wks |
 | Arbitrary-precision `int` | 4–6 wks |
