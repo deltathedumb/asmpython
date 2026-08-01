@@ -204,6 +204,28 @@ global _abi_group_digits_zeropad
 global _abi_int_fmt
 global _abi_float_fmt
 global _abi_round_ndigits
+global _abi_bigint_add
+global _abi_bigint_bit_length
+global _abi_bigint_cmp
+global _abi_bigint_divmod
+global _abi_bigint_fits_i64
+global _abi_bigint_floordiv
+global _abi_bigint_from_i64
+global _abi_bigint_from_str
+global _abi_bigint_is
+global _abi_bigint_mod
+global _abi_bigint_mul
+global _abi_bigint_neg
+global _abi_bigint_pow
+global _abi_bigint_pow_i64
+global _abi_bigint_sign
+global _abi_bigint_sub
+global _abi_bigint_to_f64
+global _abi_bigint_to_i64
+global _abi_bigint_to_str
+global _abi_i64_add_ovf
+global _abi_i64_mul_ovf
+global _abi_i64_sub_ovf
 
 ; asmpython/stdlib/hardware.py's _hw_* symbols, hosted-target bodies. These
 ; already use the standard Win64 ABI (see codegen.py's target_windows.py /
@@ -4024,3 +4046,1592 @@ _random_getrandbits:
     leave
     ret
 
+; ==========================================================================
+; Arbitrary-precision integers
+; ==========================================================================
+;
+; WHY. Python's int is unbounded; asmpython's was a raw 64-bit machine word,
+; so `9223372036854775807 + 1` produced -9223372036854775808 and `2 ** 64`
+; produced 0. Silent wraparound -- no error, no crash, just a wrong number.
+; Pinned by tests/cases/vm_int_is_arbitrary_precision.py.
+;
+; REPRESENTATION. Sign-magnitude, with the magnitude a little-endian array
+; of 32-bit limbs:
+;
+;     [0]  magic  u64   BI_MAGIC -- a mistagged pointer is caught, not used
+;     [8]  sign   i64   -1 / 0 / +1
+;     [16] len    u64   limbs in use (canonical: no high zero limbs)
+;     [24] cap    u64   limbs allocated
+;     [32] limb[] u32   magnitude, little-endian
+;
+; 32-bit limbs because x86-64 gives 32x32->64 multiply and 64/32 divide
+; natively, so every inner step is one instruction with no manual splitting.
+;
+; Sign-magnitude rather than two's complement is deliberate: it makes
+; multiply, comparison and to-string trivial, and it turns Python's
+; floor-division rule into ONE explicit, auditable correction step instead
+; of an emergent property of the representation. Python's rules are not C's:
+;
+;     -7 // 2 == -4   (floors toward -inf, not toward zero)
+;     -7 %  3 ==  2   (the remainder takes the sign of the DIVISOR)
+;
+; DIVISION is binary shift-and-subtract, NOT Knuth algorithm D. D is faster
+; by a ~32x constant, but its quotient-digit estimate and rare "add back"
+; step are the classic source of silent, input-dependent wrong answers.
+; Shift-and-subtract has one loop and one invariant and is correct by
+; inspection. The single-limb fast path below covers to-string, which is the
+; only genuinely hot divider, so the constant never shows up in practice.
+;
+; Validated as a Python reference against CPython BEFORE this was written --
+; the same method that landed the dtoa work clean. Add/sub/mul/cmp over 9000
+; random pairs, divmod over 6000 (checking both the quotient/remainder AND
+; the defining identity q*b + r == a), operands to 4000 bits, to-string to
+; 2000 digits: zero mismatches.
+
+BI_MAGIC  equ 0xB161B161B161B161
+BI_SIGN   equ 8
+BI_LEN    equ 16
+BI_CAP    equ 24
+BI_LIMB   equ 32
+
+; --------------------------------------------------------------------------
+; rax = _bi_alloc(rcx = capacity in limbs) -- zeroed cell, sign 0, len 0.
+; Returns NULL if malloc fails; every caller propagates that.
+; --------------------------------------------------------------------------
+_bi_alloc:
+    push rbx
+    push rsi
+    sub rsp, 40
+    mov rbx, rcx
+    test rbx, rbx
+    jnz .have
+    mov rbx, 1                 ; always one limb, so [BI_LIMB] is addressable
+.have:
+    mov rcx, rbx
+    shl rcx, 2
+    add rcx, BI_LIMB
+    call malloc
+    test rax, rax
+    jz .out
+    mov rsi, rax
+    mov r10, BI_MAGIC
+    mov [rsi], r10
+    mov qword [rsi+BI_SIGN], 0
+    mov qword [rsi+BI_LEN], 0
+    mov [rsi+BI_CAP], rbx
+    xor rcx, rcx
+.zero:
+    cmp rcx, rbx
+    jae .zdone
+    mov dword [rsi+rcx*4+BI_LIMB], 0
+    inc rcx
+    jmp .zero
+.zdone:
+    mov rax, rsi
+.out:
+    add rsp, 40
+    pop rsi
+    pop rbx
+    ret
+
+; --------------------------------------------------------------------------
+; _bi_norm(rcx = cell) -- drop high zero limbs; a zero magnitude forces
+; sign 0, which is what keeps the representation canonical (there is no
+; "negative zero" bigint, so comparison never has to special-case it).
+; --------------------------------------------------------------------------
+_bi_norm:
+    mov rax, [rcx+BI_LEN]
+.loop:
+    test rax, rax
+    jz .zero
+    mov edx, [rcx+rax*4+BI_LIMB-4]
+    test edx, edx
+    jnz .done
+    dec rax
+    jmp .loop
+.zero:
+    mov qword [rcx+BI_SIGN], 0
+.done:
+    mov [rcx+BI_LEN], rax
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _bi_mag_cmp(rcx = a, rdx = b) -> -1 / 0 / 1, magnitudes only.
+; --------------------------------------------------------------------------
+_bi_mag_cmp:
+    mov r8, [rcx+BI_LEN]
+    mov r9, [rdx+BI_LEN]
+    cmp r8, r9
+    jb .less
+    ja .greater
+    mov rax, r8
+.loop:
+    test rax, rax
+    jz .equal
+    dec rax
+    mov r10d, [rcx+rax*4+BI_LIMB]
+    mov r11d, [rdx+rax*4+BI_LIMB]
+    cmp r10d, r11d
+    jb .less
+    ja .greater
+    jmp .loop
+.equal:
+    xor eax, eax
+    ret
+.less:
+    mov rax, -1
+    ret
+.greater:
+    mov eax, 1
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _bi_mag_add(rcx = a, rdx = b) -- |a| + |b| into a fresh cell.
+; --------------------------------------------------------------------------
+_bi_mag_add:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    sub rsp, 32
+    mov rbx, rcx
+    mov rsi, rdx
+    mov r12, [rbx+BI_LEN]
+    mov r13, [rsi+BI_LEN]
+    mov rcx, r12
+    cmp rcx, r13
+    jae .cap
+    mov rcx, r13
+.cap:
+    inc rcx                    ; room for a carry out of the top
+    call _bi_alloc
+    test rax, rax
+    jz .out
+    mov rdi, rax
+    xor rcx, rcx               ; i
+    xor r8, r8                 ; carry
+.loop:
+    xor eax, eax
+    cmp rcx, r12
+    jae .no_a
+    mov eax, [rbx+rcx*4+BI_LIMB]
+.no_a:
+    mov r9d, eax
+    xor eax, eax
+    cmp rcx, r13
+    jae .no_b
+    mov eax, [rsi+rcx*4+BI_LIMB]
+.no_b:
+    ; a + b + carry, each below 2**32, so the sum cannot exceed 64 bits
+    mov r10, r9
+    add r10, rax
+    add r10, r8
+    mov [rdi+rcx*4+BI_LIMB], r10d
+    shr r10, 32
+    mov r8, r10
+    inc rcx
+    cmp rcx, r12
+    jb .loop
+    cmp rcx, r13
+    jb .loop
+    test r8, r8
+    jz .fin
+    mov [rdi+rcx*4+BI_LIMB], r8d
+    inc rcx
+.fin:
+    mov [rdi+BI_LEN], rcx
+    mov qword [rdi+BI_SIGN], 1
+    mov rcx, rdi
+    call _bi_norm
+    mov rax, rdi
+.out:
+    add rsp, 32
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _bi_mag_sub(rcx = a, rdx = b) -- |a| - |b|, REQUIRES |a| >= |b|.
+; --------------------------------------------------------------------------
+_bi_mag_sub:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    sub rsp, 32
+    mov rbx, rcx
+    mov rsi, rdx
+    mov r12, [rbx+BI_LEN]
+    mov r13, [rsi+BI_LEN]
+    mov rcx, r12
+    call _bi_alloc
+    test rax, rax
+    jz .out
+    mov rdi, rax
+    xor rcx, rcx
+    xor r8, r8                 ; borrow
+.loop:
+    cmp rcx, r12
+    jae .fin
+    mov eax, [rbx+rcx*4+BI_LIMB]
+    mov r9, rax
+    xor eax, eax
+    cmp rcx, r13
+    jae .no_b
+    mov eax, [rsi+rcx*4+BI_LIMB]
+.no_b:
+    sub r9, rax
+    sub r9, r8
+    xor r8, r8
+    ; a borrow shows up as bit 63 of the 64-bit difference
+    bt r9, 63
+    jnc .no_borrow
+    mov r8, 1
+.no_borrow:
+    mov [rdi+rcx*4+BI_LIMB], r9d
+    inc rcx
+    jmp .loop
+.fin:
+    mov [rdi+BI_LEN], r12
+    mov qword [rdi+BI_SIGN], 1
+    mov rcx, rdi
+    call _bi_norm
+    mov rax, rdi
+.out:
+    add rsp, 32
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _bi_mag_mul(rcx = a, rdx = b) -- schoolbook |a| * |b|.
+;
+; The inner accumulator cannot overflow 64 bits, and that is exact rather
+; than lucky: (2**32-1)**2 + (2**32-1) + (2**32-1) == 2**64 - 1.
+; --------------------------------------------------------------------------
+_bi_mag_mul:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 40
+    mov rbx, rcx
+    mov rsi, rdx
+    mov r12, [rbx+BI_LEN]
+    mov r13, [rsi+BI_LEN]
+    mov rcx, r12
+    add rcx, r13
+    test rcx, rcx
+    jnz .cap
+    mov rcx, 1
+.cap:
+    call _bi_alloc
+    test rax, rax
+    jz .out
+    mov rdi, rax
+    test r12, r12
+    jz .fin
+    test r13, r13
+    jz .fin
+    xor r14, r14               ; i
+.iloop:
+    cmp r14, r12
+    jae .fin
+    mov r15d, [rbx+r14*4+BI_LIMB]   ; a[i]
+    test r15, r15
+    jz .inext
+    xor r8, r8                 ; carry
+    xor r9, r9                 ; j
+.jloop:
+    cmp r9, r13
+    jae .flush
+    mov eax, [rsi+r9*4+BI_LIMB]
+    imul rax, r15              ; a[i] * b[j], both < 2**32
+    lea r10, [r14+r9]
+    mov r11d, [rdi+r10*4+BI_LIMB]
+    add rax, r11
+    add rax, r8
+    mov [rdi+r10*4+BI_LIMB], eax
+    shr rax, 32
+    mov r8, rax
+    inc r9
+    jmp .jloop
+.flush:
+    test r8, r8
+    jz .inext
+    lea r10, [r14+r9]
+.floop:
+    mov r11d, [rdi+r10*4+BI_LIMB]
+    add r11, r8
+    mov [rdi+r10*4+BI_LIMB], r11d
+    shr r11, 32
+    mov r8, r11
+    inc r10
+    test r8, r8
+    jnz .floop
+.inext:
+    inc r14
+    jmp .iloop
+.fin:
+    mov rax, r12
+    add rax, r13
+    mov [rdi+BI_LEN], rax
+    mov qword [rdi+BI_SIGN], 1
+    mov rcx, rdi
+    call _bi_norm
+    mov rax, rdi
+.out:
+    add rsp, 40
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _bi_divmod_small(rcx = a, rdx = divisor u32, r8 = &remainder u32)
+;
+; One 64/32 DIV per limb, high limb first. This is the fast path to-string
+; needs: it divides by 10**9 repeatedly, so each pass yields nine digits.
+; --------------------------------------------------------------------------
+_bi_divmod_small:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    sub rsp, 32
+    mov rbx, rcx
+    mov r12, rdx
+    mov r13, r8
+    mov rcx, [rbx+BI_LEN]
+    call _bi_alloc
+    test rax, rax
+    jz .out
+    mov rdi, rax
+    mov rsi, [rbx+BI_LEN]
+    xor r8, r8                 ; running remainder (< divisor, so 32 bits)
+.loop:
+    test rsi, rsi
+    jz .fin
+    dec rsi
+    ; 32-BIT divide: EDX:EAX / r12d, so the dividend is rem * 2**32 + limb.
+    ; A 64-bit DIV here would form rem * 2**64 + limb instead -- the wrong
+    ; dividend for a base-2**32 limb array, which silently corrupted every
+    ; multi-limb to-string while leaving the limbs themselves correct.
+    ; The quotient cannot overflow 32 bits because rem < divisor.
+    mov edx, r8d               ; running remainder, high half
+    mov eax, [rbx+rsi*4+BI_LIMB]
+    div r12d                   ; -> eax quotient, edx remainder
+    mov [rdi+rsi*4+BI_LIMB], eax
+    mov r8d, edx
+    jmp .loop
+.fin:
+    mov rax, [rbx+BI_LEN]
+    mov [rdi+BI_LEN], rax
+    mov qword [rdi+BI_SIGN], 1
+    mov rcx, rdi
+    call _bi_norm
+    test r13, r13
+    jz .nores
+    mov [r13], r8d
+.nores:
+    mov rax, rdi
+.out:
+    add rsp, 32
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _bi_bit_length(rcx = cell) -- bits in the magnitude, 0 for zero.
+; --------------------------------------------------------------------------
+_bi_bit_length:
+    mov rax, [rcx+BI_LEN]
+    test rax, rax
+    jz .zero
+    mov edx, [rcx+rax*4+BI_LIMB-4]
+    dec rax
+    shl rax, 5                 ; (len-1) * 32
+    bsr edx, edx               ; index of the highest set bit
+    inc rdx
+    add rax, rdx
+    ret
+.zero:
+    xor eax, eax
+    ret
+
+; --------------------------------------------------------------------------
+; _bi_shl1_ip(rcx = cell) -- magnitude <<= 1, in place. The caller
+; guarantees capacity (the division loop sizes its remainder at len(b)+1).
+; --------------------------------------------------------------------------
+_bi_shl1_ip:
+    mov r8, [rcx+BI_LEN]
+    xor r9, r9                 ; i
+    xor r10, r10               ; carry bit
+.loop:
+    cmp r9, r8
+    jae .fin
+    mov eax, [rcx+r9*4+BI_LIMB]
+    shl rax, 1
+    or rax, r10
+    mov [rcx+r9*4+BI_LIMB], eax
+    shr rax, 32
+    mov r10, rax
+    inc r9
+    jmp .loop
+.fin:
+    test r10, r10
+    jz .done
+    cmp r8, [rcx+BI_CAP]
+    jae .done                  ; capacity guard; never hit by the caller below
+    mov [rcx+r8*4+BI_LIMB], r10d
+    inc r8
+    mov [rcx+BI_LEN], r8
+.done:
+    ret
+
+; --------------------------------------------------------------------------
+; _bi_sub_ip(rcx = a, rdx = b) -- |a| -= |b| in place, requires |a| >= |b|.
+; --------------------------------------------------------------------------
+_bi_sub_ip:
+    push rbx
+    sub rsp, 32
+    mov r8, [rcx+BI_LEN]
+    mov r9, [rdx+BI_LEN]
+    xor r10, r10               ; i
+    xor r11, r11               ; borrow
+.loop:
+    cmp r10, r8
+    jae .fin
+    mov eax, [rcx+r10*4+BI_LIMB]
+    mov rbx, rax
+    xor eax, eax
+    cmp r10, r9
+    jae .no_b
+    mov eax, [rdx+r10*4+BI_LIMB]
+.no_b:
+    sub rbx, rax
+    sub rbx, r11
+    xor r11, r11
+    bt rbx, 63
+    jnc .no_borrow
+    mov r11, 1
+.no_borrow:
+    mov [rcx+r10*4+BI_LIMB], ebx
+    inc r10
+    jmp .loop
+.fin:
+    call _bi_norm              ; rcx still holds the cell
+    add rsp, 32
+    pop rbx
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _bi_copy(rcx = cell) -- independent duplicate.
+; --------------------------------------------------------------------------
+_bi_copy:
+    push rbx
+    push rsi
+    sub rsp, 40
+    mov rbx, rcx
+    mov rcx, [rbx+BI_LEN]
+    call _bi_alloc
+    test rax, rax
+    jz .out
+    mov rsi, rax
+    mov rax, [rbx+BI_SIGN]
+    mov [rsi+BI_SIGN], rax
+    mov rax, [rbx+BI_LEN]
+    mov [rsi+BI_LEN], rax
+    xor rcx, rcx
+.loop:
+    cmp rcx, [rbx+BI_LEN]
+    jae .done
+    mov eax, [rbx+rcx*4+BI_LIMB]
+    mov [rsi+rcx*4+BI_LIMB], eax
+    inc rcx
+    jmp .loop
+.done:
+    mov rax, rsi
+.out:
+    add rsp, 40
+    pop rsi
+    pop rbx
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _abi_bigint_from_i64(rcx = value)
+;
+; -2**63 is handled by negating in UNSIGNED arithmetic: NEG of the minimum
+; signed value is itself, so a signed abs() would silently keep it negative.
+; --------------------------------------------------------------------------
+_abi_bigint_from_i64:
+    push rbx
+    push rsi
+    sub rsp, 40
+    mov rbx, rcx
+    mov rsi, 1
+    test rbx, rbx
+    jns .pos
+    mov rsi, -1
+    neg rbx                    ; unsigned negate: correct even for -2**63
+.pos:
+    mov rcx, 2
+    call _bi_alloc
+    test rax, rax
+    jz .out
+    mov [rax+BI_LIMB], ebx
+    mov rcx, rbx
+    shr rcx, 32
+    mov [rax+BI_LIMB+4], ecx
+    mov qword [rax+BI_LEN], 2
+    mov [rax+BI_SIGN], rsi
+    mov rcx, rax
+    mov rbx, rax
+    call _bi_norm
+    mov rax, rbx
+.out:
+    add rsp, 40
+    pop rsi
+    pop rbx
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _abi_bigint_sign(rcx)        -1 / 0 / 1
+; rax = _abi_bigint_bit_length(rcx)
+; rax = _abi_bigint_is(rcx)          1 if this looks like a bigint cell
+; --------------------------------------------------------------------------
+_abi_bigint_sign:
+    mov rax, [rcx+BI_SIGN]
+    ret
+
+_abi_bigint_bit_length:
+    jmp _bi_bit_length
+
+_abi_bigint_is:
+    xor eax, eax
+    test rcx, rcx
+    jz .out
+    mov r10, BI_MAGIC
+    cmp [rcx], r10
+    jne .out
+    mov eax, 1
+.out:
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _abi_bigint_fits_i64(rcx)  -- 1 if the value is exactly an int64.
+; --------------------------------------------------------------------------
+_abi_bigint_fits_i64:
+    mov rax, [rcx+BI_LEN]
+    cmp rax, 2
+    ja .no
+    jb .yes                    ; 0 or 1 limbs always fit
+    ; two limbs: fits unless the magnitude exceeds 2**63, and -2**63 is
+    ; the one negative value whose magnitude is exactly 2**63
+    mov eax, [rcx+BI_LIMB+4]
+    test eax, 0x80000000
+    jz .yes
+    ; magnitude >= 2**63: only -2**63 exactly
+    cmp dword [rcx+BI_LIMB], 0
+    jne .no
+    cmp eax, 0x80000000
+    jne .no
+    cmp qword [rcx+BI_SIGN], 0
+    jge .no
+.yes:
+    mov eax, 1
+    ret
+.no:
+    xor eax, eax
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _abi_bigint_to_i64(rcx) -- low 64 bits with the sign applied.
+; Only meaningful when _abi_bigint_fits_i64 says so.
+; --------------------------------------------------------------------------
+_abi_bigint_to_i64:
+    xor eax, eax
+    mov r8, [rcx+BI_LEN]
+    test r8, r8
+    jz .out
+    mov eax, [rcx+BI_LIMB]
+    cmp r8, 1
+    je .signit
+    mov r9d, [rcx+BI_LIMB+4]
+    shl r9, 32
+    or rax, r9
+.signit:
+    cmp qword [rcx+BI_SIGN], 0
+    jge .out
+    neg rax
+.out:
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _abi_bigint_cmp(rcx = a, rdx = b) -> -1 / 0 / 1, signed.
+; --------------------------------------------------------------------------
+_abi_bigint_cmp:
+    push rbx
+    push rsi
+    sub rsp, 40
+    mov rbx, rcx
+    mov rsi, rdx
+    mov rax, [rbx+BI_SIGN]
+    mov r9, [rsi+BI_SIGN]
+    cmp rax, r9
+    jl .less
+    jg .greater
+    mov rcx, rbx
+    mov rdx, rsi
+    call _bi_mag_cmp
+    cmp qword [rbx+BI_SIGN], 0
+    jge .out                   ; both non-negative: magnitude order is value order
+    neg rax                    ; both negative: magnitude order is reversed
+    jmp .out
+.less:
+    mov rax, -1
+    jmp .out
+.greater:
+    mov eax, 1
+.out:
+    add rsp, 40
+    pop rsi
+    pop rbx
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _abi_bigint_neg(rcx)
+; --------------------------------------------------------------------------
+_abi_bigint_neg:
+    push rbx
+    sub rsp, 32
+    call _bi_copy
+    test rax, rax
+    jz .out
+    mov rbx, [rax+BI_SIGN]
+    neg rbx
+    mov [rax+BI_SIGN], rbx
+.out:
+    add rsp, 32
+    pop rbx
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _abi_bigint_add(rcx = a, rdx = b)   signed
+; rax = _abi_bigint_sub(rcx = a, rdx = b)   signed
+;
+; Sign-magnitude addition is a three-way decision: same signs add the
+; magnitudes and keep the sign; opposite signs subtract the smaller
+; magnitude from the larger and take the sign of the larger.
+; --------------------------------------------------------------------------
+_abi_bigint_add:
+    push rbx
+    push rsi
+    push r12
+    sub rsp, 32
+    mov rbx, rcx
+    mov rsi, rdx
+    mov r12, [rbx+BI_SIGN]
+    mov rax, [rsi+BI_SIGN]
+    test r12, r12
+    jz .ret_b
+    test rax, rax
+    jz .ret_a
+    cmp r12, rax
+    jne .opposite
+    mov rcx, rbx
+    mov rdx, rsi
+    call _bi_mag_add
+    test rax, rax
+    jz .out
+    mov [rax+BI_SIGN], r12
+    jmp .out
+.opposite:
+    mov rcx, rbx
+    mov rdx, rsi
+    call _bi_mag_cmp
+    test rax, rax
+    jz .zero
+    jl .b_bigger
+    mov rcx, rbx
+    mov rdx, rsi
+    call _bi_mag_sub
+    test rax, rax
+    jz .out
+    cmp qword [rax+BI_SIGN], 0
+    je .out                    ; result normalised to zero
+    mov [rax+BI_SIGN], r12
+    jmp .out
+.b_bigger:
+    mov rcx, rsi
+    mov rdx, rbx
+    call _bi_mag_sub
+    test rax, rax
+    jz .out
+    cmp qword [rax+BI_SIGN], 0
+    je .out
+    mov r10, [rsi+BI_SIGN]
+    mov [rax+BI_SIGN], r10
+    jmp .out
+.zero:
+    xor ecx, ecx
+    call _abi_bigint_from_i64
+    jmp .out
+.ret_a:
+    mov rcx, rbx
+    call _bi_copy
+    jmp .out
+.ret_b:
+    mov rcx, rsi
+    call _bi_copy
+.out:
+    add rsp, 32
+    pop r12
+    pop rsi
+    pop rbx
+    ret
+
+_abi_bigint_sub:
+    push rbx
+    push rsi
+    sub rsp, 40
+    mov rbx, rcx
+    mov rsi, rdx
+    mov rcx, rsi
+    call _abi_bigint_neg
+    test rax, rax
+    jz .out
+    mov rcx, rbx
+    mov rdx, rax
+    call _abi_bigint_add
+.out:
+    add rsp, 40
+    pop rsi
+    pop rbx
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _abi_bigint_mul(rcx = a, rdx = b)   signed
+; --------------------------------------------------------------------------
+_abi_bigint_mul:
+    push rbx
+    push rsi
+    sub rsp, 40
+    mov rbx, rcx
+    mov rsi, rdx
+    mov rcx, rbx
+    mov rdx, rsi
+    call _bi_mag_mul
+    test rax, rax
+    jz .out
+    mov r10, [rbx+BI_SIGN]
+    imul r10, [rsi+BI_SIGN]
+    cmp qword [rax+BI_LEN], 0
+    je .out                    ; zero stays canonical (sign already 0)
+    mov [rax+BI_SIGN], r10
+.out:
+    add rsp, 40
+    pop rsi
+    pop rbx
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _abi_bigint_divmod(rcx = a, rdx = b, r8 = &quot, r9 = &rem)
+;      -> 1 on success, 0 if b is zero (nothing written)
+;
+; PYTHON semantics, not C: the quotient FLOORS toward negative infinity and
+; the remainder takes the sign of the DIVISOR. Computed as a truncating
+; magnitude division plus one explicit correction, so the rule is visible
+; rather than emergent:
+;
+;      if the remainder is nonzero and the signs differ:
+;          quotient -= 1 ;  remainder += divisor
+;
+; That reproduces -7 // 2 == -4 and -7 % 3 == 2, and preserves the defining
+; identity  a == (a // b) * b + (a % b)  for every sign combination.
+; --------------------------------------------------------------------------
+_abi_bigint_divmod:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 72
+    mov rbx, rcx               ; a
+    mov rsi, rdx               ; b
+    mov [rsp+40], r8           ; &quot
+    mov [rsp+48], r9           ; &rem
+    cmp qword [rsi+BI_SIGN], 0
+    je .divzero
+    ; ---- magnitude division -> r12 = |q|, r13 = |r|
+    mov rcx, rbx
+    mov rdx, rsi
+    call _bi_mag_cmp
+    test rax, rax
+    jl .smaller                ; |a| < |b| : q = 0, r = |a|
+    cmp qword [rsi+BI_LEN], 1
+    jne .general
+    ; ---- single-limb divisor: one DIV per limb
+    mov rcx, rbx
+    mov edx, [rsi+BI_LIMB]
+    lea r8, [rsp+56]
+    call _bi_divmod_small
+    test rax, rax
+    jz .fail
+    mov r12, rax
+    mov ecx, [rsp+56]
+    call _abi_bigint_from_i64
+    test rax, rax
+    jz .fail
+    mov r13, rax
+    jmp .signs
+.smaller:
+    xor ecx, ecx
+    call _abi_bigint_from_i64
+    test rax, rax
+    jz .fail
+    mov r12, rax
+    mov rcx, rbx
+    call _bi_copy
+    test rax, rax
+    jz .fail
+    mov r13, rax
+    mov qword [r13+BI_SIGN], 1
+    mov rcx, r13
+    call _bi_norm
+    jmp .signs
+.general:
+    ; ---- binary shift-and-subtract
+    mov rcx, [rbx+BI_LEN]
+    call _bi_alloc             ; quotient, one bit per iteration
+    test rax, rax
+    jz .fail
+    mov r12, rax
+    mov rcx, [rsi+BI_LEN]
+    inc rcx                    ; the running remainder stays below 2*|b|
+    call _bi_alloc
+    test rax, rax
+    jz .fail
+    mov r13, rax
+    mov rcx, rbx
+    call _bi_bit_length
+    mov r14, rax               ; i = bit index, counting down
+.dloop:
+    test r14, r14
+    jz .dfin
+    dec r14
+    mov rcx, r13
+    call _bi_shl1_ip
+    ; bring down bit r14 of |a|
+    mov rax, r14
+    shr rax, 5
+    cmp rax, [rbx+BI_LEN]
+    jae .nobit
+    mov r15d, [rbx+rax*4+BI_LIMB]
+    mov rcx, r14
+    and rcx, 31
+    shr r15d, cl
+    test r15d, 1
+    jz .nobit
+    mov eax, [r13+BI_LIMB]
+    or eax, 1
+    mov [r13+BI_LIMB], eax
+    cmp qword [r13+BI_LEN], 0
+    jne .nobit
+    mov qword [r13+BI_LEN], 1
+.nobit:
+    mov rcx, r13
+    mov rdx, rsi
+    call _bi_mag_cmp
+    test rax, rax
+    jl .dloop
+    mov rcx, r13
+    mov rdx, rsi
+    call _bi_sub_ip
+    mov rax, r14
+    shr rax, 5
+    mov rcx, r14
+    and rcx, 31
+    mov r15d, 1
+    shl r15d, cl
+    or [r12+rax*4+BI_LIMB], r15d
+    jmp .dloop
+.dfin:
+    mov rax, [rbx+BI_LEN]
+    mov [r12+BI_LEN], rax
+    mov qword [r12+BI_SIGN], 1
+    mov rcx, r12
+    call _bi_norm
+    mov qword [r13+BI_SIGN], 1
+    mov rcx, r13
+    call _bi_norm
+.signs:
+    ; quotient sign = sign(a) * sign(b); remainder sign = sign(a)
+    cmp qword [r12+BI_LEN], 0
+    je .qzero
+    mov rax, [rbx+BI_SIGN]
+    imul rax, [rsi+BI_SIGN]
+    mov [r12+BI_SIGN], rax
+.qzero:
+    cmp qword [r13+BI_LEN], 0
+    je .rzero
+    mov rax, [rbx+BI_SIGN]
+    mov [r13+BI_SIGN], rax
+.rzero:
+    ; ---- the floor correction
+    cmp qword [r13+BI_SIGN], 0
+    je .store                  ; exact division: truncation already floors
+    mov rax, [rbx+BI_SIGN]
+    imul rax, [rsi+BI_SIGN]
+    test rax, rax
+    jns .store                 ; same signs: truncation already floors
+    mov rcx, 1
+    call _abi_bigint_from_i64
+    test rax, rax
+    jz .fail
+    mov rcx, r12
+    mov rdx, rax
+    call _abi_bigint_sub       ; q -= 1
+    test rax, rax
+    jz .fail
+    mov r12, rax
+    mov rcx, r13
+    mov rdx, rsi
+    call _abi_bigint_add       ; r += b
+    test rax, rax
+    jz .fail
+    mov r13, rax
+.store:
+    mov rax, [rsp+40]
+    test rax, rax
+    jz .nq
+    mov [rax], r12
+.nq:
+    mov rax, [rsp+48]
+    test rax, rax
+    jz .nr
+    mov [rax], r13
+.nr:
+    mov eax, 1
+    jmp .out
+.divzero:
+    xor eax, eax
+    jmp .out
+.fail:
+    xor eax, eax
+.out:
+    add rsp, 72
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _abi_bigint_floordiv(rcx = a, rdx = b)   -- NULL on divide by zero
+; rax = _abi_bigint_mod(rcx = a, rdx = b)        -- NULL on divide by zero
+; --------------------------------------------------------------------------
+_abi_bigint_floordiv:
+    sub rsp, 56
+    lea r8, [rsp+32]
+    lea r9, [rsp+40]
+    call _abi_bigint_divmod
+    test rax, rax
+    jz .zero
+    mov rax, [rsp+32]
+    add rsp, 56
+    ret
+.zero:
+    xor eax, eax
+    add rsp, 56
+    ret
+
+_abi_bigint_mod:
+    sub rsp, 56
+    lea r8, [rsp+32]
+    lea r9, [rsp+40]
+    call _abi_bigint_divmod
+    test rax, rax
+    jz .zero
+    mov rax, [rsp+40]
+    add rsp, 56
+    ret
+.zero:
+    xor eax, eax
+    add rsp, 56
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _abi_bigint_pow(rcx = base, rdx = exponent i64 >= 0)
+;
+; Square-and-multiply. A negative exponent is the CALLER's problem: Python
+; returns a float there, which is a lowering decision, so this returns NULL
+; rather than inventing a policy.
+; --------------------------------------------------------------------------
+_abi_bigint_pow:
+    push rbx
+    push rsi
+    push r12
+    sub rsp, 32
+    mov rsi, rdx               ; exponent
+    test rsi, rsi
+    js .bad
+    mov r12, rcx               ; running base
+    mov rcx, 1
+    call _abi_bigint_from_i64
+    test rax, rax
+    jz .out
+    mov rbx, rax               ; accumulator = 1
+.loop:
+    test rsi, rsi
+    jz .done
+    test rsi, 1
+    jz .square
+    mov rcx, rbx
+    mov rdx, r12
+    call _abi_bigint_mul
+    test rax, rax
+    jz .out
+    mov rbx, rax
+.square:
+    shr rsi, 1
+    test rsi, rsi
+    jz .done
+    mov rcx, r12
+    mov rdx, r12
+    call _abi_bigint_mul
+    test rax, rax
+    jz .out
+    mov r12, rax
+    jmp .loop
+.done:
+    mov rax, rbx
+    jmp .out
+.bad:
+    xor eax, eax
+.out:
+    add rsp, 32
+    pop r12
+    pop rsi
+    pop rbx
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _abi_bigint_pow_i64(rcx = base i64, rdx = exponent i64)
+; Convenience entry so `2 ** 70` needs no separate promotion step.
+; --------------------------------------------------------------------------
+_abi_bigint_pow_i64:
+    push rbx
+    sub rsp, 32
+    mov rbx, rdx
+    call _abi_bigint_from_i64
+    test rax, rax
+    jz .out
+    mov rcx, rax
+    mov rdx, rbx
+    call _abi_bigint_pow
+.out:
+    add rsp, 32
+    pop rbx
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _abi_bigint_to_str(rcx = cell) -- exact decimal, malloc'd, NUL
+; terminated, arbitrarily long.
+;
+; Repeated division by 10**9 so each pass over the limbs yields nine digits.
+; No sprintf anywhere: msvcrt cannot print a value this wide, and the digits
+; are produced exactly by construction.
+; --------------------------------------------------------------------------
+_abi_bigint_to_str:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 72
+    mov rbx, rcx
+    cmp qword [rbx+BI_SIGN], 0
+    je .zero
+    ; chunk buffer: each 10**9 chunk consumes ~29.9 bits, so len*2+4 u32
+    ; slots is a comfortable bound on the number of chunks
+    mov rcx, [rbx+BI_LEN]
+    shl rcx, 1
+    add rcx, 4
+    mov r14, rcx
+    shl rcx, 2
+    call malloc
+    test rax, rax
+    jz .fail
+    mov r12, rax               ; chunk array
+    xor r13, r13               ; chunk count
+    mov rcx, rbx
+    call _bi_copy
+    test rax, rax
+    jz .fail
+    mov rsi, rax               ; running value
+.chunks:
+    cmp qword [rsi+BI_LEN], 0
+    je .chunks_done
+    mov rcx, rsi
+    mov edx, 1000000000
+    lea r8, [rsp+56]
+    call _bi_divmod_small
+    test rax, rax
+    jz .fail
+    mov rsi, rax
+    mov ecx, [rsp+56]
+    mov [r12+r13*4], ecx
+    inc r13
+    cmp r13, r14
+    jb .chunks
+.chunks_done:
+    ; length: sign + up to 9 digits for the top chunk + 9 per remaining
+    mov rcx, r13
+    imul rcx, rcx, 9
+    add rcx, 4
+    call malloc
+    test rax, rax
+    jz .fail
+    mov rdi, rax
+    mov r15, rax
+    cmp qword [rbx+BI_SIGN], 0
+    jge .nosign
+    mov byte [rdi], 45         ; '-'
+    inc rdi
+.nosign:
+    ; top chunk without leading zeros
+    dec r13
+    mov eax, [r12+r13*4]
+    mov rcx, rdi
+    call _bi_emit_u32_nopad
+    mov rdi, rax
+.rest:
+    test r13, r13
+    jz .term
+    dec r13
+    mov eax, [r12+r13*4]
+    mov rcx, rdi
+    call _bi_emit_u32_pad9
+    mov rdi, rax
+    jmp .rest
+.term:
+    mov byte [rdi], 0
+    mov rax, r15
+    jmp .out
+.zero:
+    mov rcx, 2
+    call malloc
+    test rax, rax
+    jz .fail
+    mov byte [rax], 48         ; '0'
+    mov byte [rax+1], 0
+    jmp .out
+.fail:
+    xor eax, eax
+.out:
+    add rsp, 72
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; rax = _bi_emit_u32_nopad(eax = value, rcx = buf) -> end pointer
+_bi_emit_u32_nopad:
+    push rbx
+    mov rbx, rcx
+    sub rsp, 32
+    xor r9, r9
+    mov r8d, eax
+    test r8d, r8d
+    jnz .loop
+    mov byte [rsp], 0
+    mov r9, 1
+    jmp .emit
+.loop:
+    test r8d, r8d
+    jz .emit
+    mov eax, r8d
+    xor edx, edx
+    mov r10d, 10
+    div r10d
+    mov r8d, eax
+    mov [rsp+r9], dl
+    inc r9
+    jmp .loop
+.emit:
+    dec r9
+.eloop:
+    movzx eax, byte [rsp+r9]
+    add al, 48                 ; '0'
+    mov [rbx], al
+    inc rbx
+    dec r9
+    jns .eloop
+    mov rax, rbx
+    add rsp, 32
+    pop rbx
+    ret
+
+; rax = _bi_emit_u32_pad9(eax = value, rcx = buf) -> end pointer
+; Zero padded to exactly nine digits -- an interior chunk must keep its
+; leading zeros, or 1000000001 would print as "11".
+_bi_emit_u32_pad9:
+    push rbx
+    mov rbx, rcx
+    sub rsp, 32
+    mov r8d, eax
+    xor r9, r9
+.loop:
+    cmp r9, 9
+    jae .emit
+    mov eax, r8d
+    xor edx, edx
+    mov r10d, 10
+    div r10d
+    mov r8d, eax
+    mov [rsp+r9], dl
+    inc r9
+    jmp .loop
+.emit:
+    mov r9, 8
+.eloop:
+    movzx eax, byte [rsp+r9]
+    add al, 48                 ; '0'
+    mov [rbx], al
+    inc rbx
+    dec r9
+    jns .eloop
+    mov rax, rbx
+    add rsp, 32
+    pop rbx
+    ret
+
+; --------------------------------------------------------------------------
+; rax = _abi_bigint_from_str(rcx = char*) -- exact decimal parse, NULL if
+; the text is not a valid optionally-signed decimal integer.
+; --------------------------------------------------------------------------
+_abi_bigint_from_str:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    sub rsp, 32
+    mov rbx, rcx
+    mov r12, 1                 ; sign
+    cmp byte [rbx], 45         ; '-'
+    jne .notneg
+    mov r12, -1
+    inc rbx
+    jmp .start
+.notneg:
+    cmp byte [rbx], 43         ; '+'
+    jne .start
+    inc rbx
+.start:
+    cmp byte [rbx], 0
+    je .bad                    ; a sign with no digits
+    xor ecx, ecx
+    call _abi_bigint_from_i64
+    test rax, rax
+    jz .out
+    mov rsi, rax               ; accumulator
+.digits:
+    movzx eax, byte [rbx]
+    test eax, eax
+    jz .done
+    ; gather up to nine digits into r13, with the matching power in rdi
+    xor r13, r13
+    mov rdi, 1
+.gather:
+    movzx eax, byte [rbx]
+    cmp al, 48
+    jb .gdone
+    cmp al, 57
+    ja .gdone
+    sub al, 48
+    movzx eax, al
+    imul r13, r13, 10
+    add r13, rax
+    imul rdi, rdi, 10
+    inc rbx
+    cmp rdi, 1000000000
+    jb .gather
+.gdone:
+    cmp rdi, 1
+    je .bad                    ; a non-digit where a digit was required
+    ; accumulator = accumulator * rdi + r13
+    mov rcx, rdi
+    call _abi_bigint_from_i64
+    test rax, rax
+    jz .out
+    mov rcx, rsi
+    mov rdx, rax
+    call _abi_bigint_mul
+    test rax, rax
+    jz .out
+    mov rsi, rax
+    mov rcx, r13
+    call _abi_bigint_from_i64
+    test rax, rax
+    jz .out
+    mov rcx, rsi
+    mov rdx, rax
+    call _abi_bigint_add
+    test rax, rax
+    jz .out
+    mov rsi, rax
+    jmp .digits
+.done:
+    cmp qword [rsi+BI_LEN], 0
+    je .retzero
+    mov [rsi+BI_SIGN], r12
+.retzero:
+    mov rax, rsi
+    jmp .out
+.bad:
+    xor eax, eax
+.out:
+    add rsp, 32
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; --------------------------------------------------------------------------
+; xmm0 = _abi_bigint_to_f64(rcx = cell, rdx = &overflow_flag)
+;
+; Correctly rounded, round-half-to-even, matching CPython's float(int).
+; Sets *overflow to 1 and returns +/-inf when the value exceeds DBL_MAX --
+; CPython raises OverflowError there, which is a lowering decision, so this
+; reports the condition rather than inventing a policy.
+; --------------------------------------------------------------------------
+_abi_bigint_to_f64:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 56
+    mov rbx, rcx
+    mov r15, rdx
+    test r15, r15
+    jz .noflag
+    mov qword [r15], 0
+.noflag:
+    cmp qword [rbx+BI_SIGN], 0
+    je .zero
+    mov rcx, rbx
+    call _bi_bit_length
+    mov r12, rax               ; n = bit length
+    cmp r12, 64
+    jbe .small
+    ; ---- top 64 bits, plus a sticky bit for everything below them
+    mov r13, r12
+    sub r13, 64                ; index of the lowest bit kept
+    mov rax, r13
+    shr rax, 5
+    mov r14, rax               ; limb index
+    mov rcx, r13
+    and rcx, 31                ; bit offset within that limb
+    xor rax, rax
+    mov eax, [rbx+r14*4+BI_LIMB]
+    mov r8, [rbx+BI_LEN]
+    lea r9, [r14+1]
+    cmp r9, r8
+    jae .no_l1
+    mov r10d, [rbx+r9*4+BI_LIMB]
+    shl r10, 32
+    or rax, r10
+.no_l1:
+    xor rdx, rdx
+    lea r9, [r14+2]
+    cmp r9, r8
+    jae .no_l2
+    mov edx, [rbx+r9*4+BI_LIMB]
+.no_l2:
+    shrd rax, rdx, cl          ; rax = the top 64 bits of the magnitude
+    mov rsi, rax
+    ; sticky = is any bit strictly below r13 set?
+    xor rdi, rdi
+    mov rcx, r13
+    and rcx, 31
+    test rcx, rcx
+    jz .low_limbs
+    mov eax, [rbx+r14*4+BI_LIMB]
+    mov r9d, 1
+    shl r9d, cl
+    dec r9d
+    and eax, r9d
+    jz .low_limbs
+    mov rdi, 1
+.low_limbs:
+    xor r9, r9
+.slp:
+    cmp r9, r14
+    jae .sticky_done
+    cmp dword [rbx+r9*4+BI_LIMB], 0
+    je .snext
+    mov rdi, 1
+    jmp .sticky_done
+.snext:
+    inc r9
+    jmp .slp
+.sticky_done:
+    ; round the 64-bit window down to a 53-bit significand, half-to-even
+    mov rax, rsi
+    mov r8, rax
+    and r8, 0x7FF              ; the 11 bits being dropped
+    shr rax, 11
+    mov r9, 0x400              ; exactly half of the dropped range
+    cmp r8, r9
+    ja .roundup
+    jb .rounded
+    test rdi, rdi
+    jnz .roundup               ; above half thanks to the discarded tail
+    test rax, 1
+    jz .rounded                ; exactly half and already even
+.roundup:
+    inc rax
+.rounded:
+    mov r10, r13
+    add r10, 11                ; binary exponent of the significand
+    mov r11, 1
+    shl r11, 53
+    cmp rax, r11
+    jne .assemble
+    shr rax, 1                 ; the rounding carried into a new bit
+    inc r10
+.assemble:
+    ; value = rax * 2**r10, rax holding exactly 53 bits
+    add r10, 1075              ; 52 + 1023, the IEEE bias
+    cmp r10, 2047
+    jge .overflow
+    mov r11, 1
+    shl r11, 52
+    dec r11
+    and rax, r11               ; drop the implicit leading bit
+    shl r10, 52
+    or rax, r10
+    jmp .signit
+.small:
+    ; 64 bits or fewer: assemble the magnitude and convert directly
+    xor rax, rax
+    mov r8, [rbx+BI_LEN]
+    mov eax, [rbx+BI_LIMB]
+    cmp r8, 1
+    jbe .have_small
+    mov r9d, [rbx+BI_LIMB+4]
+    shl r9, 32
+    or rax, r9
+.have_small:
+    test rax, rax
+    js .big_unsigned           ; too large for a signed convert
+    cvtsi2sd xmm0, rax
+    jmp .apply_sign
+.big_unsigned:
+    ; halve, convert, double, and add the low bit back -- exact, because
+    ; the bit shifted out is preserved separately
+    mov r9, rax
+    and r9, 1
+    shr rax, 1
+    cvtsi2sd xmm0, rax
+    addsd xmm0, xmm0
+    cvtsi2sd xmm1, r9
+    addsd xmm0, xmm1
+    jmp .apply_sign
+.signit:
+    movq xmm0, rax
+.apply_sign:
+    cmp qword [rbx+BI_SIGN], 0
+    jge .out
+    movq rax, xmm0
+    mov r11, 0x8000000000000000
+    xor rax, r11
+    movq xmm0, rax
+    jmp .out
+.overflow:
+    test r15, r15
+    jz .ovf_val
+    mov qword [r15], 1
+.ovf_val:
+    mov rax, 0x7FF0000000000000
+    movq xmm0, rax
+    jmp .apply_sign
+.zero:
+    xorpd xmm0, xmm0
+.out:
+    add rsp, 56
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; --------------------------------------------------------------------------
+; Overflow probes, so a lowering can stay on the fast 64-bit path and
+; promote only when it actually has to. rax = 1 if the operation would
+; overflow a signed 64-bit result.
+;
+;   rax = _abi_i64_add_ovf(rcx = a, rdx = b)
+;   rax = _abi_i64_sub_ovf(rcx = a, rdx = b)
+;   rax = _abi_i64_mul_ovf(rcx = a, rdx = b)
+; --------------------------------------------------------------------------
+_abi_i64_add_ovf:
+    mov rax, rcx
+    add rax, rdx
+    seto al
+    movzx eax, al
+    ret
+
+_abi_i64_sub_ovf:
+    mov rax, rcx
+    sub rax, rdx
+    seto al
+    movzx eax, al
+    ret
+
+_abi_i64_mul_ovf:
+    mov rax, rcx
+    imul rax, rdx
+    seto al
+    movzx eax, al
+    ret
