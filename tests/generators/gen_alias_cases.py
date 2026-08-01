@@ -640,5 +640,367 @@ print((a is c) == (id(a) == id(c)))
 ''')
 
 
+# ===========================================================================
+# Round 3. Round 2 found that a list mutated through a PARAMETER does not
+# reach the caller -- `append` and `extend` are lost, while `xs[0] = 99` does
+# write through. That located the defect (the data pointer is shared, the
+# length is not) but not its boundary.
+#
+# These probes map the boundary, because the boundary is what says whether a
+# fix is complete. Each one is a single mutating operation applied through a
+# parameter, grouped by whether it changes the container's LENGTH:
+#
+#   length-changing : append extend insert pop remove clear slice-assign
+#                     dict __setitem__/pop/clear/update, set add/discard
+#   length-preserving: __setitem__ sort reverse
+#
+# If the length-preserving ones all pass and the length-changing ones all
+# fail, the diagnosis is confirmed and the fix has an exact acceptance set.
+# `alias_param_returns_mutated_list` is the sharpest of them: it asks whether
+# the CALLEE's own view has the update the caller is missing.
+# ===========================================================================
+
+case("alias_param_append_lost", "append through a parameter reaches the caller", r'''
+def mutate(xs):
+    xs.append(2)
+
+
+a = [1]
+mutate(a)
+print(len(a))
+print(a)
+''')
+
+case("alias_param_returns_mutated_list", "the callee's own view of the mutation", r'''
+def mutate(xs):
+    xs.append(2)
+    return xs
+
+
+a = [1]
+returned = mutate(a)
+print(len(returned))
+print(returned)
+print(len(a))
+print(returned is a)
+''')
+
+case("alias_param_insert", "insert through a parameter reaches the caller", r'''
+def mutate(xs):
+    xs.insert(0, 0)
+
+
+a = [1]
+mutate(a)
+print(a)
+''')
+
+case("alias_param_pop", "pop through a parameter reaches the caller", r'''
+def mutate(xs):
+    return xs.pop()
+
+
+a = [1, 2]
+print(mutate(a))
+print(a)
+''')
+
+case("alias_param_remove", "remove through a parameter reaches the caller", r'''
+def mutate(xs):
+    xs.remove(1)
+
+
+a = [1, 2]
+mutate(a)
+print(a)
+''')
+
+case("alias_param_clear", "clear through a parameter reaches the caller", r'''
+def mutate(xs):
+    xs.clear()
+
+
+a = [1, 2]
+mutate(a)
+print(len(a))
+print(a)
+''')
+
+case("alias_param_slice_assign", "slice assignment through a parameter", r'''
+def mutate(xs):
+    xs[0:1] = [7, 8]
+
+
+a = [1, 2]
+mutate(a)
+print(a)
+''')
+
+case("alias_param_setitem", "element assignment through a parameter", r'''
+def mutate(xs):
+    xs[0] = 99
+
+
+a = [1, 2]
+mutate(a)
+print(a)
+''')
+
+case("alias_param_setitem_str", "element assignment of a str through a parameter", r'''
+def mutate(xs):
+    xs[0] = "replaced"
+
+
+a = ["first", "second"]
+mutate(a)
+print(a)
+print(a[0])
+''')
+
+case("alias_param_sort", "sort through a parameter reaches the caller", r'''
+def mutate(xs):
+    xs.sort()
+
+
+a = [3, 1, 2]
+mutate(a)
+print(a)
+''')
+
+case("alias_param_reverse", "reverse through a parameter reaches the caller", r'''
+def mutate(xs):
+    xs.reverse()
+
+
+a = [1, 2, 3]
+mutate(a)
+print(a)
+''')
+
+case("alias_param_extend", "extend through a parameter reaches the caller", r'''
+def mutate(xs):
+    xs.extend([2, 3])
+
+
+a = [1]
+mutate(a)
+print(len(a))
+print(a)
+''')
+
+case("alias_param_augmented_add", "xs += through a parameter reaches the caller", r'''
+def mutate(xs):
+    xs += [2]
+
+
+a = [1]
+mutate(a)
+print(a)
+''')
+
+case("alias_param_dict_setitem", "dict insert through a parameter", r'''
+def mutate(d):
+    d["new"] = 1
+
+
+a = {"k": 0}
+mutate(a)
+print(len(a))
+print(sorted(a.keys()))
+''')
+
+case("alias_param_dict_pop", "dict pop through a parameter", r'''
+def mutate(d):
+    return d.pop("k")
+
+
+a = {"k": 5, "j": 6}
+print(mutate(a))
+print(len(a))
+''')
+
+case("alias_param_dict_clear", "dict clear through a parameter", r'''
+def mutate(d):
+    d.clear()
+
+
+a = {"k": 1}
+mutate(a)
+print(len(a))
+''')
+
+case("alias_param_dict_update", "dict update through a parameter", r'''
+def mutate(d):
+    d.update({"j": 2})
+
+
+a = {"k": 1}
+mutate(a)
+print(len(a))
+''')
+
+case("alias_param_set_add", "set add through a parameter", r'''
+def mutate(s):
+    s.add(3)
+
+
+a = {1, 2}
+mutate(a)
+print(len(a))
+print(sorted(a))
+''')
+
+case("alias_param_set_discard", "set discard through a parameter", r'''
+def mutate(s):
+    s.discard(1)
+
+
+a = {1, 2}
+mutate(a)
+print(len(a))
+print(sorted(a))
+''')
+
+case("alias_param_inner_list", "mutating an inner list through a parameter", r'''
+def mutate(rows):
+    rows[0].append(9)
+
+
+a = [[1], [2]]
+mutate(a)
+print(a)
+print(len(a[0]))
+''')
+
+case("alias_param_two_hops", "mutation survives two parameter hops", r'''
+def inner(xs):
+    xs.append(3)
+
+
+def outer(xs):
+    inner(xs)
+
+
+a = [1]
+outer(a)
+print(a)
+''')
+
+case("alias_param_then_local_alias", "a local alias of a parameter still aliases", r'''
+def mutate(xs):
+    local = xs
+    local.append(2)
+
+
+a = [1]
+mutate(a)
+print(a)
+''')
+
+case("alias_param_global_list", "a function mutates a global list without a parameter", r'''
+shared = [1]
+
+
+def mutate():
+    shared.append(2)
+
+
+mutate()
+print(shared)
+''')
+
+case("alias_param_field_holding_list", "mutating a list held by a parameter's field", r'''
+class Box:
+    def __init__(self):
+        self.items = [1]
+
+
+def mutate(box):
+    box.items.append(2)
+
+
+b = Box()
+mutate(b)
+print(b.items)
+''')
+
+case("alias_param_rebind_field", "rebinding a parameter's field reaches the caller", r'''
+class Box:
+    def __init__(self):
+        self.items = [1]
+
+
+def replace(box):
+    box.items = [7, 8]
+
+
+b = Box()
+replace(b)
+print(b.items)
+''')
+
+case("alias_returned_list_is_mutable", "a returned list can be mutated by the caller", r'''
+def build():
+    return [1]
+
+
+made = build()
+made.append(2)
+print(made)
+print(len(made))
+''')
+
+case("alias_list_copy_method", "list.copy produces an independent list", r'''
+a = [1, 2]
+b = a.copy()
+b.append(3)
+print(a)
+print(b)
+''')
+
+case("alias_sorted_returns_new_list", "sorted() does not alias its input", r'''
+a = [3, 1]
+b = sorted(a)
+b.append(9)
+print(a)
+print(b)
+''')
+
+case("alias_dict_setdefault_returns_stored", "setdefault returns the stored object", r'''
+groups = {}
+first = groups.setdefault("k", [])
+first.append(1)
+print(groups["k"])
+print(groups.setdefault("k", []) is first)
+''')
+
+case("alias_dict_get_returns_stored", "dict.get returns the stored object, not a copy", r'''
+groups = {"k": [1]}
+got = groups.get("k")
+got.append(2)
+print(groups["k"])
+''')
+
+case("alias_element_augmented_assign", "xs[0] += mutates in place through the subscript", r'''
+counts = [1]
+counts[0] += 5
+print(counts)
+
+rows = [[1]]
+rows[0] += [2]
+print(rows)
+''')
+
+case("alias_tuple_swap", "a, b = b, a swaps without aliasing", r'''
+a = [1]
+b = [2]
+a, b = b, a
+print(a)
+print(b)
+a.append(9)
+print(b)
+''')
+
+
 if __name__ == "__main__":
     raise SystemExit(main(CASES, "gen_alias_cases.py", sys.argv))
