@@ -392,3 +392,47 @@ one of the 30 fixed rather than a harness error.
 
 Post-merge rates: fix_ 95.1, obj_ 62.8, std_ 62.4, proto_ 49.4, flow_ 48.9,
 elem_ 35.1, fmt_ 29.2, alias_ 18.5. Overall 785 probes, 380 failing, 48.4%.
+
+[2026-08-01] AGENT 4 (failure triage) SHUT DOWN on usage limits. Recording what that means for FAILURE_AUDIT.md, because the document outlives the agent and will otherwise be trusted more than it has earned.
+
+WHAT THE AUDIT IS AND IS NOT, as of 4feeb761:
+  - TRUSTWORTHY: the structural findings in its sections 0-3. The agent
+    reproduced those directly. In particular the "one defect wears five
+    disguises" result -- an unannotated parameter keeps its type only when a
+    literal is passed at the call site, and the SAME cause then surfaces as a
+    raw pointer, a 0, a 0xC0000005, an [E012] refusal, or a 1e-317 denormal
+    depending only on how the value is used. That was a controlled experiment
+    (one program, one varied use, IR diffed) and it stands.
+  - TRUSTWORTHY: its corrections, including of its own earlier claims --
+    bytes is list[int] not absent; "mutable default argument rejected" is
+    really [L002] unexpected character ';'; "containers are fine" holds only
+    to nesting depth 2.
+  - NOT EARNED: the word `verified` in the ranked table. The adversarial pass
+    never ran -- the session died after the finding phase, killing 22 refuters
+    and 2 of 14 finder slices. `verified` there means "a probe ran", NOT "a
+    hostile second pass failed to break it". The agent said so in place rather
+    than in a footnote, which is why this is knowable at all.
+  - STALE: the ranked counts. The audit describes 330 failures; the corpus is
+    now 1932 cases with 658 known failures. It documents a set that no longer
+    exists.
+
+HOW TO USE IT UNTIL SOMEONE RE-DERIVES IT: as a source of HYPOTHESES, not
+conclusions. Before acting on any ranked cause, re-check it against
+tests/baseline.json and reproduce it. The manifest is the authoritative
+instrument; the audit is a prioritisation layer on top of it, and that layer
+is now one revision behind reality and one verification pass short.
+
+Rank 21 ("sort/sorted ignores __lt__ on instances") is CLOSED as implemented,
+not reopened: _lower_sort_inplace had no instance branch at all -- instances
+fell to _abi_sort_int, which compares heap ADDRESSES -- so __lt__ was never
+consulted there and whatever made the case briefly pass was not __lt__
+working. Fixed with a lowering case plus a matching reachability case (the
+two-part shape this file documents for every dunder dispatch); the first
+attempt link-failed on `undefined symbol 'Version____lt__'`.
+
+Unowned work, in the order it would repay picking up: (1) the adversarial pass
+over the 132 causes, defaulting to refuted when uncertain; (2) re-derive
+against the 658; (3) the crash bucket, which was growing fastest; (4) the 24
+explicitly unattributed and 41 NOT-root-caused entries. Leaving those
+unattributed was the right call and closing them with evidence is the next
+one.
