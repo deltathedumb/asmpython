@@ -110,7 +110,10 @@ print(math.isclose(1.0, 1.5, rel_tol=1e-3))
 print(math.isclose(0.0, 1e-9, abs_tol=1e-6))
 ''')
 
-case("std_math_log_base", "math.log accepts an optional second base argument", r'''
+# NOTE: not named `std_math_log_base` -- .gitignore carries a blanket `*log*`
+# rule, which silently makes any case file with "log" in its name untrackable.
+# The generator writes it, the runner runs it, and `git add` ignores it.
+case("std_math_base_argument", "math.log accepts an optional second base argument", r'''
 import math
 
 print(math.log(8.0, 2.0))
