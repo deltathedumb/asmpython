@@ -539,25 +539,46 @@ def get(self, ...) -> int:
     return item
 ```
 
-**The question:** `self._data`'s element kind is `"any"`, so its elements are
-boxed -- yet `item: int = self._data[0]` reads one into an `int`-annotated
-slot and the case PASSES today. Either the read choke is consulting the
-annotation rather than the element kind, or the field's element kind is not
-actually resolving to `"any"` at that site.
+**ANSWERED** by dumping the IR (`ASMPYTHON_EMIT_IR`), and the answer is
+neither of the two hypotheses this section originally posed:
 
-Which of those it is decides the whole read-side design:
+```text
+anyunbox blocks in the whole program: 0
+anytag blocks:                        0
+the element load:  %t40: i64 = load %t39      <- plain raw load
+```
 
-- if the annotation wins, then an `int`-annotated read of an `"any"` element
-  silently skips unboxing, and every such site is a latent pointer leak that
-  the corpus happens not to exercise;
-- if the element kind is not `"any"` there, then the flip did not reach
-  instance fields the way the `box_element` gate assumes, and the gate's
-  Attr arm is dead or near-dead code.
+There is **no boxing anywhere in the program**. `self._data`'s element kind
+resolves to a concrete `"int"`, not `"any"` -- whole-program field-flow
+inference sees `put(self, item: int)` and pins the field's element type from
+that annotation. So the `box_element` Attr arm never fires, the elements stay
+raw, and `item: int = self._data[0]` reads exactly what was written. Correct,
+and correct for a reason that has nothing to do with the read choke.
 
-Answer it by instrumenting, not by reading -- both prior attempts to reason
-this out from the source were wrong (see the site-1 sequence in §3). Dump the
-IR for `queue.get` (`ASMPYTHON_EMIT_IR=out.ir`) and look for whether an unbox
-appears on that load.
+**So the mechanism behind the 10 regressions is element-kind DISAGREEMENT
+ACROSS AN ASSIGNMENT, not a missing unbox:**
 
-Only then is it worth touching subscript / iteration / `pop` / slicing /
-pass-through, which all have to agree on the same answer.
+    self._data   element kind "int"   (inferred from put's annotation)
+    new_data     element kind "any"   (a bare local -- nothing pins it)
+
+    new_data.append(...)   <- the reverted change boxed these
+    self._data = new_data  <- now a field whose readers expect RAW ints
+                              holds a list of BOXED ones
+
+`q.get()` then returns a box pointer through an `int`-annotated slot: `0 0`.
+
+That reframes the read-side work. The problem is not "reads must unbox". It is
+that **a list's element kind is part of its calling convention**, and
+assigning a list into a slot with a different element kind silently violates
+it. Any write-side boxing change has to either
+(a) make element kinds agree across assignment (unify on assign, or reject the
+    mismatch), or
+(b) box uniformly for `"any"`-element containers on BOTH sides, so a
+    kind mismatch is representationally harmless.
+
+(b) is the real fix and is what the remaining probes need; (a) is the cheaper
+guard that would at least make the failure loud instead of silent.
+
+Worth noting: this was the third attempt to explain this behaviour, and the
+first two -- both reasoned from reading the source -- were wrong. One IR dump
+settled it.
