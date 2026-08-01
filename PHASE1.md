@@ -582,3 +582,53 @@ guard that would at least make the failure loud instead of silent.
 Worth noting: this was the third attempt to explain this behaviour, and the
 first two -- both reasoned from reading the source -- were wrong. One IR dump
 settled it.
+
+---
+
+## 6. `vm_callable_param_result`: a calling-convention mismatch
+
+Diagnosed by IR dump, not by reading. The program shows the asymmetry
+starkly: **136 `anyunbox` blocks and ZERO `_abi_new_box` calls.** It unboxes
+everywhere and boxes nothing.
+
+```python
+def apply(fn, arg):
+    return fn(arg)
+
+def shout(s: str) -> str:      # fully annotated -- still fails
+    return s.upper()
+
+print(apply(shout, "hi"))      # CPython: HI    asmpython: 8201056
+```
+
+`shout` is declared `-> str`, so it returns a RAW str pointer -- correct for
+its own signature. `apply` returns `fn(arg)`, an INDIRECT call whose result
+type is `"any"`, and the store choke's `"any"` arm forwards it *still-boxed*:
+
+```python
+if static_ty == "any":
+    return _lower_expr_inner(ctx, e)   # assumes already a box
+```
+
+It is not a box. So a raw str pointer is forwarded as an `"any"` value, reads
+back UNTAGGED, and prints as an integer. This is the same "an `any` value is
+not necessarily boxed" invariant from the earlier section, now biting on the
+WRITE side -- and the flip made it more common, because far more expressions
+are typed `"any"` now.
+
+**Why the caller cannot fix it.** Boxing at the indirect call site is
+impossible: the kind has to be known to pick a tag, and at that point it is
+not. An untagged raw value has no recoverable kind at run time. The value must
+be boxed at its ORIGIN, where the kind was still known.
+
+**So it is a convention problem.** A function that is ever used as a
+first-class value has two incompatible contracts: its declared signature
+(`-> str`, raw) and the indirect call site's expectation (`"any"`, boxed).
+The fix is to make those agree -- a function referenced as a value adopts the
+boxed-return convention, and ALL of its call sites unbox, which direct callers
+can do because they resolve the callee statically. `_is_callable_valued`
+already identifies the functions in question.
+
+That is a real ABI change for those functions and needs its own measured step.
+It is, however, the first remaining probe with a fully understood cause and a
+concrete design rather than an open question.
