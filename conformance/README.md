@@ -1,16 +1,30 @@
-# pyconform — a CPython microbehaviour conformance suite
+# conformance — asmpython's CPython oracle
 
-A corpus of small, self-contained Python programs with exact expected output,
-runnable against **any** Python implementation through a thin shim.
+**A developer tool, not a distributable package.** It exists so asmpython can be
+measured against *the language* instead of against `tests/`, a corpus that grew
+up alongside the compiler and therefore cannot contain the shapes the compiler
+was never asked to handle.
 
-It exists to answer one question precisely: *where does this implementation
-diverge from CPython, and does that divergence matter?*
+That distinction is the whole point, and it is not theoretical. Three
+parameter-slot defects found in one session were invisible to `tests/` by
+construction:
 
-**1467 cases. 95 PEPs. CPython passes 100% of the counted tiers.**
+```python
+def ident(v):
+    return v
+print(ident(3.5))     # 3731456     — needs TWO disagreeing call sites
+print(ident("s"))     # 5368766490  — a raw pointer
+print(ident(True))    # 1           — bool-ness dies at the first call
+```
+
+A corpus written by the same people who write the compiler tests what the
+compiler already does. An oracle derived from CPython tests what Python *is*.
+
+**1656 cases. 121 PEPs. CPython passes 100% of the counted tiers.**
 
 | area | what it covers |
 |---|---|
-| `generated/` | three cross-products — value × storage trip, container × reader, operand pair × operator |
+| `generated/` | four cross-products — value × storage trip, container × reader, operand pair × operator, container × constructor |
 | `datamodel/` | every special method: attribute access, containers, numerics, comparison, metaclasses, descriptors |
 | `quirks/` | the famous flaws — `t[0] += [x]` raising *and* mutating, `nan != nan`, `{1: …, True: …}` collapsing |
 | `pep/` | 95 PEPs, from list comprehensions (202) to t-strings (750) |
@@ -38,12 +52,14 @@ id(x)                          # an address, not a specified value
 hash("abc")                    # salted per process
 ```
 
-A suite that pins those fails PyPy, MicroPython and GraalPy for no good
-reason, and any maintainer who looks at it once will never look again. A suite
-that pins *nothing* misses the microbehaviour it was built for.
+Pinning those would hold asmpython to CPython's *accidents* — refcount-driven
+collection timing, small-int caching, address values — none of which asmpython
+should reproduce. Pinning *nothing* misses the microbehaviour the oracle exists
+for.
 
 So every case declares which side of that line it sits on, and the tier is a
-field, not a convention.
+field, not a convention. The `impl` tier is what lets the oracle record a
+divergence without asserting asmpython is wrong to have it.
 
 | tier | meaning | counted in the score |
 |---|---|---|
@@ -110,9 +126,10 @@ should be expected to satisfy.
 
 ---
 
-## Running it against an implementation
+## Scoring asmpython
 
 ```
+python conformance/harness.py --shim asmpython --matrix
 python conformance/harness.py --shim cpython
 python conformance/harness.py --shim asmpython --tier spec,cpython
 python conformance/harness.py --shim asmpython --matrix          # cross-product view
@@ -131,21 +148,33 @@ compiling saturates the cores and `subprocess.run` releases the GIL anyway — s
 reach for it only if you have measured a win on your own hardware, **running
 the comparison both ways round**. Ordering matters more than the executor here:
 the first run of any pair pays for a cold runtime build and a cold file cache,
-which is enough to invent a 1.8× speedup that does not exist. A group is any directory prefix of a case id, so you choose the
-granularity. An unknown group is a hard error rather than an empty selection —
-zero cases score 100%, which is the most dangerous way to be wrong.
+which is enough to invent a 1.8× speedup that does not exist.
+
+A group is any directory prefix of a case id, so you choose the granularity. An
+unknown group is a hard error rather than an empty selection — zero cases score
+100%, which is the most dangerous way to be wrong.
 
 `selftest.py` takes the same groups positionally: `python selftest.py pep`.
+
+There are two shims and they play different roles. `cpython` is the **oracle** —
+it is what `regen.py` derives expectations from and what `selftest.py` checks
+the suite against. `asmpython` is the **subject**. Everything else in the tree
+is implementation-neutral, which is not an aspiration toward portability but the
+property that keeps the oracle honest: a suite that knew about asmpython could
+be bent, however unintentionally, toward what asmpython already does.
 
 A shim is small — given a case file, produce its stdout:
 
 ```python
-# conformance/shims/mypython.py
 def run(case_path, timeout):
-    return subprocess.run(["mypython", case_path], ...)
+    """-> (stdout, stderr, returncode). returncode None means REFUSED."""
 ```
 
-Nothing else in the suite is implementation-specific.
+`shims/asmpython.py` passes `--no-pyinbin-fallback`, and that flag is
+load-bearing: without it the CLI silently interprets a source the native backend
+rejected and exits 0, so a compile refusal is indistinguishable from a pass.
+Scoring an interpreted fallback as native conformance would make the whole
+measurement meaningless.
 
 ---
 

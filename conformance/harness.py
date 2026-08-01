@@ -1,8 +1,14 @@
-"""Run conformance cases against a Python implementation via a shim.
+"""Score an implementation against the CPython oracle, via a shim.
 
-    python conformance/harness.py --shim cpython
-    python conformance/harness.py --shim asmpython --tier spec,cpython
-    python conformance/harness.py --shim asmpython --filter numeric/ --verbose
+    python conformance/harness.py --shim asmpython --matrix
+    python conformance/harness.py --shim asmpython --groups pep,functions
+    python conformance/harness.py --shim cpython            # must be 100%
+
+A developer tool for asmpython, not a distributable package. The `cpython` shim
+is the ORACLE (what regen derives expectations from and selftest validates
+against); `asmpython` is the SUBJECT. Nothing here is asmpython-specific except
+that one shim -- deliberately, because a suite that knew about asmpython could
+be bent toward what asmpython already does.
 
 Exit codes: 0 = every counted case passed; 1 = at least one counted failure.
 `impl`-tier cases are run and reported but never counted (see README.md).
@@ -23,9 +29,11 @@ ROOT = Path(__file__).resolve().parent
 CASES = ROOT / "cases"
 SHIMS = ROOT / "shims"
 
-#: Tiers whose failures count against an implementation. `impl` is recorded
-#: but excluded: those are CPython accidents, not language guarantees, and
-#: failing another implementation for them is how a suite loses its audience.
+#: Tiers whose failures count against an implementation. `impl` is recorded but
+#: excluded: those are CPython accidents -- refcount-driven collection timing,
+#: small-int caching, address values -- not language guarantees. asmpython has
+#: no obligation to reproduce them, and counting them would put permanent
+#: failures in the score that no one should ever fix.
 COUNTED_TIERS = ("spec", "cpython")
 VALID_TIERS = ("spec", "cpython", "impl")
 
@@ -412,7 +420,7 @@ def main(argv: list[str] | None = None) -> int:
 
     use_processes = args.exec_mode == "process" and args.jobs > 1
     how = "processes" if use_processes else "threads"
-    print(f"pyconform: {len(cases)} case(s), shim={args.shim}, "
+    print(f"conformance: {len(cases)} case(s), shim={args.shim}, "
           f"tiers={','.join(tiers)}, {args.jobs} {how}")
     results: list[Result] = []
 

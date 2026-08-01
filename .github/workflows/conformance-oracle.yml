@@ -1,0 +1,77 @@
+# Keeps the conformance ORACLE trustworthy.
+#
+# `conformance/` is a developer tool: it pins CPython's behaviour so asmpython
+# can be measured against the language rather than against a corpus asmpython
+# grew up with. Nothing here compiles anything with asmpython -- scoring the
+# compiler is a local, slow operation (one compile-and-link per case). What CI
+# guards is the ORACLE: if the recorded expectations are wrong, every asmpython
+# measurement taken against them is wrong too, silently and in the direction
+# that looks like an asmpython bug.
+#
+# Two properties, both cheap:
+#   1. CPython passes 100% of the counted tiers. A failure here is a defect in
+#      the SUITE -- a wrong expectation, a nondeterministic case, or a CPython
+#      accident mis-tiered as a language requirement -- never in asmpython.
+#   2. cases/ is reproducible from its sources: generators for the bodies,
+#      CPython for the expectations.
+#
+# Runs across versions because a case can be correct on one and wrong on
+# another; `# min-python:` gates the ones using newer syntax, and the matrix is
+# what proves those gates are right.
+name: Conformance oracle
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["beta/3.14.0"]
+    paths:
+      - "conformance/**"
+      - ".github/workflows/conformance-oracle.yml"
+  pull_request:
+    paths:
+      - "conformance/**"
+      - ".github/workflows/conformance-oracle.yml"
+  schedule:
+    - cron: '0 6 * * 1'   # weekly: catches drift as CPython itself moves
+
+permissions:
+  contents: read
+
+jobs:
+  oracle:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: conformance
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: CPython must pass every counted case
+        run: python selftest.py
+
+      # Every in-scope PEP is covered by a case or excluded with a stated
+      # reason. The third state -- not thought about -- fails here, because an
+      # unexamined gap and a deliberate omission are indistinguishable in a
+      # coverage percentage. Also catches a cross-reference that points at a
+      # case which has since been renamed away, which would otherwise report
+      # that PEP as covered forever.
+      - name: every in-scope PEP is covered or reasoned away
+        run: python pepcoverage.py --check
+
+      # The whole tree must be reproducible from its sources. ORDER MATTERS: a
+      # generator REWRITES a case body from scratch, which removes its
+      # `# expect:` block, so regen has to run after them -- diffing between the
+      # two would compare against a deliberately half-written tree.
+      - name: cases are reproducible from generators + CPython
+        run: |
+          for g in generators/gen_*.py; do python "$g"; done
+          python regen.py --force
+          git diff --exit-code -- cases/ \
+            || (echo "::error::cases/ is not reproducible: a generator was edited without regenerating, or an expectation was hand-written" && exit 1)

@@ -1,9 +1,13 @@
-# Contributing a case
+# Writing a case
 
-The whole suite rests on one property: **CPython scores 100% on the counted
-tiers.** Every rule below exists to keep that true, because the moment it isn't,
-the suite is asserting something no implementation should have to satisfy and
-nobody can tell which cases are trustworthy.
+The oracle rests on one property: **CPython scores 100% on the counted tiers.**
+Every rule below exists to keep that true, because the moment it isn't, the
+suite is asserting something CPython does not actually do -- and every asmpython
+measurement taken against it is then wrong in the direction that looks like an
+asmpython bug.
+
+That is the failure mode to fear here. A broken case does not report as a broken
+case; it reports as a compiler defect, and someone goes looking for it.
 
 ```
 python conformance/selftest.py      # must pass before you push
@@ -68,6 +72,12 @@ This is the judgement that decides whether anyone trusts the suite.
 **`spec`** — the language requires it. Needs a `ref:`. The harness rejects a
 `spec` case without one, and that is deliberate: if you cannot find a citation,
 you do not yet know that the behaviour is required.
+
+The citation must be the **language or library reference**. The tutorial is not
+normative, and needing it is itself evidence the behaviour is not required —
+`0.1 + 0.2 == 0.30000000000000004` is only documented there, because the
+reference says floats are merely "usually implemented using double in C". That
+case is `cpython`.
 
 **`cpython`** — CPython does it, the spec doesn't mandate it, real code depends
 on it. Exception *message text* is the standard example: the type raised is
