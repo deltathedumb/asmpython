@@ -1026,6 +1026,13 @@ class SemaAnalyzer:
         # or "ClassName.method_name" for a method. See
         # `_infer_unannotated_params`.
         self.inferred_param_types: dict[str, tuple] = {}
+        # Same key space as `inferred_param_types`, for parameters whose call
+        # sites disagree on the BASE kind. Kept separate rather than recorded as
+        # an ("any", ...) inference because `_infer_call_target_params` already
+        # uses that tuple for a different purpose (a mixed container literal),
+        # where the whole point is that nothing gets written through.
+        # See `_infer_call_target_params` and `_apply_inferred_param_types`.
+        self.polymorphic_params: set[str] = set()
         # func_name -> list of (ty, el_type, val_type) for each free variable,
         # populated by _prescan_fv_types() before the main analysis loops.
         self._fv_types: dict = {}
@@ -2655,6 +2662,24 @@ class SemaAnalyzer:
                     self.inferred_param_types[f"{qualname}:{i}"] = (
                         (_c0[0], _el) + tuple(_c0[2:])
                     )
+                elif len({c[0] for c in candidates}) > 1:
+                    # Different BASE kinds at different sites: the parameter is
+                    # polymorphic, and that is a positive fact about it, not a
+                    # failure to learn one. Declining silently left the slot at
+                    # `_seed_param`'s int default -- not "unknown" but a wrong
+                    # claim -- so every non-int argument was reinterpreted as a
+                    # machine word:
+                    #     def ident(v): return v
+                    #     ident(3.5)   -> 3731456
+                    #     ident("s")   -> 5368766490   (the raw str pointer)
+                    # Note both calls are needed to provoke it: with a single
+                    # site the kind is inferred and the code is correct, so the
+                    # bug only appears once a function is used polymorphically.
+                    #
+                    # "any" is the honest slot type -- the caller boxes with the
+                    # value's own tag (`_lower_call_arg` -> `_lower_for_slot`)
+                    # and the callee reads it back by tag.
+                    self.polymorphic_params.add(f"{qualname}:{i}")
 
     #: Inferred parameter kinds written through to the IR parameter type.
     #:
@@ -2767,6 +2792,18 @@ class SemaAnalyzer:
                 if i < start:
                     continue
                 inferred = self.inferred_param_types.get(f"{qualname}:{i}")
+                if inferred is None and f"{qualname}:{i}" in self.polymorphic_params:
+                    # Call sites disagreed on the base kind. Type the slot "any"
+                    # so the value travels boxed and tagged instead of being
+                    # reinterpreted as an int (see `_infer_call_target_params`).
+                    if i < len(fn_pts) and fn_pts[i] is not None:
+                        continue  # never override a real annotation
+                    while len(fn_pts) <= i:
+                        fn_pts.append(None)
+                    fn_pts[i] = ("any", None)
+                    if sig is not None and i < len(sig.param_types):
+                        sig.param_types[i] = "any"
+                    continue
                 if inferred is None or inferred[0] not in self._INFERRED_PARAM_KINDS:
                     continue
                 # A parameter the body TYPE-TESTS is polymorphic by intent, so
