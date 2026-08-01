@@ -1,54 +1,24 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "asmpython"
-version = "2.0.0"
-description = "Compile Python to native x86-64 executables via NASM"
-readme = "README.md"
-license = { text = "MIT" }
-authors = [{ name = "Mabel", email = "harveydjass@gmail.com" }]
+name = "apc"
+version = "0.1.0"
+description = "A retargetable compiler: language-independent IR, pluggable frontends and backends"
 requires-python = ">=3.11"
-keywords = ["compiler", "assembly", "x86-64", "native", "transpiler", "nasm"]
-classifiers = [
-    "Development Status :: 5 - Production/Stable",
-    "Environment :: Console",
-    "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: Microsoft :: Windows",
-    "Operating System :: POSIX :: Linux",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Assembly",
-    "Topic :: Software Development :: Compilers",
-    "Topic :: System :: Hardware",
-]
+dependencies = []
 
 [project.scripts]
-asmpython = "asmpython._compiler.cli:main"
-asmpython-pytest-scout = "asmpython.tools.pytest_scout:main"
-
-[project.urls]
-Repository = "https://github.com/deltathedumb/asmpython"
-Documentation = "https://github.com/deltathedumb/asmpython/blob/main/docs/index.html"
-Changelog = "https://github.com/deltathedumb/asmpython/blob/main/CHANGELOG.md"
+apc = "apc.driver.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["asmpython*"]
+where = ["src"]
 
-[tool.setuptools.package-data]
-"asmpython" = [
-    "stdlib/**/*.py",
-    "asmlib/*.py",
-    "_runtime/**/*",
-    "_vendor/**/*",
-    # A backend may ship support sources it compiles at link time -- the JVM
-    # backend's runtime is .java, built by javac into the output jar. Without
-    # this a pip install looks complete and then fails at the first build with
-    # no runtime to compile.
-    "_backends/**/runtime/**/*",
-]
+[tool.pytest.ini_options]
+testpaths = ["tests/apc"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 88
+src = ["src"]
