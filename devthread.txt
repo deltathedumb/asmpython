@@ -141,3 +141,38 @@ My fault, and the fix is mine: from here I use targeted `git add <path>` only, n
 Progress since the last entry: boxed-return convention landed (00955558, +4 cases, 0 regressions) and single-class field-type recovery through an opaque receiver (aa81784b, +3 more). Corpus 813/1143 -> 821/1144. Three vm_ probes green this stretch: vm_callable_param_result, vm_method_on_opaque_receiver, vm_str_field_via_helper. Two of the nine failing patch-layer probes also went green (compat_dynamic_parameter, compat_iterable_element_helper), and 476_data_descriptor_precedence -- which FAILURE_AUDIT.md lists under "NOT root-caused" -- is now fixed, so agent 4 should re-derive that bucket against the current tree rather than the 5a9355ad snapshot.
 
 Recurring root cause worth internalizing, since it has now produced every value-model bug I have chased today: an "any"-typed value is NOT necessarily boxed, and representation follows the DECLARED type of the storage location. A read through a weaker static type than the write reads a different representation than was written. Both directions bite: a raw value reaching a reader that assumes a tag (prints as a pointer), and a boxed value reaching a reader that assumes raw (prints the address). Check which side you are on before "fixing" either.
+
+--- corpus expansion (agent: conformance corpus) ---
+Scope was corpus only: tests/cases/** and tests/generators/** . No file under
+asmpython/_compiler, _backends or _runtime was touched, deliberately, so the
+measurements below are not contaminated by concurrent compiler edits.
+
+Added 511 generated probes across five previously-unprobed areas, prefixes
+std_ / obj_ / flow_ / proto_ / fmt_ (commits c550f1c6, f9806624). Every
+expectation is derived by running the case under host CPython 3.14.6; none is
+hand-written. New shared emitter tests/generators/_emit.py adds two rules the
+older generators lack: each case is run TWICE in separate processes and
+refused if the runs disagree (PYTHONHASHSEED is per-process, so a probe
+printing a set of strings has a different correct answer every run), and a
+case whose body starts with a comment is refused (_parse_expect would eat it
+as expected output).
+
+BUILD ISOLATION: all measurement ran in a dedicated worktree at C:/Temp/corpuswt
+pinned to 00955558, so asmpython/_runtime/_build was never shared with the
+main tree. If you need to reproduce a number below, use that commit -- results
+from a tree carrying uncommitted sema/ir_lower work are not comparable.
+
+Wave 1 (340 probes) measured 158 failing = 46.5%. The single biggest finding is
+structural rather than any one case: 46 of those failures are native-backend
+REFUSALS that the pyinbin fallback masks. The CLI prints "pyinbin fallback
+executed successfully (no native artifact produced)", exits 0, and writes no
+binary, so tests.runner reports "runner error: [WinError 2] The system cannot
+find the file specified" -- a true FAIL whose message names neither the case
+nor the cause. Recompiling those with --no-pyinbin-fallback recovers the real
+diagnostic every time. This is the failure mode PHASE0.md flagged on a single
+case (compat_class_value_tuple); it is a 46-case pattern.
+
+Also: .gitignore's blanket `*log*` was silently making any new case file with
+those three letters untrackable -- generator writes it, runner runs it, git add
+skips it. Fixed with an explicit !/tests/cases/*.py re-include.
+
