@@ -403,3 +403,192 @@ argument for continuing to report per area rather than per wave.
   real threads.
 - **Multi-module programs**, the C ABI, and non-x86-64 backends, all unchanged
   from round 1.
+
+---
+
+# Round 3 — the container-element consumer matrix
+
+Measured at `ae1dc7ae`.
+
+## 1. Re-measurement, and a correction to round 2
+
+The 619 existing probes were re-run first. **6 fixed, 0 regressed.** All six
+are agent 3's exact-decimal work landing exactly where predicted:
+`fmt_spec_exponent`, `fmt_spec_e_uppercase`, `fmt_spec_g_uppercase`,
+`fmt_spec_general_g`, `fmt_percent_exponent` and `fmt_percent_float_precision`.
+The `fmt_` area fell from 37.5% to 29.2% failing.
+
+**Round 2's aliasing diagnosis was wrong and is corrected here.** It said the
+list's data pointer was shared while its length was not, and that dicts were
+unaffected. Mapping the boundary refutes both halves:
+
+```text
+def m(xs): xs.sort()      CPython [1, 2, 3]   asmpython [3, 1, 2]   no effect
+def m(xs): xs.reverse()   CPython [3, 2, 1]   asmpython [1, 2, 3]   no effect
+def m(d):  d.clear()      CPython len 0       asmpython len 1       no effect
+def s(d):  d["k"] = 9     CPython len 1       asmpython len 1       works
+def m(xs): xs.append(2); return len(xs)
+                          CPython callee 2, caller 2
+                          asmpython callee 1, caller 1
+```
+
+`sort` and `reverse` do not change the length and still have no effect, which
+kills the length explanation. Dicts are affected after all — `pop`, `clear` and
+`update` all fail; only `d[k] = v` works. And the callee's **own** view does
+not carry the append either, so nothing is being lost on the way back to the
+caller.
+
+The corrected statement: **a mutating method called on a parameter has no
+effect at all**, while a subscript store through a parameter does take effect.
+Not a length problem, and not list-specific.
+
+Boundary, from `alias_param_*`:
+
+| group | result |
+|---|---|
+| length-changing methods (append, extend, insert, pop, remove, clear, `dict.pop/clear/update`, `set.add/discard`) | **1/14 pass** |
+| length-preserving methods (`sort`, `reverse`, `setitem`) | **0/4 pass** |
+| subscript store `d[k] = v` through a parameter | passes |
+| mutation via a parameter's *field* (`box.items.append`) | passes |
+| mutation of a *global* without a parameter | passes |
+
+The one passing length-changing case is `d[k] = v`, which is a subscript store
+rather than a method call — consistent with the corrected reading.
+
+## 2. The consumer matrix
+
+134 probes: 30 consumer paths × 4 element kinds, plus 14 nested-container
+cases. Rebuilt mechanically from case names and runner verdicts.
+
+```text
+consumer path           int   str float mixed
+----------------------------------------------
+comprehension_dict        .     .     .     X
+comprehension_list        .     .     .     X
+comprehension_nested      .     X     X     X
+comprehension_set         .     .     .     X
+dict_from_pairs           !     X     !     !
+enumerate                 .     .     C     X
+for_loop                  .     .     .     X
+index_method              .     .     C     E
+len                       .     .     .     .
+membership                .     .     C     X
+min_max                   .     .     .     X
+min_max_key               .     .     C     C
+pass_to_function          .     X     X     .
+pop_method                .     .     .     X
+remove_method             .     .     C     X
+repr_container            .     .     .     X
+repr_nested               .     .     .     X
+set_ops                   .     .     C     X
+slice                     .     .     .     X
+slice_step                .     .     .     X
+sort_inplace              .     .     .     X
+sort_inplace_key          .     .     C     C
+sorted                    .     .     .     X
+sorted_key                .     .     C     C
+starred_call              .     X     X     !
+subscript                 .     .     .     X
+subscript_computed        .     .     .     X
+unpack                    .     .     .     .
+unpack_in_for             .     .     .     X
+zip                       .     .     .     X
+----------------------------------------------
+FAIL by kind              1     4    12    27
+
+.  pass    X  wrong output    C  compile refused
+!  crash   E  runtime error   R  masked refusal
+```
+
+120 cells, 44 failing (36.7%). Nested containers: 14 probes, 6 failing.
+
+**Every one of the 30 paths is covered on every one of the 4 kinds.** There
+are no blank cells, which is the property that makes this usable as a
+migration gate rather than as a sample.
+
+### What the matrix says
+
+**Only two paths are correct on all four kinds: `len` and `unpack`.** Both
+avoid reading an element's *value* — `len` reads the count, `unpack` binds a
+fixed arity. Every path that actually consumes a value fails on at least one
+kind.
+
+**`mixed` fails on 27 of 30 paths**, and the dominant symptom is a single
+defect: **`None` stored in a container reads back as `0`.**
+
+```text
+subscript           want 'None'                  got '0'
+for_loop            want 'None'                  got '0'
+zip                 want 'None None'             got '0 0'
+slice               want '[True, None]'          got '[True, 0]'
+repr_container      want "[1, 'two', 3.5, True, None]"
+                    got "[1, 'two', 3.5, True, 0]"
+```
+
+That one fact accounts for most of the mixed column. It is the same
+`vm_none_is_not_zero` property, now shown to reach fifteen separate consumers.
+
+**Four paths silently return a value where CPython raises.** `min`, `max`,
+`sorted` and `list.sort` on a heterogeneous list must raise `TypeError`;
+instead they return an answer:
+
+```text
+sorted(mixed)    CPython TypeError    asmpython [0, 1, 'two', 3.5, True]
+min(mixed)       CPython TypeError    asmpython 0
+```
+
+This is the highest-value class in the matrix — a wrong value in place of an
+error, with no signal.
+
+**`float` breaks more consumer paths than `str` (12 vs 4)**, and eight of the
+twelve are compile refusals rather than wrong values: `enumerate`,
+`index_method`, `membership`, `min_max_key`, `remove_method`, `set_ops`,
+`sort_inplace_key`, `sorted_key`. Float elements are refused by the paths that
+compare or key on them.
+
+**`dict_from_pairs` fails on all four kinds** — the only path that does. Three
+of the four crash outright; the `str` case writes raw pointers as the values
+(`{'aa': 5368741891, ...}`). Building a dict from an iterable of pairs is
+broken independent of element kind.
+
+**`pass_to_function` and `starred_call` leak pointers for `str` and `float`
+but pass for `int`**, which is the boxing boundary showing up at the call
+edge rather than in the container.
+
+**Nested containers**: the inner container's elements survive a single level
+(`elem_nested_dict_of_lists_read` passes) but `comprehension_nested` leaks
+pointers for `str`, `float` and `mixed` alike — a comprehension over rows is
+one of the paths that re-reads elements without carrying their kind.
+
+## 3. Hit rate per wave
+
+| wave | probes | failing | rate |
+|---|---:|---:|---:|
+| 1 — std/obj/flow/proto/fmt | 340 | 158 | 46.5% |
+| 2 — the same areas, deeper | 172 | 124 | 72.1% |
+| 3 — aliasing, fixtures, in-memory stdlib | 108 | 63 | 58.3% |
+| 4 — consumer matrix + parameter boundary | 166 | 71 | 42.8% |
+
+Wave 4 splits sharply: the consumer matrix is 37.3% and the 32 new
+parameter-boundary probes are 65.6%. Corpus: 1736 → **1903 cases**; probes
+owned here: 619 → **785**.
+
+The rate is drifting down but is nowhere near 10%, and the wave-4 figure is
+the least meaningful of the four — a cross product deliberately includes the
+combinations expected to pass, so its rate measures the shape of the product
+rather than the density of defects.
+
+## 4. Note for whoever owns `tests/runner.py`
+
+`alias_param_setitem_str` fails as `runner error: 'NoneType' object has no
+attribute 'replace'`. The compiled program writes bytes that are undecodable
+in the console codepage, and the runner reports its own internal error instead
+of the case's failure. Same class as the `WinError 2` masking fixed in
+`a99c0cff`: a real FAIL arriving with a message about the harness. Decoding
+the child's output with `errors="replace"` would make it report the actual
+divergence.
+
+## 5. Priority 3 status
+
+The fixture convention was delivered in round 2 (`gen_fixture_cases.py`, 41
+probes) and is unchanged. It remains gated on `open(p).read()` returning `0`.
