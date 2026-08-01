@@ -249,6 +249,18 @@ print(grow([1, 2], 3))
 print(keys_of({"a": 1, "b": 2}))
 ''')
 
+case("vm_float_label_through_call", "a float keeps its register class into a call", '''
+import math
+
+vals = [1.5, 2.5, -3.25]
+print([abs(v) for v in vals])
+print([math.floor(v) for v in vals])
+print([str(v) for v in vals])
+print([round(v, 1) for v in vals])
+print(math.sqrt(16))
+print(abs(-2.5))
+''')
+
 case("vm_value_in_container", "membership uses value equality", '''
 names = ["ada", "bob"]
 print("ada" in names)

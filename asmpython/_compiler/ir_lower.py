@@ -10264,9 +10264,20 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                     # same int->float promotion every other numeric-binop
                     # call site in this file already does.
                     if i < len(arg_types) and arg_types[i] == "float" and av.type is not F64:
-                        fv = ctx.tmp(F64)
-                        ctx.emit(IRInstr("sitofp", fv, [av]))
-                        av = fv
+                        if A.expr_type(a) == "float":
+                            # Already a float, just wearing the wrong SSA
+                            # label -- a comprehension's loop-variable slot
+                            # reloads as i64 even for a float element. `sitofp`
+                            # here would be a NUMERIC conversion of the
+                            # double's bit pattern, which is how
+                            # `[math.floor(v) for v in vals]` returned garbage.
+                            # Relabel instead; the bits are already correct.
+                            av = _as_f64_arg(ctx, av, f"ffi_{c_name}_{i}")
+                        else:
+                            # Genuinely an int (`math.sqrt(16)`): convert.
+                            fv = ctx.tmp(F64)
+                            ctx.emit(IRInstr("sitofp", fv, [av]))
+                            av = fv
                     if i < len(arg_types) and arg_types[i] == "list_buf":
                         # `os._stat(path, buf)`-style bindings pass a
                         # `list[int]`'s underlying DATA BUFFER (not its
@@ -12622,7 +12633,15 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                     ctx.emit(IRInstr("call", v, [f"{owner}____abs__", val]))
                     return v
             if arg_t == "float":
-                f_v = _lower_expr(ctx, e.args[0])
+                # Relabel before the call: a statically-float value does not
+                # always arrive F64-typed (a comprehension's loop-variable slot
+                # reloads as i64), and the backend picks a call argument's
+                # register class from that label -- so the bits went to a GP
+                # register while fabs read xmm0, and every element saw whatever
+                # the previous iteration left there. `[abs(v) for v in vals]`
+                # returned [1.5, 1.5, 1.5]. Same defect `_as_f64_arg` documents
+                # for the float-format and round call sites.
+                f_v = _as_f64_arg(ctx, _lower_expr(ctx, e.args[0]), f"abs_{id(e)}")
                 out = ctx.tmp(F64)
                 ctx.emit(IRInstr("call", out, ["fabs", f_v]))
                 return out
