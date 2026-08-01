@@ -632,3 +632,37 @@ already identifies the functions in question.
 That is a real ABI change for those functions and needs its own measured step.
 It is, however, the first remaining probe with a fully understood cause and a
 concrete design rather than an open question.
+
+---
+
+## 7. Element-representation changes are gated on enumerating consumers
+
+Two measured attempts, same shape, same failure:
+
+| change | fixed | regressed |
+|---|---:|---:|
+| box bare-`list` local elements | 5 | 10 |
+| box heterogeneous tuple slots | 1 | **26** |
+
+Both boxed the WRITE side and patched ONE read site. Both were reverted.
+
+The tuple attempt is the clearer lesson because its regression list names the
+problem outright -- unpacking, `enumerate`, container repr, comprehensions,
+`min`/`max` with a key, starred call args, `dict(pairs)`. A tuple's elements
+are consumed by far more paths than the subscript read, and **every one of
+them has to agree on the representation.** Patching the site you happened to
+be looking at is not a partial fix; it is a net negative.
+
+So the sequencing is now explicit and measured, not a guess:
+
+> Before changing how any container stores its elements, enumerate every
+> path that CONSUMES those elements. The change is only safe once all of
+> them move together.
+
+That enumeration is the actual next unit of work, and it is a survey rather
+than a redesign -- the consumers are findable, there are just more of them
+than intuition suggests. Until it exists, `vm_tuple_through_any`,
+`vm_container_heterogeneous`, `vm_dict_key_through_any` and the `None`/`bool`
+probes all stay blocked on the same thing, which is why they have not been
+attempted piecemeal.
+

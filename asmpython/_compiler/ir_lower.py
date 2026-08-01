@@ -9503,6 +9503,14 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("gep", buf_addr, [tup_v, _LIST_BUF_OFF]))
             buf_v = ctx.tmp(PTR)
             ctx.emit(IRInstr("load", buf_v, [buf_addr]))
+            # NOTE: boxing a heterogeneous tuple's slots (so their kinds
+            # survive the tuple being passed through an "any" parameter) was
+            # tried and reverted: 26 regressions against 1 fix. A tuple's
+            # elements are consumed by FAR more paths than the subscript read
+            # -- unpacking, enumerate, repr, comprehensions, min/max key,
+            # starred call args -- and every one of them would have to agree on
+            # the representation. Patching a single read site is not enough.
+            # See PHASE1.md; `vm_tuple_through_any.py` pins the gap.
             for i, el in enumerate(e.elems):
                 val = _lower_expr(ctx, el)
                 slot_addr = ctx.tmp(PTR)
