@@ -9739,8 +9739,11 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         xs_v2 = ctx.tmp(PTR)
         ctx.emit(IRInstr("load", xs_v2, [xs_ptr]))
         addr = _list_elem_addr(ctx, xs_v2, idx_v2)
-        elem_v = ctx.tmp(I64)
-        ctx.emit(IRInstr("load", elem_v, [addr]))
+        # A CONSUME site: the element is tested for truth, so an "any" element
+        # has to be unboxed first. A raw load yields the box's ADDRESS, which is
+        # never zero, so every element of a boxed list tested truthy and
+        # `all([True, False])` answered True.
+        elem_v = _load_list_elem(ctx, addr, el_kind_aa)
         truthy_v = _value_truthy_typed(ctx, elem_v, el_kind_aa, id(e))
         if is_all:
             ctx.emit(IRInstr("br.t", None, [truthy_v, cont_b.label, hit_b.label]))
@@ -9748,10 +9751,19 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("br.t", None, [truthy_v, hit_b.label, cont_b.label]))
 
         ctx.switch_to(cont_b)
+        # Re-LOAD the index rather than reusing `idx_v2` from the body block.
+        # Unboxing an "any" element emits a whole tag-dispatch chain between the
+        # body and here, and those blocks are created AFTER cont_b, so a value
+        # kept live across them is live across blocks the backend allocates out
+        # of order. `idx_v2` came back stale, the increment had no effect, and
+        # `all([True, False])` span forever. Reloading costs one instruction and
+        # removes the long live range entirely.
+        cont_idx = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", cont_idx, [idx_ptr]))
         one_v = ctx.tmp(I64)
         ctx.emit(IRInstr("const", one_v, [1]))
         next_idx = ctx.tmp(I64)
-        ctx.emit(IRInstr("iadd", next_idx, [idx_v2, one_v]))
+        ctx.emit(IRInstr("iadd", next_idx, [cont_idx, one_v]))
         ctx.emit(IRInstr("store", None, [next_idx, idx_ptr]))
         ctx.emit(IRInstr("br", None, [head_b.label]))
 

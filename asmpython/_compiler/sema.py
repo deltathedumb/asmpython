@@ -10316,6 +10316,23 @@ class SemaAnalyzer:
                     _el_cv = self._callable_type_of(el, scope)
                     if _el_cv is not None:
                         et = _el_cv
+                if isinstance(el, A.IntLit) and (
+                    el.is_bool or el.is_none or el.is_ellipsis
+                ):
+                    # True/False/None/... parse to IntLit, so `expr_type` calls
+                    # them "int" and a list of them is stored RAW -- there is no
+                    # tag left, and `[True, False][0]` prints 1. Only a boxed
+                    # element carries the kind.
+                    #
+                    # Pinned HARD (mixed=True) rather than through the weak
+                    # `et == "any"` fallback below, which a later CONCRETE
+                    # element overrides by design: in `[True, 1]` the int would
+                    # win and take the bool down with it, which is the same
+                    # "a concrete guess beats an honest unknown" mistake the
+                    # parameter slots made.
+                    seen = "any"
+                    mixed = True
+                    continue
                 # Every asmpython value is a uniform 8-byte slot, so a list may
                 # hold nested collections (list/dict/tuple/set) and instances as
                 # well as scalars — they're stored as pointers (mirrors what
