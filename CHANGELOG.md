@@ -21,7 +21,7 @@ deliverable.
   asmpython's correctness was measured against `tests/`, a corpus written
   alongside the compiler, which cannot contain the shapes the compiler was
   never asked to handle. pyconform baselines CPython instead and asserts the
-  *language*: 1166 cases whose expected output is DERIVED by running each under
+  *language*: 1467 cases whose expected output is DERIVED by running each under
   CPython twice in separate processes (disagreement is refused, which catches
   hash-seed and clock dependence), tiered `spec` / `cpython` / `impl` with
   `spec` requiring a documentation citation, and a self-test asserting CPython
@@ -30,8 +30,15 @@ deliverable.
   implementation forever. Three cross-products carry most of it: a value
   through 20 storage trips, a container through 28 readers, a pair through 16
   operators. Each case's PATH is its coordinates, so `--matrix` collapses
-  hundreds of failures into which axis is broken. 45 PEPs covered, with
-  `min-python:` gating for features newer than the oldest supported CPython.
+  hundreds of failures into which axis is broken. Beyond them, hand-written
+  trees for the data model's special methods, the `match` statement's pattern
+  kinds, Python's famous quirks (`t[0] += [x]` raising AND mutating, `nan !=
+  nan`, `{1: ..., True: ...}` collapsing to one key), and the three things no
+  cross-product can express -- evaluation ORDER, ALIASING and CLEANUP -- because
+  a reordering that happens to produce the right answer is invisible to a
+  value-comparison test. 95 PEPs covered, from list comprehensions (202) to
+  t-strings (750), with `min-python:` gating for features newer than the oldest
+  supported CPython.
   `--groups`/`--list-groups` select subsets for a quick check, `--json` plus
   `compare.py` diff two runs and exit nonzero only on a REGRESSION — a score
   alone cannot distinguish "fixed three, broke three" from "changed nothing".

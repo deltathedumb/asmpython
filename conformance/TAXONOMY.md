@@ -16,8 +16,9 @@ The generated trees are cross-products, so a failure carries its own
 coordinates in its path:
 
 ```
-generated/boundary/<trip>/<kind>       a value KIND through a storage TRIP
-generated/consumer/<consumer>/<kind>   a container read by a CONSUMER
+generated/boundary/<trip>/<kind>         a value KIND through a storage TRIP
+generated/consumer/<consumer>/<kind>     a container read by a CONSUMER
+generated/operator/<op>/<left>-<right>   an operand PAIR under an OPERATOR
 ```
 
 Ask which axis moves before opening any source:
@@ -124,6 +125,31 @@ implementation that refuses is at least *honest*, which a wrong answer is not.
 Triage refusals separately. They are usually a missing feature; the `X`s are
 usually a broken model.
 
+### static-rejection-of-dynamic-error
+
+A special case of `refused`, and the one most likely to be argued about. Many
+operator cases expect a **runtime** `TypeError` — `{'a': 1} - {'a': 1}` — and a
+statically-typed compiler may reject the whole program instead, at compile time.
+
+That is a defensible engineering choice and it is still non-conformance: the
+program is valid Python, it catches the error, and it must run. A compiler that
+refuses cannot execute code that *handles* the failure. Recording it as
+`REFUSED` rather than `FAIL` keeps the distinction visible without pretending it
+does not count.
+
+Diagnostic: the case's expected output is an exception name, and the
+implementation produced no binary at all.
+
+### evaluation-order
+
+The values are all correct and the *sequence* is wrong. Only the
+`evaluation-order/` cases can see this, because they assert a log of side
+effects rather than a result — an implementation that reorders operands, or
+evaluates an augmented-assignment target twice, usually still produces the right
+number.
+
+Diagnostic: every printed value matches except the log.
+
 ### formatter-only
 
 The value is right and only its rendering is wrong: float shortest-repr
@@ -147,6 +173,9 @@ Work outward from the value:
    `representation-follows-slot`; if the trip is a call and a second call site
    is what breaks it, `monomorphic-inference`.
 6. Does it depend only on **who reads it**? → `consumer-gap`.
+7. Are all the values right and only the **order** wrong? → `evaluation-order`.
+8. Was the program **rejected** rather than run? → `refused`, or
+   `static-rejection-of-dynamic-error` if the case expected an exception.
 
 If two apply, prefer the one that names the *mechanism* over the one that names
 the symptom — `representation-follows-slot` over `kind-conflation` when a bool
