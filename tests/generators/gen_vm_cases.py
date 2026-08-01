@@ -205,6 +205,31 @@ print(a != b)
 print(a == "other")
 ''')
 
+case("vm_dict_key_through_any", "a dict key keeps its identity through an opaque param", '''
+def get(d, k):
+    return d[k]
+
+
+def put(d, k, v):
+    d[k] = v
+
+
+d = {}
+d["foo"] = 7
+print(d["foo"])
+print(get(d, "foo"))
+
+e = {}
+put(e, "bar", 9)
+print(e["bar"])
+print(get(e, "bar"))
+
+n = {}
+n[3] = "three"
+print(n[3])
+print(get(n, 3))
+''')
+
 case("vm_value_in_container", "membership uses value equality", '''
 names = ["ada", "bob"]
 print("ada" in names)

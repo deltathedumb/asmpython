@@ -247,32 +247,98 @@ deciding what unknown should do there -- almost certainly box-and-tag-dispatch,
 matching what `"any"` already does one branch up -- rather than renaming
 anything. That decision is what the constant flip is waiting on.
 
-**Site 1 is already answerable**, and it sets the pattern for the rest.
-`_lower_dict_key` (ir_lower.py:3382) documents its own encoding contract:
+**Site 1, worked through -- and the first two analyses of it were wrong.**
+Recording the sequence, because each wrong turn was caught by a probe rather
+than by reading, and that is the argument for writing the probe first.
 
-    str            -> itself
-    int            -> its decimal spelling
-    everything else -> its repr() string, because "repr_mode makes the
-                       encoding UNAMBIGUOUS across kinds"
+*First analysis:* `_lower_dict_key` documents "everything else -> repr()", so
+unknown keys belong in the repr arm; narrow the `key_ty in ("str", "any")`
+test to `"str"`. **Wrong** -- a key written through the `str` arm (bare) and
+read back through the `any` arm (repr, quoted) would land in different slots,
+breaking str/any key interop.
 
-An unknown-kind key is precisely the case that contract was written for, so it
-belongs in the repr branch -- and `_lower_expr_as_str` in repr mode already
-performs the runtime tag dispatch (`_lower_format_any_value`) that a boxed
-unknown needs. No new machinery.
+*Second analysis:* group them as-is, since both pass through bare. **Also
+wrong**, and the probe shows it. This is CPython-correct code:
 
-The catch, and why this is not a one-line change: the function's first test is
-`if key_ty in ("str", "any")`, which passes an "any" key through as though it
-were already a string. Once UNKNOWN_TY becomes "any", unknown keys hit that
-arm instead of the repr arm. So the fix is to narrow that test to `"str"` and
-let "any" fall through to repr -- which also corrects the pre-existing case of
-an explicitly `object`-typed key, but is a behaviour change to something that
-is currently passing tests, and therefore needs its own verified step rather
-than riding along with the flip.
+```python
+d = {}; d["foo"] = 7
+def get(d, k): return d[k]
+print(get(d, "foo"))            # CPython: 7   asmpython: crash
+```
+
+The function's own docstring states the assumption that fails: "an 'any' key
+is already a real pointer; the runtime hashes whatever string it points at."
+That predates boxing. A value in an "any" slot is a 24-byte BOX cell, not a
+string, so the runtime hashed the cell and never matched the key the `str` arm
+wrote. Fixed by `_lower_encode_any_key`, which dispatches on the runtime tag
+and reproduces each static arm's encoding exactly -- str-tagged boxes yield
+their PAYLOAD bare (matching the `str` arm), everything else goes through
+`_lower_format_any_value(repr_mode=True)` (decimal for int, repr for the
+rest).
+
+*What the probe still needs.* Fixing the key encoding is not sufficient,
+because the probe never reaches it. `d` is unannotated too, so the subscript
+takes the `obj_ty == "any"` path, where only a statically-`str` index is
+treated as a dict access:
+
+```python
+if obj_ty == "any" and A.expr_type(e.index) == "str":   # dict get
+    ...
+# otherwise: fall through and treat it as a LIST integer index
+```
+
+`k` is typed `"int"` -- the unknown sentinel -- so an unknown key is read as a
+list index, which is where "list index out of range" comes from. Making that correct needs a runtime dispatch on the CONTAINER's tag -- which
+was implemented, tried, and **reverted**, because it cannot work yet:
+
+The container reaching this path is an UNTAGGED raw pointer. Dicts *are* in
+`_BOXABLE_STATIC_TYPES`, but the argument is never boxed at the call boundary,
+because the parameter carries the `"int"` UNKNOWN sentinel rather than `"any"`.
+And an untagged pointer is indistinguishable between a dict and a list at run
+time -- `_lower_read_any_tag` returns `UNTAGGED_ID` for both. So the dispatch
+sent dicts down the list arm regardless, turning a clean "list index out of
+range" into a segfault. Strictly worse, so it is gone.
+
+**This is the first probe proven to be blocked ON the flip rather than merely
+adjacent to it.** No read-site fix exists: the container has to be boxed
+before anything can tell what it is, and boxing unknown values is exactly what
+splitting UNKNOWN out of `int` delivers.
+
+`tests/cases/vm_dict_key_through_any.py` pins the whole chain.
+
+### The invariant that made both wrong turns wrong
+
+> **An `"any"`-typed value is NOT guaranteed to be boxed.**
+
+`_lower_box_any` wraps scalars and containers in a tagged cell, but coverage is
+incomplete: a bare `list` annotation resolves to the `"int"` unknown-sentinel
+rather than `"any"`, so nothing boxes its elements. Iterating one yields RAW
+values that then flow into `"any"` slots untagged.
+
+Any read-side change that assumes "this is `any`, therefore it carries a tag"
+silently corrupts the un-boxed half. That single assumption produced both of
+this session's regressions, six cases in total:
+
+| change | broke | why |
+|---|---|---|
+| bare `0` renders as `None` in `_fe_tagged` | 152_itertools_module, 451_generator_yield_in_if, lib_collections_deque, lib_collections_deque_extend | raw unboxed `0`s reach it, so `[-1, 0, 1, 2]` printed `[-1, None, 1, 2]` |
+| re-encode `"any"` dict keys by tag | 221_struct_depth, 485_bare_dict_get_default_counting | raw str pointers read UNTAGGED and got `repr`'d, missing the slot the `str` arm wrote |
+
+The rule that fixes both: branch on the tag being inside the box range
+`[set(-8), int(-1)]` and pass everything else -- UNTAGGED, null, real
+instances -- through **unchanged**. `_lower_unbox_any` already uses exactly
+that range test; copy it rather than testing individual tags.
+
+Neither was caught by a filtered run. Both surfaced only in a full
+`baseline --check`, because the breakage lands in unrelated stdlib and
+container cases rather than near the code being changed.
+
+This is also the strongest argument for the phase ordering: these are symptoms
+of unknown values not being boxed at all. Splitting UNKNOWN out of `int` is
+what removes the un-boxed half, and until it does, every read-side fix has to
+carry a raw-value fallback.
 
 
-
-Every step is verified against the pinned baseline and must leave it at
-809/1142 exactly; both steps so far did.
 
 ### `None` and `bool` have no static type
 

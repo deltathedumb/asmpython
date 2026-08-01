@@ -1,0 +1,2216 @@
+; 2 func(s), 14 global(s)
+@d: ptr
+@n: ptr
+@__str_1: ptr = '__class__'
+@__str_2: ptr = 'start'
+@__str_3: ptr = 'stop'
+@__str_4: ptr = 'step'
+@__str_5: ptr = 'list index out of range'
+@__str_6: ptr = 'foo'
+@__str_7: ptr = "'"
+@__str_8: ptr = ''
+@__str_9: ptr = '%s\n'
+@__str_10: ptr = 'True'
+@__str_11: ptr = 'False'
+@__str_12: ptr = 'three'
+
+func get(%%arg_d: ptr, %%arg_k: ptr) -> i64 {
+  Lentry1:            ; block 0
+    %%t1: i64 = const 0
+    %%t2: ptr = alloca
+    store %%arg_d, %%t2
+    %%t3: ptr = alloca
+    store %%arg_k, %%t3
+    %%t4: ptr = load %%t2
+    %%t5: ptr = const 0
+    %%t6: ptr = alloca
+    %%t7: i64 = icmp.eq %%t4, %%t5
+    %%t45: ptr = alloca
+    %%t60: ptr = alloca
+    %%t99: ptr = alloca
+    %%t112: ptr = alloca
+    %%t116: ptr = alloca
+    br.t %%t7, Lanytagnone2, Lanytagheap4
+  Lanytagnone2:            ; block 1
+    %%t8: i64 = const -9
+    store %%t8, %%t6
+    br Lanytagend10
+  Lanytagrawint3:            ; block 2
+    %%t17: i64 = const -1000
+    store %%t17, %%t6
+    br Lanytagend10
+  Lanytagheap4:            ; block 3
+    %%t9: i64 = const 65536
+    %%t10: i64 = icmp.gt %%t4, %%t9
+    %%t11: i64 = const 7
+    %%t12: i64 = iand %%t4, %%t11
+    %%t13: i64 = const 0
+    %%t14: i64 = icmp.eq %%t12, %%t13
+    %%t15: i64 = iand %%t10, %%t14
+    br.t %%t15, Lanytagregcheck11, Lanytagrawint3
+  Lanytagboxcheck5:            ; block 4
+    %%t18: ptr = gep %%t4, 0
+    %%t19: i64 = load %%t18
+    %%t20: i64 = const -5711107564889042451
+    %%t21: i64 = icmp.eq %%t19, %%t20
+    br.t %%t21, Lanytagbox6, Lanytaginstcheck7
+  Lanytagbox6:            ; block 5
+    %%t22: ptr = gep %%t4, 8
+    %%t23: i64 = load %%t22
+    store %%t23, %%t6
+    br Lanytagend10
+  Lanytaginstcheck7:            ; block 6
+    %%t25: i64 = const 8
+    %%t24: i64 = icmp.ge %%t19, %%t25
+    %%t26: i64 = const 1073741824
+    %%t27: i64 = icmp.le %%t19, %%t26
+    %%t28: i64 = const 1
+    %%t29: i64 = isub %%t19, %%t28
+    %%t30: i64 = iand %%t19, %%t29
+    %%t31: i64 = const 0
+    %%t32: i64 = icmp.eq %%t30, %%t31
+    %%t33: i64 = iand %%t24, %%t27
+    %%t34: i64 = iand %%t33, %%t32
+    br.t %%t34, Lanytaglive8, Lanytagnotinst12
+  Lanytaglive8:            ; block 7
+    %%t36: ptr = gep %%t4, 16
+    %%t37: i64 = load %%t36
+    %%t38: i64 = const 65536
+    %%t39: i64 = icmp.gt %%t37, %%t38
+    br.t %%t39, Lanytaguntagged13, Lanytagdictish9
+  Lanytagdictish9:            ; block 8
+    %%t41: i64 = const -1000
+    %%t43: ptr = global_addr __str_1
+    %%t42: i64 = call _abi_dict_get_default, %%t4, %%t43, %%t41
+    store %%t42, %%t6
+    br Lanytagend10
+  Lanytagend10:            ; block 9
+    %%t44: i64 = load %%t6
+    store %%t4, %%t45
+    %%t46: i64 = const -2
+    %%t47: i64 = icmp.eq %%t44, %%t46
+    %%t49: i64 = const -8
+    %%t50: i64 = const -1
+    %%t51: i64 = icmp.ge %%t44, %%t49
+    %%t52: i64 = icmp.le %%t44, %%t50
+    %%t48: i64 = iand %%t51, %%t52
+    br.t %%t48, Lanyunboxboxed14, Lanyunboxend17
+  Lanytagregcheck11:            ; block 10
+    %%t16: i64 = call _abi_gc_is_object, %%t4
+    br.t %%t16, Lanytagboxcheck5, Lanytagrawint3
+  Lanytagnotinst12:            ; block 11
+    %%t35: i64 = const -1000
+    store %%t35, %%t6
+    br Lanytagend10
+  Lanytaguntagged13:            ; block 12
+    %%t40: i64 = const -1000
+    store %%t40, %%t6
+    br Lanytagend10
+  Lanyunboxboxed14:            ; block 13
+    br.t %%t47, Lanyunboxfloat15, Lanyunboxpayload16
+  Lanyunboxfloat15:            ; block 14
+    %%t55: ptr = gep %%t4, 16
+    %%t56: i64 = load %%t55
+    store %%t56, %%t45
+    br Lanyunboxend17
+  Lanyunboxpayload16:            ; block 15
+    %%t53: ptr = gep %%t4, 16
+    %%t54: i64 = load %%t53
+    store %%t54, %%t45
+    br Lanyunboxend17
+  Lanyunboxend17:            ; block 16
+    %%t57: ptr = load %%t45
+    %%t58: ptr = load %%t3
+    %%t59: ptr = const 0
+    %%t61: i64 = icmp.eq %%t58, %%t59
+    br.t %%t61, Lanytagnone18, Lanytagheap20
+  Lanytagnone18:            ; block 17
+    %%t62: i64 = const -9
+    store %%t62, %%t60
+    br Lanytagend26
+  Lanytagrawint19:            ; block 18
+    %%t71: i64 = const -1000
+    store %%t71, %%t60
+    br Lanytagend26
+  Lanytagheap20:            ; block 19
+    %%t63: i64 = const 65536
+    %%t64: i64 = icmp.gt %%t58, %%t63
+    %%t65: i64 = const 7
+    %%t66: i64 = iand %%t58, %%t65
+    %%t67: i64 = const 0
+    %%t68: i64 = icmp.eq %%t66, %%t67
+    %%t69: i64 = iand %%t64, %%t68
+    br.t %%t69, Lanytagregcheck27, Lanytagrawint19
+  Lanytagboxcheck21:            ; block 20
+    %%t72: ptr = gep %%t58, 0
+    %%t73: i64 = load %%t72
+    %%t74: i64 = const -5711107564889042451
+    %%t75: i64 = icmp.eq %%t73, %%t74
+    br.t %%t75, Lanytagbox22, Lanytaginstcheck23
+  Lanytagbox22:            ; block 21
+    %%t76: ptr = gep %%t58, 8
+    %%t77: i64 = load %%t76
+    store %%t77, %%t60
+    br Lanytagend26
+  Lanytaginstcheck23:            ; block 22
+    %%t79: i64 = const 8
+    %%t78: i64 = icmp.ge %%t73, %%t79
+    %%t80: i64 = const 1073741824
+    %%t81: i64 = icmp.le %%t73, %%t80
+    %%t82: i64 = const 1
+    %%t83: i64 = isub %%t73, %%t82
+    %%t84: i64 = iand %%t73, %%t83
+    %%t85: i64 = const 0
+    %%t86: i64 = icmp.eq %%t84, %%t85
+    %%t87: i64 = iand %%t78, %%t81
+    %%t88: i64 = iand %%t87, %%t86
+    br.t %%t88, Lanytaglive24, Lanytagnotinst28
+  Lanytaglive24:            ; block 23
+    %%t90: ptr = gep %%t58, 16
+    %%t91: i64 = load %%t90
+    %%t92: i64 = const 65536
+    %%t93: i64 = icmp.gt %%t91, %%t92
+    br.t %%t93, Lanytaguntagged29, Lanytagdictish25
+  Lanytagdictish25:            ; block 24
+    %%t95: i64 = const -1000
+    %%t97: ptr = global_addr __str_1
+    %%t96: i64 = call _abi_dict_get_default, %%t58, %%t97, %%t95
+    store %%t96, %%t60
+    br Lanytagend26
+  Lanytagend26:            ; block 25
+    %%t98: i64 = load %%t60
+    store %%t58, %%t99
+    %%t100: i64 = const -2
+    %%t101: i64 = icmp.eq %%t98, %%t100
+    %%t103: i64 = const -8
+    %%t104: i64 = const -1
+    %%t105: i64 = icmp.ge %%t98, %%t103
+    %%t106: i64 = icmp.le %%t98, %%t104
+    %%t102: i64 = iand %%t105, %%t106
+    br.t %%t102, Lanyunboxboxed30, Lanyunboxend33
+  Lanytagregcheck27:            ; block 26
+    %%t70: i64 = call _abi_gc_is_object, %%t58
+    br.t %%t70, Lanytagboxcheck21, Lanytagrawint19
+  Lanytagnotinst28:            ; block 27
+    %%t89: i64 = const -1000
+    store %%t89, %%t60
+    br Lanytagend26
+  Lanytaguntagged29:            ; block 28
+    %%t94: i64 = const -1000
+    store %%t94, %%t60
+    br Lanytagend26
+  Lanyunboxboxed30:            ; block 29
+    br.t %%t101, Lanyunboxfloat31, Lanyunboxpayload32
+  Lanyunboxfloat31:            ; block 30
+    %%t109: ptr = gep %%t58, 16
+    %%t110: i64 = load %%t109
+    store %%t110, %%t99
+    br Lanyunboxend33
+  Lanyunboxpayload32:            ; block 31
+    %%t107: ptr = gep %%t58, 16
+    %%t108: i64 = load %%t107
+    store %%t108, %%t99
+    br Lanyunboxend33
+  Lanyunboxend33:            ; block 32
+    %%t111: ptr = load %%t99
+    %%t113: i64 = const 65536
+    %%t114: i64 = icmp.gt %%t111, %%t113
+    br.t %%t114, Ldynslice_maybeptr_166841867800034, Ldynslice_index_166841867800036
+  Ldynslice_maybeptr_166841867800034:            ; block 33
+    %%t115: ptr = const 0
+    %%t117: i64 = icmp.eq %%t111, %%t115
+    br.t %%t117, Lanytagnone38, Lanytagheap40
+  Ldynslice_slice_166841867800035:            ; block 34
+    %%t157: i64 = const 0
+    %%t159: ptr = global_addr __str_2
+    %%t158: i64 = call _abi_dict_get_default, %%t111, %%t159, %%t157
+    %%t161: ptr = global_addr __str_3
+    %%t160: i64 = call _abi_dict_get_default, %%t111, %%t161, %%t157
+    %%t163: i64 = const 1
+    %%t164: ptr = global_addr __str_4
+    %%t162: i64 = call _abi_dict_get_default, %%t111, %%t164, %%t163
+    %%t165: ptr = call _abi_list_slice_step, %%t57, %%t158, %%t160, %%t162
+    store %%t165, %%t112
+    br Ldynslice_end_166841867800037
+  Ldynslice_index_166841867800036:            ; block 35
+    %%t166: ptr = gep %%t57, 8
+    %%t167: i64 = load %%t166
+    %%t168: i64 = ineg %%t167
+    %%t169: i64 = icmp.ge %%t111, %%t168
+    %%t170: i64 = icmp.lt %%t111, %%t167
+    %%t171: i64 = iand %%t169, %%t170
+    br.t %%t171, Lidxoob_ok_166841867800051, Lidxoob_raise_166841867800050
+  Ldynslice_end_166841867800037:            ; block 36
+    %%t186: ptr = load %%t112
+    ret %%t186
+  Lanytagnone38:            ; block 37
+    %%t118: i64 = const -9
+    store %%t118, %%t116
+    br Lanytagend46
+  Lanytagrawint39:            ; block 38
+    %%t127: i64 = const -1000
+    store %%t127, %%t116
+    br Lanytagend46
+  Lanytagheap40:            ; block 39
+    %%t119: i64 = const 65536
+    %%t120: i64 = icmp.gt %%t111, %%t119
+    %%t121: i64 = const 7
+    %%t122: i64 = iand %%t111, %%t121
+    %%t123: i64 = const 0
+    %%t124: i64 = icmp.eq %%t122, %%t123
+    %%t125: i64 = iand %%t120, %%t124
+    br.t %%t125, Lanytagregcheck47, Lanytagrawint39
+  Lanytagboxcheck41:            ; block 40
+    %%t128: ptr = gep %%t111, 0
+    %%t129: i64 = load %%t128
+    %%t130: i64 = const -5711107564889042451
+    %%t131: i64 = icmp.eq %%t129, %%t130
+    br.t %%t131, Lanytagbox42, Lanytaginstcheck43
+  Lanytagbox42:            ; block 41
+    %%t132: ptr = gep %%t111, 8
+    %%t133: i64 = load %%t132
+    store %%t133, %%t116
+    br Lanytagend46
+  Lanytaginstcheck43:            ; block 42
+    %%t135: i64 = const 8
+    %%t134: i64 = icmp.ge %%t129, %%t135
+    %%t136: i64 = const 1073741824
+    %%t137: i64 = icmp.le %%t129, %%t136
+    %%t138: i64 = const 1
+    %%t139: i64 = isub %%t129, %%t138
+    %%t140: i64 = iand %%t129, %%t139
+    %%t141: i64 = const 0
+    %%t142: i64 = icmp.eq %%t140, %%t141
+    %%t143: i64 = iand %%t134, %%t137
+    %%t144: i64 = iand %%t143, %%t142
+    br.t %%t144, Lanytaglive44, Lanytagnotinst48
+  Lanytaglive44:            ; block 43
+    %%t146: ptr = gep %%t111, 16
+    %%t147: i64 = load %%t146
+    %%t148: i64 = const 65536
+    %%t149: i64 = icmp.gt %%t147, %%t148
+    br.t %%t149, Lanytaguntagged49, Lanytagdictish45
+  Lanytagdictish45:            ; block 44
+    %%t151: i64 = const -1000
+    %%t153: ptr = global_addr __str_1
+    %%t152: i64 = call _abi_dict_get_default, %%t111, %%t153, %%t151
+    store %%t152, %%t116
+    br Lanytagend46
+  Lanytagend46:            ; block 45
+    %%t154: i64 = load %%t116
+    %%t155: i64 = const -13
+    %%t156: i64 = icmp.eq %%t154, %%t155
+    br.t %%t156, Ldynslice_slice_166841867800035, Ldynslice_index_166841867800036
+  Lanytagregcheck47:            ; block 46
+    %%t126: i64 = call _abi_gc_is_object, %%t111
+    br.t %%t126, Lanytagboxcheck41, Lanytagrawint39
+  Lanytagnotinst48:            ; block 47
+    %%t145: i64 = const -1000
+    store %%t145, %%t116
+    br Lanytagend46
+  Lanytaguntagged49:            ; block 48
+    %%t150: i64 = const -1000
+    store %%t150, %%t116
+    br Lanytagend46
+  Lidxoob_raise_166841867800050:            ; block 49
+    %%t172: ptr = global_addr __str_5
+    %%t173: i64 = const 9
+    call _abi_raise, %%t172, %%t173
+    br Lidxoob_ok_166841867800051
+  Lidxoob_ok_166841867800051:            ; block 50
+    %%t174: ptr = gep %%t57, 8
+    %%t175: i64 = load %%t174
+    %%t176: i64 = const 0
+    %%t177: i64 = icmp.lt %%t111, %%t176
+    %%t178: i64 = imul %%t177, %%t175
+    %%t179: i64 = iadd %%t111, %%t178
+    %%t180: i64 = const 8
+    %%t181: i64 = imul %%t179, %%t180
+    %%t182: ptr = gep %%t57, 16
+    %%t183: ptr = load %%t182
+    %%t184: ptr = gep %%t183, %%t181
+    %%t185: i64 = load %%t184
+    store %%t185, %%t112
+    br Ldynslice_end_166841867800037
+}
+
+func main() -> i64 {
+  Lentry1:            ; block 0
+    %%t1: i64 = const 0
+    %%t2: ptr = call _abi_new_instance
+    %%t3: ptr = global_addr d
+    store %%t2, %%t3
+    %%t4: ptr = global_addr d
+    %%t5: ptr = load %%t4
+    %%t6: ptr = global_addr __str_6
+    %%t7: i64 = const 7
+    call _abi_dict_set, %%t5, %%t6, %%t7
+    %%t8: ptr = global_addr d
+    %%t9: ptr = load %%t8
+    %%t10: ptr = global_addr __str_6
+    %%t11: i64 = call _abi_dict_contains, %%t9, %%t10
+    %%t21: ptr = alloca
+    %%t33: ptr = alloca
+    %%t72: ptr = alloca
+    %%t76: ptr = alloca
+    %%t115: ptr = alloca
+    %%t135: ptr = alloca
+    %%t174: ptr = alloca
+    %%t193: ptr = alloca
+    %%t232: ptr = alloca
+    %%t245: ptr = alloca
+    %%t251: ptr = alloca
+    %%t290: ptr = alloca
+    %%t306: ptr = alloca
+    %%t345: ptr = alloca
+    %%t363: ptr = alloca
+    %%t402: ptr = alloca
+    %%t421: ptr = alloca
+    %%t460: ptr = alloca
+    %%t476: ptr = alloca
+    %%t515: ptr = alloca
+    %%t531: ptr = alloca
+    %%t552: ptr = alloca
+    %%t591: ptr = alloca
+    %%t595: ptr = alloca
+    %%t634: ptr = alloca
+    %%t654: ptr = alloca
+    %%t693: ptr = alloca
+    %%t712: ptr = alloca
+    %%t751: ptr = alloca
+    %%t764: ptr = alloca
+    %%t770: ptr = alloca
+    %%t809: ptr = alloca
+    %%t825: ptr = alloca
+    %%t864: ptr = alloca
+    %%t882: ptr = alloca
+    %%t921: ptr = alloca
+    %%t940: ptr = alloca
+    %%t979: ptr = alloca
+    %%t995: ptr = alloca
+    %%t1034: ptr = alloca
+    %%t1050: ptr = alloca
+    br.t %%t11, Lkeyerr_ok_16684189364003, Lkeyerr_raise_16684189364002
+  Lkeyerr_raise_16684189364002:            ; block 1
+    %%t12: ptr = global_addr __str_7
+    %%t13: ptr = call _abi_str_concat, %%t12, %%t10
+    %%t14: ptr = call _abi_str_concat, %%t13, %%t12
+    %%t15: i64 = const 10
+    call _abi_raise, %%t14, %%t15
+    br Lkeyerr_ok_16684189364003
+  Lkeyerr_ok_16684189364003:            ; block 2
+    %%t16: i64 = const 0
+    %%t17: i64 = call _abi_dict_get_default, %%t9, %%t10, %%t16
+    %%t18: i64 = const 10
+    %%t19: ptr = global_addr __str_8
+    %%t20: ptr = call _abi_int_to_base, %%t17, %%t18, %%t19
+    store %%t20, %%t21
+    %%t22: ptr = load %%t21
+    %%t23: ptr = global_addr __str_9
+    call printf, %%t23, %%t22
+    %%t24: ptr = global_addr d
+    %%t25: ptr = load %%t24
+    %%t26: i64 = const -6
+    %%t27: ptr = call _abi_new_box, %%t26, %%t25
+    %%t28: ptr = global_addr __str_6
+    %%t29: i64 = const -3
+    %%t30: ptr = call _abi_new_box, %%t29, %%t28
+    %%t31: ptr = call get, %%t27, %%t30
+    %%t32: ptr = const 0
+    %%t34: i64 = icmp.eq %%t31, %%t32
+    br.t %%t34, Lanytagnone4, Lanytagheap6
+  Lanytagnone4:            ; block 3
+    %%t35: i64 = const -9
+    store %%t35, %%t33
+    br Lanytagend12
+  Lanytagrawint5:            ; block 4
+    %%t44: i64 = const -1000
+    store %%t44, %%t33
+    br Lanytagend12
+  Lanytagheap6:            ; block 5
+    %%t36: i64 = const 65536
+    %%t37: i64 = icmp.gt %%t31, %%t36
+    %%t38: i64 = const 7
+    %%t39: i64 = iand %%t31, %%t38
+    %%t40: i64 = const 0
+    %%t41: i64 = icmp.eq %%t39, %%t40
+    %%t42: i64 = iand %%t37, %%t41
+    br.t %%t42, Lanytagregcheck13, Lanytagrawint5
+  Lanytagboxcheck7:            ; block 6
+    %%t45: ptr = gep %%t31, 0
+    %%t46: i64 = load %%t45
+    %%t47: i64 = const -5711107564889042451
+    %%t48: i64 = icmp.eq %%t46, %%t47
+    br.t %%t48, Lanytagbox8, Lanytaginstcheck9
+  Lanytagbox8:            ; block 7
+    %%t49: ptr = gep %%t31, 8
+    %%t50: i64 = load %%t49
+    store %%t50, %%t33
+    br Lanytagend12
+  Lanytaginstcheck9:            ; block 8
+    %%t52: i64 = const 8
+    %%t51: i64 = icmp.ge %%t46, %%t52
+    %%t53: i64 = const 1073741824
+    %%t54: i64 = icmp.le %%t46, %%t53
+    %%t55: i64 = const 1
+    %%t56: i64 = isub %%t46, %%t55
+    %%t57: i64 = iand %%t46, %%t56
+    %%t58: i64 = const 0
+    %%t59: i64 = icmp.eq %%t57, %%t58
+    %%t60: i64 = iand %%t51, %%t54
+    %%t61: i64 = iand %%t60, %%t59
+    br.t %%t61, Lanytaglive10, Lanytagnotinst14
+  Lanytaglive10:            ; block 9
+    %%t63: ptr = gep %%t31, 16
+    %%t64: i64 = load %%t63
+    %%t65: i64 = const 65536
+    %%t66: i64 = icmp.gt %%t64, %%t65
+    br.t %%t66, Lanytaguntagged15, Lanytagdictish11
+  Lanytagdictish11:            ; block 10
+    %%t68: i64 = const -1000
+    %%t70: ptr = global_addr __str_1
+    %%t69: i64 = call _abi_dict_get_default, %%t31, %%t70, %%t68
+    store %%t69, %%t33
+    br Lanytagend12
+  Lanytagend12:            ; block 11
+    %%t71: i64 = load %%t33
+    %%t73: i64 = const -4
+    %%t74: i64 = icmp.eq %%t71, %%t73
+    br.t %%t74, Lfmtanybool18, Lfmtanyafterbool19
+  Lanytagregcheck13:            ; block 12
+    %%t43: i64 = call _abi_gc_is_object, %%t31
+    br.t %%t43, Lanytagboxcheck7, Lanytagrawint5
+  Lanytagnotinst14:            ; block 13
+    %%t62: i64 = const -1000
+    store %%t62, %%t33
+    br Lanytagend12
+  Lanytaguntagged15:            ; block 14
+    %%t67: i64 = const -1000
+    store %%t67, %%t33
+    br Lanytagend12
+  Lfmtanyend16:            ; block 15
+    %%t530: ptr = load %%t72
+    store %%t530, %%t531
+    %%t532: ptr = load %%t531
+    %%t533: ptr = global_addr __str_9
+    call printf, %%t533, %%t532
+    %%t534: ptr = call _abi_new_instance
+    %%t535: ptr = global_addr n
+    store %%t534, %%t535
+    %%t536: ptr = global_addr n
+    %%t537: ptr = load %%t536
+    %%t538: i64 = const 3
+    %%t539: i64 = const 10
+    %%t540: ptr = global_addr __str_8
+    %%t541: ptr = call _abi_int_to_base, %%t538, %%t539, %%t540
+    %%t542: ptr = global_addr __str_12
+    call _abi_dict_set, %%t537, %%t541, %%t542
+    %%t543: ptr = global_addr n
+    %%t544: ptr = load %%t543
+    %%t545: i64 = const -6
+    %%t546: ptr = call _abi_new_box, %%t545, %%t544
+    %%t547: i64 = const 3
+    %%t548: i64 = const -1
+    %%t549: ptr = call _abi_new_box, %%t548, %%t547
+    %%t550: ptr = call get, %%t546, %%t549
+    %%t551: ptr = const 0
+    %%t553: i64 = icmp.eq %%t550, %%t551
+    br.t %%t553, Lanytagnone162, Lanytagheap164
+  Lfmtanyfallback17:            ; block 16
+    %%t475: ptr = const 0
+    %%t477: i64 = icmp.eq %%t31, %%t475
+    br.t %%t477, Lanytagnone146, Lanytagheap148
+  Lfmtanybool18:            ; block 17
+    %%t75: ptr = const 0
+    %%t77: i64 = icmp.eq %%t31, %%t75
+    br.t %%t77, Lanytagnone20, Lanytagheap22
+  Lfmtanyafterbool19:            ; block 18
+    %%t132: i64 = const -1
+    %%t133: i64 = icmp.eq %%t71, %%t132
+    br.t %%t133, Lfmtanyint38, Lfmtanyafterint39
+  Lanytagnone20:            ; block 19
+    %%t78: i64 = const -9
+    store %%t78, %%t76
+    br Lanytagend28
+  Lanytagrawint21:            ; block 20
+    %%t87: i64 = const -1000
+    store %%t87, %%t76
+    br Lanytagend28
+  Lanytagheap22:            ; block 21
+    %%t79: i64 = const 65536
+    %%t80: i64 = icmp.gt %%t31, %%t79
+    %%t81: i64 = const 7
+    %%t82: i64 = iand %%t31, %%t81
+    %%t83: i64 = const 0
+    %%t84: i64 = icmp.eq %%t82, %%t83
+    %%t85: i64 = iand %%t80, %%t84
+    br.t %%t85, Lanytagregcheck29, Lanytagrawint21
+  Lanytagboxcheck23:            ; block 22
+    %%t88: ptr = gep %%t31, 0
+    %%t89: i64 = load %%t88
+    %%t90: i64 = const -5711107564889042451
+    %%t91: i64 = icmp.eq %%t89, %%t90
+    br.t %%t91, Lanytagbox24, Lanytaginstcheck25
+  Lanytagbox24:            ; block 23
+    %%t92: ptr = gep %%t31, 8
+    %%t93: i64 = load %%t92
+    store %%t93, %%t76
+    br Lanytagend28
+  Lanytaginstcheck25:            ; block 24
+    %%t95: i64 = const 8
+    %%t94: i64 = icmp.ge %%t89, %%t95
+    %%t96: i64 = const 1073741824
+    %%t97: i64 = icmp.le %%t89, %%t96
+    %%t98: i64 = const 1
+    %%t99: i64 = isub %%t89, %%t98
+    %%t100: i64 = iand %%t89, %%t99
+    %%t101: i64 = const 0
+    %%t102: i64 = icmp.eq %%t100, %%t101
+    %%t103: i64 = iand %%t94, %%t97
+    %%t104: i64 = iand %%t103, %%t102
+    br.t %%t104, Lanytaglive26, Lanytagnotinst30
+  Lanytaglive26:            ; block 25
+    %%t106: ptr = gep %%t31, 16
+    %%t107: i64 = load %%t106
+    %%t108: i64 = const 65536
+    %%t109: i64 = icmp.gt %%t107, %%t108
+    br.t %%t109, Lanytaguntagged31, Lanytagdictish27
+  Lanytagdictish27:            ; block 26
+    %%t111: i64 = const -1000
+    %%t113: ptr = global_addr __str_1
+    %%t112: i64 = call _abi_dict_get_default, %%t31, %%t113, %%t111
+    store %%t112, %%t76
+    br Lanytagend28
+  Lanytagend28:            ; block 27
+    %%t114: i64 = load %%t76
+    store %%t31, %%t115
+    %%t116: i64 = const -2
+    %%t117: i64 = icmp.eq %%t114, %%t116
+    %%t119: i64 = const -8
+    %%t120: i64 = const -1
+    %%t121: i64 = icmp.ge %%t114, %%t119
+    %%t122: i64 = icmp.le %%t114, %%t120
+    %%t118: i64 = iand %%t121, %%t122
+    br.t %%t118, Lanyunboxboxed32, Lanyunboxend35
+  Lanytagregcheck29:            ; block 28
+    %%t86: i64 = call _abi_gc_is_object, %%t31
+    br.t %%t86, Lanytagboxcheck23, Lanytagrawint21
+  Lanytagnotinst30:            ; block 29
+    %%t105: i64 = const -1000
+    store %%t105, %%t76
+    br Lanytagend28
+  Lanytaguntagged31:            ; block 30
+    %%t110: i64 = const -1000
+    store %%t110, %%t76
+    br Lanytagend28
+  Lanyunboxboxed32:            ; block 31
+    br.t %%t117, Lanyunboxfloat33, Lanyunboxpayload34
+  Lanyunboxfloat33:            ; block 32
+    %%t125: ptr = gep %%t31, 16
+    %%t126: i64 = load %%t125
+    store %%t126, %%t115
+    br Lanyunboxend35
+  Lanyunboxpayload34:            ; block 33
+    %%t123: ptr = gep %%t31, 16
+    %%t124: i64 = load %%t123
+    store %%t124, %%t115
+    br Lanyunboxend35
+  Lanyunboxend35:            ; block 34
+    %%t127: ptr = load %%t115
+    %%t128: i64 = const 0
+    %%t129: i64 = icmp.ne %%t127, %%t128
+    br.t %%t129, Lfmtanybooltrue36, Lfmtanyboolfalse37
+  Lfmtanybooltrue36:            ; block 35
+    %%t130: ptr = global_addr __str_10
+    store %%t130, %%t72
+    br Lfmtanyend16
+  Lfmtanyboolfalse37:            ; block 36
+    %%t131: ptr = global_addr __str_11
+    store %%t131, %%t72
+    br Lfmtanyend16
+  Lfmtanyint38:            ; block 37
+    %%t134: ptr = const 0
+    %%t136: i64 = icmp.eq %%t31, %%t134
+    br.t %%t136, Lanytagnone40, Lanytagheap42
+  Lfmtanyafterint39:            ; block 38
+    %%t190: i64 = const -2
+    %%t191: i64 = icmp.eq %%t71, %%t190
+    br.t %%t191, Lfmtanyfloat56, Lfmtanyafterfloat57
+  Lanytagnone40:            ; block 39
+    %%t137: i64 = const -9
+    store %%t137, %%t135
+    br Lanytagend48
+  Lanytagrawint41:            ; block 40
+    %%t146: i64 = const -1000
+    store %%t146, %%t135
+    br Lanytagend48
+  Lanytagheap42:            ; block 41
+    %%t138: i64 = const 65536
+    %%t139: i64 = icmp.gt %%t31, %%t138
+    %%t140: i64 = const 7
+    %%t141: i64 = iand %%t31, %%t140
+    %%t142: i64 = const 0
+    %%t143: i64 = icmp.eq %%t141, %%t142
+    %%t144: i64 = iand %%t139, %%t143
+    br.t %%t144, Lanytagregcheck49, Lanytagrawint41
+  Lanytagboxcheck43:            ; block 42
+    %%t147: ptr = gep %%t31, 0
+    %%t148: i64 = load %%t147
+    %%t149: i64 = const -5711107564889042451
+    %%t150: i64 = icmp.eq %%t148, %%t149
+    br.t %%t150, Lanytagbox44, Lanytaginstcheck45
+  Lanytagbox44:            ; block 43
+    %%t151: ptr = gep %%t31, 8
+    %%t152: i64 = load %%t151
+    store %%t152, %%t135
+    br Lanytagend48
+  Lanytaginstcheck45:            ; block 44
+    %%t154: i64 = const 8
+    %%t153: i64 = icmp.ge %%t148, %%t154
+    %%t155: i64 = const 1073741824
+    %%t156: i64 = icmp.le %%t148, %%t155
+    %%t157: i64 = const 1
+    %%t158: i64 = isub %%t148, %%t157
+    %%t159: i64 = iand %%t148, %%t158
+    %%t160: i64 = const 0
+    %%t161: i64 = icmp.eq %%t159, %%t160
+    %%t162: i64 = iand %%t153, %%t156
+    %%t163: i64 = iand %%t162, %%t161
+    br.t %%t163, Lanytaglive46, Lanytagnotinst50
+  Lanytaglive46:            ; block 45
+    %%t165: ptr = gep %%t31, 16
+    %%t166: i64 = load %%t165
+    %%t167: i64 = const 65536
+    %%t168: i64 = icmp.gt %%t166, %%t167
+    br.t %%t168, Lanytaguntagged51, Lanytagdictish47
+  Lanytagdictish47:            ; block 46
+    %%t170: i64 = const -1000
+    %%t172: ptr = global_addr __str_1
+    %%t171: i64 = call _abi_dict_get_default, %%t31, %%t172, %%t170
+    store %%t171, %%t135
+    br Lanytagend48
+  Lanytagend48:            ; block 47
+    %%t173: i64 = load %%t135
+    store %%t31, %%t174
+    %%t175: i64 = const -2
+    %%t176: i64 = icmp.eq %%t173, %%t175
+    %%t178: i64 = const -8
+    %%t179: i64 = const -1
+    %%t180: i64 = icmp.ge %%t173, %%t178
+    %%t181: i64 = icmp.le %%t173, %%t179
+    %%t177: i64 = iand %%t180, %%t181
+    br.t %%t177, Lanyunboxboxed52, Lanyunboxend55
+  Lanytagregcheck49:            ; block 48
+    %%t145: i64 = call _abi_gc_is_object, %%t31
+    br.t %%t145, Lanytagboxcheck43, Lanytagrawint41
+  Lanytagnotinst50:            ; block 49
+    %%t164: i64 = const -1000
+    store %%t164, %%t135
+    br Lanytagend48
+  Lanytaguntagged51:            ; block 50
+    %%t169: i64 = const -1000
+    store %%t169, %%t135
+    br Lanytagend48
+  Lanyunboxboxed52:            ; block 51
+    br.t %%t176, Lanyunboxfloat53, Lanyunboxpayload54
+  Lanyunboxfloat53:            ; block 52
+    %%t184: ptr = gep %%t31, 16
+    %%t185: i64 = load %%t184
+    store %%t185, %%t174
+    br Lanyunboxend55
+  Lanyunboxpayload54:            ; block 53
+    %%t182: ptr = gep %%t31, 16
+    %%t183: i64 = load %%t182
+    store %%t183, %%t174
+    br Lanyunboxend55
+  Lanyunboxend55:            ; block 54
+    %%t186: ptr = load %%t174
+    %%t187: i64 = const 10
+    %%t188: ptr = global_addr __str_8
+    %%t189: ptr = call _abi_int_to_base, %%t186, %%t187, %%t188
+    store %%t189, %%t72
+    br Lfmtanyend16
+  Lfmtanyfloat56:            ; block 55
+    %%t192: ptr = const 0
+    %%t194: i64 = icmp.eq %%t31, %%t192
+    br.t %%t194, Lanytagnone58, Lanytagheap60
+  Lfmtanyafterfloat57:            ; block 56
+    %%t248: i64 = const -3
+    %%t249: i64 = icmp.eq %%t71, %%t248
+    br.t %%t249, Lfmtanystr74, Lfmtanyafterstr75
+  Lanytagnone58:            ; block 57
+    %%t195: i64 = const -9
+    store %%t195, %%t193
+    br Lanytagend66
+  Lanytagrawint59:            ; block 58
+    %%t204: i64 = const -1000
+    store %%t204, %%t193
+    br Lanytagend66
+  Lanytagheap60:            ; block 59
+    %%t196: i64 = const 65536
+    %%t197: i64 = icmp.gt %%t31, %%t196
+    %%t198: i64 = const 7
+    %%t199: i64 = iand %%t31, %%t198
+    %%t200: i64 = const 0
+    %%t201: i64 = icmp.eq %%t199, %%t200
+    %%t202: i64 = iand %%t197, %%t201
+    br.t %%t202, Lanytagregcheck67, Lanytagrawint59
+  Lanytagboxcheck61:            ; block 60
+    %%t205: ptr = gep %%t31, 0
+    %%t206: i64 = load %%t205
+    %%t207: i64 = const -5711107564889042451
+    %%t208: i64 = icmp.eq %%t206, %%t207
+    br.t %%t208, Lanytagbox62, Lanytaginstcheck63
+  Lanytagbox62:            ; block 61
+    %%t209: ptr = gep %%t31, 8
+    %%t210: i64 = load %%t209
+    store %%t210, %%t193
+    br Lanytagend66
+  Lanytaginstcheck63:            ; block 62
+    %%t212: i64 = const 8
+    %%t211: i64 = icmp.ge %%t206, %%t212
+    %%t213: i64 = const 1073741824
+    %%t214: i64 = icmp.le %%t206, %%t213
+    %%t215: i64 = const 1
+    %%t216: i64 = isub %%t206, %%t215
+    %%t217: i64 = iand %%t206, %%t216
+    %%t218: i64 = const 0
+    %%t219: i64 = icmp.eq %%t217, %%t218
+    %%t220: i64 = iand %%t211, %%t214
+    %%t221: i64 = iand %%t220, %%t219
+    br.t %%t221, Lanytaglive64, Lanytagnotinst68
+  Lanytaglive64:            ; block 63
+    %%t223: ptr = gep %%t31, 16
+    %%t224: i64 = load %%t223
+    %%t225: i64 = const 65536
+    %%t226: i64 = icmp.gt %%t224, %%t225
+    br.t %%t226, Lanytaguntagged69, Lanytagdictish65
+  Lanytagdictish65:            ; block 64
+    %%t228: i64 = const -1000
+    %%t230: ptr = global_addr __str_1
+    %%t229: i64 = call _abi_dict_get_default, %%t31, %%t230, %%t228
+    store %%t229, %%t193
+    br Lanytagend66
+  Lanytagend66:            ; block 65
+    %%t231: i64 = load %%t193
+    store %%t31, %%t232
+    %%t233: i64 = const -2
+    %%t234: i64 = icmp.eq %%t231, %%t233
+    %%t236: i64 = const -8
+    %%t237: i64 = const -1
+    %%t238: i64 = icmp.ge %%t231, %%t236
+    %%t239: i64 = icmp.le %%t231, %%t237
+    %%t235: i64 = iand %%t238, %%t239
+    br.t %%t235, Lanyunboxboxed70, Lanyunboxend73
+  Lanytagregcheck67:            ; block 66
+    %%t203: i64 = call _abi_gc_is_object, %%t31
+    br.t %%t203, Lanytagboxcheck61, Lanytagrawint59
+  Lanytagnotinst68:            ; block 67
+    %%t222: i64 = const -1000
+    store %%t222, %%t193
+    br Lanytagend66
+  Lanytaguntagged69:            ; block 68
+    %%t227: i64 = const -1000
+    store %%t227, %%t193
+    br Lanytagend66
+  Lanyunboxboxed70:            ; block 69
+    br.t %%t234, Lanyunboxfloat71, Lanyunboxpayload72
+  Lanyunboxfloat71:            ; block 70
+    %%t242: ptr = gep %%t31, 16
+    %%t243: i64 = load %%t242
+    store %%t243, %%t232
+    br Lanyunboxend73
+  Lanyunboxpayload72:            ; block 71
+    %%t240: ptr = gep %%t31, 16
+    %%t241: i64 = load %%t240
+    store %%t241, %%t232
+    br Lanyunboxend73
+  Lanyunboxend73:            ; block 72
+    %%t244: ptr = load %%t232
+    store %%t244, %%t245
+    %%t246: f64 = load %%t245
+    %%t247: ptr = call _abi_float_to_str, %%t246
+    store %%t247, %%t72
+    br Lfmtanyend16
+  Lfmtanystr74:            ; block 73
+    %%t250: ptr = const 0
+    %%t252: i64 = icmp.eq %%t31, %%t250
+    br.t %%t252, Lanytagnone76, Lanytagheap78
+  Lfmtanyafterstr75:            ; block 74
+    %%t303: i64 = const -5
+    %%t304: i64 = icmp.eq %%t71, %%t303
+    br.t %%t304, Lfmtanylist92, Lfmtanyafterlist93
+  Lanytagnone76:            ; block 75
+    %%t253: i64 = const -9
+    store %%t253, %%t251
+    br Lanytagend84
+  Lanytagrawint77:            ; block 76
+    %%t262: i64 = const -1000
+    store %%t262, %%t251
+    br Lanytagend84
+  Lanytagheap78:            ; block 77
+    %%t254: i64 = const 65536
+    %%t255: i64 = icmp.gt %%t31, %%t254
+    %%t256: i64 = const 7
+    %%t257: i64 = iand %%t31, %%t256
+    %%t258: i64 = const 0
+    %%t259: i64 = icmp.eq %%t257, %%t258
+    %%t260: i64 = iand %%t255, %%t259
+    br.t %%t260, Lanytagregcheck85, Lanytagrawint77
+  Lanytagboxcheck79:            ; block 78
+    %%t263: ptr = gep %%t31, 0
+    %%t264: i64 = load %%t263
+    %%t265: i64 = const -5711107564889042451
+    %%t266: i64 = icmp.eq %%t264, %%t265
+    br.t %%t266, Lanytagbox80, Lanytaginstcheck81
+  Lanytagbox80:            ; block 79
+    %%t267: ptr = gep %%t31, 8
+    %%t268: i64 = load %%t267
+    store %%t268, %%t251
+    br Lanytagend84
+  Lanytaginstcheck81:            ; block 80
+    %%t270: i64 = const 8
+    %%t269: i64 = icmp.ge %%t264, %%t270
+    %%t271: i64 = const 1073741824
+    %%t272: i64 = icmp.le %%t264, %%t271
+    %%t273: i64 = const 1
+    %%t274: i64 = isub %%t264, %%t273
+    %%t275: i64 = iand %%t264, %%t274
+    %%t276: i64 = const 0
+    %%t277: i64 = icmp.eq %%t275, %%t276
+    %%t278: i64 = iand %%t269, %%t272
+    %%t279: i64 = iand %%t278, %%t277
+    br.t %%t279, Lanytaglive82, Lanytagnotinst86
+  Lanytaglive82:            ; block 81
+    %%t281: ptr = gep %%t31, 16
+    %%t282: i64 = load %%t281
+    %%t283: i64 = const 65536
+    %%t284: i64 = icmp.gt %%t282, %%t283
+    br.t %%t284, Lanytaguntagged87, Lanytagdictish83
+  Lanytagdictish83:            ; block 82
+    %%t286: i64 = const -1000
+    %%t288: ptr = global_addr __str_1
+    %%t287: i64 = call _abi_dict_get_default, %%t31, %%t288, %%t286
+    store %%t287, %%t251
+    br Lanytagend84
+  Lanytagend84:            ; block 83
+    %%t289: i64 = load %%t251
+    store %%t31, %%t290
+    %%t291: i64 = const -2
+    %%t292: i64 = icmp.eq %%t289, %%t291
+    %%t294: i64 = const -8
+    %%t295: i64 = const -1
+    %%t296: i64 = icmp.ge %%t289, %%t294
+    %%t297: i64 = icmp.le %%t289, %%t295
+    %%t293: i64 = iand %%t296, %%t297
+    br.t %%t293, Lanyunboxboxed88, Lanyunboxend91
+  Lanytagregcheck85:            ; block 84
+    %%t261: i64 = call _abi_gc_is_object, %%t31
+    br.t %%t261, Lanytagboxcheck79, Lanytagrawint77
+  Lanytagnotinst86:            ; block 85
+    %%t280: i64 = const -1000
+    store %%t280, %%t251
+    br Lanytagend84
+  Lanytaguntagged87:            ; block 86
+    %%t285: i64 = const -1000
+    store %%t285, %%t251
+    br Lanytagend84
+  Lanyunboxboxed88:            ; block 87
+    br.t %%t292, Lanyunboxfloat89, Lanyunboxpayload90
+  Lanyunboxfloat89:            ; block 88
+    %%t300: ptr = gep %%t31, 16
+    %%t301: i64 = load %%t300
+    store %%t301, %%t290
+    br Lanyunboxend91
+  Lanyunboxpayload90:            ; block 89
+    %%t298: ptr = gep %%t31, 16
+    %%t299: i64 = load %%t298
+    store %%t299, %%t290
+    br Lanyunboxend91
+  Lanyunboxend91:            ; block 90
+    %%t302: ptr = load %%t290
+    store %%t302, %%t72
+    br Lfmtanyend16
+  Lfmtanylist92:            ; block 91
+    %%t305: ptr = const 0
+    %%t307: i64 = icmp.eq %%t31, %%t305
+    br.t %%t307, Lanytagnone94, Lanytagheap96
+  Lfmtanyafterlist93:            ; block 92
+    %%t360: i64 = const -6
+    %%t361: i64 = icmp.eq %%t71, %%t360
+    br.t %%t361, Lfmtanydict110, Lfmtanyafterdict111
+  Lanytagnone94:            ; block 93
+    %%t308: i64 = const -9
+    store %%t308, %%t306
+    br Lanytagend102
+  Lanytagrawint95:            ; block 94
+    %%t317: i64 = const -1000
+    store %%t317, %%t306
+    br Lanytagend102
+  Lanytagheap96:            ; block 95
+    %%t309: i64 = const 65536
+    %%t310: i64 = icmp.gt %%t31, %%t309
+    %%t311: i64 = const 7
+    %%t312: i64 = iand %%t31, %%t311
+    %%t313: i64 = const 0
+    %%t314: i64 = icmp.eq %%t312, %%t313
+    %%t315: i64 = iand %%t310, %%t314
+    br.t %%t315, Lanytagregcheck103, Lanytagrawint95
+  Lanytagboxcheck97:            ; block 96
+    %%t318: ptr = gep %%t31, 0
+    %%t319: i64 = load %%t318
+    %%t320: i64 = const -5711107564889042451
+    %%t321: i64 = icmp.eq %%t319, %%t320
+    br.t %%t321, Lanytagbox98, Lanytaginstcheck99
+  Lanytagbox98:            ; block 97
+    %%t322: ptr = gep %%t31, 8
+    %%t323: i64 = load %%t322
+    store %%t323, %%t306
+    br Lanytagend102
+  Lanytaginstcheck99:            ; block 98
+    %%t325: i64 = const 8
+    %%t324: i64 = icmp.ge %%t319, %%t325
+    %%t326: i64 = const 1073741824
+    %%t327: i64 = icmp.le %%t319, %%t326
+    %%t328: i64 = const 1
+    %%t329: i64 = isub %%t319, %%t328
+    %%t330: i64 = iand %%t319, %%t329
+    %%t331: i64 = const 0
+    %%t332: i64 = icmp.eq %%t330, %%t331
+    %%t333: i64 = iand %%t324, %%t327
+    %%t334: i64 = iand %%t333, %%t332
+    br.t %%t334, Lanytaglive100, Lanytagnotinst104
+  Lanytaglive100:            ; block 99
+    %%t336: ptr = gep %%t31, 16
+    %%t337: i64 = load %%t336
+    %%t338: i64 = const 65536
+    %%t339: i64 = icmp.gt %%t337, %%t338
+    br.t %%t339, Lanytaguntagged105, Lanytagdictish101
+  Lanytagdictish101:            ; block 100
+    %%t341: i64 = const -1000
+    %%t343: ptr = global_addr __str_1
+    %%t342: i64 = call _abi_dict_get_default, %%t31, %%t343, %%t341
+    store %%t342, %%t306
+    br Lanytagend102
+  Lanytagend102:            ; block 101
+    %%t344: i64 = load %%t306
+    store %%t31, %%t345
+    %%t346: i64 = const -2
+    %%t347: i64 = icmp.eq %%t344, %%t346
+    %%t349: i64 = const -8
+    %%t350: i64 = const -1
+    %%t351: i64 = icmp.ge %%t344, %%t349
+    %%t352: i64 = icmp.le %%t344, %%t350
+    %%t348: i64 = iand %%t351, %%t352
+    br.t %%t348, Lanyunboxboxed106, Lanyunboxend109
+  Lanytagregcheck103:            ; block 102
+    %%t316: i64 = call _abi_gc_is_object, %%t31
+    br.t %%t316, Lanytagboxcheck97, Lanytagrawint95
+  Lanytagnotinst104:            ; block 103
+    %%t335: i64 = const -1000
+    store %%t335, %%t306
+    br Lanytagend102
+  Lanytaguntagged105:            ; block 104
+    %%t340: i64 = const -1000
+    store %%t340, %%t306
+    br Lanytagend102
+  Lanyunboxboxed106:            ; block 105
+    br.t %%t347, Lanyunboxfloat107, Lanyunboxpayload108
+  Lanyunboxfloat107:            ; block 106
+    %%t355: ptr = gep %%t31, 16
+    %%t356: i64 = load %%t355
+    store %%t356, %%t345
+    br Lanyunboxend109
+  Lanyunboxpayload108:            ; block 107
+    %%t353: ptr = gep %%t31, 16
+    %%t354: i64 = load %%t353
+    store %%t354, %%t345
+    br Lanyunboxend109
+  Lanyunboxend109:            ; block 108
+    %%t357: ptr = load %%t345
+    %%t358: i64 = const 6
+    %%t359: ptr = call _abi_list_repr, %%t357, %%t358
+    store %%t359, %%t72
+    br Lfmtanyend16
+  Lfmtanydict110:            ; block 109
+    %%t362: ptr = const 0
+    %%t364: i64 = icmp.eq %%t31, %%t362
+    br.t %%t364, Lanytagnone112, Lanytagheap114
+  Lfmtanyafterdict111:            ; block 110
+    %%t418: i64 = const -8
+    %%t419: i64 = icmp.eq %%t71, %%t418
+    br.t %%t419, Lfmtanyset128, Lfmtanyafterset129
+  Lanytagnone112:            ; block 111
+    %%t365: i64 = const -9
+    store %%t365, %%t363
+    br Lanytagend120
+  Lanytagrawint113:            ; block 112
+    %%t374: i64 = const -1000
+    store %%t374, %%t363
+    br Lanytagend120
+  Lanytagheap114:            ; block 113
+    %%t366: i64 = const 65536
+    %%t367: i64 = icmp.gt %%t31, %%t366
+    %%t368: i64 = const 7
+    %%t369: i64 = iand %%t31, %%t368
+    %%t370: i64 = const 0
+    %%t371: i64 = icmp.eq %%t369, %%t370
+    %%t372: i64 = iand %%t367, %%t371
+    br.t %%t372, Lanytagregcheck121, Lanytagrawint113
+  Lanytagboxcheck115:            ; block 114
+    %%t375: ptr = gep %%t31, 0
+    %%t376: i64 = load %%t375
+    %%t377: i64 = const -5711107564889042451
+    %%t378: i64 = icmp.eq %%t376, %%t377
+    br.t %%t378, Lanytagbox116, Lanytaginstcheck117
+  Lanytagbox116:            ; block 115
+    %%t379: ptr = gep %%t31, 8
+    %%t380: i64 = load %%t379
+    store %%t380, %%t363
+    br Lanytagend120
+  Lanytaginstcheck117:            ; block 116
+    %%t382: i64 = const 8
+    %%t381: i64 = icmp.ge %%t376, %%t382
+    %%t383: i64 = const 1073741824
+    %%t384: i64 = icmp.le %%t376, %%t383
+    %%t385: i64 = const 1
+    %%t386: i64 = isub %%t376, %%t385
+    %%t387: i64 = iand %%t376, %%t386
+    %%t388: i64 = const 0
+    %%t389: i64 = icmp.eq %%t387, %%t388
+    %%t390: i64 = iand %%t381, %%t384
+    %%t391: i64 = iand %%t390, %%t389
+    br.t %%t391, Lanytaglive118, Lanytagnotinst122
+  Lanytaglive118:            ; block 117
+    %%t393: ptr = gep %%t31, 16
+    %%t394: i64 = load %%t393
+    %%t395: i64 = const 65536
+    %%t396: i64 = icmp.gt %%t394, %%t395
+    br.t %%t396, Lanytaguntagged123, Lanytagdictish119
+  Lanytagdictish119:            ; block 118
+    %%t398: i64 = const -1000
+    %%t400: ptr = global_addr __str_1
+    %%t399: i64 = call _abi_dict_get_default, %%t31, %%t400, %%t398
+    store %%t399, %%t363
+    br Lanytagend120
+  Lanytagend120:            ; block 119
+    %%t401: i64 = load %%t363
+    store %%t31, %%t402
+    %%t403: i64 = const -2
+    %%t404: i64 = icmp.eq %%t401, %%t403
+    %%t406: i64 = const -8
+    %%t407: i64 = const -1
+    %%t408: i64 = icmp.ge %%t401, %%t406
+    %%t409: i64 = icmp.le %%t401, %%t407
+    %%t405: i64 = iand %%t408, %%t409
+    br.t %%t405, Lanyunboxboxed124, Lanyunboxend127
+  Lanytagregcheck121:            ; block 120
+    %%t373: i64 = call _abi_gc_is_object, %%t31
+    br.t %%t373, Lanytagboxcheck115, Lanytagrawint113
+  Lanytagnotinst122:            ; block 121
+    %%t392: i64 = const -1000
+    store %%t392, %%t363
+    br Lanytagend120
+  Lanytaguntagged123:            ; block 122
+    %%t397: i64 = const -1000
+    store %%t397, %%t363
+    br Lanytagend120
+  Lanyunboxboxed124:            ; block 123
+    br.t %%t404, Lanyunboxfloat125, Lanyunboxpayload126
+  Lanyunboxfloat125:            ; block 124
+    %%t412: ptr = gep %%t31, 16
+    %%t413: i64 = load %%t412
+    store %%t413, %%t402
+    br Lanyunboxend127
+  Lanyunboxpayload126:            ; block 125
+    %%t410: ptr = gep %%t31, 16
+    %%t411: i64 = load %%t410
+    store %%t411, %%t402
+    br Lanyunboxend127
+  Lanyunboxend127:            ; block 126
+    %%t414: ptr = load %%t402
+    %%t415: i64 = const 1
+    %%t416: i64 = const 6
+    %%t417: ptr = call _abi_dict_repr, %%t414, %%t415, %%t416
+    store %%t417, %%t72
+    br Lfmtanyend16
+  Lfmtanyset128:            ; block 127
+    %%t420: ptr = const 0
+    %%t422: i64 = icmp.eq %%t31, %%t420
+    br.t %%t422, Lanytagnone130, Lanytagheap132
+  Lfmtanyafterset129:            ; block 128
+    br Lfmtanyfallback17
+  Lanytagnone130:            ; block 129
+    %%t423: i64 = const -9
+    store %%t423, %%t421
+    br Lanytagend138
+  Lanytagrawint131:            ; block 130
+    %%t432: i64 = const -1000
+    store %%t432, %%t421
+    br Lanytagend138
+  Lanytagheap132:            ; block 131
+    %%t424: i64 = const 65536
+    %%t425: i64 = icmp.gt %%t31, %%t424
+    %%t426: i64 = const 7
+    %%t427: i64 = iand %%t31, %%t426
+    %%t428: i64 = const 0
+    %%t429: i64 = icmp.eq %%t427, %%t428
+    %%t430: i64 = iand %%t425, %%t429
+    br.t %%t430, Lanytagregcheck139, Lanytagrawint131
+  Lanytagboxcheck133:            ; block 132
+    %%t433: ptr = gep %%t31, 0
+    %%t434: i64 = load %%t433
+    %%t435: i64 = const -5711107564889042451
+    %%t436: i64 = icmp.eq %%t434, %%t435
+    br.t %%t436, Lanytagbox134, Lanytaginstcheck135
+  Lanytagbox134:            ; block 133
+    %%t437: ptr = gep %%t31, 8
+    %%t438: i64 = load %%t437
+    store %%t438, %%t421
+    br Lanytagend138
+  Lanytaginstcheck135:            ; block 134
+    %%t440: i64 = const 8
+    %%t439: i64 = icmp.ge %%t434, %%t440
+    %%t441: i64 = const 1073741824
+    %%t442: i64 = icmp.le %%t434, %%t441
+    %%t443: i64 = const 1
+    %%t444: i64 = isub %%t434, %%t443
+    %%t445: i64 = iand %%t434, %%t444
+    %%t446: i64 = const 0
+    %%t447: i64 = icmp.eq %%t445, %%t446
+    %%t448: i64 = iand %%t439, %%t442
+    %%t449: i64 = iand %%t448, %%t447
+    br.t %%t449, Lanytaglive136, Lanytagnotinst140
+  Lanytaglive136:            ; block 135
+    %%t451: ptr = gep %%t31, 16
+    %%t452: i64 = load %%t451
+    %%t453: i64 = const 65536
+    %%t454: i64 = icmp.gt %%t452, %%t453
+    br.t %%t454, Lanytaguntagged141, Lanytagdictish137
+  Lanytagdictish137:            ; block 136
+    %%t456: i64 = const -1000
+    %%t458: ptr = global_addr __str_1
+    %%t457: i64 = call _abi_dict_get_default, %%t31, %%t458, %%t456
+    store %%t457, %%t421
+    br Lanytagend138
+  Lanytagend138:            ; block 137
+    %%t459: i64 = load %%t421
+    store %%t31, %%t460
+    %%t461: i64 = const -2
+    %%t462: i64 = icmp.eq %%t459, %%t461
+    %%t464: i64 = const -8
+    %%t465: i64 = const -1
+    %%t466: i64 = icmp.ge %%t459, %%t464
+    %%t467: i64 = icmp.le %%t459, %%t465
+    %%t463: i64 = iand %%t466, %%t467
+    br.t %%t463, Lanyunboxboxed142, Lanyunboxend145
+  Lanytagregcheck139:            ; block 138
+    %%t431: i64 = call _abi_gc_is_object, %%t31
+    br.t %%t431, Lanytagboxcheck133, Lanytagrawint131
+  Lanytagnotinst140:            ; block 139
+    %%t450: i64 = const -1000
+    store %%t450, %%t421
+    br Lanytagend138
+  Lanytaguntagged141:            ; block 140
+    %%t455: i64 = const -1000
+    store %%t455, %%t421
+    br Lanytagend138
+  Lanyunboxboxed142:            ; block 141
+    br.t %%t462, Lanyunboxfloat143, Lanyunboxpayload144
+  Lanyunboxfloat143:            ; block 142
+    %%t470: ptr = gep %%t31, 16
+    %%t471: i64 = load %%t470
+    store %%t471, %%t460
+    br Lanyunboxend145
+  Lanyunboxpayload144:            ; block 143
+    %%t468: ptr = gep %%t31, 16
+    %%t469: i64 = load %%t468
+    store %%t469, %%t460
+    br Lanyunboxend145
+  Lanyunboxend145:            ; block 144
+    %%t472: ptr = load %%t460
+    %%t473: i64 = const 6
+    %%t474: ptr = call _abi_set_repr, %%t472, %%t473
+    store %%t474, %%t72
+    br Lfmtanyend16
+  Lanytagnone146:            ; block 145
+    %%t478: i64 = const -9
+    store %%t478, %%t476
+    br Lanytagend154
+  Lanytagrawint147:            ; block 146
+    %%t487: i64 = const -1000
+    store %%t487, %%t476
+    br Lanytagend154
+  Lanytagheap148:            ; block 147
+    %%t479: i64 = const 65536
+    %%t480: i64 = icmp.gt %%t31, %%t479
+    %%t481: i64 = const 7
+    %%t482: i64 = iand %%t31, %%t481
+    %%t483: i64 = const 0
+    %%t484: i64 = icmp.eq %%t482, %%t483
+    %%t485: i64 = iand %%t480, %%t484
+    br.t %%t485, Lanytagregcheck155, Lanytagrawint147
+  Lanytagboxcheck149:            ; block 148
+    %%t488: ptr = gep %%t31, 0
+    %%t489: i64 = load %%t488
+    %%t490: i64 = const -5711107564889042451
+    %%t491: i64 = icmp.eq %%t489, %%t490
+    br.t %%t491, Lanytagbox150, Lanytaginstcheck151
+  Lanytagbox150:            ; block 149
+    %%t492: ptr = gep %%t31, 8
+    %%t493: i64 = load %%t492
+    store %%t493, %%t476
+    br Lanytagend154
+  Lanytaginstcheck151:            ; block 150
+    %%t495: i64 = const 8
+    %%t494: i64 = icmp.ge %%t489, %%t495
+    %%t496: i64 = const 1073741824
+    %%t497: i64 = icmp.le %%t489, %%t496
+    %%t498: i64 = const 1
+    %%t499: i64 = isub %%t489, %%t498
+    %%t500: i64 = iand %%t489, %%t499
+    %%t501: i64 = const 0
+    %%t502: i64 = icmp.eq %%t500, %%t501
+    %%t503: i64 = iand %%t494, %%t497
+    %%t504: i64 = iand %%t503, %%t502
+    br.t %%t504, Lanytaglive152, Lanytagnotinst156
+  Lanytaglive152:            ; block 151
+    %%t506: ptr = gep %%t31, 16
+    %%t507: i64 = load %%t506
+    %%t508: i64 = const 65536
+    %%t509: i64 = icmp.gt %%t507, %%t508
+    br.t %%t509, Lanytaguntagged157, Lanytagdictish153
+  Lanytagdictish153:            ; block 152
+    %%t511: i64 = const -1000
+    %%t513: ptr = global_addr __str_1
+    %%t512: i64 = call _abi_dict_get_default, %%t31, %%t513, %%t511
+    store %%t512, %%t476
+    br Lanytagend154
+  Lanytagend154:            ; block 153
+    %%t514: i64 = load %%t476
+    store %%t31, %%t515
+    %%t516: i64 = const -2
+    %%t517: i64 = icmp.eq %%t514, %%t516
+    %%t519: i64 = const -8
+    %%t520: i64 = const -1
+    %%t521: i64 = icmp.ge %%t514, %%t519
+    %%t522: i64 = icmp.le %%t514, %%t520
+    %%t518: i64 = iand %%t521, %%t522
+    br.t %%t518, Lanyunboxboxed158, Lanyunboxend161
+  Lanytagregcheck155:            ; block 154
+    %%t486: i64 = call _abi_gc_is_object, %%t31
+    br.t %%t486, Lanytagboxcheck149, Lanytagrawint147
+  Lanytagnotinst156:            ; block 155
+    %%t505: i64 = const -1000
+    store %%t505, %%t476
+    br Lanytagend154
+  Lanytaguntagged157:            ; block 156
+    %%t510: i64 = const -1000
+    store %%t510, %%t476
+    br Lanytagend154
+  Lanyunboxboxed158:            ; block 157
+    br.t %%t517, Lanyunboxfloat159, Lanyunboxpayload160
+  Lanyunboxfloat159:            ; block 158
+    %%t525: ptr = gep %%t31, 16
+    %%t526: i64 = load %%t525
+    store %%t526, %%t515
+    br Lanyunboxend161
+  Lanyunboxpayload160:            ; block 159
+    %%t523: ptr = gep %%t31, 16
+    %%t524: i64 = load %%t523
+    store %%t524, %%t515
+    br Lanyunboxend161
+  Lanyunboxend161:            ; block 160
+    %%t527: ptr = load %%t515
+    %%t528: i64 = const 0
+    %%t529: ptr = call _abi_fmt_elem, %%t527, %%t528
+    store %%t529, %%t72
+    br Lfmtanyend16
+  Lanytagnone162:            ; block 161
+    %%t554: i64 = const -9
+    store %%t554, %%t552
+    br Lanytagend170
+  Lanytagrawint163:            ; block 162
+    %%t563: i64 = const -1000
+    store %%t563, %%t552
+    br Lanytagend170
+  Lanytagheap164:            ; block 163
+    %%t555: i64 = const 65536
+    %%t556: i64 = icmp.gt %%t550, %%t555
+    %%t557: i64 = const 7
+    %%t558: i64 = iand %%t550, %%t557
+    %%t559: i64 = const 0
+    %%t560: i64 = icmp.eq %%t558, %%t559
+    %%t561: i64 = iand %%t556, %%t560
+    br.t %%t561, Lanytagregcheck171, Lanytagrawint163
+  Lanytagboxcheck165:            ; block 164
+    %%t564: ptr = gep %%t550, 0
+    %%t565: i64 = load %%t564
+    %%t566: i64 = const -5711107564889042451
+    %%t567: i64 = icmp.eq %%t565, %%t566
+    br.t %%t567, Lanytagbox166, Lanytaginstcheck167
+  Lanytagbox166:            ; block 165
+    %%t568: ptr = gep %%t550, 8
+    %%t569: i64 = load %%t568
+    store %%t569, %%t552
+    br Lanytagend170
+  Lanytaginstcheck167:            ; block 166
+    %%t571: i64 = const 8
+    %%t570: i64 = icmp.ge %%t565, %%t571
+    %%t572: i64 = const 1073741824
+    %%t573: i64 = icmp.le %%t565, %%t572
+    %%t574: i64 = const 1
+    %%t575: i64 = isub %%t565, %%t574
+    %%t576: i64 = iand %%t565, %%t575
+    %%t577: i64 = const 0
+    %%t578: i64 = icmp.eq %%t576, %%t577
+    %%t579: i64 = iand %%t570, %%t573
+    %%t580: i64 = iand %%t579, %%t578
+    br.t %%t580, Lanytaglive168, Lanytagnotinst172
+  Lanytaglive168:            ; block 167
+    %%t582: ptr = gep %%t550, 16
+    %%t583: i64 = load %%t582
+    %%t584: i64 = const 65536
+    %%t585: i64 = icmp.gt %%t583, %%t584
+    br.t %%t585, Lanytaguntagged173, Lanytagdictish169
+  Lanytagdictish169:            ; block 168
+    %%t587: i64 = const -1000
+    %%t589: ptr = global_addr __str_1
+    %%t588: i64 = call _abi_dict_get_default, %%t550, %%t589, %%t587
+    store %%t588, %%t552
+    br Lanytagend170
+  Lanytagend170:            ; block 169
+    %%t590: i64 = load %%t552
+    %%t592: i64 = const -4
+    %%t593: i64 = icmp.eq %%t590, %%t592
+    br.t %%t593, Lfmtanybool176, Lfmtanyafterbool177
+  Lanytagregcheck171:            ; block 170
+    %%t562: i64 = call _abi_gc_is_object, %%t550
+    br.t %%t562, Lanytagboxcheck165, Lanytagrawint163
+  Lanytagnotinst172:            ; block 171
+    %%t581: i64 = const -1000
+    store %%t581, %%t552
+    br Lanytagend170
+  Lanytaguntagged173:            ; block 172
+    %%t586: i64 = const -1000
+    store %%t586, %%t552
+    br Lanytagend170
+  Lfmtanyend174:            ; block 173
+    %%t1049: ptr = load %%t591
+    store %%t1049, %%t1050
+    %%t1051: ptr = load %%t1050
+    %%t1052: ptr = global_addr __str_9
+    call printf, %%t1052, %%t1051
+    %%t1053: i64 = const 0
+    ret %%t1053
+  Lfmtanyfallback175:            ; block 174
+    %%t994: ptr = const 0
+    %%t996: i64 = icmp.eq %%t550, %%t994
+    br.t %%t996, Lanytagnone304, Lanytagheap306
+  Lfmtanybool176:            ; block 175
+    %%t594: ptr = const 0
+    %%t596: i64 = icmp.eq %%t550, %%t594
+    br.t %%t596, Lanytagnone178, Lanytagheap180
+  Lfmtanyafterbool177:            ; block 176
+    %%t651: i64 = const -1
+    %%t652: i64 = icmp.eq %%t590, %%t651
+    br.t %%t652, Lfmtanyint196, Lfmtanyafterint197
+  Lanytagnone178:            ; block 177
+    %%t597: i64 = const -9
+    store %%t597, %%t595
+    br Lanytagend186
+  Lanytagrawint179:            ; block 178
+    %%t606: i64 = const -1000
+    store %%t606, %%t595
+    br Lanytagend186
+  Lanytagheap180:            ; block 179
+    %%t598: i64 = const 65536
+    %%t599: i64 = icmp.gt %%t550, %%t598
+    %%t600: i64 = const 7
+    %%t601: i64 = iand %%t550, %%t600
+    %%t602: i64 = const 0
+    %%t603: i64 = icmp.eq %%t601, %%t602
+    %%t604: i64 = iand %%t599, %%t603
+    br.t %%t604, Lanytagregcheck187, Lanytagrawint179
+  Lanytagboxcheck181:            ; block 180
+    %%t607: ptr = gep %%t550, 0
+    %%t608: i64 = load %%t607
+    %%t609: i64 = const -5711107564889042451
+    %%t610: i64 = icmp.eq %%t608, %%t609
+    br.t %%t610, Lanytagbox182, Lanytaginstcheck183
+  Lanytagbox182:            ; block 181
+    %%t611: ptr = gep %%t550, 8
+    %%t612: i64 = load %%t611
+    store %%t612, %%t595
+    br Lanytagend186
+  Lanytaginstcheck183:            ; block 182
+    %%t614: i64 = const 8
+    %%t613: i64 = icmp.ge %%t608, %%t614
+    %%t615: i64 = const 1073741824
+    %%t616: i64 = icmp.le %%t608, %%t615
+    %%t617: i64 = const 1
+    %%t618: i64 = isub %%t608, %%t617
+    %%t619: i64 = iand %%t608, %%t618
+    %%t620: i64 = const 0
+    %%t621: i64 = icmp.eq %%t619, %%t620
+    %%t622: i64 = iand %%t613, %%t616
+    %%t623: i64 = iand %%t622, %%t621
+    br.t %%t623, Lanytaglive184, Lanytagnotinst188
+  Lanytaglive184:            ; block 183
+    %%t625: ptr = gep %%t550, 16
+    %%t626: i64 = load %%t625
+    %%t627: i64 = const 65536
+    %%t628: i64 = icmp.gt %%t626, %%t627
+    br.t %%t628, Lanytaguntagged189, Lanytagdictish185
+  Lanytagdictish185:            ; block 184
+    %%t630: i64 = const -1000
+    %%t632: ptr = global_addr __str_1
+    %%t631: i64 = call _abi_dict_get_default, %%t550, %%t632, %%t630
+    store %%t631, %%t595
+    br Lanytagend186
+  Lanytagend186:            ; block 185
+    %%t633: i64 = load %%t595
+    store %%t550, %%t634
+    %%t635: i64 = const -2
+    %%t636: i64 = icmp.eq %%t633, %%t635
+    %%t638: i64 = const -8
+    %%t639: i64 = const -1
+    %%t640: i64 = icmp.ge %%t633, %%t638
+    %%t641: i64 = icmp.le %%t633, %%t639
+    %%t637: i64 = iand %%t640, %%t641
+    br.t %%t637, Lanyunboxboxed190, Lanyunboxend193
+  Lanytagregcheck187:            ; block 186
+    %%t605: i64 = call _abi_gc_is_object, %%t550
+    br.t %%t605, Lanytagboxcheck181, Lanytagrawint179
+  Lanytagnotinst188:            ; block 187
+    %%t624: i64 = const -1000
+    store %%t624, %%t595
+    br Lanytagend186
+  Lanytaguntagged189:            ; block 188
+    %%t629: i64 = const -1000
+    store %%t629, %%t595
+    br Lanytagend186
+  Lanyunboxboxed190:            ; block 189
+    br.t %%t636, Lanyunboxfloat191, Lanyunboxpayload192
+  Lanyunboxfloat191:            ; block 190
+    %%t644: ptr = gep %%t550, 16
+    %%t645: i64 = load %%t644
+    store %%t645, %%t634
+    br Lanyunboxend193
+  Lanyunboxpayload192:            ; block 191
+    %%t642: ptr = gep %%t550, 16
+    %%t643: i64 = load %%t642
+    store %%t643, %%t634
+    br Lanyunboxend193
+  Lanyunboxend193:            ; block 192
+    %%t646: ptr = load %%t634
+    %%t647: i64 = const 0
+    %%t648: i64 = icmp.ne %%t646, %%t647
+    br.t %%t648, Lfmtanybooltrue194, Lfmtanyboolfalse195
+  Lfmtanybooltrue194:            ; block 193
+    %%t649: ptr = global_addr __str_10
+    store %%t649, %%t591
+    br Lfmtanyend174
+  Lfmtanyboolfalse195:            ; block 194
+    %%t650: ptr = global_addr __str_11
+    store %%t650, %%t591
+    br Lfmtanyend174
+  Lfmtanyint196:            ; block 195
+    %%t653: ptr = const 0
+    %%t655: i64 = icmp.eq %%t550, %%t653
+    br.t %%t655, Lanytagnone198, Lanytagheap200
+  Lfmtanyafterint197:            ; block 196
+    %%t709: i64 = const -2
+    %%t710: i64 = icmp.eq %%t590, %%t709
+    br.t %%t710, Lfmtanyfloat214, Lfmtanyafterfloat215
+  Lanytagnone198:            ; block 197
+    %%t656: i64 = const -9
+    store %%t656, %%t654
+    br Lanytagend206
+  Lanytagrawint199:            ; block 198
+    %%t665: i64 = const -1000
+    store %%t665, %%t654
+    br Lanytagend206
+  Lanytagheap200:            ; block 199
+    %%t657: i64 = const 65536
+    %%t658: i64 = icmp.gt %%t550, %%t657
+    %%t659: i64 = const 7
+    %%t660: i64 = iand %%t550, %%t659
+    %%t661: i64 = const 0
+    %%t662: i64 = icmp.eq %%t660, %%t661
+    %%t663: i64 = iand %%t658, %%t662
+    br.t %%t663, Lanytagregcheck207, Lanytagrawint199
+  Lanytagboxcheck201:            ; block 200
+    %%t666: ptr = gep %%t550, 0
+    %%t667: i64 = load %%t666
+    %%t668: i64 = const -5711107564889042451
+    %%t669: i64 = icmp.eq %%t667, %%t668
+    br.t %%t669, Lanytagbox202, Lanytaginstcheck203
+  Lanytagbox202:            ; block 201
+    %%t670: ptr = gep %%t550, 8
+    %%t671: i64 = load %%t670
+    store %%t671, %%t654
+    br Lanytagend206
+  Lanytaginstcheck203:            ; block 202
+    %%t673: i64 = const 8
+    %%t672: i64 = icmp.ge %%t667, %%t673
+    %%t674: i64 = const 1073741824
+    %%t675: i64 = icmp.le %%t667, %%t674
+    %%t676: i64 = const 1
+    %%t677: i64 = isub %%t667, %%t676
+    %%t678: i64 = iand %%t667, %%t677
+    %%t679: i64 = const 0
+    %%t680: i64 = icmp.eq %%t678, %%t679
+    %%t681: i64 = iand %%t672, %%t675
+    %%t682: i64 = iand %%t681, %%t680
+    br.t %%t682, Lanytaglive204, Lanytagnotinst208
+  Lanytaglive204:            ; block 203
+    %%t684: ptr = gep %%t550, 16
+    %%t685: i64 = load %%t684
+    %%t686: i64 = const 65536
+    %%t687: i64 = icmp.gt %%t685, %%t686
+    br.t %%t687, Lanytaguntagged209, Lanytagdictish205
+  Lanytagdictish205:            ; block 204
+    %%t689: i64 = const -1000
+    %%t691: ptr = global_addr __str_1
+    %%t690: i64 = call _abi_dict_get_default, %%t550, %%t691, %%t689
+    store %%t690, %%t654
+    br Lanytagend206
+  Lanytagend206:            ; block 205
+    %%t692: i64 = load %%t654
+    store %%t550, %%t693
+    %%t694: i64 = const -2
+    %%t695: i64 = icmp.eq %%t692, %%t694
+    %%t697: i64 = const -8
+    %%t698: i64 = const -1
+    %%t699: i64 = icmp.ge %%t692, %%t697
+    %%t700: i64 = icmp.le %%t692, %%t698
+    %%t696: i64 = iand %%t699, %%t700
+    br.t %%t696, Lanyunboxboxed210, Lanyunboxend213
+  Lanytagregcheck207:            ; block 206
+    %%t664: i64 = call _abi_gc_is_object, %%t550
+    br.t %%t664, Lanytagboxcheck201, Lanytagrawint199
+  Lanytagnotinst208:            ; block 207
+    %%t683: i64 = const -1000
+    store %%t683, %%t654
+    br Lanytagend206
+  Lanytaguntagged209:            ; block 208
+    %%t688: i64 = const -1000
+    store %%t688, %%t654
+    br Lanytagend206
+  Lanyunboxboxed210:            ; block 209
+    br.t %%t695, Lanyunboxfloat211, Lanyunboxpayload212
+  Lanyunboxfloat211:            ; block 210
+    %%t703: ptr = gep %%t550, 16
+    %%t704: i64 = load %%t703
+    store %%t704, %%t693
+    br Lanyunboxend213
+  Lanyunboxpayload212:            ; block 211
+    %%t701: ptr = gep %%t550, 16
+    %%t702: i64 = load %%t701
+    store %%t702, %%t693
+    br Lanyunboxend213
+  Lanyunboxend213:            ; block 212
+    %%t705: ptr = load %%t693
+    %%t706: i64 = const 10
+    %%t707: ptr = global_addr __str_8
+    %%t708: ptr = call _abi_int_to_base, %%t705, %%t706, %%t707
+    store %%t708, %%t591
+    br Lfmtanyend174
+  Lfmtanyfloat214:            ; block 213
+    %%t711: ptr = const 0
+    %%t713: i64 = icmp.eq %%t550, %%t711
+    br.t %%t713, Lanytagnone216, Lanytagheap218
+  Lfmtanyafterfloat215:            ; block 214
+    %%t767: i64 = const -3
+    %%t768: i64 = icmp.eq %%t590, %%t767
+    br.t %%t768, Lfmtanystr232, Lfmtanyafterstr233
+  Lanytagnone216:            ; block 215
+    %%t714: i64 = const -9
+    store %%t714, %%t712
+    br Lanytagend224
+  Lanytagrawint217:            ; block 216
+    %%t723: i64 = const -1000
+    store %%t723, %%t712
+    br Lanytagend224
+  Lanytagheap218:            ; block 217
+    %%t715: i64 = const 65536
+    %%t716: i64 = icmp.gt %%t550, %%t715
+    %%t717: i64 = const 7
+    %%t718: i64 = iand %%t550, %%t717
+    %%t719: i64 = const 0
+    %%t720: i64 = icmp.eq %%t718, %%t719
+    %%t721: i64 = iand %%t716, %%t720
+    br.t %%t721, Lanytagregcheck225, Lanytagrawint217
+  Lanytagboxcheck219:            ; block 218
+    %%t724: ptr = gep %%t550, 0
+    %%t725: i64 = load %%t724
+    %%t726: i64 = const -5711107564889042451
+    %%t727: i64 = icmp.eq %%t725, %%t726
+    br.t %%t727, Lanytagbox220, Lanytaginstcheck221
+  Lanytagbox220:            ; block 219
+    %%t728: ptr = gep %%t550, 8
+    %%t729: i64 = load %%t728
+    store %%t729, %%t712
+    br Lanytagend224
+  Lanytaginstcheck221:            ; block 220
+    %%t731: i64 = const 8
+    %%t730: i64 = icmp.ge %%t725, %%t731
+    %%t732: i64 = const 1073741824
+    %%t733: i64 = icmp.le %%t725, %%t732
+    %%t734: i64 = const 1
+    %%t735: i64 = isub %%t725, %%t734
+    %%t736: i64 = iand %%t725, %%t735
+    %%t737: i64 = const 0
+    %%t738: i64 = icmp.eq %%t736, %%t737
+    %%t739: i64 = iand %%t730, %%t733
+    %%t740: i64 = iand %%t739, %%t738
+    br.t %%t740, Lanytaglive222, Lanytagnotinst226
+  Lanytaglive222:            ; block 221
+    %%t742: ptr = gep %%t550, 16
+    %%t743: i64 = load %%t742
+    %%t744: i64 = const 65536
+    %%t745: i64 = icmp.gt %%t743, %%t744
+    br.t %%t745, Lanytaguntagged227, Lanytagdictish223
+  Lanytagdictish223:            ; block 222
+    %%t747: i64 = const -1000
+    %%t749: ptr = global_addr __str_1
+    %%t748: i64 = call _abi_dict_get_default, %%t550, %%t749, %%t747
+    store %%t748, %%t712
+    br Lanytagend224
+  Lanytagend224:            ; block 223
+    %%t750: i64 = load %%t712
+    store %%t550, %%t751
+    %%t752: i64 = const -2
+    %%t753: i64 = icmp.eq %%t750, %%t752
+    %%t755: i64 = const -8
+    %%t756: i64 = const -1
+    %%t757: i64 = icmp.ge %%t750, %%t755
+    %%t758: i64 = icmp.le %%t750, %%t756
+    %%t754: i64 = iand %%t757, %%t758
+    br.t %%t754, Lanyunboxboxed228, Lanyunboxend231
+  Lanytagregcheck225:            ; block 224
+    %%t722: i64 = call _abi_gc_is_object, %%t550
+    br.t %%t722, Lanytagboxcheck219, Lanytagrawint217
+  Lanytagnotinst226:            ; block 225
+    %%t741: i64 = const -1000
+    store %%t741, %%t712
+    br Lanytagend224
+  Lanytaguntagged227:            ; block 226
+    %%t746: i64 = const -1000
+    store %%t746, %%t712
+    br Lanytagend224
+  Lanyunboxboxed228:            ; block 227
+    br.t %%t753, Lanyunboxfloat229, Lanyunboxpayload230
+  Lanyunboxfloat229:            ; block 228
+    %%t761: ptr = gep %%t550, 16
+    %%t762: i64 = load %%t761
+    store %%t762, %%t751
+    br Lanyunboxend231
+  Lanyunboxpayload230:            ; block 229
+    %%t759: ptr = gep %%t550, 16
+    %%t760: i64 = load %%t759
+    store %%t760, %%t751
+    br Lanyunboxend231
+  Lanyunboxend231:            ; block 230
+    %%t763: ptr = load %%t751
+    store %%t763, %%t764
+    %%t765: f64 = load %%t764
+    %%t766: ptr = call _abi_float_to_str, %%t765
+    store %%t766, %%t591
+    br Lfmtanyend174
+  Lfmtanystr232:            ; block 231
+    %%t769: ptr = const 0
+    %%t771: i64 = icmp.eq %%t550, %%t769
+    br.t %%t771, Lanytagnone234, Lanytagheap236
+  Lfmtanyafterstr233:            ; block 232
+    %%t822: i64 = const -5
+    %%t823: i64 = icmp.eq %%t590, %%t822
+    br.t %%t823, Lfmtanylist250, Lfmtanyafterlist251
+  Lanytagnone234:            ; block 233
+    %%t772: i64 = const -9
+    store %%t772, %%t770
+    br Lanytagend242
+  Lanytagrawint235:            ; block 234
+    %%t781: i64 = const -1000
+    store %%t781, %%t770
+    br Lanytagend242
+  Lanytagheap236:            ; block 235
+    %%t773: i64 = const 65536
+    %%t774: i64 = icmp.gt %%t550, %%t773
+    %%t775: i64 = const 7
+    %%t776: i64 = iand %%t550, %%t775
+    %%t777: i64 = const 0
+    %%t778: i64 = icmp.eq %%t776, %%t777
+    %%t779: i64 = iand %%t774, %%t778
+    br.t %%t779, Lanytagregcheck243, Lanytagrawint235
+  Lanytagboxcheck237:            ; block 236
+    %%t782: ptr = gep %%t550, 0
+    %%t783: i64 = load %%t782
+    %%t784: i64 = const -5711107564889042451
+    %%t785: i64 = icmp.eq %%t783, %%t784
+    br.t %%t785, Lanytagbox238, Lanytaginstcheck239
+  Lanytagbox238:            ; block 237
+    %%t786: ptr = gep %%t550, 8
+    %%t787: i64 = load %%t786
+    store %%t787, %%t770
+    br Lanytagend242
+  Lanytaginstcheck239:            ; block 238
+    %%t789: i64 = const 8
+    %%t788: i64 = icmp.ge %%t783, %%t789
+    %%t790: i64 = const 1073741824
+    %%t791: i64 = icmp.le %%t783, %%t790
+    %%t792: i64 = const 1
+    %%t793: i64 = isub %%t783, %%t792
+    %%t794: i64 = iand %%t783, %%t793
+    %%t795: i64 = const 0
+    %%t796: i64 = icmp.eq %%t794, %%t795
+    %%t797: i64 = iand %%t788, %%t791
+    %%t798: i64 = iand %%t797, %%t796
+    br.t %%t798, Lanytaglive240, Lanytagnotinst244
+  Lanytaglive240:            ; block 239
+    %%t800: ptr = gep %%t550, 16
+    %%t801: i64 = load %%t800
+    %%t802: i64 = const 65536
+    %%t803: i64 = icmp.gt %%t801, %%t802
+    br.t %%t803, Lanytaguntagged245, Lanytagdictish241
+  Lanytagdictish241:            ; block 240
+    %%t805: i64 = const -1000
+    %%t807: ptr = global_addr __str_1
+    %%t806: i64 = call _abi_dict_get_default, %%t550, %%t807, %%t805
+    store %%t806, %%t770
+    br Lanytagend242
+  Lanytagend242:            ; block 241
+    %%t808: i64 = load %%t770
+    store %%t550, %%t809
+    %%t810: i64 = const -2
+    %%t811: i64 = icmp.eq %%t808, %%t810
+    %%t813: i64 = const -8
+    %%t814: i64 = const -1
+    %%t815: i64 = icmp.ge %%t808, %%t813
+    %%t816: i64 = icmp.le %%t808, %%t814
+    %%t812: i64 = iand %%t815, %%t816
+    br.t %%t812, Lanyunboxboxed246, Lanyunboxend249
+  Lanytagregcheck243:            ; block 242
+    %%t780: i64 = call _abi_gc_is_object, %%t550
+    br.t %%t780, Lanytagboxcheck237, Lanytagrawint235
+  Lanytagnotinst244:            ; block 243
+    %%t799: i64 = const -1000
+    store %%t799, %%t770
+    br Lanytagend242
+  Lanytaguntagged245:            ; block 244
+    %%t804: i64 = const -1000
+    store %%t804, %%t770
+    br Lanytagend242
+  Lanyunboxboxed246:            ; block 245
+    br.t %%t811, Lanyunboxfloat247, Lanyunboxpayload248
+  Lanyunboxfloat247:            ; block 246
+    %%t819: ptr = gep %%t550, 16
+    %%t820: i64 = load %%t819
+    store %%t820, %%t809
+    br Lanyunboxend249
+  Lanyunboxpayload248:            ; block 247
+    %%t817: ptr = gep %%t550, 16
+    %%t818: i64 = load %%t817
+    store %%t818, %%t809
+    br Lanyunboxend249
+  Lanyunboxend249:            ; block 248
+    %%t821: ptr = load %%t809
+    store %%t821, %%t591
+    br Lfmtanyend174
+  Lfmtanylist250:            ; block 249
+    %%t824: ptr = const 0
+    %%t826: i64 = icmp.eq %%t550, %%t824
+    br.t %%t826, Lanytagnone252, Lanytagheap254
+  Lfmtanyafterlist251:            ; block 250
+    %%t879: i64 = const -6
+    %%t880: i64 = icmp.eq %%t590, %%t879
+    br.t %%t880, Lfmtanydict268, Lfmtanyafterdict269
+  Lanytagnone252:            ; block 251
+    %%t827: i64 = const -9
+    store %%t827, %%t825
+    br Lanytagend260
+  Lanytagrawint253:            ; block 252
+    %%t836: i64 = const -1000
+    store %%t836, %%t825
+    br Lanytagend260
+  Lanytagheap254:            ; block 253
+    %%t828: i64 = const 65536
+    %%t829: i64 = icmp.gt %%t550, %%t828
+    %%t830: i64 = const 7
+    %%t831: i64 = iand %%t550, %%t830
+    %%t832: i64 = const 0
+    %%t833: i64 = icmp.eq %%t831, %%t832
+    %%t834: i64 = iand %%t829, %%t833
+    br.t %%t834, Lanytagregcheck261, Lanytagrawint253
+  Lanytagboxcheck255:            ; block 254
+    %%t837: ptr = gep %%t550, 0
+    %%t838: i64 = load %%t837
+    %%t839: i64 = const -5711107564889042451
+    %%t840: i64 = icmp.eq %%t838, %%t839
+    br.t %%t840, Lanytagbox256, Lanytaginstcheck257
+  Lanytagbox256:            ; block 255
+    %%t841: ptr = gep %%t550, 8
+    %%t842: i64 = load %%t841
+    store %%t842, %%t825
+    br Lanytagend260
+  Lanytaginstcheck257:            ; block 256
+    %%t844: i64 = const 8
+    %%t843: i64 = icmp.ge %%t838, %%t844
+    %%t845: i64 = const 1073741824
+    %%t846: i64 = icmp.le %%t838, %%t845
+    %%t847: i64 = const 1
+    %%t848: i64 = isub %%t838, %%t847
+    %%t849: i64 = iand %%t838, %%t848
+    %%t850: i64 = const 0
+    %%t851: i64 = icmp.eq %%t849, %%t850
+    %%t852: i64 = iand %%t843, %%t846
+    %%t853: i64 = iand %%t852, %%t851
+    br.t %%t853, Lanytaglive258, Lanytagnotinst262
+  Lanytaglive258:            ; block 257
+    %%t855: ptr = gep %%t550, 16
+    %%t856: i64 = load %%t855
+    %%t857: i64 = const 65536
+    %%t858: i64 = icmp.gt %%t856, %%t857
+    br.t %%t858, Lanytaguntagged263, Lanytagdictish259
+  Lanytagdictish259:            ; block 258
+    %%t860: i64 = const -1000
+    %%t862: ptr = global_addr __str_1
+    %%t861: i64 = call _abi_dict_get_default, %%t550, %%t862, %%t860
+    store %%t861, %%t825
+    br Lanytagend260
+  Lanytagend260:            ; block 259
+    %%t863: i64 = load %%t825
+    store %%t550, %%t864
+    %%t865: i64 = const -2
+    %%t866: i64 = icmp.eq %%t863, %%t865
+    %%t868: i64 = const -8
+    %%t869: i64 = const -1
+    %%t870: i64 = icmp.ge %%t863, %%t868
+    %%t871: i64 = icmp.le %%t863, %%t869
+    %%t867: i64 = iand %%t870, %%t871
+    br.t %%t867, Lanyunboxboxed264, Lanyunboxend267
+  Lanytagregcheck261:            ; block 260
+    %%t835: i64 = call _abi_gc_is_object, %%t550
+    br.t %%t835, Lanytagboxcheck255, Lanytagrawint253
+  Lanytagnotinst262:            ; block 261
+    %%t854: i64 = const -1000
+    store %%t854, %%t825
+    br Lanytagend260
+  Lanytaguntagged263:            ; block 262
+    %%t859: i64 = const -1000
+    store %%t859, %%t825
+    br Lanytagend260
+  Lanyunboxboxed264:            ; block 263
+    br.t %%t866, Lanyunboxfloat265, Lanyunboxpayload266
+  Lanyunboxfloat265:            ; block 264
+    %%t874: ptr = gep %%t550, 16
+    %%t875: i64 = load %%t874
+    store %%t875, %%t864
+    br Lanyunboxend267
+  Lanyunboxpayload266:            ; block 265
+    %%t872: ptr = gep %%t550, 16
+    %%t873: i64 = load %%t872
+    store %%t873, %%t864
+    br Lanyunboxend267
+  Lanyunboxend267:            ; block 266
+    %%t876: ptr = load %%t864
+    %%t877: i64 = const 6
+    %%t878: ptr = call _abi_list_repr, %%t876, %%t877
+    store %%t878, %%t591
+    br Lfmtanyend174
+  Lfmtanydict268:            ; block 267
+    %%t881: ptr = const 0
+    %%t883: i64 = icmp.eq %%t550, %%t881
+    br.t %%t883, Lanytagnone270, Lanytagheap272
+  Lfmtanyafterdict269:            ; block 268
+    %%t937: i64 = const -8
+    %%t938: i64 = icmp.eq %%t590, %%t937
+    br.t %%t938, Lfmtanyset286, Lfmtanyafterset287
+  Lanytagnone270:            ; block 269
+    %%t884: i64 = const -9
+    store %%t884, %%t882
+    br Lanytagend278
+  Lanytagrawint271:            ; block 270
+    %%t893: i64 = const -1000
+    store %%t893, %%t882
+    br Lanytagend278
+  Lanytagheap272:            ; block 271
+    %%t885: i64 = const 65536
+    %%t886: i64 = icmp.gt %%t550, %%t885
+    %%t887: i64 = const 7
+    %%t888: i64 = iand %%t550, %%t887
+    %%t889: i64 = const 0
+    %%t890: i64 = icmp.eq %%t888, %%t889
+    %%t891: i64 = iand %%t886, %%t890
+    br.t %%t891, Lanytagregcheck279, Lanytagrawint271
+  Lanytagboxcheck273:            ; block 272
+    %%t894: ptr = gep %%t550, 0
+    %%t895: i64 = load %%t894
+    %%t896: i64 = const -5711107564889042451
+    %%t897: i64 = icmp.eq %%t895, %%t896
+    br.t %%t897, Lanytagbox274, Lanytaginstcheck275
+  Lanytagbox274:            ; block 273
+    %%t898: ptr = gep %%t550, 8
+    %%t899: i64 = load %%t898
+    store %%t899, %%t882
+    br Lanytagend278
+  Lanytaginstcheck275:            ; block 274
+    %%t901: i64 = const 8
+    %%t900: i64 = icmp.ge %%t895, %%t901
+    %%t902: i64 = const 1073741824
+    %%t903: i64 = icmp.le %%t895, %%t902
+    %%t904: i64 = const 1
+    %%t905: i64 = isub %%t895, %%t904
+    %%t906: i64 = iand %%t895, %%t905
+    %%t907: i64 = const 0
+    %%t908: i64 = icmp.eq %%t906, %%t907
+    %%t909: i64 = iand %%t900, %%t903
+    %%t910: i64 = iand %%t909, %%t908
+    br.t %%t910, Lanytaglive276, Lanytagnotinst280
+  Lanytaglive276:            ; block 275
+    %%t912: ptr = gep %%t550, 16
+    %%t913: i64 = load %%t912
+    %%t914: i64 = const 65536
+    %%t915: i64 = icmp.gt %%t913, %%t914
+    br.t %%t915, Lanytaguntagged281, Lanytagdictish277
+  Lanytagdictish277:            ; block 276
+    %%t917: i64 = const -1000
+    %%t919: ptr = global_addr __str_1
+    %%t918: i64 = call _abi_dict_get_default, %%t550, %%t919, %%t917
+    store %%t918, %%t882
+    br Lanytagend278
+  Lanytagend278:            ; block 277
+    %%t920: i64 = load %%t882
+    store %%t550, %%t921
+    %%t922: i64 = const -2
+    %%t923: i64 = icmp.eq %%t920, %%t922
+    %%t925: i64 = const -8
+    %%t926: i64 = const -1
+    %%t927: i64 = icmp.ge %%t920, %%t925
+    %%t928: i64 = icmp.le %%t920, %%t926
+    %%t924: i64 = iand %%t927, %%t928
+    br.t %%t924, Lanyunboxboxed282, Lanyunboxend285
+  Lanytagregcheck279:            ; block 278
+    %%t892: i64 = call _abi_gc_is_object, %%t550
+    br.t %%t892, Lanytagboxcheck273, Lanytagrawint271
+  Lanytagnotinst280:            ; block 279
+    %%t911: i64 = const -1000
+    store %%t911, %%t882
+    br Lanytagend278
+  Lanytaguntagged281:            ; block 280
+    %%t916: i64 = const -1000
+    store %%t916, %%t882
+    br Lanytagend278
+  Lanyunboxboxed282:            ; block 281
+    br.t %%t923, Lanyunboxfloat283, Lanyunboxpayload284
+  Lanyunboxfloat283:            ; block 282
+    %%t931: ptr = gep %%t550, 16
+    %%t932: i64 = load %%t931
+    store %%t932, %%t921
+    br Lanyunboxend285
+  Lanyunboxpayload284:            ; block 283
+    %%t929: ptr = gep %%t550, 16
+    %%t930: i64 = load %%t929
+    store %%t930, %%t921
+    br Lanyunboxend285
+  Lanyunboxend285:            ; block 284
+    %%t933: ptr = load %%t921
+    %%t934: i64 = const 1
+    %%t935: i64 = const 6
+    %%t936: ptr = call _abi_dict_repr, %%t933, %%t934, %%t935
+    store %%t936, %%t591
+    br Lfmtanyend174
+  Lfmtanyset286:            ; block 285
+    %%t939: ptr = const 0
+    %%t941: i64 = icmp.eq %%t550, %%t939
+    br.t %%t941, Lanytagnone288, Lanytagheap290
+  Lfmtanyafterset287:            ; block 286
+    br Lfmtanyfallback175
+  Lanytagnone288:            ; block 287
+    %%t942: i64 = const -9
+    store %%t942, %%t940
+    br Lanytagend296
+  Lanytagrawint289:            ; block 288
+    %%t951: i64 = const -1000
+    store %%t951, %%t940
+    br Lanytagend296
+  Lanytagheap290:            ; block 289
+    %%t943: i64 = const 65536
+    %%t944: i64 = icmp.gt %%t550, %%t943
+    %%t945: i64 = const 7
+    %%t946: i64 = iand %%t550, %%t945
+    %%t947: i64 = const 0
+    %%t948: i64 = icmp.eq %%t946, %%t947
+    %%t949: i64 = iand %%t944, %%t948
+    br.t %%t949, Lanytagregcheck297, Lanytagrawint289
+  Lanytagboxcheck291:            ; block 290
+    %%t952: ptr = gep %%t550, 0
+    %%t953: i64 = load %%t952
+    %%t954: i64 = const -5711107564889042451
+    %%t955: i64 = icmp.eq %%t953, %%t954
+    br.t %%t955, Lanytagbox292, Lanytaginstcheck293
+  Lanytagbox292:            ; block 291
+    %%t956: ptr = gep %%t550, 8
+    %%t957: i64 = load %%t956
+    store %%t957, %%t940
+    br Lanytagend296
+  Lanytaginstcheck293:            ; block 292
+    %%t959: i64 = const 8
+    %%t958: i64 = icmp.ge %%t953, %%t959
+    %%t960: i64 = const 1073741824
+    %%t961: i64 = icmp.le %%t953, %%t960
+    %%t962: i64 = const 1
+    %%t963: i64 = isub %%t953, %%t962
+    %%t964: i64 = iand %%t953, %%t963
+    %%t965: i64 = const 0
+    %%t966: i64 = icmp.eq %%t964, %%t965
+    %%t967: i64 = iand %%t958, %%t961
+    %%t968: i64 = iand %%t967, %%t966
+    br.t %%t968, Lanytaglive294, Lanytagnotinst298
+  Lanytaglive294:            ; block 293
+    %%t970: ptr = gep %%t550, 16
+    %%t971: i64 = load %%t970
+    %%t972: i64 = const 65536
+    %%t973: i64 = icmp.gt %%t971, %%t972
+    br.t %%t973, Lanytaguntagged299, Lanytagdictish295
+  Lanytagdictish295:            ; block 294
+    %%t975: i64 = const -1000
+    %%t977: ptr = global_addr __str_1
+    %%t976: i64 = call _abi_dict_get_default, %%t550, %%t977, %%t975
+    store %%t976, %%t940
+    br Lanytagend296
+  Lanytagend296:            ; block 295
+    %%t978: i64 = load %%t940
+    store %%t550, %%t979
+    %%t980: i64 = const -2
+    %%t981: i64 = icmp.eq %%t978, %%t980
+    %%t983: i64 = const -8
+    %%t984: i64 = const -1
+    %%t985: i64 = icmp.ge %%t978, %%t983
+    %%t986: i64 = icmp.le %%t978, %%t984
+    %%t982: i64 = iand %%t985, %%t986
+    br.t %%t982, Lanyunboxboxed300, Lanyunboxend303
+  Lanytagregcheck297:            ; block 296
+    %%t950: i64 = call _abi_gc_is_object, %%t550
+    br.t %%t950, Lanytagboxcheck291, Lanytagrawint289
+  Lanytagnotinst298:            ; block 297
+    %%t969: i64 = const -1000
+    store %%t969, %%t940
+    br Lanytagend296
+  Lanytaguntagged299:            ; block 298
+    %%t974: i64 = const -1000
+    store %%t974, %%t940
+    br Lanytagend296
+  Lanyunboxboxed300:            ; block 299
+    br.t %%t981, Lanyunboxfloat301, Lanyunboxpayload302
+  Lanyunboxfloat301:            ; block 300
+    %%t989: ptr = gep %%t550, 16
+    %%t990: i64 = load %%t989
+    store %%t990, %%t979
+    br Lanyunboxend303
+  Lanyunboxpayload302:            ; block 301
+    %%t987: ptr = gep %%t550, 16
+    %%t988: i64 = load %%t987
+    store %%t988, %%t979
+    br Lanyunboxend303
+  Lanyunboxend303:            ; block 302
+    %%t991: ptr = load %%t979
+    %%t992: i64 = const 6
+    %%t993: ptr = call _abi_set_repr, %%t991, %%t992
+    store %%t993, %%t591
+    br Lfmtanyend174
+  Lanytagnone304:            ; block 303
+    %%t997: i64 = const -9
+    store %%t997, %%t995
+    br Lanytagend312
+  Lanytagrawint305:            ; block 304
+    %%t1006: i64 = const -1000
+    store %%t1006, %%t995
+    br Lanytagend312
+  Lanytagheap306:            ; block 305
+    %%t998: i64 = const 65536
+    %%t999: i64 = icmp.gt %%t550, %%t998
+    %%t1000: i64 = const 7
+    %%t1001: i64 = iand %%t550, %%t1000
+    %%t1002: i64 = const 0
+    %%t1003: i64 = icmp.eq %%t1001, %%t1002
+    %%t1004: i64 = iand %%t999, %%t1003
+    br.t %%t1004, Lanytagregcheck313, Lanytagrawint305
+  Lanytagboxcheck307:            ; block 306
+    %%t1007: ptr = gep %%t550, 0
+    %%t1008: i64 = load %%t1007
+    %%t1009: i64 = const -5711107564889042451
+    %%t1010: i64 = icmp.eq %%t1008, %%t1009
+    br.t %%t1010, Lanytagbox308, Lanytaginstcheck309
+  Lanytagbox308:            ; block 307
+    %%t1011: ptr = gep %%t550, 8
+    %%t1012: i64 = load %%t1011
+    store %%t1012, %%t995
+    br Lanytagend312
+  Lanytaginstcheck309:            ; block 308
+    %%t1014: i64 = const 8
+    %%t1013: i64 = icmp.ge %%t1008, %%t1014
+    %%t1015: i64 = const 1073741824
+    %%t1016: i64 = icmp.le %%t1008, %%t1015
+    %%t1017: i64 = const 1
+    %%t1018: i64 = isub %%t1008, %%t1017
+    %%t1019: i64 = iand %%t1008, %%t1018
+    %%t1020: i64 = const 0
+    %%t1021: i64 = icmp.eq %%t1019, %%t1020
+    %%t1022: i64 = iand %%t1013, %%t1016
+    %%t1023: i64 = iand %%t1022, %%t1021
+    br.t %%t1023, Lanytaglive310, Lanytagnotinst314
+  Lanytaglive310:            ; block 309
+    %%t1025: ptr = gep %%t550, 16
+    %%t1026: i64 = load %%t1025
+    %%t1027: i64 = const 65536
+    %%t1028: i64 = icmp.gt %%t1026, %%t1027
+    br.t %%t1028, Lanytaguntagged315, Lanytagdictish311
+  Lanytagdictish311:            ; block 310
+    %%t1030: i64 = const -1000
+    %%t1032: ptr = global_addr __str_1
+    %%t1031: i64 = call _abi_dict_get_default, %%t550, %%t1032, %%t1030
+    store %%t1031, %%t995
+    br Lanytagend312
+  Lanytagend312:            ; block 311
+    %%t1033: i64 = load %%t995
+    store %%t550, %%t1034
+    %%t1035: i64 = const -2
+    %%t1036: i64 = icmp.eq %%t1033, %%t1035
+    %%t1038: i64 = const -8
+    %%t1039: i64 = const -1
+    %%t1040: i64 = icmp.ge %%t1033, %%t1038
+    %%t1041: i64 = icmp.le %%t1033, %%t1039
+    %%t1037: i64 = iand %%t1040, %%t1041
+    br.t %%t1037, Lanyunboxboxed316, Lanyunboxend319
+  Lanytagregcheck313:            ; block 312
+    %%t1005: i64 = call _abi_gc_is_object, %%t550
+    br.t %%t1005, Lanytagboxcheck307, Lanytagrawint305
+  Lanytagnotinst314:            ; block 313
+    %%t1024: i64 = const -1000
+    store %%t1024, %%t995
+    br Lanytagend312
+  Lanytaguntagged315:            ; block 314
+    %%t1029: i64 = const -1000
+    store %%t1029, %%t995
+    br Lanytagend312
+  Lanyunboxboxed316:            ; block 315
+    br.t %%t1036, Lanyunboxfloat317, Lanyunboxpayload318
+  Lanyunboxfloat317:            ; block 316
+    %%t1044: ptr = gep %%t550, 16
+    %%t1045: i64 = load %%t1044
+    store %%t1045, %%t1034
+    br Lanyunboxend319
+  Lanyunboxpayload318:            ; block 317
+    %%t1042: ptr = gep %%t550, 16
+    %%t1043: i64 = load %%t1042
+    store %%t1043, %%t1034
+    br Lanyunboxend319
+  Lanyunboxend319:            ; block 318
+    %%t1046: ptr = load %%t1034
+    %%t1047: i64 = const 0
+    %%t1048: ptr = call _abi_fmt_elem, %%t1046, %%t1047
+    store %%t1048, %%t591
+    br Lfmtanyend174
+}

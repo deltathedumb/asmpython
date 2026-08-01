@@ -3356,6 +3356,91 @@ def _dict_value_repr_kind(e: A.Expr) -> int:
     return _composite_repr_kind(vt, inner)
 
 
+def _lower_encode_any_key(
+    ctx: _FuncCtx, boxed_v: IRValue, e: "A.Expr | None" = None
+) -> IRValue:
+    """The stored key STRING for a value whose kind is only known at run time.
+
+    The dynamic twin of `_lower_dict_key`'s static arms, and it must produce
+    byte-identical results to them -- a key written as a statically-`str`
+    expression and read back through an "any"-typed parameter has to land in
+    the same slot. So:
+
+      * a str-tagged box   -> its PAYLOAD, used bare, matching the `str` arm
+        (NOT its repr, which would quote it and miss the slot the `str` arm
+        wrote);
+      * anything else      -> `_lower_format_any_value(repr_mode=True)`, which
+        yields a decimal for an int (matching the `int` arm) and a repr for
+        float/bool/tuple/instance (matching the final arm), dispatching on the
+        runtime tag for each.
+
+    `boxed_v` must be the RAW, still-boxed cell (`_lower_expr_inner`): the tag
+    is only legible on the box, and unboxing first would leave a bare str
+    pointer the tag reader classifies as UNTAGGED.
+    """
+    STR_TAG = BUILTIN_TYPE_IDS["str"]
+    uid = id(e) if e is not None else id(boxed_v)
+    out_ptr = ctx.ensure_slot(f"__anykey_{uid}", PTR)
+    tag_v = _lower_read_any_tag(ctx, boxed_v)
+
+    # Created in EMISSION order (raw, boxcheck, str, other, end), not in the
+    # order the branch mentions them: the x86-64 regalloc indexes blocks by
+    # their position in ctx.blocks, so a creation order that does not track
+    # real control flow makes its liveness pass emit a bare KeyError('%tN').
+    raw_b = ctx.new_block(f"anykeyraw_{uid}")
+    boxcheck_b = ctx.new_block(f"anykeybox_{uid}")
+    str_b = ctx.new_block(f"anykeystr_{uid}")
+    other_b = ctx.new_block(f"anykeyother_{uid}")
+    end_b = ctx.new_block(f"anykeyend_{uid}")
+
+    # Only re-encode values that are ACTUALLY boxed. An "any"-typed value is
+    # not always a box: a bare `list`'s elements are stored raw (its element
+    # kind is the unknown sentinel, so nothing boxes them), so `for w in words:
+    # counts[w] = ...` yields a plain str pointer with no tag. Re-encoding
+    # those would quote them and miss the slot the `str` arm wrote -- measured
+    # as regressions in 221_struct_depth and
+    # 485_bare_dict_get_default_counting. Anything outside the box tag range
+    # [set(-8), int(-1)] -- UNTAGGED, null, a real instance -- therefore keeps
+    # the pass-through this function replaced, exactly as before.
+    lo_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", lo_v, [BUILTIN_TYPE_IDS["set"]]))
+    hi_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", hi_v, [BUILTIN_TYPE_IDS["int"]]))
+    ge_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.ge", ge_v, [tag_v, lo_v]))
+    le_v = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.le", le_v, [tag_v, hi_v]))
+    is_box = ctx.tmp(I64)
+    ctx.emit(IRInstr("iand", is_box, [ge_v, le_v]))
+    ctx.emit(IRInstr("br.t", None, [is_box, boxcheck_b.label, raw_b.label]))
+
+    ctx.switch_to(raw_b)
+    ctx.emit(IRInstr("store", None, [boxed_v, out_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.switch_to(boxcheck_b)
+    tag_c = ctx.tmp(I64)
+    ctx.emit(IRInstr("const", tag_c, [STR_TAG]))
+    is_str = ctx.tmp(I64)
+    ctx.emit(IRInstr("icmp.eq", is_str, [tag_v, tag_c]))
+    ctx.emit(IRInstr("br.t", None, [is_str, str_b.label, other_b.label]))
+
+    ctx.switch_to(str_b)
+    unboxed = _lower_unbox_any(ctx, boxed_v)
+    ctx.emit(IRInstr("store", None, [unboxed, out_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.switch_to(other_b)
+    rep_v = _lower_format_any_value(ctx, boxed_v, repr_mode=True)
+    ctx.emit(IRInstr("store", None, [rep_v, out_ptr]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+
+    ctx.switch_to(end_b)
+    out_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("load", out_v, [out_ptr]))
+    return out_v
+
+
 def _lower_dict_key(ctx: _FuncCtx, e: A.Expr) -> IRValue:
     """Lower a dict key expression to the STRING it's stored under.
 
@@ -3377,8 +3462,23 @@ def _lower_dict_key(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         repr strings and therefore hit the same slot.
     """
     key_ty = A.expr_type(e)
-    if key_ty in ("str", "any"):
+    if key_ty == "str":
         return _lower_expr(ctx, e)
+    if key_ty == "any":
+        # The docstring above used to group "any" with "str" on the grounds
+        # that "an 'any' key is already a real pointer; the runtime hashes
+        # whatever string it points at". That predates boxing: a value in an
+        # "any" slot is a 24-byte BOX cell (see `_lower_box_any`), not a
+        # string, so the runtime hashed the CELL and the key never matched the
+        # one written through the `str` arm.
+        #
+        #     d = {}; d["foo"] = 7
+        #     def get(d, k): return d[k]     # k is "any" -> boxed
+        #     get(d, "foo")                  # -> "list index out of range"
+        #
+        # The kind is only knowable at run time here, so dispatch on the tag
+        # and reproduce the SAME encoding each static arm below produces.
+        return _lower_encode_any_key(ctx, _lower_expr_inner(ctx, e), e)
     if key_ty == "int":
         key_v = _lower_expr(ctx, e)
         base = ctx.tmp(I64)
@@ -9645,6 +9745,17 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 ctx.emit(IRInstr("bitcast_i2f", fv, [v]))
                 return fv
             return v
+        # NOTE: an "any" container indexed by a non-str key cannot be resolved
+        # here. Dispatching on the container's runtime tag was tried and
+        # reverted: the container reaching this path is an UNTAGGED raw
+        # pointer (the argument was never boxed, because the parameter carries
+        # the "int" UNKNOWN sentinel rather than "any"), and an untagged
+        # pointer is indistinguishable between a dict and a list at run time.
+        # The dispatch therefore sent dicts down the list arm anyway and turned
+        # a clean "list index out of range" into a segfault.
+        # `vm_dict_key_through_any.py` pins this; it is blocked on boxing
+        # unknown values, i.e. on the UNKNOWN_TY split (PHASE1.md), not on
+        # anything fixable at this read site.
         if obj_ty not in ("list", "tuple", "any"):
             raise LowerError(f"unsupported expr Subscript ({obj_ty})")
         # obj_ty == "any" (e.g. a lambda parameter -- sema.py seeds every
