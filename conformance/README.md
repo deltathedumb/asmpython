@@ -94,6 +94,7 @@ should be expected to satisfy.
 python conformance/harness.py --shim cpython
 python conformance/harness.py --shim asmpython --tier spec,cpython
 python conformance/harness.py --shim asmpython --filter numeric/
+python conformance/harness.py --shim asmpython --matrix     # cross-product view
 ```
 
 A shim is small — given a case file, produce its stdout:
@@ -105,6 +106,26 @@ def run(case_path, timeout):
 ```
 
 Nothing else in the suite is implementation-specific.
+
+---
+
+## Triaging a result
+
+Most of `cases/` is two cross-products — `generated/boundary/<trip>/<kind>` (a
+value moved across a storage boundary) and `generated/consumer/<consumer>/<kind>`
+(a container read by every reader). The axis names are the path, so a failing
+case names its own coordinates, and hundreds of failures collapse into a handful
+of causes.
+
+`--matrix` prints that decomposition: which whole **columns** fail (a broken
+value kind, independent of any boundary) versus which whole **rows** fail (a
+boundary that loses representation whatever crosses it). Those are opposite work
+queues and a case-by-case list cannot distinguish them.
+
+[TAXONOMY.md](TAXONOMY.md) names the recurring causes —
+`representation-follows-slot`, `monomorphic-inference`, `kind-conflation`,
+`width-truncation`, `container-depth`, `consumer-gap`, `refused`,
+`formatter-only` — with the diagnostic that distinguishes each from the others.
 
 ---
 

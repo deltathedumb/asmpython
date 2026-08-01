@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -288,6 +289,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--matrix", action="store_true",
                     help="collapse generated cross-products into a grid")
+    ap.add_argument("--json", metavar="PATH",
+                    help="write the full per-case result as JSON")
     args = ap.parse_args(argv)
 
     tiers = tuple(t.strip() for t in args.tier.split(",") if t.strip())
@@ -327,6 +330,31 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.matrix:
         print_matrix(results)
+
+    if args.json:
+        # Per-case rather than aggregate: a score alone cannot tell "fixed 3,
+        # broke 3" from "changed nothing", and that is the comparison anyone
+        # tracking an implementation over time actually wants. `detail` is
+        # deliberately omitted -- it holds a full stdout diff, which would
+        # dominate the file and churn on unrelated formatting changes.
+        payload = {
+            "shim": args.shim,
+            "tiers": list(tiers),
+            "counted": len(counted),
+            "passed": len(passed),
+            "cases": {
+                r.case.id: {"status": r.status, "tier": r.case.tier,
+                            "counted": r.counted}
+                for r in results
+            },
+        }
+        out = Path(args.json)
+        if out.parent != Path(""):
+            out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        print(f"wrote {out} ({len(results)} case(s))")
 
     pct = (100.0 * len(passed) / len(counted)) if counted else 100.0
     print(f"\nconformance: {len(passed)}/{len(counted)} ({pct:.1f}%) "
