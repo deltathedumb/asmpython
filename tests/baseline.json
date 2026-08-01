@@ -1,10 +1,10 @@
 {
   "_comment": "Pinned corpus baseline. 'failing' is the set of cases known to fail at this tree state; a case leaving that set is progress, a case entering it is a regression. Regenerate with `python -m tests.baseline --record`.",
   "tree": {
-    "commit": "e5ffb7411e26882f5618de25d27b6f14fe505357",
+    "commit": "c20985167619b26b43abe568096040a1f70de154",
     "branch": "beta/3.14.0",
-    "dirty": true,
-    "diff_sha256": "14a5b7072ae352fa"
+    "dirty": false,
+    "diff_sha256": ""
   },
   "runner_args": [
     "-j",
@@ -12,8 +12,8 @@
   ],
   "counts": {
     "total": 1932,
-    "passing": 1278,
-    "failing": 654
+    "passing": 1280,
+    "failing": 652
   },
   "passing": [
     "01_hello.py",
@@ -1064,6 +1064,7 @@
     "property_no_setter.py",
     "proto_add_dunder.py",
     "proto_all_rich_comparisons.py",
+    "proto_any_all_short_circuit.py",
     "proto_augmented_subscript.py",
     "proto_bitwise_dunders.py",
     "proto_builtin_divmod.py",
@@ -1261,6 +1262,7 @@
     "undef_var.py",
     "unique_sorted.py",
     "usermod_helpers.py",
+    "vm_bool_is_not_int.py",
     "vm_callable_param_result.py",
     "vm_dict_mixed_values.py",
     "vm_exception_str.py",
@@ -1746,7 +1748,6 @@
     "proj_call_factory.py",
     "proj_event_dispatch.py",
     "property_deleter.py",
-    "proto_any_all_short_circuit.py",
     "proto_bool_is_int_subclass.py",
     "proto_contains_iteration_fallback.py",
     "proto_contains_uses_equality.py",
@@ -1938,7 +1939,6 @@
     "unicode_ord_high.py",
     "unicode_upper_accent.py",
     "vars_of_instance.py",
-    "vm_bool_is_not_int.py",
     "vm_bytearray_mutable.py",
     "vm_bytes_literal.py",
     "vm_container_heterogeneous.py",
