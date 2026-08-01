@@ -537,3 +537,56 @@ Corpus contamination: the rule held this round (no source edit or build while a
 sweep was live), with one near-miss -- `tests.runner --help` is not a supported
 flag and silently starts a FULL RUN. It was stopped, but a stray --help is
 enough to corrupt a measurement.
+
+--------------------------------------------------------------------------------
+ELEMENT CHOKE POINT: it is not a mechanical migration. Read this before batching.
+--------------------------------------------------------------------------------
+
+I was one edit away from batch-applying `_load_list_elem` across the sites with
+an element-kind variable in scope. That would have regressed things, and the
+reason generalises, so it is worth stating as a rule rather than a note.
+
+An element read is one of TWO kinds, and they want OPPOSITE treatment:
+
+  CONSUME -- the value is used AS a value: compared, added, formatted, tested
+             for truth. An "any" element must be UNBOXED here, because the
+             consumer will otherwise compute with the box's ADDRESS. This is
+             what `_load_list_elem` is for.
+
+  COPY    -- the value is moved into another slot that is itself "any": a tuple
+             being built, a loop target, another container. Here the raw load is
+             already CORRECT: it yields the box pointer, and copying the box
+             preserves the tag. Unboxing would strip it, and the value would
+             arrive at its destination as bare bits with nothing left to say
+             what it is.
+
+Concretely, three of the sites that look most migratable are COPY sites and
+must be left alone:
+
+  ir_lower.py:9082   builds a tuple from zipped iterables -> stores into a
+                     tuple slot
+  ir_lower.py:2165   comprehension tuple-unpack -> _store_loop_target(target_ty)
+  ir_lower.py:14472  for-zip -> _store_loop_target(elem_ty)
+
+All three pass the element straight into a slot whose declared type is the same
+kind they read it as. The box has to survive that hop.
+
+The genuine CONSUME sites, which are the actual work queue:
+
+  _lower_membership / _lower_membership_any   905, 1129, 10851   equality
+  _lower_list_index                           1375               equality
+  _lower_list_remove                          1232, 1299         equality
+  _lower_expr_inner (any/all)                 9741               truthiness
+  _lower_list_instance_repr                   3505               formatting
+  _lower_list_of_tuples_repr                  4932               formatting
+  _lower_dict_raw_key_repr                    -                  formatting
+
+_lower_minmax (7452, 7487) and the three sort helpers are MIXED and should be
+done last and individually: they compare elements (consume) and also move them
+into the result (copy), so a single treatment for the whole function is wrong by
+construction. min() over a mixed list has to compare unboxed and RETURN boxed.
+
+This also revises the effort estimate downward in a useful way: the queue is
+roughly 10-12 real sites, not 33 and certainly not 57. The rest are either copy
+sites that are already right or internal keys/pairs reads that were never in
+scope.
