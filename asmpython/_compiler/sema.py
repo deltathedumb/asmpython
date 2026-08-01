@@ -10976,7 +10976,30 @@ class SemaAnalyzer:
                     e.value_type = self.global_scope.dict_value_types.get(e.name, "int")
                 return
             if obj_t == "any":
-                # Attribute of an already-opaque value. Stay lenient.
+                # Attribute of an already-opaque value. If exactly ONE class in
+                # the program declares a field of this name, its type is
+                # unambiguous even though the receiver is not -- use it.
+                #
+                # This matters because representation follows the field's
+                # DECLARED type: `Leaf.tag` is inferred `str` from its
+                # constructor call sites and so is stored RAW, correctly. Read
+                # back through an "any" receiver it was typed "any", and the
+                # "any" reader assumes a boxed value, so the raw str pointer
+                # read as UNTAGGED and printed as an integer
+                # (`vm_str_field_via_helper.py`). Recovering the real type here
+                # keeps the read on the same representation the write used.
+                #
+                # Ambiguous names stay "any": two classes with a same-named
+                # field of different types cannot be resolved without a runtime
+                # class-id dispatch, which is a separate, larger change.
+                _fld_types = {
+                    c.fields[e.name]
+                    for c in self.classes.values()
+                    if e.name in c.fields and c.fields[e.name]
+                }
+                if len(_fld_types) == 1:
+                    e.inferred_type = _fld_types.pop()
+                    return
                 e.inferred_type = "any"
                 return
             if obj_t == "str":
