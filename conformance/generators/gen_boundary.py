@@ -1,7 +1,7 @@
 """Generate the boundary cross-product: every VALUE KIND through every TRIP.
 
     python conformance/generators/gen_boundary.py
-    python conformance/regen.py --filter generated/boundary
+    python conformance/regen.py --groups generated/boundary
 
 A value's identity must survive being moved. That is close to the whole content
 of a dynamic language's data model, and it is where a compiled implementation
@@ -190,7 +190,7 @@ def main() -> int:
     print(f"gen_boundary: {written} cases "
           f"({len(TRIPS)} trips x {len(KINDS)} kinds, "
           f"{skipped} impossible pair(s) excluded) -> {OUT}")
-    print("now run: python conformance/regen.py --filter generated/boundary")
+    print("now run: python conformance/regen.py --groups generated/boundary")
     return 0
 
 

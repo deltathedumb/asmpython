@@ -1,7 +1,7 @@
 """Generate the consumer cross-product: every CONSUMER over every ELEMENT KIND.
 
     python conformance/generators/gen_consumer.py
-    python conformance/regen.py --filter generated/consumer
+    python conformance/regen.py --groups generated/consumer
 
 The companion to gen_boundary.py. That one moves a value across boundaries;
 this one puts values in a container and varies who reads them back.
@@ -36,6 +36,29 @@ ELEMENTS: dict[str, str] = {
     "mixed": "[1, 'two', 3.5, True, None]",
     "nested-list": "[[1, 2], [3], [4, 5, 6]]",
     "tuple-elems": "[(1, 'a'), (2, 'b')]",
+    "dict-elems": "[{'a': 1}, {'b': 2}]",
+    "bytes-elems": "[b'ab', b'cd']",
+    # The empty list is the edge every off-by-one lands on, and its repr,
+    # slices and iteration are all still well defined -- but the consumers
+    # that index it are not (see INCOMPATIBLE).
+    "empty": "[]",
+}
+
+#: (consumer, element-kind) pairs that cannot exist. Only `empty` needs any:
+#: a consumer that reads xs[0], pops, or takes a min has nothing to read, and
+#: CPython raises IndexError or ValueError, so there is no expectation to
+#: record. A case the reference implementation cannot run is not a case.
+#:
+#: Explicit rather than "whatever regen refuses", for the same reason as
+#: gen_boundary.INCOMPATIBLE: impossible and broken must not look alike.
+_NEEDS_AN_ELEMENT = {
+    "subscript", "subscript-computed", "negative-index", "unpack-first",
+    "membership", "index-method", "pop-method", "remove-method",
+    "min-max-by-repr", "pass-to-function", "return-from-function",
+    "store-in-instance", "dict-value", "star-args",
+}
+INCOMPATIBLE: dict[str, set[str]] = {
+    consumer: {"empty"} for consumer in _NEEDS_AN_ELEMENT
 }
 
 #: Each consumer reads `xs` and prints something derived from its ELEMENTS.
@@ -89,18 +112,26 @@ xs = {elements}
 
 
 def main() -> int:
-    written = 0
+    written = skipped = 0
     for consumer, body in CONSUMERS.items():
+        excluded = INCOMPATIBLE.get(consumer, set())
         for kind, literal in ELEMENTS.items():
             path = OUT / consumer / f"{kind}.py"
+            if kind in excluded:
+                # Unlink, so an exclusion added later cannot strand a case that
+                # is still scored and no longer generated.
+                path.unlink(missing_ok=True)
+                skipped += 1
+                continue
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
                 TEMPLATE.format(elements=literal, body=body), encoding="utf-8"
             )
             written += 1
     print(f"gen_consumer: {written} cases "
-          f"({len(CONSUMERS)} consumers x {len(ELEMENTS)} kinds) -> {OUT}")
-    print("now run: python conformance/regen.py --filter generated/consumer")
+          f"({len(CONSUMERS)} consumers x {len(ELEMENTS)} kinds, "
+          f"{skipped} impossible pair(s) excluded) -> {OUT}")
+    print("now run: python conformance/regen.py --groups generated/consumer")
     return 0
 
 
