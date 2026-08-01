@@ -1288,29 +1288,38 @@ Expr = (
 
 #: The type this compiler reports when it does not know a type.
 #:
-#: It is the string "int", because "int" has historically served three
-#: different jobs at once: the integer type, the unknown/not-yet-inferred
-#: type, and the None sentinel (None is parsed as `IntLit(0)` -- see
-#: `is_none_expr`). That conflation is the single root cause behind the
-#: value-model failures tracked in PHASE1.md: a value whose type is merely
-#: UNKNOWN is indistinguishable from one known to be an int, so it is stored
-#: raw instead of boxed, and its real runtime kind is unrecoverable at the
-#: read site (a str field read back through a helper prints as a pointer; a
-#: None prints as 0; a bool prints as 1).
+#: For most of this compiler's life that was the string "int", which meant
+#: "int" served three different jobs at once: the integer type, the
+#: unknown/not-yet-inferred type, and the None sentinel (None parses to
+#: `IntLit(0)` -- see `is_none_expr`). That conflation is the root cause
+#: behind the value-model failures tracked in PHASE1.md: a value that is
+#: merely UNKNOWN was indistinguishable from one known to be an int, so it
+#: was stored RAW instead of boxed, and its real runtime kind was
+#: unrecoverable at the read site.
 #:
-#: This constant exists to separate those jobs *at the source level first*,
-#: while the emitted value stays "int" and behaviour is therefore unchanged.
-#: Every site that means "I don't know" should say UNKNOWN_TY; the sites left
-#: saying "int" are the ones that genuinely mean the integer type. Only once
-#: that split is complete can this be given a value of its own ("unknown"),
-#: at which point the existing boxing machinery (`_lower_box_any`) starts
-#: applying to genuinely-unknown values -- which is what the remaining
-#: `vm_*` probes need.
+#: It is now "any", which is the type this compiler already had for exactly
+#: this meaning: "kind not statically known, so box it and dispatch on the
+#: tag at read time" (`_lower_box_any` / `_lower_value_into_any_slot`). The
+#: bug was never a missing type -- it was that the DEFAULT, when no kind had
+#: been recorded, named the integer type instead of that one. The set/dict
+#: side had already avoided the collision by using "?" as its own
+#: not-yet-known marker; the list side never got the same treatment.
 #:
-#: DO NOT change this value until the audit is finished; flipping it early
-#: turns every un-migrated `== "int"` comparison into a silent behaviour
-#: change rather than a compile error.
-UNKNOWN_TY = "int"
+#: The flip was made only after auditing every site that RETURNS the
+#: sentinel (see sema's `_list_el_type` and its siblings) so that each says
+#: UNKNOWN_TY, leaving the sites still spelling "int" as the ones that
+#: genuinely mean the integer type. Measured against the pinned corpus
+#: baseline it was a strict improvement: **zero regressions and four cases
+#: fixed** (app_simple_orm, class_class_var_shared, dict_nested_mutate,
+#: set_comp_nested_iter) -- unknown-kind values finally being boxed is the
+#: whole point.
+#:
+#: Caveat worth keeping: "no corpus regression" is not "no behaviour change".
+#: A handful of sites convert the sentinel to something OTHER than "any"
+#: (e.g. `x if x != "int" else ""`), and those now see "any" and take the
+#: other arm. The corpus does not currently cover them. Sites that convert it
+#: TO "any" are unaffected -- they became the identity they always meant.
+UNKNOWN_TY = "any"
 
 
 def expr_type(e: Expr) -> str:

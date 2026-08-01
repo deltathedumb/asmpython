@@ -1,19 +1,19 @@
 {
   "_comment": "Pinned corpus baseline. 'failing' is the set of cases known to fail at this tree state; a case leaving that set is progress, a case entering it is a regression. Regenerate with `python -m tests.baseline --record`.",
   "tree": {
-    "commit": "6c96ef95280f109eb2e0588505ea37b62203c7a5",
+    "commit": "3ab1b6939e096951ca8741802ceaa95dfee6a4bd",
     "branch": "beta/3.14.0",
-    "dirty": true,
-    "diff_sha256": "32d6008b7eb928ab"
+    "dirty": false,
+    "diff_sha256": ""
   },
   "runner_args": [
     "-j",
     "8"
   ],
   "counts": {
-    "total": 1142,
+    "total": 1143,
     "passing": 809,
-    "failing": 333
+    "failing": 334
   },
   "passing": [
     "01_hello.py",
@@ -1151,6 +1151,7 @@
     "vm_bytes_literal.py",
     "vm_callable_param_result.py",
     "vm_container_heterogeneous.py",
+    "vm_dict_key_through_any.py",
     "vm_int_is_arbitrary_precision.py",
     "vm_none_is_not_zero.py",
     "vm_round_returns_int.py",
