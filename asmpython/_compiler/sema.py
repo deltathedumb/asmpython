@@ -1917,6 +1917,29 @@ class SemaAnalyzer:
                 self._scan_field_assigns(s.else_body, sig, pinfo)
                 self._scan_field_assigns(s.finally_body, sig, pinfo)
 
+    def _uniform_elem_kind(self, exprs):
+        """The one element kind every expression in `exprs` shares, "any" when
+        they disagree, or None when there is nothing to learn (an empty
+        literal, which keeps the previous no-information behaviour).
+
+        A container parameter inferred from a literal call site used to report
+        a bare ("list", None) / ("dict", None), so the ELEMENT type was
+        unknown at every read. For a list that meant `for x in lst: s.add(x)`
+        added an untyped value to a set and the program access-violated; for a
+        dict it forced the int default. Reporting the real element kind is what
+        made dict safe to infer at all, and lists and sets need it for exactly
+        the same reason.
+        """
+        kind = None
+        for ex in exprs:
+            lv = self._literal_arg_type(ex)
+            k = lv[0] if lv is not None else "any"
+            if kind is None:
+                kind = k
+            elif kind != k:
+                return "any"
+        return kind
+
     def _literal_arg_type(self, value):
         """(ty, el, val, tuple) for an expression whose type is knowable from
         its syntax alone, independent of scope -- or None if it depends on a
@@ -1930,11 +1953,17 @@ class SemaAnalyzer:
         if isinstance(value, A.StrLit) or isinstance(value, A.FString):
             return ("str", None, None, None)
         if isinstance(value, A.ListLit):
-            return ("list", None, None, None)
+            return ("list", self._uniform_elem_kind(value.elems), None, None)
         if isinstance(value, A.DictLit):
-            return ("dict", None, None, None)
+            # Report the VALUE kind too. Writing a bare ("dict", None) forces
+            # the int default on every read, which is why dict used to be kept
+            # out of _INFERRED_PARAM_KINDS entirely -- it cost
+            # app_validate_form.py an entry. A MIXED dict reports "any", which
+            # preserves the dynamic handling that case needs, and a homogeneous
+            # one reports its real kind.
+            return ("dict", self._uniform_elem_kind(value.values), None, None)
         if isinstance(value, A.SetLit):
-            return ("set", None, None, None)
+            return ("set", self._uniform_elem_kind(value.elems), None, None)
         if isinstance(value, A.TupleLit):
             return ("tuple", None, None, None)
         if isinstance(value, A.Call) and value.func in (
@@ -2239,6 +2268,187 @@ class SemaAnalyzer:
             if e.body is not None:
                 self._collect_calls_expr(e.body, out)
 
+    def _module_binding_kinds(self) -> dict:
+        """Module-level names whose type is knowable, as {name: (ty, el, ...)}.
+
+        Parameter inference reads only LITERAL arguments, because
+        _literal_arg_type is deliberately scope-independent. That leaves the
+        most ordinary shape in the corpus uninferred:
+
+            tree = {'root': {'a': {}}}
+            def show(node, depth=0):
+                for key in sorted(node): ...
+            show(tree)                      # a Name, so nothing was learned
+
+        `node` stayed untyped and `sorted(node)` produced ints, so
+        `'  ' * depth + key` was rejected as str + int. A module-level name
+        bound exactly once to a literal has a type that is just as certain as
+        the literal written inline at the call site.
+
+        Only names bound EXACTLY ONCE in the whole program qualify -- a second
+        binding anywhere, at module level or inside any function via `global`,
+        drops the name rather than picking one of the two.
+        """
+        cached = getattr(self, "_mod_binding_kinds_cache", None)
+        if cached is not None:
+            return cached
+        kinds: dict = {}
+        seen_twice: set = set()
+
+        def _note(target, value, top: bool) -> None:
+            if not isinstance(target, str):
+                return
+            if target in seen_twice:
+                return
+            if target in kinds or not top:
+                # A rebinding anywhere makes the single-binding claim false.
+                seen_twice.add(target)
+                kinds.pop(target, None)
+                return
+            lit = self._literal_arg_type(value)
+            if lit is not None:
+                kinds[target] = lit
+
+        for _s in self._walk_stmts_flat(self.mod.body):
+            if isinstance(_s, A.Assign):
+                _note(_s.target, _s.value, True)
+        def _rebinds_globals(body: list) -> None:
+            # Only an assignment to a name the function DECLARED global can
+            # rebind the module binding. A plain `x = 5` inside a function is a
+            # local and says nothing about the module-level `x`, so counting it
+            # would discard a perfectly certain binding.
+            declared: set = set()
+            for _s in self._walk_stmts_flat(body):
+                if isinstance(_s, A.Global):
+                    declared.update(_s.names)
+            if not declared:
+                return
+            for _s in self._walk_stmts_flat(body):
+                if isinstance(_s, A.Assign) and _s.target in declared:
+                    _note(_s.target, _s.value, False)
+
+        for _f in self.mod.funcs:
+            _rebinds_globals(_f.body)
+        for _c in self.mod.classes:
+            for _m in _c.methods:
+                _rebinds_globals(_m.body)
+        self._mod_binding_kinds_cache = kinds
+        return kinds
+
+    def _return_expr_kind(self, fn, ex, kinds: dict, depth: int):
+        """Kind of a RETURNED expression, or None when it cannot be read.
+
+        Recursive, because the shapes that actually appear are nested: a merge
+        step returns `r + a[i:] + b[j:]`, a concatenation whose left operand is
+        itself a concatenation. Handling only the top level left that -- and so
+        every function that returned one -- unreadable.
+        """
+        if ex is None or depth > 6:
+            return None
+        lit = self._literal_arg_type(ex)
+        if lit is not None:
+            return lit
+        if isinstance(ex, A.Name):
+            return self._param_kind_in(fn, ex.name)
+        if isinstance(ex, A.Call) and isinstance(ex.func, str):
+            return kinds.get(ex.func)
+        if isinstance(ex, A.BinOp) and ex.op == "+":
+            # Concatenation carries its operands' kind. Either side answers,
+            # since `+` requires them to agree in the first place.
+            return (self._return_expr_kind(fn, ex.left, kinds, depth + 1)
+                    or self._return_expr_kind(fn, ex.right, kinds, depth + 1))
+        if isinstance(ex, A.Subscript) and isinstance(ex.index, A.Slice):
+            # A slice of a sequence is that same sequence kind.
+            return self._return_expr_kind(fn, ex.obj, kinds, depth + 1)
+        if isinstance(ex, A.IfExp):
+            a = self._return_expr_kind(fn, ex.body, kinds, depth + 1)
+            b = self._return_expr_kind(fn, ex.orelse, kinds, depth + 1)
+            return a if (a is not None and b is not None and a[0] == b[0]) else None
+        return None
+
+    def _infer_return_kinds(self) -> None:
+        """Fill `self._fn_return_kinds` so a CALL can inform the parameter it is
+        passed to.
+
+        Forwarding (see _param_kind_in) covers an argument that is a bare
+        parameter name; this covers one that is a call:
+
+            def msort(xs):
+                if len(xs) <= 1: return xs
+                return merge(msort(xs[:m]), msort(xs[m:]))
+
+        `merge`'s only call site passes two CALLS, so without this its
+        parameters stay int and `len(a)` reads an integer as a list header.
+
+        A returned PARAMETER resolves through what inference already knows, so
+        this runs between rounds. A function whose returns disagree, or that has
+        one unreadable return, is left out entirely -- absence means "nothing
+        known", never a guess.
+        """
+        kinds: dict = {}
+        for f in self.mod.funcs:
+            params: list = f.params
+            merged = None
+            usable = True
+            seen = False
+            for st in self._walk_stmts_flat(f.body):
+                if not isinstance(st, A.Return) or st.value is None:
+                    continue
+                lit = self._return_expr_kind(f, st.value, kinds, 0)
+                if lit is None:
+                    # An unreadable return is NO INFORMATION, not a
+                    # disagreement. Bailing on one made mutually recursive
+                    # functions unresolvable: merge's return needs msort's kind
+                    # and msort's needs merge's, so neither was ever readable
+                    # even though msort also has a plain `return xs` that says
+                    # list. The readable returns must still all agree, and a
+                    # function with none at all is skipped by `seen`.
+                    continue
+                seen = True
+                if merged is None:
+                    merged = tuple(lit) + (None,) * (4 - len(lit))
+                elif merged[0] != lit[0]:
+                    usable = False
+                    break
+                elif merged[1] != lit[1]:
+                    els = {merged[1], lit[1]} - {None}
+                    merged = (merged[0], next(iter(els)) if len(els) == 1 else None) + tuple(merged[2:])
+            if usable and seen and merged is not None and merged[0] != "int":
+                kinds[f.name] = merged
+        self._fn_return_kinds = kinds
+
+    def _param_kind_in(self, owner, nm: str):
+        """The recorded kind of `nm` as a parameter of `owner`, or None.
+
+        Call-site inference only ever read LITERAL arguments, so a call that
+        forwards one of its own parameters taught it nothing:
+
+            def merge(a, b): ... len(a) ... a[i] ...
+            def wrap(x):     return merge(x, x)
+            wrap([1])
+
+        `wrap`'s parameter is inferred from the literal, but `merge`'s only call
+        site passes a NAME, so `a` and `b` stayed int and `len(a)` read an
+        integer as a list header. Forwarding a parameter is the commonest way a
+        call site is not a literal, and the answer is already known by the time
+        it is asked -- from an annotation, or from an earlier round of this
+        same pass.
+        """
+        if owner is None or not isinstance(nm, str):
+            return None
+        params: list = owner.params
+        if nm not in params:
+            return None
+        i = params.index(nm)
+        pts: list = owner.param_types
+        annot = pts[i] if i < len(pts) else None
+        if annot is not None and annot[0] not in (None, "any"):
+            return tuple(annot) + (None,) * (4 - len(annot))
+        got = self.inferred_param_types.get(f"{owner.name}:{i}")
+        if got is not None:
+            return tuple(got) + (None,) * (4 - len(got))
+        return None
+
     def _infer_unannotated_params(self) -> None:
         """For function/method parameters with no type annotation and no
         default, scan every call site in the module for arguments whose type
@@ -2255,52 +2465,74 @@ class SemaAnalyzer:
         existing `int` default -- callers needing a different type still
         annotate explicitly, same as before."""
         calls: list = []
-        self._collect_calls_stmts(self.mod.body, calls)
+        # `_call_owner` maps each collected call to the FUNCTION it is written
+        # in, so an argument that is a bare Name can be resolved against that
+        # function's own parameters -- see _param_kind_in.
+        self._call_owner = {}
+
+        def _collect_owned(body, owner):
+            start = len(calls)
+            self._collect_calls_stmts(body, calls)
+            for _c in calls[start:]:
+                self._call_owner.setdefault(id(_c), owner)
+
+        _collect_owned(self.mod.body, None)
         for f in self.mod.funcs:
-            self._collect_calls_stmts(f.body, calls)
+            _collect_owned(f.body, f)
         for c in self.mod.classes:
             for m in c.methods:
-                self._collect_calls_stmts(m.body, calls)
+                _collect_owned(m.body, m)
 
         _mod_names = {
             _mn for _mn in getattr(self.mod, "project_module_qualifiers", set())
         }
-        for f in self.mod.funcs:
-            sites = [c for c in calls if isinstance(c, A.Call) and c.func == f.name]
-            # A MODULE-QUALIFIED call (`pprint.pformat(x)`) is a call to this
-            # same merged function -- whole-program compilation flattens the
-            # namespace -- but it is still an A.MethodCall at THIS point,
-            # because the rewrite to a plain Call happens during checking,
-            # which runs later. Collecting only A.Call left every such callee's
-            # parameters uninferred: `pformat`'s `o` defaulted to int, so its
-            # `str(o)` formatted a dict POINTER as a decimal integer.
-            for _c in calls:
-                if (
-                    isinstance(_c, A.MethodCall)
-                    and _c.method == f.name
-                    and isinstance(_c.obj, A.Name)
-                    and _c.obj.name not in self.imported_modules
-                ):
-                    sites.append(_c)
-            self._infer_call_target_params(f.name, f, sites, start=0)
+        # Repeated to a fixpoint. A parameter learned by FORWARDING (see
+        # _param_kind_in) depends on the forwarding function already being
+        # typed, which depends on declaration order -- `shout(s)` written above
+        # `go(t)` learned nothing on a single pass. Bounded, and it stops as
+        # soon as a round adds nothing, so the ordinary case still costs one.
+        for _round in range(4):
+            _before = dict(self.inferred_param_types)
+            if _round:
+                self._infer_return_kinds()
+            for f in self.mod.funcs:
+                sites = [c for c in calls if isinstance(c, A.Call) and c.func == f.name]
+                # A MODULE-QUALIFIED call (`pprint.pformat(x)`) is a call to this
+                # same merged function -- whole-program compilation flattens the
+                # namespace -- but it is still an A.MethodCall at THIS point,
+                # because the rewrite to a plain Call happens during checking,
+                # which runs later. Collecting only A.Call left every such callee's
+                # parameters uninferred: `pformat`'s `o` defaulted to int, so its
+                # `str(o)` formatted a dict POINTER as a decimal integer.
+                for _c in calls:
+                    if (
+                        isinstance(_c, A.MethodCall)
+                        and _c.method == f.name
+                        and isinstance(_c.obj, A.Name)
+                        and _c.obj.name not in self.imported_modules
+                    ):
+                        sites.append(_c)
+                self._infer_call_target_params(f.name, f, sites, start=0)
 
-        for c in self.mod.classes:
-            for m in c.methods:
-                if m.name == "__init__":
-                    sites = [
-                        c2 for c2 in calls if isinstance(c2, A.Call) and c2.func == c.name
-                    ]
-                else:
-                    # Matched by method name only (the receiver's static type
-                    # isn't known yet at this pre-pass). If another class has a
-                    # same-named method with conflicting argument types, the
-                    # mismatch just falls back to `int` as before -- no new
-                    # miscompile.
-                    sites = [
-                        mc for mc in calls
-                        if isinstance(mc, A.MethodCall) and mc.method == m.name
-                    ]
-                self._infer_call_target_params(f"{c.name}.{m.name}", m, sites, start=1)
+            for c in self.mod.classes:
+                for m in c.methods:
+                    if m.name == "__init__":
+                        sites = [
+                            c2 for c2 in calls if isinstance(c2, A.Call) and c2.func == c.name
+                        ]
+                    else:
+                        # Matched by method name only (the receiver's static type
+                        # isn't known yet at this pre-pass). If another class has a
+                        # same-named method with conflicting argument types, the
+                        # mismatch just falls back to `int` as before -- no new
+                        # miscompile.
+                        sites = [
+                            mc for mc in calls
+                            if isinstance(mc, A.MethodCall) and mc.method == m.name
+                        ]
+                    self._infer_call_target_params(f"{c.name}.{m.name}", m, sites, start=1)
+            if self.inferred_param_types == _before:
+                break
 
     def _literal_is_uniform(self, value) -> bool:
         """Whether a container literal's elements all share one base kind.
@@ -2337,6 +2569,17 @@ class SemaAnalyzer:
             if self._resolve_annot(annot) is not None:  # type: ignore
                 continue
             if i < len(fn_defaults) and fn_defaults[i] is not None:
+                # A parameter with a default is skipped for CALL-SITE inference,
+                # because the default already describes it -- but nothing was
+                # reading that description, so the parameter stayed untyped.
+                # For a pointer-sized kind that is merely imprecise; for a FLOAT
+                # it is wrong, because a float travels in an XMM register and an
+                # untyped parameter arrives through a GP one, so `def f(x=1.5)`
+                # returned raw bits (3.2055295e-317). Recording the default's own
+                # kind is the description the skip assumes exists.
+                _dl = self._literal_arg_type(fn_defaults[i])
+                if _dl is not None and _dl[0] in self._INFERRED_PARAM_KINDS:
+                    self.inferred_param_types.setdefault(f"{qualname}:{i}", _dl)
                 continue
             candidates: list = []
             found_any = False
@@ -2360,6 +2603,16 @@ class SemaAnalyzer:
                     if arg is None:
                         continue
                 lit = self._literal_arg_type(arg)
+                if lit is None and isinstance(arg, A.Call) and isinstance(arg.func, str):
+                    lit = getattr(self, "_fn_return_kinds", {}).get(arg.func)
+                if lit is None and isinstance(arg, A.Name):
+                    lit = self._param_kind_in(
+                        getattr(self, "_call_owner", {}).get(id(site)), arg.name
+                    )
+                if lit is None and isinstance(arg, A.Name):
+                    # Not a literal, but a module-level name bound exactly once
+                    # to one is just as certain -- see _module_binding_kinds.
+                    lit = self._module_binding_kinds().get(arg.name)
                 if lit is None:
                     continue
                 # A CONTAINER literal only informs the parameter's type when its
@@ -2382,6 +2635,26 @@ class SemaAnalyzer:
                     candidates.append(lit)
             if found_any and len(candidates) == 1:
                 self.inferred_param_types[f"{qualname}:{i}"] = candidates[0]
+            elif found_any and len(candidates) > 1:
+                # Sites that differ ONLY in the element slot, where some report
+                # None (nothing to learn -- an EMPTY literal) and the rest agree
+                # on one kind. `process_command([])` then `process_command([1])`
+                # yields ("list", None) and ("list", "int"): before element
+                # kinds were reported at all these were both ("list", None) and
+                # agreed, so requiring exact equality turned a newly more
+                # precise answer into a disagreement and dropped the parameter
+                # to the int default (424_match_structural.py).
+                #
+                # An unknown yields to a known one; two DIFFERENT known kinds
+                # still conflict and inference declines, exactly as before.
+                _rest = {(c[0],) + tuple(c[2:]) for c in candidates}
+                _els = {c[1] for c in candidates if c[1] is not None}
+                if len(_rest) == 1 and len(_els) <= 1:
+                    _c0 = candidates[0]
+                    _el = next(iter(_els)) if _els else None
+                    self.inferred_param_types[f"{qualname}:{i}"] = (
+                        (_c0[0], _el) + tuple(_c0[2:])
+                    )
 
     #: Inferred parameter kinds written through to the IR parameter type.
     #:
@@ -2415,7 +2688,41 @@ class SemaAnalyzer:
     #: list/set/tuple carry the same latent risk whenever their element type is
     #: not int; they are kept because the gate showed no divergence for them and
     #: they account for real fixes.
-    _INFERRED_PARAM_KINDS = ("float", "str", "list", "set", "tuple")
+    _INFERRED_PARAM_KINDS = ("float", "str", "list", "dict", "set", "tuple")
+
+    def _param_is_type_tested(self, fn, pname: str) -> bool:
+        """True if `fn`'s body calls isinstance()/type() on `pname`.
+
+        Evidence the parameter is polymorphic by intent, which one literal call
+        site cannot outweigh. See the use site in _apply_inferred_param_types.
+        """
+        found = [False]
+
+        def _walk(node) -> None:
+            if found[0] or node is None:
+                return
+            if isinstance(node, A.Call) and node.func in ("isinstance", "type"):
+                for a in node.args:
+                    if isinstance(a, A.Name) and a.name == pname:
+                        found[0] = True
+                        return
+            for attr in ("args", "elems", "values", "keys", "operands"):
+                for sub in (getattr(node, attr, None) or []):
+                    _walk(sub)
+            for attr in ("obj", "value", "test", "left", "right", "iter", "elt", "cond"):
+                _walk(getattr(node, attr, None))
+
+        def _walk_stmts(stmts) -> None:
+            for st in (stmts or []):
+                if found[0]:
+                    return
+                for attr in ("value", "test", "expr", "iter", "cond"):
+                    _walk(getattr(st, attr, None))
+                for attr in ("body", "then", "orelse", "finally_body", "else_body"):
+                    _walk_stmts(getattr(st, attr, None))
+
+        _walk_stmts(fn.body)
+        return found[0]
 
     def _apply_inferred_param_types(self) -> None:
         """Propagate a parameter type inferred from call sites (see
@@ -2462,13 +2769,35 @@ class SemaAnalyzer:
                 inferred = self.inferred_param_types.get(f"{qualname}:{i}")
                 if inferred is None or inferred[0] not in self._INFERRED_PARAM_KINDS:
                     continue
+                # A parameter the body TYPE-TESTS is polymorphic by intent, so
+                # the literal call sites do not describe it. Inference sees only
+                # LITERAL arguments, so a recursive helper like
+                #     def to_json(obj):
+                #         if isinstance(obj, dict): ... to_json(v) ...
+                #         elif isinstance(obj, str): ...
+                # has exactly one visible site -- the dict literal at the top
+                # level -- and every recursive call is invisible. Typing `obj`
+                # as dict then made the str/int branches unreachable-but-emitted
+                # and the program access-violated (prog_json_stringify.py).
+                #
+                # An `isinstance` test on the parameter is the author stating
+                # the type varies, which is strictly better evidence than one
+                # literal call site. Only that test disqualifies -- other
+                # "dynamic" uses (iteration, attribute access) do not, since
+                # those are exactly the cases inference exists to type.
+                if self._param_is_type_tested(fn, fn.params[i]):
+                    continue
                 kind = inferred[0]
                 cur = fn_pts[i] if i < len(fn_pts) else None
                 if cur is not None:
                     continue  # never override a real annotation
                 while len(fn_pts) <= i:
                     fn_pts.append(None)
-                fn_pts[i] = (kind, None)
+                # Carry the element/value kind, not just the base. A bare
+                # (kind, None) makes every read take the int default, which is
+                # what made a dict parameter unusable.
+                _el = inferred[1] if len(inferred) > 1 else None
+                fn_pts[i] = (kind, _el if isinstance(_el, str) and _el else None)
                 if sig is not None:
                     sig_pts: list = sig.param_types
                     if i < len(sig_pts):
@@ -3039,7 +3368,7 @@ class SemaAnalyzer:
                 return None
         return seen
 
-    def _yielded_value_kind(self, stmts: list) -> "str | None":
+    def _yielded_value_kind(self, stmts: list, param_kinds=None) -> "str | None":
         """The common kind of every `yield`ed expression in `stmts`, or None if
         they disagree or none is statically knowable.
 
@@ -3057,6 +3386,16 @@ class SemaAnalyzer:
                 return None
             if isinstance(_v, A.MethodCall) and _v.method in _STR_METHOD_RET:
                 _kinds.add(_STR_METHOD_RET[_v.method])
+                continue
+            if isinstance(_v, A.Name):
+                # A bare `yield c` where `c` is the loop variable. Its kind is
+                # not readable from the yield alone, but the enclosing `for`
+                # says what it iterates -- the same question _gen_local_seed
+                # already asks to seed the lifted field.
+                _fk = self._gen_for_var_kind(_v.name, stmts, param_kinds or {})
+                if not _fk:
+                    return None
+                _kinds.add(_fk)
                 continue
             _lit = self._literal_arg_type(_v)
             if _lit is None:
@@ -4235,7 +4574,17 @@ class SemaAnalyzer:
             return "int" if range_args else ""
         if isinstance(it, A.Call) and it.func == "range":
             return "int"
-        if isinstance(it, A.ListLit) and it.elems:
+        if isinstance(it, A.StrLit):
+            # Iterating a string yields its characters, which are strings.
+            # Missing this arm seeded `self.c = 0` for `for c in "abc"`, so
+            # every use of `c` inside the generator was typed int -- the reason
+            # `yield c.upper()` was rejected as "int has no method 'upper'".
+            return "str"
+        if isinstance(it, A.DictLit):
+            # Iterating a dict yields its KEYS, and dict keys are always str in
+            # asmpython's representation (see _lower_dict_key).
+            return "str"
+        if isinstance(it, (A.ListLit, A.TupleLit)) and it.elems:
             first = it.elems[0]
             if isinstance(first, A.FloatLit):
                 return "float"
@@ -4246,11 +4595,13 @@ class SemaAnalyzer:
             return ""
         if isinstance(it, A.Name):
             annot = param_kinds.get(it.name)
-            if isinstance(annot, tuple) and len(annot) >= 2 and annot[0] in (
-                "list",
-                "tuple",
-            ):
-                return annot[1] or ""
+            if isinstance(annot, tuple) and len(annot) >= 2:
+                if annot[0] in ("list", "tuple"):
+                    return annot[1] or ""
+                if annot[0] == "str":
+                    return "str"
+                if annot[0] == "dict":
+                    return "str"
         return ""
 
     def _gen_local_seed(self, name: str, stmts: list, pos, param_kinds=None):
@@ -4699,7 +5050,15 @@ class SemaAnalyzer:
         elif isinstance(_rt, tuple) and _rt and _rt[0] not in ("list", "tuple", "set"):
             next_ret = _rt
         else:
-            next_ret = ("int", None)
+            # No annotation: read the kind off the `yield`ed expressions
+            # themselves. Falling straight to int meant EVERY unannotated
+            # generator yielded ints no matter what was in it, so
+            # `for c in "abc": yield c.upper()` produced a list[int] and
+            # `"".join(...)` on it was rejected. _yielded_value_kind is
+            # syntax-only and answers None unless every yield agrees, so a
+            # generator it cannot read keeps the int fallback exactly as before.
+            _yk = self._yielded_value_kind(f.body, param_kinds)
+            next_ret = (_yk, None) if _yk else ("int", None)
 
         next_func = A.FuncDef(
             name="__next__",
@@ -8068,6 +8427,20 @@ class SemaAnalyzer:
                         # `for k, v in d.items(): inv[v] = k` segfaulted for
                         # any int-valued dict. The slot kind IS known here.
                         is_int = flat and ti < len(shape) and shape[ti] == "int"
+                        # A CONTAINER slot binds to its real kind too, for the
+                        # same reason the int slot does: the kind is known here,
+                        # and "any" forces every consumer to guess. For
+                        # `for o, i in nested.items()` over a dict of dicts, `i`
+                        # bound "any" and the inner `i.items()` had nothing to
+                        # dispatch on, so the program access-violated -- while
+                        # the same loop written through a subscript
+                        # (`i = nested[o]`) worked, which is what places the
+                        # fault here rather than in items().
+                        is_ctr = (
+                            flat
+                            and ti < len(shape)
+                            and shape[ti] in ("dict", "list", "tuple", "set")
+                        )
                         if is_str:
                             scope.add(nm, "str")
                             ttypes.append("str")
@@ -8077,6 +8450,9 @@ class SemaAnalyzer:
                         elif is_int:
                             scope.add(nm, "int")
                             ttypes.append("int")
+                        elif is_ctr:
+                            scope.add(nm, shape[ti])
+                            ttypes.append(shape[ti])
                         else:
                             scope.add(nm, "any")
                             ttypes.append("any")
@@ -9399,6 +9775,18 @@ class SemaAnalyzer:
                 if e.op not in ("&", "|", "^", "<<", ">>") and "float" in (lt, rt):
                     e.inferred_type = "float"  # type: ignore
                     return
+                # True division is ALWAYS float in Python, whatever the operands
+                # are -- the same rule expr_type states for the non-opaque case.
+                # Leaving it opaque contradicted the LOWERING, which does float
+                # division regardless, so the correct bits were computed and
+                # then printed as an integer: `t = (4, 2); t[0] / t[1]` gave
+                # 4611686018427387904, the IEEE-754 pattern for 2.0. Any
+                # subscript operand reached here, since an element read is
+                # opaque, so this hit indexing into tuples, lists and
+                # list-of-lists alike.
+                if e.op == "/":
+                    e.inferred_type = "float"  # type: ignore
+                    return
                 e.inferred_type = "any"  # type: ignore
                 return
             # An operand that's an object instance may overload the operator via
@@ -9468,7 +9856,7 @@ class SemaAnalyzer:
             # result holds members drawn from the operands, so its member kind
             # is theirs merged -- without it `sorted({1,2} & {2,3})` lost the
             # int-ness the operands had and printed the stored key strings.
-            if e.op in ("|", "&", "-") and lt == "set" and rt == "set":
+            if e.op in ("|", "&", "-", "^") and lt == "set" and rt == "set":
                 e.inferred_type = "set"  # type: ignore
                 e.set_el_type = self._merge_el_type(  # type: ignore[attr-defined]
                     self._set_el_type(e.left, scope),
@@ -10088,9 +10476,14 @@ class SemaAnalyzer:
             # When the outer element is itself a list (list[list[T]]), propagate
             # the inner element type so `_list_el_type(var, child)` returns T.
             if el == "list" and not e.targets:
-                inner_el = self._list_el_value_type(e.iter, scope)
-                if inner_el != A.UNKNOWN_TY:
-                    child.list_el_types[e.var] = inner_el
+                # Recorded even when the inner kind is "int". Skipping it
+                # assumed int was the fallback for a missing entry, but
+                # _list_el_type answers "any" instead, so `[x for row in m for
+                # x in row]` over a list[list[int]] typed `x` as "any" -- i.e.
+                # BOXED -- while the lowering stored raw ints. Reading those
+                # back as boxes access-violated in set()/iteration, though
+                # printing or indexing the list still looked right.
+                child.list_el_types[e.var] = self._list_el_value_type(e.iter, scope)
             loop_vars = set(self._flat_target_names(e.targets)) if e.targets else {e.var}
             if e.cond is not None:
                 self._check_expr(e.cond, child)
@@ -10123,9 +10516,11 @@ class SemaAnalyzer:
                     loop_vars.add(ef_evar)
                     # Propagate inner element type for list[list[T]] case
                     if ef_el == "list":
-                        ef_inner = self._list_el_value_type(ef_iter, child)
-                        if ef_inner != A.UNKNOWN_TY:
-                            child.list_el_types[ef_evar] = ef_inner
+                        # Unconditional for the same reason as the first clause
+                        # above: a missing entry reads back as "any", not "int".
+                        child.list_el_types[ef_evar] = self._list_el_value_type(
+                            ef_iter, child
+                        )
                     elif ef_el == "dict":
                         ef_inner = self._list_el_value_type(ef_iter, child)
                         child.dict_value_types[ef_evar] = (
@@ -10295,7 +10690,7 @@ class SemaAnalyzer:
             # stays "?" so the first `d[k] = v` can pin it, exactly as an empty
             # `[]`/`set()` is pinned by its first append/add.
             _dkt = "?"
-            for k, v in zip(e.keys, e.values):
+            for _ki, (k, v) in enumerate(zip(e.keys, e.values)):
                 if isinstance(k, A.Name) and k.name == "**":
                     # `**other` (PEP 448 dict unpacking): `other` must itself
                     # be dict-typed (or opaque).
@@ -10314,6 +10709,10 @@ class SemaAnalyzer:
                     )
                     continue
                 self._check_expr(k, scope)
+                _hk = self._hashable_key_expr(k, scope)
+                if _hk is not k:
+                    e.keys[_ki] = _hk
+                    k = _hk
                 _klt = A.expr_type(k)
                 if not _is_dict_key_type(_klt):
                     raise SemaError(
@@ -10558,6 +10957,35 @@ class SemaAnalyzer:
                     e.inferred_type = "str"
                 return
             self._check_expr(e.index, scope)
+            # `arr[obj]` where obj defines __index__: CPython calls it to get
+            # the integer. __index__ was dispatched NOWHERE -- unlike
+            # __getitem__ and __next__, which go through _resolve_method -- so
+            # the instance was used AS the index and the runtime bounds-check
+            # rejected it: `arr[Idx()]` exited 1 with "list index out of
+            # range" (tests/cases/dunder_index.py).
+            #
+            # Rewritten in place rather than handled in lowering, the same way
+            # an iterable argument is desugared to `list(arg)` elsewhere in
+            # this file: once the index is an ordinary int expression every
+            # existing path -- bounds check, negative index, slicing -- applies
+            # unchanged, and no lowering work is needed.
+            # A dict READ with an instance key goes through the same
+            # __hash__ rewrite the DictLit store uses -- both sides must encode
+            # identically or every lookup misses.
+            if obj_t == "dict":
+                _hk = self._hashable_key_expr(e.index, scope)
+                if _hk is not e.index:
+                    e.index = _hk
+            _idx_t = A.expr_type(e.index)
+            if isinstance(_idx_t, str) and _idx_t.startswith("instance:"):
+                _idx_cls = _idx_t.split(":", 1)[1]
+                if self._resolve_method(_idx_cls, "__index__") is not None:
+                    _conv = A.MethodCall(
+                        obj=e.index, method="__index__", args=[], kwargs=[],
+                        pos=e.index.pos,
+                    )
+                    self._check_expr(_conv, scope)
+                    e.index = _conv
             if obj_t == "list":
                 # Normalize a bare class-name element kind to `instance:<Class>`
                 # so a method call on the read-out element resolves: indexing a
@@ -11640,8 +12068,20 @@ class SemaAnalyzer:
                             "dict.setdefault() takes (key[, default])", e.pos,
                             ErrorCode.E_ARG_COUNT,
                         )
-                    if A.expr_type(e.args[0]) not in ("str", "any"):
-                        raise SemaError("dict.setdefault() key must be a str", e.pos, ErrorCode.E_ARG_TYPE)
+                    # Any hashable key kind, matching `d[k]` and `d.get(k)`.
+                    # This was str-only, which was true when every dict key was
+                    # stored as a string with no element typing -- but keys now
+                    # carry a real key_type and int/float keys round-trip, so
+                    # refusing them here contradicted what plain subscripting
+                    # already accepts (`d[1] = "a"` works; `d.setdefault(1, ...)`
+                    # did not).
+                    if not _is_dict_key_type(A.expr_type(e.args[0])):
+                        raise SemaError(
+                            "dict.setdefault() key must be hashable "
+                            f"(str/int/float/bool/tuple/instance), got "
+                            f"{A.expr_type(e.args[0])}",
+                            e.pos, ErrorCode.E_ARG_TYPE,
+                        )
                     e.inferred_type = self._dict_value_type(e.obj, scope)
                     if len(e.args) == 2 and e.inferred_type in ("int", "?"):
                         # The dict's value kind is unknown (a bare `{}` resolves
@@ -12135,7 +12575,9 @@ class SemaAnalyzer:
                             ErrorCode.E_ARG_TYPE,
                         )
                     e.inferred_type = "int"
-                elif e.method in ("union", "intersection", "difference"):
+                elif e.method in (
+                    "union", "intersection", "difference", "symmetric_difference",
+                ):
                     if len(e.args) != 1:
                         raise SemaError(
                             f"set.{e.method}() takes 1 argument", e.pos,
@@ -12513,6 +12955,34 @@ class SemaAnalyzer:
             drained = A.Call(func="list", args=[arg], kwargs=[], pos=arg.pos)
             self._check_expr(drained, scope)
             e.args[i] = drained
+
+    def _hashable_key_expr(self, k, scope):
+        """`k` rewritten to `k.__hash__()` when it is an instance defining it.
+
+        A dict here is STRING-keyed, and an instance with no custom encoding
+        falls back to repr(), which is pointer-derived -- so two value-equal
+        keys landed in different slots and `d = {K('a'): 1}` then `d[K('a')]`
+        raised. __hash__ is exactly the contract that makes value-equal keys
+        agree, and it was dispatched nowhere.
+
+        Rewritten to an int-valued call, which the key encoder already has a
+        canonical decimal spelling for, so this adds no new encoding rule. Done
+        in sema rather than in lowering so the call is visible to reachability
+        -- emitting it only at lower time left the method un-generated and the
+        link failed with "undefined symbol 'K____hash__'".
+
+        Must be applied at BOTH the store and the read, or the two encodings
+        disagree and every lookup misses.
+        """
+        kt = A.expr_type(k)
+        if not (isinstance(kt, str) and kt.startswith("instance:")):
+            return k
+        if self._resolve_method(kt.split(":", 1)[1], "__hash__") is None:
+            return k
+        conv = A.MethodCall(obj=k, method="__hash__", args=[], kwargs=[],
+                            pos=getattr(k, "pos", None))
+        self._check_expr(conv, scope)
+        return conv
 
     def _check_sort_kwargs(self, e, scope: Scope, allow_default: bool = False) -> None:
         """Validate and resolve the `key=`/`reverse=` kwargs shared by
@@ -14187,6 +14657,11 @@ class SemaAnalyzer:
                 "bitcast_f2i": "int",
                 "bitcast_i2f": "float",
                 "repr": "str",
+                # `ascii` was declared in the builtin ARITY table and in the
+                # known-names list, but missing from this return-kind map, so
+                # the lookup raised a bare KeyError that surfaced as
+                # "asmpython: 'ascii'" -- an internal error, not a diagnostic.
+                "ascii": "str",
                 "type": "any",
                 "id": "int",
                 "open": "any",

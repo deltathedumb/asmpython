@@ -21,15 +21,40 @@ import os
 import sys
 
 
-def join(a: str, b: str) -> str:
-    """Join two path components with "/". Empty `a` -> `b`; an `a` that already
-    ends in a separator gets no extra one."""
-    if a == "":
-        return b
-    last = a[len(a) - 1:]
-    if last == "/" or last == "\\":
-        return a + b
-    return a + "/" + b
+def join(a: str, *paths) -> str:
+    """Join path components with "/", like CPython's os.path.join.
+
+    VARIADIC, because CPython's is: `os.path.join('a', 'b', 'c')` is ordinary
+    usage, and the old two-argument version rejected it at compile time with
+    [E021] "join() takes 2 argument(s), got 3".
+
+    Written to avoid assigning a loop element directly into `out`. That shape --
+    a str-typed accumulator receiving an element of an unannotated list inside
+    an if/elif -- MISCOMPILES to a segfault today, independently of this module:
+
+        def j(a: str, parts: list) -> str:
+            out: str = a
+            for b in parts:
+                if out == "":
+                    out = b          # <- crashes
+                elif b != "":
+                    out = out + b
+
+    Concatenating onto an empty accumulator gives the same result without the
+    assignment, so this works around a compiler bug rather than waiting on it.
+    """
+    out: str = a
+    for b in paths:
+        if b != "":
+            if out == "":
+                out = out + b
+            else:
+                last = out[len(out) - 1:]
+                if last == "/" or last == "\\":
+                    out = out + b
+                else:
+                    out = out + "/" + b
+    return out
 
 
 def basename(p: str) -> str:
@@ -137,7 +162,13 @@ def isfile(p: str) -> int:
 
 
 def splitext(p: str) -> list:
-    """Split path into (root, ext) where ext starts with '.'."""
+    """Split path into (root, ext) where ext starts with '.'.
+
+    CPython returns a TUPLE and this should too, but a tuple of strings
+    currently reprs as raw pointers -- `(8725776, 8725808)` instead of
+    `('file.tar', '.gz')` -- so returning one trades a wrong bracket for a
+    meaningless number. Stays a list until tuple repr carries element kinds.
+    """
     dot: int = -1
     i: int = 0
     n: int = len(p)
@@ -151,7 +182,10 @@ def splitext(p: str) -> list:
 
 
 def split(p: str) -> list:
-    """Split path into (head, tail) like dirname/basename."""
+    """Split path into (head, tail) like dirname/basename.
+
+    A list for the same reason as `splitext` -- tuple repr loses element kinds.
+    """
     return [dirname(p), basename(p)]
 
 

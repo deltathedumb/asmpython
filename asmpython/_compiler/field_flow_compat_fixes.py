@@ -202,6 +202,20 @@ def _lookup_field_type(
     return None
 
 
+#: Module functions with NO free variables, i.e. safe to treat as a plain
+#: callable value when RETURNED. Populated once per module by
+#: `_infer_specific_returns` (ordered_flow_compat_fixes) before it walks return
+#: statements, and empty otherwise so the rule below stays off for every other
+#: caller of `_literal_type`.
+#:
+#: A registry rather than a threaded parameter because `_literal_type` and
+#: `_body_return_types` are called from a dozen places and recurse through
+#: every block form; adding an argument to all of them to carry one read-only
+#: set is far more edit surface -- and more chances to pass it wrongly -- than
+#: the state is worth.
+PLAIN_FUNCS: set = set()
+
+
 def _literal_type(
     expression,
     environment: dict,
@@ -229,6 +243,28 @@ def _literal_type(
         return "tuple"
     if isinstance(expression, A.SetLit):
         return "set"
+    if (
+        isinstance(expression, A.Name)
+        and expression.name in PLAIN_FUNCS
+        and expression.name not in environment
+        and expression.name not in class_names
+    ):
+        # `return some_function` -- a bare FUNCTION REFERENCE, typed as the
+        # callable it is so the caller can invoke the result. `def get():
+        # return add1` then `get()(1)` was "[E113] 'any' is not callable",
+        # while sema's ARGUMENT path already reports `callable:<ret>` for the
+        # same bare name (that is what makes `apply(fn, v)` work). This is the
+        # same rule on the RETURN path.
+        #
+        # PLAIN_FUNCS excludes CLOSURES deliberately. A nested function is
+        # lifted to module level, so by name it looks like any other module
+        # function -- but typing a returned closure as a plain callable
+        # discards its binding. Applying this to every module function fixed
+        # `get()(1)` and broke `a(1)(2)` (a returning a nested b), which had
+        # been working, so the set is restricted to functions with no free
+        # variables.
+        _ret = function_returns.get(expression.name)
+        return "callable:" + (_ret if isinstance(_ret, str) and _ret else "any")
     if isinstance(expression, A.Name):
         return environment.get(expression.name, _UNKNOWN)
     if isinstance(expression, A.Call):

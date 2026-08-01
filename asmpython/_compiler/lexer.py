@@ -296,7 +296,11 @@ class Lexer:
                 self.tokens.append(self._read_identifier())
                 continue
 
-            if ch.isdigit():
+            # A leading-dot float (`.5`) starts with `.`, not a digit. `...` is
+            # excluded because the char after the dot must be a digit, and an
+            # attribute like `x.5` is not valid Python in the first place, so a
+            # dot-then-digit is unambiguously a float.
+            if ch.isdigit() or (ch == "." and self._peek(1).isdigit()):
                 self.tokens.append(self._read_number())
                 continue
 
@@ -367,7 +371,12 @@ class Lexer:
         while self._peek() and (self._peek().isdigit() or self._peek() == "_"):
             self._advance()
         is_float = False
-        if self._peek() == "." and self._peek(1).isdigit():
+        # A trailing-dot float (`5.`) has no digit after the point. CPython
+        # consumes the dot unconditionally here -- `1.real` is a syntax error,
+        # not attribute access on an int -- so requiring a following digit both
+        # rejected `5.` and diverged from CPython. `1..real` still works: the
+        # first dot ends the float, the second starts the attribute.
+        if self._peek() == ".":
             is_float = True
             self._advance()
             while self._peek() and (self._peek().isdigit() or self._peek() == "_"):
@@ -667,6 +676,14 @@ class Lexer:
             self.paren_depth += 1
         elif ch in ")]}":
             self.paren_depth -= 1
+        if ch == ";" and self.paren_depth == 0:
+            # `a = 1; b = 2` -- a semicolon separates simple statements, which
+            # is exactly what a NEWLINE does here, so it becomes one rather
+            # than a token every statement rule would have to learn about. It
+            # was not in the operator set at all, so any program using one
+            # failed to LEX ("unexpected character ';'"). A redundant NEWLINE
+            # (from a trailing `;`) is skipped like any other blank line.
+            return Token("NEWLINE", chr(10), line, col)
         if ch in "+-*/%<>=,:()[]{}&|^~.@":
             return Token("OP", ch, line, col)
         raise LexError(f"unexpected character {ch!r}", SourcePos(line, col), ErrorCode.L_UNEXPECTED_CHAR)

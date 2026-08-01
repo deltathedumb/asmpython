@@ -103,6 +103,17 @@ class WindowsCodegen(Codegen):
             self.emitf(f"mov rax, {frame}", "call ___chkstk_ms")
 
     # --- entry: main() -------------------------------------------------------
+    def _emit_image_base_into_rdx(self) -> None:
+        """Win64: the PEB holds ImageBaseAddress, so an RVA costs two loads.
+
+        gs:[0x60] is the PEB on x64; ImageBaseAddress is at +0x10. Same route
+        the GC's globals-range hook takes.
+        """
+        self.emitf("mov rdx, [gs:0x60]")
+        self.emitf("test rdx, rdx", "jz ._imgbase_none")
+        self.emitf("mov rdx, [rdx+0x10]")
+        self.label("._imgbase_none")
+
     def _emit_gc_stack_base_fallback(self) -> None:
         """Win64: the TEB is at gs:0 and its StackBase field is at offset 8,
         so one load gives the true top of this thread's stack -- no
@@ -728,7 +739,7 @@ class WindowsCodegen(Codegen):
             # name ptr, file ptr, line-slot ptr, entry index.
             self.emit("_tb_depth:  resq 1")
             self.emit("_tb_exe:    resq 1")
-            self.emit("_tb_frames: resq 4096")
+            self.emit("_tb_frames: resq 8192")   # 1024 frames x 64 bytes
             self.emit("_gc_memo_hit:  resq 1")
             self.emit("_gc_memo_miss: resq 1")
             self.emit("_gc_alloc_count: resq 1")

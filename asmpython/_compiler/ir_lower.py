@@ -23,6 +23,8 @@ since nothing ever overwrites them.
 
 from __future__ import annotations
 
+import pathlib
+
 from dataclasses import fields, is_dataclass
 
 from . import ast_nodes as A
@@ -186,6 +188,7 @@ class _ModuleCtx:
         mlang_code_funcs: dict | None = None,
         imported_funcs: dict | None = None,
         source_file: str = "<unknown>",
+        source_path: str = "",
         exe_name: str = "<program>",
         embed_tracebacks: bool = False,
     ) -> None:
@@ -195,6 +198,10 @@ class _ModuleCtx:
         #: bookkeeping costs a push/pop per call, so nothing is paid unless
         #: --embed-tracebacks asked for it.
         self.source_file = source_file
+        #: Full path, kept alongside the display basename so the source TEXT of
+        #: each statement can be read at compile time and embedded.
+        self.source_path = source_path
+        self._src_lines: list[str] | None = None
         self.exe_name = exe_name
         self.embed_tracebacks = embed_tracebacks
         self.data: list[IRGlobal] = []
@@ -1137,6 +1144,21 @@ def _lower_membership(ctx: _FuncCtx, needle_e: A.Expr, hay_e: A.Expr, negate: bo
         )
     ):
         ctx.emit(IRInstr("call", eq_v, ["_abi_str_eq", cur_needle, elem_v]))
+    elif needle_ty in ("list", "tuple"):
+        # A CONTAINER needle compares BY VALUE, like `==` does. This fell to
+        # the `icmp.eq` below, i.e. pointer equality, so
+        # `(3, 4) in [(1, 2), (3, 4)]` was False -- two structurally equal
+        # tuples are distinct objects. Same defect the `.index` path had, and
+        # it reuses the same `_emit_sequence_eq_value` that `==` uses rather
+        # than introducing a second notion of equality that could drift.
+        eq_v = _emit_sequence_eq_value(
+            ctx,
+            cur_needle,
+            elem_v,
+            _repr_el_kind(needle_e),
+            _inner_el_kind(needle_e),
+            id(needle_e),
+        )
     else:
         ctx.emit(IRInstr("icmp.eq", eq_v, [cur_needle, elem_v]))
     ctx.emit(IRInstr("br.t", None, [eq_v, found_b.label, cont_b.label]))
@@ -1212,8 +1234,28 @@ def _lower_list_remove(ctx: _FuncCtx, e: A.MethodCall) -> IRValue:
     ctx.emit(IRInstr("load", elem_v, [elem_addr]))
     cur_needle = ctx.tmp(needle_v.type)
     ctx.emit(IRInstr("load", cur_needle, [needle_ptr]))
-    eq_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("icmp.eq", eq_v, [cur_needle, elem_v]))
+    # By VALUE, matching `==` and the `.index`/`in` paths. A raw icmp.eq here
+    # is pointer equality, so `xs.remove((1, 2))` silently removed NOTHING and
+    # left the list unchanged -- worse than the `.index` version of this bug,
+    # which at least raised "value not in list". A str needle goes through
+    # _abi_str_eq rather than relying on literal interning to make pointers
+    # coincide.
+    _rm_t = A.expr_type(e.args[0])
+    if _rm_t == "str":
+        eq_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("call", eq_v, ["_abi_str_eq", cur_needle, elem_v]))
+    elif _rm_t in ("list", "tuple"):
+        eq_v = _emit_sequence_eq_value(
+            ctx,
+            cur_needle,
+            elem_v,
+            _repr_el_kind(e.args[0]),
+            _inner_el_kind(e.args[0]),
+            id(e),
+        )
+    else:
+        eq_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.eq", eq_v, [cur_needle, elem_v]))
     ctx.emit(IRInstr("br.t", None, [eq_v, shift_head.label, find_cont.label]))
 
     ctx.switch_to(find_cont)
@@ -1335,8 +1377,34 @@ def _lower_list_index(ctx: _FuncCtx, e: A.MethodCall) -> IRValue:
     ctx.emit(IRInstr("load", elem_v, [elem_addr]))
     cur_needle = ctx.tmp(needle_v.type)
     ctx.emit(IRInstr("load", cur_needle, [needle_ptr]))
-    eq_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("icmp.eq", eq_v, [cur_needle, elem_v]))
+    # Compare BY VALUE, not by pointer.
+    #
+    # This was a bare `icmp.eq`, i.e. pointer equality, so
+    # `[(1,2),(3,4)].index((3,4))` raised "value not in list" -- two
+    # structurally equal tuples are distinct objects. Strings appeared to work
+    # only because string LITERALS are interned and happen to share a pointer;
+    # a computed string failed identically, so interning was hiding the bug
+    # rather than the case being correct.
+    #
+    # Reuses the same structural comparison `==` already uses
+    # (_emit_sequence_eq_value) instead of adding a second notion of equality
+    # that could drift from it. Scalars keep icmp.eq, which is what they want.
+    _needle_t = A.expr_type(e.args[0])
+    if _needle_t == "str":
+        eq_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("call", eq_v, ["_abi_str_eq", cur_needle, elem_v]))
+    elif _needle_t in ("list", "tuple"):
+        eq_v = _emit_sequence_eq_value(
+            ctx,
+            cur_needle,
+            elem_v,
+            _repr_el_kind(e.args[0]),
+            _inner_el_kind(e.args[0]),
+            id(e),
+        )
+    else:
+        eq_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.eq", eq_v, [cur_needle, elem_v]))
     ctx.emit(IRInstr("br.t", None, [eq_v, found_b.label, cont_b.label]))
 
     ctx.switch_to(cont_b)
@@ -5595,6 +5663,58 @@ def _emit_int_divzero_check(ctx: _FuncCtx, divisor: IRValue, tag: int) -> None:
     ctx.switch_to(ok_b)
 
 
+def _emit_float_mod_floored(ctx: "_FuncCtx", r: IRValue, b: IRValue, tag: int) -> IRValue:
+    """Correct C `fmod` to Python's floored `%`.
+
+    They agree only when the operands share a sign. C truncates toward zero, so
+    the remainder takes the sign of the DIVIDEND; Python floors, so it takes the
+    sign of the DIVISOR. `-5.5 % 2.0` was -1.5 instead of 0.5, and `5.5 % -2.0`
+    was 1.5 instead of -0.5.
+
+    The correction is Python's own: when the remainder is non-zero and its sign
+    differs from the divisor's, add the divisor. Integer `%` already floors, so
+    only the float path needs this.
+    """
+    out = ctx.ensure_slot(f"__fmodfix_{tag}", F64)
+    ctx.emit(IRInstr("store", None, [r, out]))
+    zero = ctx.tmp(F64)
+    ctx.emit(IRInstr("const", zero, [0.0]))
+    nz = ctx.tmp(I64)
+    ctx.emit(IRInstr("fcmp.ne", nz, [r, zero]))
+    r_neg = ctx.tmp(I64)
+    ctx.emit(IRInstr("fcmp.lt", r_neg, [r, zero]))
+    b_neg = ctx.tmp(I64)
+    ctx.emit(IRInstr("fcmp.lt", b_neg, [b, zero]))
+    differ = ctx.tmp(I64)
+    ctx.emit(IRInstr("ixor", differ, [r_neg, b_neg]))
+    need = ctx.tmp(I64)
+    ctx.emit(IRInstr("iand", need, [nz, differ]))
+    fix_b = ctx.new_block("fmodfix")
+    zero_b = ctx.new_block("fmodzero")
+    chk_b = ctx.new_block("fmodchk")
+    end_b = ctx.new_block("fmodend")
+    ctx.emit(IRInstr("br.t", None, [need, fix_b.label, chk_b.label]))
+    ctx.switch_to(fix_b)
+    adj = ctx.tmp(F64)
+    ctx.emit(IRInstr("fadd", adj, [r, b]))
+    ctx.emit(IRInstr("store", None, [adj, out]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+    # A ZERO remainder still carries a sign, and C's is the dividend's:
+    # fmod(-4.0, 2.0) is -0.0 where Python gives 0.0. CPython's float_rem
+    # answers copysign(0.0, divisor) for this case, so do the same.
+    ctx.switch_to(chk_b)
+    ctx.emit(IRInstr("br.t", None, [nz, end_b.label, zero_b.label]))
+    ctx.switch_to(zero_b)
+    cs = ctx.tmp(F64)
+    ctx.emit(IRInstr("call", cs, ["copysign", zero, b]))
+    ctx.emit(IRInstr("store", None, [cs, out]))
+    ctx.emit(IRInstr("br", None, [end_b.label]))
+    ctx.switch_to(end_b)
+    res = ctx.tmp(F64)
+    ctx.emit(IRInstr("load", res, [out]))
+    return res
+
+
 def _emit_float_divzero_check(ctx: _FuncCtx, divisor: IRValue, op: str, tag: int) -> None:
     """Raise ZeroDivisionError if `divisor` (an F64) is 0.0, for float
     `/`/`//`/`%`. Unlike int division (a hardware SIGFPE), a float divide
@@ -5905,7 +6025,8 @@ def _lower_set_pairop(ctx: _FuncCtx, obj_e: A.Expr, other_e: A.Expr, method: str
 
 
 def _lower_set_setop(ctx: _FuncCtx, obj_e: A.Expr, other_e: A.Expr, method: str, tag: int) -> IRValue:
-    """s.union(o) / s.intersection(o) / s.difference(o) -- ports
+    """s.union(o) / s.intersection(o) / s.difference(o) /
+    s.symmetric_difference(o) -- ports
     codegen.py's _gen_set_setop exactly. union is a fresh set with both
     operands merged in (right wins on conflicts, though sets have no
     payload so that's moot); intersection/difference iterate self's keys,
@@ -5921,66 +6042,77 @@ def _lower_set_setop(ctx: _FuncCtx, obj_e: A.Expr, other_e: A.Expr, method: str,
         ctx.emit(IRInstr("call", None, ["_abi_dict_update", new_v, other_v]))
         return new_v
 
-    keys_v = ctx.tmp(PTR)
-    ctx.emit(IRInstr("call", keys_v, ["_abi_dict_keys", obj_v]))
-    keys_ptr = ctx.ensure_slot(f"__setop_keys_{tag}", PTR)
-    ctx.emit(IRInstr("store", None, [keys_v, keys_ptr]))
-    idx_ptr = ctx.ensure_slot(f"__setop_idx_{tag}", I64)
-    zero = ctx.tmp(I64)
-    ctx.emit(IRInstr("const", zero, [0]))
-    ctx.emit(IRInstr("store", None, [zero, idx_ptr]))
+    def _keep_loop(src_v, test_v, keep_when_present: bool, which: str) -> None:
+        """Walk `src_v`'s keys, copying each into `new_v` when its membership in
+        `test_v` matches `keep_when_present`. Slot names are keyed by `which` as
+        well as `tag`, so two loops in one expression do not share a cursor."""
+        keys_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("call", keys_v, ["_abi_dict_keys", src_v]))
+        keys_ptr = ctx.ensure_slot(f"__setop_keys_{tag}_{which}", PTR)
+        ctx.emit(IRInstr("store", None, [keys_v, keys_ptr]))
+        idx_ptr = ctx.ensure_slot(f"__setop_idx_{tag}_{which}", I64)
+        zero = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero, [0]))
+        ctx.emit(IRInstr("store", None, [zero, idx_ptr]))
 
-    head_b = ctx.new_block("setopheread")
-    body_b = ctx.new_block("setopbody")
-    keep_b = ctx.new_block("setopkeep")
-    cont_b = ctx.new_block("setopcont")
-    end_b = ctx.new_block("setopend")
+        head_b = ctx.new_block("setopheread")
+        body_b = ctx.new_block("setopbody")
+        keep_b = ctx.new_block("setopkeep")
+        cont_b = ctx.new_block("setopcont")
+        end_b = ctx.new_block("setopend")
 
-    ctx.emit(IRInstr("br", None, [head_b.label]))
-    ctx.switch_to(head_b)
-    idx_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
-    len_addr = ctx.tmp(PTR)
-    ctx.emit(IRInstr("gep", len_addr, [keys_v, _LIST_LEN_OFF]))
-    len_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("load", len_v, [len_addr]))
-    cond = ctx.tmp(I64)
-    ctx.emit(IRInstr("icmp.lt", cond, [idx_v, len_v]))
-    ctx.emit(IRInstr("br.t", None, [cond, body_b.label, end_b.label]))
+        ctx.emit(IRInstr("br", None, [head_b.label]))
+        ctx.switch_to(head_b)
+        idx_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+        len_addr = ctx.tmp(PTR)
+        ctx.emit(IRInstr("gep", len_addr, [keys_v, _LIST_LEN_OFF]))
+        len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v, [len_addr]))
+        cond = ctx.tmp(I64)
+        ctx.emit(IRInstr("icmp.lt", cond, [idx_v, len_v]))
+        ctx.emit(IRInstr("br.t", None, [cond, body_b.label, end_b.label]))
 
-    ctx.switch_to(body_b)
-    key_addr = _list_elem_addr(ctx, keys_v, idx_v)
-    key_v = ctx.tmp(PTR)
-    ctx.emit(IRInstr("load", key_v, [key_addr]))
-    has_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("call", has_v, ["_abi_dict_contains", other_v, key_v]))
-    zero2 = ctx.tmp(I64)
-    ctx.emit(IRInstr("const", zero2, [0]))
-    if method == "intersection":
+        ctx.switch_to(body_b)
+        key_addr = _list_elem_addr(ctx, keys_v, idx_v)
+        key_v = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", key_v, [key_addr]))
+        has_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("call", has_v, ["_abi_dict_contains", test_v, key_v]))
+        zero2 = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", zero2, [0]))
         should_keep = ctx.tmp(I64)
-        ctx.emit(IRInstr("icmp.ne", should_keep, [has_v, zero2]))
-    else:
-        should_keep = ctx.tmp(I64)
-        ctx.emit(IRInstr("icmp.eq", should_keep, [has_v, zero2]))
-    ctx.emit(IRInstr("br.t", None, [should_keep, keep_b.label, cont_b.label]))
+        ctx.emit(IRInstr(
+            "icmp.ne" if keep_when_present else "icmp.eq", should_keep, [has_v, zero2]
+        ))
+        ctx.emit(IRInstr("br.t", None, [should_keep, keep_b.label, cont_b.label]))
 
-    ctx.switch_to(keep_b)
-    one_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("const", one_v, [1]))
-    ctx.emit(IRInstr("call", None, ["_abi_dict_set", new_v, key_v, one_v]))
-    ctx.emit(IRInstr("br", None, [cont_b.label]))
+        ctx.switch_to(keep_b)
+        one_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", one_v, [1]))
+        ctx.emit(IRInstr("call", None, ["_abi_dict_set", new_v, key_v, one_v]))
+        ctx.emit(IRInstr("br", None, [cont_b.label]))
 
-    ctx.switch_to(cont_b)
-    inc_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("load", inc_v, [idx_ptr]))
-    one2 = ctx.tmp(I64)
-    ctx.emit(IRInstr("const", one2, [1]))
-    next_v = ctx.tmp(I64)
-    ctx.emit(IRInstr("iadd", next_v, [inc_v, one2]))
-    ctx.emit(IRInstr("store", None, [next_v, idx_ptr]))
-    ctx.emit(IRInstr("br", None, [head_b.label]))
+        ctx.switch_to(cont_b)
+        inc_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", inc_v, [idx_ptr]))
+        one2 = ctx.tmp(I64)
+        ctx.emit(IRInstr("const", one2, [1]))
+        next_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("iadd", next_v, [inc_v, one2]))
+        ctx.emit(IRInstr("store", None, [next_v, idx_ptr]))
+        ctx.emit(IRInstr("br", None, [head_b.label]))
+        ctx.switch_to(end_b)
 
-    ctx.switch_to(end_b)
+
+    if method == "symmetric_difference":
+        # Everything in exactly one of the two: the difference loop run in both
+        # directions into the same result. This is the only setop that needs
+        # more than one pass, which is why the loop above is a helper.
+        _keep_loop(obj_v, other_v, False, "a")
+        _keep_loop(other_v, obj_v, False, "b")
+        return new_v
+    _keep_loop(obj_v, other_v, method == "intersection", "a")
     return new_v
 
 
@@ -7916,7 +8048,7 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("call", None, ["_abi_dict_update", new_v, lhs]))
             ctx.emit(IRInstr("call", None, ["_abi_dict_update", new_v, rhs]))
             return new_v
-        if lt == "set" and rt == "set" and e.op in ("&", "-"):
+        if lt == "set" and rt == "set" and e.op in ("&", "-", "^"):
             # `s1 & s2` / `s1 - s2`: unlike `|` above, these were never
             # given a BinOp case at all -- only reachable via the
             # equivalent `.intersection()`/`.difference()` METHOD calls
@@ -7936,7 +8068,11 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             # `_gen_set_setop` helper -- mirror that here by reusing this
             # file's own already-correct method-call path instead of
             # duplicating its logic.
-            method = {"&": "intersection", "-": "difference"}[e.op]
+            method = {
+                "&": "intersection",
+                "-": "difference",
+                "^": "symmetric_difference",
+            }[e.op]
             return _lower_set_setop(ctx, e.left, e.right, method, id(e))
         if lt == "float" or rt == "float" or e.op == "/":
             # `/` (true division) is ALWAYS float division in Python, even
@@ -7972,6 +8108,8 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                 v = ctx.tmp(F64)
                 c_name = "fmod" if e.op == "%" else "pow"
                 ctx.emit(IRInstr("call", v, [c_name, a, b]))
+                if e.op == "%":
+                    v = _emit_float_mod_floored(ctx, v, b, id(e))
                 return v
             if e.op == "//":
                 # Float floor division: `a // b` is `floor(a / b)`. No
@@ -9242,8 +9380,15 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.emit(IRInstr("store", None, [out_v0, out_ptr]))
         len_addr = ctx.tmp(PTR)
         ctx.emit(IRInstr("gep", len_addr, [src_v0, _LIST_LEN_OFF]))
-        len_v = ctx.tmp(I64)
-        ctx.emit(IRInstr("load", len_v, [len_addr]))
+        len_v0 = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v0, [len_addr]))
+        # The source and output pointers were already parked in slots; the
+        # BOUND was not, and it is stale for exactly the same reason -- when the
+        # argument is a comprehension this load lands in the comprehension's
+        # exit block, not in setcallhead. `for c in range(3): s = set([1 for i
+        # in range(c+1)]); print(len(s))` crashed on the second iteration.
+        len_ptr = ctx.ensure_slot(f"__setcall_len_{id(e)}", I64)
+        ctx.emit(IRInstr("store", None, [len_v0, len_ptr]))
         idx_ptr = ctx.ensure_slot(f"__setcall_idx_{id(e)}", I64)
         zero_v = ctx.tmp(I64)
         ctx.emit(IRInstr("const", zero_v, [0]))
@@ -9263,6 +9408,8 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.switch_to(head_b)
         idx_v = ctx.tmp(I64)
         ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+        len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v, [len_ptr]))
         cond_v = ctx.tmp(I64)
         ctx.emit(IRInstr("icmp.lt", cond_v, [idx_v, len_v]))
         ctx.emit(IRInstr("br.t", None, [cond_v, body_b.label, end_b.label]))
@@ -9315,8 +9462,22 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             ctx.emit(IRInstr("store", None, [zero0, acc_ptr]))
         len_addr = ctx.tmp(PTR)
         ctx.emit(IRInstr("gep", len_addr, [xs_v, _LIST_LEN_OFF]))
-        len_v = ctx.tmp(I64)
-        ctx.emit(IRInstr("load", len_v, [len_addr]))
+        len_v0 = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v0, [len_addr]))
+        # The sequence pointer and its length are parked in SLOTS rather than
+        # carried into the loop blocks as temps. Both are computed in whatever
+        # block is current here, which for `xs = [...]; sum(xs)` is the
+        # comprehension's EXIT block, not sum's own head -- and the temps went
+        # stale across that boundary, so every iteration of an enclosing loop
+        # summed the first iteration's length:
+        #   for c in range(3): xs = [1 for i in range(c+1)]
+        #                      print(sum(xs), len(xs))   -> 1 1 / 1 2 / 1 3
+        # len() reads the same field correctly because it consumes its load in
+        # the block that defines it.
+        len_ptr = ctx.ensure_slot(f"__sum_len_{id(e)}", I64)
+        ctx.emit(IRInstr("store", None, [len_v0, len_ptr]))
+        xs_ptr = ctx.ensure_slot(f"__sum_xs_{id(e)}", PTR)
+        ctx.emit(IRInstr("store", None, [xs_v, xs_ptr]))
         idx_ptr = ctx.ensure_slot(f"__sum_idx_{id(e)}", I64)
         zero1 = ctx.tmp(I64)
         ctx.emit(IRInstr("const", zero1, [0]))
@@ -9329,6 +9490,8 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.switch_to(head_b)
         idx_v = ctx.tmp(I64)
         ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+        len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v, [len_ptr]))
         cond_v = ctx.tmp(I64)
         ctx.emit(IRInstr("icmp.lt", cond_v, [idx_v, len_v]))
         ctx.emit(IRInstr("br.t", None, [cond_v, body_b.label, end_b.label]))
@@ -9336,7 +9499,9 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.switch_to(body_b)
         idx_v2 = ctx.tmp(I64)
         ctx.emit(IRInstr("load", idx_v2, [idx_ptr]))
-        addr = _list_elem_addr(ctx, xs_v, idx_v2)
+        xs_v2 = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", xs_v2, [xs_ptr]))
+        addr = _list_elem_addr(ctx, xs_v2, idx_v2)
         # An "any"-element list holds BOXED scalars, so the element has to be
         # unboxed before it can be added -- a raw load accumulated the elements'
         # box ADDRESSES. `_load_list_elem` yields the payload; for a float sum
@@ -9386,8 +9551,18 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         xs_v = _lower_expr(ctx, e.args[0])
         len_addr = ctx.tmp(PTR)
         ctx.emit(IRInstr("gep", len_addr, [xs_v, _LIST_LEN_OFF]))
-        len_v = ctx.tmp(I64)
-        ctx.emit(IRInstr("load", len_v, [len_addr]))
+        len_v0 = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v0, [len_addr]))
+        # Parked in slots, not carried into the loop blocks as temps -- see the
+        # sum lowering for the full account. When the argument is a
+        # COMPREHENSION this gep/load lands in the comprehension's exit block
+        # rather than in aahead, and the temps read stale on the second
+        # execution: `for c in range(3): print(all([i >= 0 for i in
+        # range(c+1)]))` answered False/False/False instead of True/True/True.
+        len_ptr = ctx.ensure_slot(f"__aa_len_{id(e)}", I64)
+        ctx.emit(IRInstr("store", None, [len_v0, len_ptr]))
+        xs_ptr = ctx.ensure_slot(f"__aa_xs_{id(e)}", PTR)
+        ctx.emit(IRInstr("store", None, [xs_v, xs_ptr]))
         idx_ptr = ctx.ensure_slot(f"__aa_idx_{id(e)}", I64)
         zero0 = ctx.tmp(I64)
         ctx.emit(IRInstr("const", zero0, [0]))
@@ -9405,6 +9580,8 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.switch_to(head_b)
         idx_v = ctx.tmp(I64)
         ctx.emit(IRInstr("load", idx_v, [idx_ptr]))
+        len_v = ctx.tmp(I64)
+        ctx.emit(IRInstr("load", len_v, [len_ptr]))
         cond_v = ctx.tmp(I64)
         ctx.emit(IRInstr("icmp.lt", cond_v, [idx_v, len_v]))
         ctx.emit(IRInstr("br.t", None, [cond_v, body_b.label, end_b.label]))
@@ -9412,7 +9589,9 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
         ctx.switch_to(body_b)
         idx_v2 = ctx.tmp(I64)
         ctx.emit(IRInstr("load", idx_v2, [idx_ptr]))
-        addr = _list_elem_addr(ctx, xs_v, idx_v2)
+        xs_v2 = ctx.tmp(PTR)
+        ctx.emit(IRInstr("load", xs_v2, [xs_ptr]))
+        addr = _list_elem_addr(ctx, xs_v2, idx_v2)
         elem_v = ctx.tmp(I64)
         ctx.emit(IRInstr("load", elem_v, [addr]))
         truthy_v = _value_truthy_typed(ctx, elem_v, el_kind_aa, id(e))
@@ -11075,7 +11254,9 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
                         )
                     )
                 return ctx.shared_zero
-            if e.method in ("union", "intersection", "difference") and len(e.args) == 1:
+            if e.method in (
+                "union", "intersection", "difference", "symmetric_difference",
+            ) and len(e.args) == 1:
                 return _lower_set_setop(ctx, e.obj, e.args[0], e.method, id(e))
             if (
                 e.method in (
@@ -12579,7 +12760,12 @@ def _lower_expr_inner(ctx: _FuncCtx, e: A.Expr) -> IRValue:
             out = ctx.tmp(PTR)
             ctx.emit(IRInstr("call", out, ["_abi_chr", n_v]))
             return out
-        if e.func == "repr" and len(e.args) == 1:
+        if e.func in ("repr", "ascii") and len(e.args) == 1:
+            # `ascii` lowers as repr: the two differ only in escaping non-ASCII
+            # characters, and asmpython's strings are byte strings with no
+            # such escaping, so repr already yields what ascii() must return
+            # for everything representable here. Wider character support would
+            # grow the escaping at this site rather than add a new builtin.
             return _lower_expr_as_str(ctx, e.args[0], repr_mode=True)
         if e.func == "format" and len(e.args) in (1, 2):
             # format(value[, spec]) -- entirely unimplemented before this;
@@ -14190,14 +14376,51 @@ def _lower_del_target(ctx: _FuncCtx, tgt: "A.Expr") -> None:
 #: statement update affordable. `_runtime_tb_print` reads it through the
 #: address recorded at push time.
 _TB_LINE_SLOT = "__tb_line"
+#: Companion slot holding a pointer to the current statement's source text.
+_TB_TEXT_SLOT = "__tb_text"
+
+
+def _tb_source_line(mctx: "_ModuleCtx", line: int) -> str:
+    """The source text of `line`, stripped, or "" if unavailable.
+
+    Read from disk at COMPILE time and interned as a string constant, so the
+    binary carries its own source lines and a traceback works on a machine that
+    has never seen the .py file. Read once per module and cached; a miss (file
+    moved, line out of range) yields "" and the frame simply prints without a
+    source line rather than failing the build.
+    """
+    if mctx._src_lines is None:
+        try:
+            mctx._src_lines = pathlib.Path(mctx.source_path).read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines()
+        except OSError:
+            mctx._src_lines = []
+    if 1 <= line <= len(mctx._src_lines):
+        return mctx._src_lines[line - 1].strip()
+    return ""
 
 
 def _tb_enabled(ctx: "_FuncCtx") -> bool:
     return bool(getattr(ctx.mctx, "embed_tracebacks", False))
 
 
-def _tb_emit_push(ctx: "_FuncCtx", func_name: str) -> None:
-    """Record this frame: name, file, and where its line slot lives."""
+def _tb_emit_push(ctx: "_FuncCtx", func_name: str, symbol: str,
+                  module_body: bool = False) -> None:
+    """Record this frame: name, file, its line/text slots, and its own code.
+
+    `symbol` is the emitted function symbol, whose ADDRESS becomes the frame's
+    `index`. That is what makes the number traceable: printed as an RVA it names
+    exactly one compiled function, findable in a linker map or `objdump`, and
+    stable across runs because it is image-relative.
+
+    A captured return address was tried first and is not usable. The push runs
+    inside the function it belongs to, so its return address points into that
+    function's own prologue, not at the call site; and `[rbp+8]` cannot rescue it
+    because the prologue pushes callee-saved registers BEFORE `rbp`, so the
+    return address sits at a per-function offset. Function address plus line is
+    both exact and cheap.
+    """
     if not _tb_enabled(ctx):
         return
     slot = ctx.ensure_slot(_TB_LINE_SLOT, I64)
@@ -14212,8 +14435,18 @@ def _tb_emit_push(ctx: "_FuncCtx", func_name: str) -> None:
     exe_v = ctx.tmp(PTR)
     ctx.emit(IRInstr("global_addr", exe_v,
                      [ctx.mctx.intern_str(ctx.mctx.exe_name)]))
+    tslot = ctx.ensure_slot(_TB_TEXT_SLOT, PTR)
+    znull = ctx.tmp(PTR)
+    ctx.emit(IRInstr("const", znull, [0]))
+    ctx.emit(IRInstr("store", None, [znull, tslot]))
+    # The executable name is program-wide, so the module body records it once
+    # rather than every frame carrying a copy.
+    if module_body:
+        _store_global(ctx, "_tb_exe", exe_v)
+    func_v = ctx.tmp(PTR)
+    ctx.emit(IRInstr("global_addr", func_v, [symbol]))
     ctx.emit(IRInstr("call", None,
-                     ["_abi_tb_push", name_v, file_v, slot, exe_v]))
+                     ["_abi_tb_push", name_v, file_v, slot, tslot, func_v]))
 
 
 def _tb_emit_pop(ctx: "_FuncCtx") -> None:
@@ -14231,6 +14464,12 @@ def _tb_emit_line(ctx: "_FuncCtx", line: int) -> None:
     lv = ctx.tmp(I64)
     ctx.emit(IRInstr("const", lv, [line]))
     ctx.emit(IRInstr("store", None, [lv, slot]))
+    text = _tb_source_line(ctx.mctx, line)
+    if text:
+        tslot = ctx.ensure_slot(_TB_TEXT_SLOT, PTR)
+        tv = ctx.tmp(PTR)
+        ctx.emit(IRInstr("global_addr", tv, [ctx.mctx.intern_str(text)]))
+        ctx.emit(IRInstr("store", None, [tv, tslot]))
 
 
 def _unwind_try_scopes(ctx: _FuncCtx, down_to: int) -> bool:
@@ -16050,7 +16289,8 @@ def lower_func(
             ctx.slot_el_ty[pname] = annot[1]
 
     # `<module>` matches CPython's name for module-level code.
-    _tb_emit_push(ctx, "<module>" if module_body else f.name)
+    _tb_emit_push(ctx, "<module>" if module_body else f.name, f.name,
+                  module_body=module_body)
 
     for st in f.body:
         _lower_stmt(ctx, st)
@@ -16720,6 +16960,7 @@ def _callable_valued_funcs(mod: A.Module, func_names: frozenset) -> frozenset:
 
 
 def lower_module(mod: A.Module, *, source_file: str = "<unknown>",
+                 source_path: str = "",
                  exe_name: str = "<program>",
                  embed_tracebacks: bool = False) -> IRModule:
     top_funcs, method_funcs = _reachable_callables(mod)
@@ -16755,6 +16996,7 @@ def lower_module(mod: A.Module, *, source_file: str = "<unknown>",
         getattr(mod, "mlang_code_funcs", {}),
         imported_funcs,
         source_file=source_file,
+        source_path=source_path,
         exe_name=exe_name,
         embed_tracebacks=embed_tracebacks,
     )

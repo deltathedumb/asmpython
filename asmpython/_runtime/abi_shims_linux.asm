@@ -317,7 +317,7 @@ _abi_str_slice:
 ; abi_shims.asm; `_lower_read_any_tag` calls it on EVERY target, so a Linux
 ; build fails to link without it.
 ; ---- Traceback frame stack (--embed-tracebacks) --------------------------
-; _abi_tb_push(name, file, line_slot, exe)   SysV: rdi, rsi, rdx
+; _abi_tb_push(name, file, line_slot, text_slot, func_addr)   SysV: rdi, rsi, rdx
 ;
 ; Records one frame: name, file, the address of the caller's own line slot, and
 ; the address this frame was entered from (our return address, still at [rsp]
@@ -336,21 +336,16 @@ _abi_tb_push:
     cmp r10, 1024
     jge .tbp_full
     mov r11, r10
-    shl r11, 5                      ; * 32 bytes per frame
+    shl r11, 6                      ; * 64 bytes per frame
     lea rax, [rel _tb_frames]
     add rax, r11
     mov [rax+0], rdi                ; name
     mov [rax+8], rsi                ; file
     mov [rax+16], rdx               ; line-slot address
-    mov r11, [rsp]                  ; entry index (our return address)
-    mov [rax+24], r11
+    mov [rax+32], rcx              ; arg4: text-slot address
+    mov [rax+24], r8              ; arg5: this function's address
     inc r10
     mov [rel _tb_depth], r10
-    ; The executable name is program-wide, not per-frame, so it is stashed once
-    ; here rather than stored in every frame. Rewriting the same pointer on each
-    ; push is cheaper than a compare-and-branch and there is no program-start
-    ; hook to set it in: only the legacy targets emit an entry prologue.
-    mov [rel _tb_exe], rcx
 .tbp_full:
     ret
 

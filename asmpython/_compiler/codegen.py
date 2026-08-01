@@ -5242,13 +5242,31 @@ class Codegen:
         self.label("._tb_loop")
         self.emitf("mov rax, [rbp-8]", "cmp rax, [_tb_depth]", "jge ._tb_done")
         # frame = _tb_frames + i*32
-        self.emitf("mov rax, [rbp-8]", "shl rax, 5")
+        # 64-byte stride: five fields (name, file, line-slot, index,
+        # text-slot) plus slack, sized to a power of two so indexing stays a
+        # shift rather than a multiply.
+        self.emitf("mov rax, [rbp-8]", "shl rax, 6")
         self.emitf("lea rdx, [_tb_frames]", "add rax, rdx", "mov [rbp-16], rax")
         # printf(fmt, file, index, *line_slot, name)
         # printf(fmt, exe, source, index, line, function). Win64 varargs: the
-        # first four go in rcx/rdx/r8/r9, the rest at [rsp+32] upward, above
-        # the 32-byte shadow space.
-        self.emitf("mov rax, [rbp-16]")
+        # first four go in rcx/rdx/r8/r9, the rest at [rsp+32] upward, above the
+        # 32-byte shadow space.
+        #
+        # Ordered so no scratch memory is needed: the image-base hook clobbers
+        # only rdx, and rdx is loaded last. An earlier version spilled the frame
+        # pointer to [rbp-24] -- which, with rsp = rbp-64, IS [rsp+40], the
+        # varargs slot holding the function name, so every name printed as
+        # garbage.
+        self.emitf("mov rax, [rbp-16]")                    # frame
+        # index -> RVA. Subtract the load base only when the target knows it and
+        # the value is above it, so an unrecorded position (0) stays 0 instead
+        # of underflowing into a huge number.
+        self.emitf("mov r9, [rax+24]")                     # captured position
+        self._emit_image_base_into_rdx()
+        self.emitf("test rdx, rdx", "jz ._tb_absolute")
+        self.emitf("cmp r9, rdx", "jb ._tb_absolute")
+        self.emitf("sub r9, rdx")
+        self.label("._tb_absolute")
         self.emitf("mov r10, [rax+16]")                    # line-slot ptr
         self.emitf("test r10, r10", "jz ._tb_noline")
         self.emitf("mov r10, [r10]")                       # *line-slot
@@ -5259,13 +5277,22 @@ class Codegen:
         self.emitf("mov [rsp+32], r10")                    # line
         self.emitf("mov r11, [rax+0]")                     # function name
         self.emitf("mov [rsp+40], r11")
-        self.emitf("mov r9, [rax+24]")                     # index
         self.emitf("mov r8, [rax+8]")                      # source file
         self.emitf("mov rdx, [_tb_exe]")                   # executable name
         self.emitf("test rdx, rdx", "jnz ._tb_haveexe")
         self.emitf("lea rdx, [_tb_unknown_exe]")
         self.label("._tb_haveexe")
         self.emitf("lea rcx, [_tb_frame_fmt]", "call printf")
+        # Source text, if the build embedded it. The frame holds the address of
+        # the function's text slot; the slot holds a pointer to an interned
+        # string constant, so both indirections have to be checked -- a frame
+        # that faulted before its first statement marker has a null slot.
+        self.emitf("mov rax, [rbp-16]", "mov rax, [rax+32]")
+        self.emitf("test rax, rax", "jz ._tb_nosrc")
+        self.emitf("mov rdx, [rax]")
+        self.emitf("test rdx, rdx", "jz ._tb_nosrc")
+        self.emitf("lea rcx, [_tb_src_fmt]", "call printf")
+        self.label("._tb_nosrc")
         self.emitf("mov rax, [rbp-8]", "inc rax", "mov [rbp-8], rax")
         self.emitf("jmp ._tb_loop")
         self.label("._tb_done")
@@ -10422,6 +10449,7 @@ class Codegen:
         # interpreter frame.
         self.emit('_tb_header: db "Traceback (most recent call last)",10,0')
         self.emit('_tb_unknown_exe: db "<program>",0')
+        self.emit("_tb_src_fmt: db '        %s',10,0")
         # Single-quoted in NASM so the embedded double quotes are literal --
         # NASM has no doubled-quote escape inside a "..." string, and the
         # doubled form assembled as a bare `%s` symbol reference.
@@ -17108,6 +17136,17 @@ class Codegen:
         by parsing its own PE headers; Linux has no equivalent hook yet.
         """
         self.emitf("xor rbx, rbx", "xor rcx, rcx")
+
+    def _emit_image_base_into_rdx(self) -> None:
+        """rdx = this image's load base, or 0 if the target cannot say.
+
+        Used to turn a captured code address into an RVA, which is the form
+        that can actually be looked up: an absolute address moves with the load
+        base, an RVA matches what a linker map or `objdump` shows. A target
+        that returns 0 prints absolute addresses instead -- still correct, just
+        not portable between runs.
+        """
+        self.emitf("xor rdx, rdx")
 
     def _emit_gc_stack_base_fallback(self) -> None:
         """Leave the top of the machine stack in rbx, or 0 if this target has

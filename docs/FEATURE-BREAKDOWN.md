@@ -193,7 +193,7 @@ Legend:
 | Available stdlib | ⚠️ | `math` (22 fns + 5 consts) and `os` (`system`, `getenv`, `_exit`, plus file I/O: `fopen`/`fgetc`/`fclose`/`_access`). That's it today — see the 1.0 `asmpython.libs` plan in [roadmap.md](roadmap.md). |
 | `import x as y` / `from x import a as b` | ✅ | |
 | Unmodeled attr of a known module (`os.environ`, `os.sep`) | ⚠️ | Type-checks as opaque (front-end leniency); no codegen. |
-| Dotted imports (`import os.path`) | ⚠️ | Leading segment binds; submodule lookup is post-bootstrap. |
+| Dotted imports (`import os.path`) | ✅ | `os.path.basename(p)` resolves to the merged symbol, as do `urllib.parse`, `xml.etree`, `http.server`, `concurrent.futures`. `import a.b as c` and shadowing (`os = 5`) behave as CPython. Previously the unaliased dotted form bound nothing, so the name was an unbound local and the call segfaulted. |
 | Relative imports (`from .x import y`) | ⚠️ | Functions and classes from a sibling project module are merged in (whole-program compile). A relative-imported *value* (`from .x import SOME_DICT`) is now materialized too — its initializer is pulled into the program as a global, **transitively** (deps emitted first) when self-contained. Names whose initializer needs a CPython-runtime value stay opaque. |
 | Importing another user `.py` file | ⚠️ | Whole-program loader (`_compiler/program.py`) discovers the import graph and merges sibling modules' funcs, classes, and self-contained value globals into one compilation unit. `from . import mod as M` then `M.func(x)` dispatches to the merged function. No per-file `.o` linking; no executing arbitrary module-level side effects. |
 | `__name__` / `__file__` dunders | ⚠️ | Provided as str (`__name__ == "__main__"` works); one entry point per program. |
@@ -232,19 +232,44 @@ These are intentionally **not** goals — asmpython compiles to flat machine cod
 so the interpreter machinery has no analogue:
 
 - The GIL, bytecode / `dis`, the C-API / C extensions (`.pyd`/`.so` modules).
+- Dotted imports: `import os.path` + `os.path.basename(p)`, and the same for
+  every bundled module whose name has a dot (`urllib.parse`, `xml.etree`,
+  `http.server`, `concurrent.futures`, ...). `import a.b as c` and a shadowing
+  rebind (`os = 5` disabling the rewrite) behave as CPython does.
+
+  Previously this bound NOTHING -- an unaliased dotted import fell through the
+  binder entirely -- so `os` was an unbound local, `os.path.basename` compiled
+  to a dict lookup on it, and the resulting 0 was dereferenced. A segfault, not
+  a diagnostic.
+
 - Developer tracebacks, via `--embed-tracebacks`. An unhandled exception prints
   CPython's structure -- header, one indented frame line per level outermost
   first, exception last -- with native details:
 
-      Traceback (most recent last call):
-          File "app.py", index 0x140001798, line 9 (derived), in <module>
-          File "app.py", index 0x140001606, line 5 (derived), in outer
-          File "app.py", index 0x14000108F, line 2 (derived), in inner
+      Traceback (most recent call last)
+          File "main.exe" (tb.py), index 0x140001845 (line 9), in <module>
+              print(outer(data))
+          File "main.exe" (tb.py), index 0x140001678 (line 5), in outer
+              return inner(xs)
+          File "main.exe" (tb.py), index 0x1400010BC (line 2), in inner
+              return xs[10]
       Unhandled exception: list index out of range
 
-  `index` is the address the frame was entered from; `line` is marked `(derived)`
-  because it is reconstructed from a compile-time table rather than carried by an
-  interpreter frame. `<module>` is CPython's name for module-level code.
+  The binary is named first and the source file it came from in parentheses;
+  `<module>` is CPython's name for module-level code.
+
+  `index` is the **RVA of that frame's own compiled function**, which is what
+  makes it useful: add the image base and it lands on the function's prologue,
+  so it can be looked up in a linker map or `objdump`, and it is image-relative
+  so it is identical across runs. With `line` it pinpoints the statement.
+
+  A captured return address was tried first and does not work. The frame push
+  runs INSIDE the function it describes, so its return address points into that
+  function's own prologue rather than at the call site, and `[rbp+8]` cannot
+  recover the real one because the prologue pushes callee-saved registers before
+  `rbp` -- the return address sits at a per-function offset, which also rules out
+  a naive rbp-chain walk. A function address costs one `lea` per call and is
+  exact.
 
   Mechanism: the compiler maintains a frame stack, expressed entirely in
   existing IR ops, so no backend changes were needed. Each function pushes
@@ -269,10 +294,15 @@ so the interpreter machinery has no analogue:
   gets. Without it, dead frames' line-slot pointers aimed into reclaimed stack
   and the printer reported a pointer where a line belonged.
 
-  Not yet done: the source TEXT of each frame's line is not embedded, so a frame
-  shows `file`, `line` and `function` but not the code. That is additive -- each
-  statement's line is already interned as a string constant at the point the
-  marker is emitted.
+  The source text really is EMBEDDED, not read back from disk: each statement's
+  line is read at compile time, stripped, and interned as a string constant, so
+  a traceback shows the code on a machine that has never had the `.py` file.
+  Verified by renaming the source away and re-running the binary. Cost measured
+  at 1-2 KB per program (2.6-6.6%), page-granular.
+
+  Two indirections are checked before printing a source line -- the frame's
+  text-slot address, then the pointer in that slot -- because a frame that
+  faulted before reaching its first statement marker has a null slot.
 
 - Reference counting and `__del__` finalizers. The `gc` module is REAL: `collect()`
   runs a mark-sweep and returns the number of objects actually freed,

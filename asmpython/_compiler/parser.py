@@ -37,6 +37,11 @@ class Parser:
         # scope's variable from a module-level function when it sees a name in
         # CALL position -- see `_find_free_vars`.
         self._enclosing_params: list = []
+        # Serial for the temporaries the nested-unpack desugars introduce.
+        self._nested_unpack_seq: int = 0
+        # Per-group shape of the loop target most recently parsed; see
+        # _parse_for_target_list.
+        self._for_target_shape: list = []
         # Nested class definitions are lifted the same way. This keeps
         # function-local helper classes (notably ctypes.Structure declarations)
         # visible to sema/codegen without modeling Python's local class scope.
@@ -1700,6 +1705,14 @@ class Parser:
             return all(self._is_safe_default_value(el) for el in e.elems)
         if isinstance(e, A.DictLit):
             return not e.keys and not e.values
+        if isinstance(e, A.Lambda):
+            # A lambda literal is safe to splice for the very reason this check
+            # exists: it is immutable and its evaluation has no side effects, so
+            # re-evaluating it per call site yields an equivalent function. It
+            # is strictly safer than the ListLit accepted just above, which is
+            # the classic mutable default where per-site splicing genuinely does
+            # diverge from CPython's evaluate-once semantics.
+            return True
         return False
 
     def _fold_default_negation(self, e):
@@ -1722,6 +1735,60 @@ class Parser:
             if isinstance(operand, A.FloatLit):
                 return A.FloatLit(value=-operand.value, pos=e.pos)
         return e
+
+    def _fold_const_default(self, e):
+        """Constant-fold a default argument built from numeric/string literals.
+
+        `def f(x, n=2 + 3)` is a compile-time constant, but the default grammar
+        reached the expression through _parse_primary and stopped at the `+`
+        ("expected ',', got '+'"). Parsing the operator is only half of it: a
+        BinOp is not one of the shapes _is_safe_default_value accepts, and
+        every consumer of a default's AST expects an already-folded literal
+        (the same reason _fold_default_negation exists).
+
+        Folding here answers both at once -- `2 + 3` becomes IntLit(5), which
+        is safe to splice per call site by inspection and needs no new case
+        anywhere downstream. Only literal operands fold, so nothing with a name
+        in it, and nothing that could have a side effect, is accepted; anything
+        that does not fold is left alone for _is_safe_default_value to reject
+        exactly as before. A fold that would raise (division by zero) is
+        declined rather than folded, leaving the original error to surface
+        normally.
+        """
+        if not isinstance(e, A.BinOp):
+            return e
+        lhs = self._fold_default_negation(self._fold_const_default(e.left))
+        rhs = self._fold_default_negation(self._fold_const_default(e.right))
+        if isinstance(lhs, A.StrLit) and isinstance(rhs, A.StrLit) and e.op == "+":
+            return A.StrLit(value=lhs.value + rhs.value, pos=e.pos)
+        if not (
+            isinstance(lhs, (A.IntLit, A.FloatLit))
+            and isinstance(rhs, (A.IntLit, A.FloatLit))
+        ):
+            return e
+        a, b = lhs.value, rhs.value
+        try:
+            if e.op == "+":
+                v = a + b
+            elif e.op == "-":
+                v = a - b
+            elif e.op == "*":
+                v = a * b
+            elif e.op == "/":
+                v = a / b
+            elif e.op == "//":
+                v = a // b
+            elif e.op == "%":
+                v = a % b
+            elif e.op == "**":
+                v = a ** b
+            else:
+                return e
+        except (ZeroDivisionError, OverflowError, ValueError):
+            return e
+        if isinstance(v, float):
+            return A.FloatLit(value=v, pos=e.pos)
+        return A.IntLit(value=v, pos=e.pos)
 
     def _parse_default_literal(self):
         """Parse one default-argument value: anything `_is_safe_default_value`
@@ -1750,11 +1817,20 @@ class Parser:
         the parse succeed for `+`/`~` in the first place, not rejecting them
         one level later once they've already been silently consumed.
         """
-        if self._check_any_op("-"):
-            minus_pos = self._eat().pos
-            expr = A.UnaryOp(op="-", operand=self._parse_primary(), pos=minus_pos)
+        if self._check("KEYWORD", "lambda"):
+            # `_parse_primary` sits above lambda in the precedence chain and so
+            # can never reach it. A lambda default (`def f(x, key=lambda v: v)`)
+            # therefore failed in the parser, before _is_safe_default_value --
+            # which does accept it -- ever got a say.
+            expr = self._parse_lambda()
         else:
-            expr = self._parse_primary()
+            # The real expression grammar, so operator PRECEDENCE is correct --
+            # a hand-rolled left-to-right operator loop folds `2 + 3 * 4` to 20
+            # instead of 14. _parse_or stops at `,` and `)`, so it cannot run
+            # past the end of this parameter. Shapes it accepts that a default
+            # may not take (`+1`, `~x`, a call) are still rejected below by
+            # _is_safe_default_value, exactly as when they failed to parse.
+            expr = self._fold_const_default(self._parse_or())
         if not self._is_safe_default_value(expr):
             raise ParseError(
                 "default argument must be a literal "
@@ -1953,6 +2029,92 @@ class Parser:
         # name; sema decides whether it's a known class -> instance:<name>.
         return (name, None)
 
+    def _lift_capturing_lambdas(self, stmt) -> list:
+        """Rewrite each CAPTURING lambda in `stmt` into a lifted nested
+        function, returning the ClosureBind statements that must precede it.
+
+        A lambda could never capture: the parser lifts a nested `def` to module
+        level and leaves a ClosureBind at the def's STATEMENT position, and a
+        lambda is an expression, so `def adder(n): return lambda x: x + n`
+        reported "undefined variable 'n'". Rather than build a second closure
+        mechanism, the lambda is turned into exactly the shape that already
+        works -- a lifted nested def plus a bind at the enclosing statement:
+
+            def adder(n):
+                ClosureBind(_lam_1, free_vars=['n'])
+                return _lam_1
+
+        Only lambdas that actually capture are rewritten. A non-capturing one
+        stays an A.Lambda, so everything that pattern-matches on that node
+        (`sorted(key=...)`, map/filter, the sort-key lowering) is untouched.
+        Capture is judged against the enclosing function's PARAMETERS, the
+        frame _find_free_vars already consults; a module-level lambda has no
+        frame and is never rewritten, which is right because module globals
+        resolve without a closure.
+        """
+        if not self._enclosing_params:
+            return []
+        bound: set = set()
+        for _frame in self._enclosing_params:
+            bound.update(_frame)
+        if not bound:
+            return []
+        binds: list = []
+
+        def _lift(lam):
+            import uuid as _uuid
+            fname = f"_lam_{_uuid.uuid4().hex[:8]}"
+            fdef = A.FuncDef(
+                name=fname,
+                params=list(lam.params) + ([lam.vararg] if lam.vararg else []),
+                body=[A.Return(value=lam.body, pos=lam.pos)],
+                pos=lam.pos,
+                param_types=[None] * (len(lam.params) + (1 if lam.vararg else 0)),
+                defaults=[None] * (len(lam.params) + (1 if lam.vararg else 0)),
+                vararg=lam.vararg,
+            )
+            free, nonlocals = self._find_free_vars(fdef)
+            free = [v for v in free if v in bound]
+            if not free:
+                return None
+            fdef.is_lifted = True
+            fdef.free_vars = free
+            fdef.nonlocal_vars = []
+            self._nested_funcs.append(fdef)
+            binds.append(
+                A.ClosureBind(
+                    func_name=fname, free_vars=free, nonlocal_vars=[], pos=lam.pos
+                )
+            )
+            return A.Name(name=fname, pos=lam.pos)
+
+        def _walk(e):
+            if e is None:
+                return None
+            if isinstance(e, A.Lambda):
+                e.body = _walk(e.body)
+                return _lift(e) or e
+            for attr in ("value", "obj", "left", "right", "test", "body", "orelse",
+                         "operand", "iter", "elt", "index", "key", "cond", "start",
+                         "stop", "step"):
+                sub = getattr(e, attr, None)
+                if sub is not None and not isinstance(sub, (list, str, int, float, bool)):
+                    setattr(e, attr, _walk(sub))
+            for attr in ("args", "elems", "values", "keys", "operands"):
+                sub = getattr(e, attr, None)
+                if isinstance(sub, list):
+                    setattr(e, attr, [_walk(x) if x is not None else None for x in sub])
+            kw = getattr(e, "kwargs", None)
+            if isinstance(kw, list) and kw and isinstance(kw[0], tuple):
+                e.kwargs = [(k, _walk(v)) for k, v in kw]
+            return e
+
+        for attr in ("value", "expr", "test", "iter", "cond"):
+            sub = getattr(stmt, attr, None)
+            if sub is not None and not isinstance(sub, (list, str, int, float, bool)):
+                setattr(stmt, attr, _walk(sub))
+        return binds
+
     def _parse_block(self) -> list:
         # Single-line compound-statement body (`def f(): ...`, `if x: y = 1`,
         # `class C: pass`) -- real Python allows exactly one simple statement
@@ -1998,8 +2160,14 @@ class Parser:
                 # Same list-vs-single-node tolerance as the inline-body
                 # case just above -- see its comment for why.
                 if isinstance(result, list):
-                    stmts.extend(result)
+                    for _r in result:
+                        stmts.extend(self._lift_capturing_lambdas(_r))
+                        stmts.append(_r)
                 else:
+                    # The bind must come BEFORE the statement that uses the
+                    # lifted function, same ordering a nested def's own
+                    # ClosureBind has.
+                    stmts.extend(self._lift_capturing_lambdas(result))
                     stmts.append(result)
                 self._skip_newlines()
             self._expect("DEDENT")
@@ -2337,6 +2505,10 @@ class Parser:
                 self._eat()
                 values.append(self._parse_expr())
             self._expect("NEWLINE")
+            if any(
+                isinstance(t, (A.TupleLit, A.ListLit)) for t in expr.elems
+            ) and self._nested_assign_leaves_are_names(expr.elems):
+                return self._desugar_nested_assign(expr.elems, values, pos)
             return A.TupleAssign(targets=expr.elems, values=values, pos=pos)
         # Tuple assignment with at least one subscript/attribute target, e.g.
         # `xs[0], xs[1] = xs[1], xs[0]` or `a, self.x = self.x, a`. Pure
@@ -2366,6 +2538,10 @@ class Parser:
             # assignment, not an unpack, and must keep its separate values.
             if len(values) > 1 and any(isinstance(t, A.StarTarget) for t in targets):
                 values = [A.ListLit(elems=values, pos=pos)]
+            if any(
+                isinstance(t, (A.TupleLit, A.ListLit)) for t in targets
+            ) and self._nested_assign_leaves_are_names(targets):
+                return self._desugar_nested_assign(targets, values, pos)
             return A.TupleAssign(targets=targets, values=values, pos=pos)
         if isinstance(expr, A.Subscript) and self._check("OP", "="):
             self._eat()
@@ -2374,8 +2550,32 @@ class Parser:
             # consumed the first element and left a stray comma for the
             # NEWLINE check to choke on. Confirmed via a real repro:
             # PIL.Image.py's `OPEN[id] = factory, accept`.
+            #
+            # A CHAINED assignment led by a subscript (`a[0] = a[1] = 9`) is
+            # collected the same way the attribute-led branch below does it --
+            # that path already existed, this one did not, so the second `=`
+            # was left for the NEWLINE check and reported as
+            # "[P002] expected NEWLINE, got OP '='". tests/cases/algo_prime_sieve.py
+            # is exactly this shape (`is_prime[0] = is_prime[1] = False`).
+            #
+            # Speculative parse with rewind, for the same reason as the
+            # attribute branch: lookahead alone cannot tell "another chained
+            # target" from "the RHS value", since both start with an arbitrary
+            # expression. Only a following `=` commits it as a target.
+            chain_targets = [expr]
+            while True:
+                save = self.i
+                nxt = self._parse_expr()
+                if self._is_assign_target(nxt) and self._check("OP", "="):
+                    self._eat()
+                    chain_targets.append(nxt)
+                    continue
+                self.i = save
+                break
             value = self._parse_tuple_rhs()
             self._expect("NEWLINE")
+            if len(chain_targets) > 1:
+                return self._desugar_chained_assign(chain_targets, value, pos)
             return A.IndexAssign(target=expr, value=value, pos=pos)
         if isinstance(expr, A.Subscript) and self._peek().kind == "OP" and self._peek().value in AUG_OPS:
             op_tok = self._eat()
@@ -2541,9 +2741,134 @@ class Parser:
             pos=kw.pos,
         )
 
+    def _with_items_are_parenthesized(self) -> bool:
+        """True if the `with` head is a PARENTHESIZED manager list.
+
+        `with (A() as a, B() as b):` (PEP 617) put the open paren where an
+        expression was expected, so `_parse_expr` read `(A()` and then failed on
+        `as`. The parens here group the ITEM LIST, not an expression.
+
+        Disambiguated by looking for an `as` at paren depth 1, which is the one
+        shape that cannot be an expression: `with (expr):` and `with (a, b):`
+        have no `as` and keep parsing as expressions exactly as before, so a
+        parenthesized tuple of managers is not silently reinterpreted.
+        """
+        if not self._check("OP", "("):
+            return False
+        depth = 0
+        j = self.i
+        while j < len(self.toks):
+            t = self.toks[j]
+            if t.kind == "OP" and t.value in ("(", "[", "{"):
+                depth += 1
+            elif t.kind == "OP" and t.value in (")", "]", "}"):
+                depth -= 1
+                if depth == 0:
+                    return False
+            elif depth == 1 and t.kind == "KEYWORD" and t.value == "as":
+                return True
+            elif t.kind in ("NEWLINE", "EOF"):
+                break
+            j += 1
+        return False
+
+    def _nested_assign_leaves_are_names(self, targets: list) -> bool:
+        """True if every LEAF of a possibly-nested target list is a plain name.
+
+        The desugar below binds each leaf with `A.Assign`, whose `target` is a
+        `str`, so a Subscript/Attr leaf has nowhere to go. Those only occur in
+        the flat parallel form, which sema and ir_lower already handle, so
+        answering False here leaves that path exactly as it was.
+        """
+        for t in targets:
+            if isinstance(t, (A.TupleLit, A.ListLit)):
+                if not self._nested_assign_leaves_are_names(t.elems):
+                    return False
+            elif not isinstance(t, A.Name):
+                return False
+        return True
+
+    def _desugar_nested_assign(self, targets: list, values: list, pos) -> list:
+        """Flatten a NESTED unpack target into plain assignments via temporaries.
+
+        `a, (b, c) = 1, (2, 3)` and `(a, (b, c)) = (1, (2, 3))` were both
+        rejected or worse -- the parenthesised form raised E115, and the bare
+        form COMPILED and then crashed, storing the inner tuple's pointer where
+        a value was expected. The targets parsed fine (`_is_assign_target`
+        accepts a nested list/tuple); nothing downstream knew what to do with
+        one.
+
+        Rewriting here means nothing downstream has to: sema and ir_lower only
+        ever see flat assignments and subscripts, both of which already work on
+        tuples (verified: `t = (1, (2, 3)); b, c = t[1]`).
+
+        The parallel form binds every value to a temporary BEFORE any store, so
+        `a, (b, c) = c, (a, b)` still reads the old values -- the same guarantee
+        TupleAssign's own docstring makes for the flat case.
+        """
+        out: list = []
+
+        def _fresh(kind: str) -> str:
+            self._nested_unpack_seq += 1
+            return f"__nu{self._nested_unpack_seq}{kind}"
+
+        def _bind(tgts: list, src: str) -> None:
+            for i, t in enumerate(tgts):
+                item = A.Subscript(
+                    obj=A.Name(name=src, pos=pos),
+                    index=A.IntLit(value=i, pos=pos),
+                    pos=pos,
+                )
+                if isinstance(t, (A.TupleLit, A.ListLit)):
+                    tmp = _fresh("t")
+                    out.append(A.Assign(target=tmp, value=item, pos=pos))
+                    _bind(t.elems, tmp)
+                else:
+                    out.append(A.Assign(target=t.name, value=item, pos=pos))
+
+        if len(values) == 1:
+            root = _fresh("r")
+            out.append(A.Assign(target=root, value=values[0], pos=pos))
+            _bind(targets, root)
+            return out
+        for t, v in zip(targets, values):
+            tmp = _fresh("v")
+            out.append(A.Assign(target=tmp, value=v, pos=pos))
+            t.desugar_tmp = tmp  # type: ignore[attr-defined]
+        for t in targets:
+            tmp = t.desugar_tmp  # type: ignore[attr-defined]
+            if isinstance(t, (A.TupleLit, A.ListLit)):
+                _bind(t.elems, tmp)
+            else:
+                out.append(
+                    A.Assign(target=t.name, value=A.Name(name=tmp, pos=pos), pos=pos)
+                )
+        return out
+
     def _parse_with(self) -> "A.With":
         kw = self._expect("KEYWORD", "with")
         items: list[tuple] = []
+        if self._with_items_are_parenthesized():
+            self._eat()  # '('
+            while not self._check("OP", ")"):
+                expr = self._parse_expr()
+                name: "str | None" = None
+                if self._check("KEYWORD", "as"):
+                    self._eat()
+                    name = self._expect("NAME").value
+                items.append((expr, name))
+                if self._check("OP", ","):
+                    self._eat()
+                    continue
+                break
+            self._expect("OP", ")")
+            self._expect("OP", ":")
+            body = self._parse_block()
+            with_stmt: A.With
+            for expr, name in reversed(items):
+                with_stmt = A.With(expr=expr, name=name, body=body, pos=kw.pos)
+                body = [with_stmt]
+            return with_stmt
         while True:
             expr = self._parse_expr()
             name: str | None = None
@@ -3644,16 +3969,23 @@ class Parser:
         """
         first = self._peek()
         targets, grouped = self._parse_for_target_group()
+        # Per-group shape, kept alongside the flat list so a caller that WANTS
+        # the nesting can rewrite it (see _desugar_nested_for_target). Recorded
+        # on self rather than returned, because _parse_for_target_list has
+        # several callers -- the same side-channel idiom _for_target_pos uses.
+        shape: list = [list(targets) if grouped else targets[0]]
         groups = 1
         while self._check("OP", ","):
             self._eat()
             if self._check("KEYWORD", "in"):
                 break  # trailing comma before `in`
             names, was_grouped = self._parse_for_target_group()
+            shape.append(list(names) if was_grouped else names[0])
             grouped = grouped or was_grouped
             groups += 1
             targets.extend(names)
         self._for_target_pos = first.pos
+        self._for_target_shape = shape if (grouped and groups > 1) else []
         return targets, (grouped and groups > 1)
 
     # Iterables whose lowering already yields a FLAT tuple, making a flattened
@@ -3665,6 +3997,47 @@ class Parser:
     # 74_zip.py and 388_zip_three.py (`enumerate(zip(...))`) and
     # sim_leaderboard.py (`enumerate(ranked)`).
     _FLATTENING_ITERABLES = ("enumerate",)
+
+    def _desugar_nested_for_target(self, shape: list, body: list, pos) -> tuple:
+        """Turn a nested loop target into one temp plus unpacking in the body.
+
+        `for a, (b, c) in pairs:` has no lowering: flattening it to
+        ['a','b','c'] binds the inner tuple's ADDRESS, which is what
+        `for a, (b, c) in [(1, (2, 3))]` printing `1 8885232 0` was. The fix is
+        the one _reject_nested_for_target's own message recommends -- bind the
+        item and unpack it inside the body:
+
+            for __nf1r in pairs:
+                a = __nf1r[0]
+                __nf2t = __nf1r[1]
+                b = __nf2t[0]
+                c = __nf2t[1]
+                <body>
+
+        Every construct this produces already works on tuples, so nothing
+        downstream needs to learn about nesting. Returns (loop_var, new_body).
+        """
+        self._nested_unpack_seq += 1
+        root = f"__nf{self._nested_unpack_seq}r"
+        prologue: list = []
+
+        def _bind(items: list, src: str) -> None:
+            for i, item in enumerate(items):
+                idx = A.Subscript(
+                    obj=A.Name(name=src, pos=pos),
+                    index=A.IntLit(value=i, pos=pos),
+                    pos=pos,
+                )
+                if isinstance(item, list):
+                    self._nested_unpack_seq += 1
+                    tmp = f"__nf{self._nested_unpack_seq}t"
+                    prologue.append(A.Assign(target=tmp, value=idx, pos=pos))
+                    _bind(item, tmp)
+                else:
+                    prologue.append(A.Assign(target=item, value=idx, pos=pos))
+
+        _bind(shape, root)
+        return root, prologue + list(body)
 
     def _reject_nested_for_target(self, nested: bool, iter_expr) -> None:
         """Refuse a nested loop target the lowering cannot honour.
@@ -3744,9 +4117,27 @@ class Parser:
             return A.For(var=var, range_args=args, body=body, pos=kw.pos, targets=multi, orelse=orelse_f)  # type: ignore
         # Any other expression: treat as iterable.
         iter_expr = self._parse_expr()
-        self._reject_nested_for_target(_nested, iter_expr)
+        # A nested target over a NON-flattening iterable is rewritten rather
+        # than refused. The enumerate family keeps flattening -- there the flat
+        # reading is the correct one and three corpus cases depend on it -- so
+        # _reject_nested_for_target still runs for everything not rewritten
+        # here, and still refuses whatever it refused before.
+        _shape = self._for_target_shape
+        _rewrite_nested = bool(
+            _nested
+            and _shape
+            and not (
+                isinstance(iter_expr, A.Call)
+                and iter_expr.func in self._FLATTENING_ITERABLES
+            )
+        )
+        if not _rewrite_nested:
+            self._reject_nested_for_target(_nested, iter_expr)
         self._expect("OP", ":")
         body = self._parse_block()
+        if _rewrite_nested:
+            var, body = self._desugar_nested_for_target(_shape, body, kw.pos)
+            multi = []
         orelse_f2: list = []
         self._skip_newlines()
         if self._check("KEYWORD", "else"):
@@ -3817,7 +4208,13 @@ class Parser:
                     break
                 more = _param_item()
         self._expect("OP", ":")
-        body = self._parse_ternary()
+        # The body is a full expression, not just a ternary: CPython's grammar
+        # is `lambdef: 'lambda' [varargslist] ':' test` and `test` includes
+        # `lambdef` itself. Parsing at the ternary level -- one rung BELOW
+        # lambda in the precedence chain -- made a curried
+        # `lambda x: lambda y: x + y` unparseable, since the inner lambda sat
+        # at a level the body could never reach.
+        body = self._parse_expr()
         return A.Lambda(params=params, vararg=vararg, body=body, pos=pos)
 
     def _parse_ternary(self) -> "A.Expr":
@@ -3967,7 +4364,13 @@ class Parser:
 
     def _parse_mul(self):
         left = self._parse_unary()
-        while self._check_any_op("*", "/", "//", "%"):
+        # `@` is matrix multiplication at multiplicative precedence, which is
+        # where CPython puts it. sema's DUNDER_BINOP already mapped it to
+        # __matmul__/__rmatmul__ -- the operator simply had no way to be
+        # parsed, since `@` was only ever recognised as a decorator marker.
+        # A decorator is dispatched at STATEMENT level before any expression is
+        # parsed, so reading `@` here cannot shadow one.
+        while self._check_any_op("*", "/", "//", "%", "@"):
             tok = self._eat()
             right = self._parse_unary()
             # Keep '/' distinct from '//'. expr_type / codegen decide whether
@@ -4429,6 +4832,23 @@ class Parser:
         self._expect("OP", "]")
         return A.ListLit(elems=elems, pos=start)
 
+    def _parse_comprehension_conds(self):
+        """Parse a comprehension's `if` clauses, returning one condition.
+
+        A comprehension may carry more than one filter -- `[x for x in r if a
+        if b]` -- and only the first was ever consumed, so the second failed as
+        "expected ']', got 'if'". The AST has a single `cond` slot, which loses
+        nothing: CPython evaluates the clauses left to right and stops at the
+        first false one, which is exactly `a and b`. Folding left keeps that
+        order for three or more clauses too.
+        """
+        cond = None
+        while self._check("KEYWORD", "if"):
+            self._eat()
+            nxt = self._parse_or()
+            cond = nxt if cond is None else A.BoolOp(op="and", left=cond, right=nxt, pos=cond.pos)
+        return cond
+
     def _parse_comprehension_tail(self, elt, pos):
         """Parse `for <var> in <iter> [if <cond>]` after the element expression,
         returning a Comprehension. Used by list comprehensions and generator
@@ -4445,10 +4865,7 @@ class Parser:
         self._expect("KEYWORD", "in")
         iter_expr = self._parse_or()
         self._reject_nested_for_target(_nested, iter_expr)
-        cond = None
-        if self._check("KEYWORD", "if"):
-            self._eat()
-            cond = self._parse_or()
+        cond = self._parse_comprehension_conds()
         ef_vars: list = []
         ef_targets: list = []
         ef_iters: list = []
@@ -4461,10 +4878,10 @@ class Parser:
             self._expect("KEYWORD", "in")
             eiter2 = self._parse_or()
             self._reject_nested_for_target(_enested, eiter2)
-            econd2 = None
-            if self._check("KEYWORD", "if"):
-                self._eat()
-                econd2 = self._parse_or()
+            # Same multi-`if` fold as the first for-clause above. This copy
+            # still read a single filter, so `[... for y in ys if p if q]`
+            # stopped at the second `if` on any clause after the first.
+            econd2 = self._parse_comprehension_conds()
             ef_vars.append(evar2)
             ef_targets.append(emulti2)
             ef_iters.append(eiter2)
@@ -4483,10 +4900,7 @@ class Parser:
         self._expect("KEYWORD", "in")
         iter_expr = self._parse_or()
         self._reject_nested_for_target(_nested, iter_expr)
-        cond = None
-        if self._check("KEYWORD", "if"):
-            self._eat()
-            cond = self._parse_or()
+        cond = self._parse_comprehension_conds()
         return A.DictComprehension(
             key=key,
             value=value,
