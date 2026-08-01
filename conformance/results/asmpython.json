@@ -1,5 +1,40 @@
 {
   "cases": {
+    "aliasing/augmented-assign-on-shared-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "aliasing/default-argument-is-shared": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "aliasing/dict-value-is-a-reference": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "aliasing/list-mutated-through-function": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "aliasing/nested-list-shares-inner": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "aliasing/self-referential-repr": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "aliasing/tuple-holding-mutable": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
     "boundary/equality-survives-a-boundary": {
       "counted": true,
       "status": "PASS",
@@ -16,6 +51,76 @@
       "tier": "spec"
     },
     "boundary/value-through-unannotated-param": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "control-flow/exception-inside-except": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "control-flow/finally-runs-on-break-and-continue": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "control-flow/loop-else-with-exception": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "control-flow/nested-finally-runs-inside-out": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "control-flow/return-value-computed-before-finally": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "control-flow/with-exit-runs-on-exception": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "evaluation-order/assignment-rhs-before-target": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "evaluation-order/augmented-target-evaluated-once": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "evaluation-order/call-arguments-left-to-right": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "evaluation-order/callable-evaluated-before-args": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "evaluation-order/comparison-chain-stops-early": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "evaluation-order/dict-literal-key-then-value": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "evaluation-order/operands-left-to-right": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "evaluation-order/slice-bounds-then-value": {
       "counted": true,
       "status": "FAIL",
       "tier": "spec"
@@ -85,6 +190,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "functions/closure-cell-is-shared": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
     "functions/comprehension-has-its-own-scope": {
       "counted": true,
       "status": "PASS",
@@ -100,14 +210,29 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "functions/inner-function-sees-later-binding": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "functions/keyword-only-and-positional-only": {
       "counted": true,
       "status": "FAIL",
       "tier": "spec"
     },
+    "functions/mutual-recursion": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
     "functions/nonlocal-rebinds-enclosing": {
       "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "functions/recursion-builds-structure": {
+      "counted": true,
+      "status": "PASS",
       "tier": "spec"
     },
     "functions/return-none-implicitly": {
@@ -120,6 +245,106 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/class-attribute-roundtrip/bool-false": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/class-attribute-roundtrip/bool-true": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/class-attribute-roundtrip/bytes": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/class-attribute-roundtrip/complex": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/boundary/class-attribute-roundtrip/dict": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/class-attribute-roundtrip/float": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/class-attribute-roundtrip/float-zero": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/class-attribute-roundtrip/frozenset": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/class-attribute-roundtrip/int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/class-attribute-roundtrip/int-big": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/class-attribute-roundtrip/int-negative": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/class-attribute-roundtrip/int-zero": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/class-attribute-roundtrip/list": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/class-attribute-roundtrip/list-nested": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/class-attribute-roundtrip/none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/class-attribute-roundtrip/set": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/class-attribute-roundtrip/str": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/class-attribute-roundtrip/str-empty": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/class-attribute-roundtrip/tuple": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/class-attribute-roundtrip/tuple-empty": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "generated/boundary/comprehension/bool-false": {
       "counted": true,
       "status": "FAIL",
@@ -128,6 +353,16 @@
     "generated/boundary/comprehension/bool-true": {
       "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/comprehension/bytes": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/comprehension/complex": {
+      "counted": true,
+      "status": "REFUSED",
       "tier": "spec"
     },
     "generated/boundary/comprehension/dict": {
@@ -143,6 +378,11 @@
     "generated/boundary/comprehension/float-zero": {
       "counted": true,
       "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/comprehension/frozenset": {
+      "counted": true,
+      "status": "FAIL",
       "tier": "spec"
     },
     "generated/boundary/comprehension/int": {
@@ -180,6 +420,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/comprehension/set": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "generated/boundary/comprehension/str": {
       "counted": true,
       "status": "PASS",
@@ -210,6 +455,16 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/default-argument/bytes": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/default-argument/complex": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
     "generated/boundary/default-argument/dict": {
       "counted": true,
       "status": "FAIL",
@@ -221,6 +476,11 @@
       "tier": "spec"
     },
     "generated/boundary/default-argument/float-zero": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/default-argument/frozenset": {
       "counted": true,
       "status": "FAIL",
       "tier": "spec"
@@ -260,6 +520,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/default-argument/set": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "generated/boundary/default-argument/str": {
       "counted": true,
       "status": "FAIL",
@@ -280,6 +545,86 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/dict-key-roundtrip/bool-false": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/dict-key-roundtrip/bool-true": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/dict-key-roundtrip/bytes": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/boundary/dict-key-roundtrip/complex": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/boundary/dict-key-roundtrip/float": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/dict-key-roundtrip/float-zero": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/dict-key-roundtrip/frozenset": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/dict-key-roundtrip/int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/dict-key-roundtrip/int-big": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/dict-key-roundtrip/int-negative": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/dict-key-roundtrip/int-zero": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/dict-key-roundtrip/none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/dict-key-roundtrip/str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/dict-key-roundtrip/str-empty": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/dict-key-roundtrip/tuple": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/dict-key-roundtrip/tuple-empty": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "generated/boundary/dict-value-roundtrip/bool-false": {
       "counted": true,
       "status": "FAIL",
@@ -288,6 +633,16 @@
     "generated/boundary/dict-value-roundtrip/bool-true": {
       "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/dict-value-roundtrip/bytes": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/dict-value-roundtrip/complex": {
+      "counted": true,
+      "status": "REFUSED",
       "tier": "spec"
     },
     "generated/boundary/dict-value-roundtrip/dict": {
@@ -303,6 +658,11 @@
     "generated/boundary/dict-value-roundtrip/float-zero": {
       "counted": true,
       "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/dict-value-roundtrip/frozenset": {
+      "counted": true,
+      "status": "FAIL",
       "tier": "spec"
     },
     "generated/boundary/dict-value-roundtrip/int": {
@@ -340,6 +700,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/dict-value-roundtrip/set": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "generated/boundary/dict-value-roundtrip/str": {
       "counted": true,
       "status": "PASS",
@@ -360,6 +725,106 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/exception-payload/bool-false": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/exception-payload/bool-true": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/exception-payload/bytes": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/exception-payload/complex": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/boundary/exception-payload/dict": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/exception-payload/float": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/exception-payload/float-zero": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/exception-payload/frozenset": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/exception-payload/int": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/exception-payload/int-big": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/exception-payload/int-negative": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/exception-payload/int-zero": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/exception-payload/list": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/exception-payload/list-nested": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/exception-payload/none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/exception-payload/set": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/exception-payload/str": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/exception-payload/str-empty": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/exception-payload/tuple": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/exception-payload/tuple-empty": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "generated/boundary/for-loop/bool-false": {
       "counted": true,
       "status": "FAIL",
@@ -368,6 +833,16 @@
     "generated/boundary/for-loop/bool-true": {
       "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/for-loop/bytes": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/for-loop/complex": {
+      "counted": true,
+      "status": "REFUSED",
       "tier": "spec"
     },
     "generated/boundary/for-loop/dict": {
@@ -383,6 +858,11 @@
     "generated/boundary/for-loop/float-zero": {
       "counted": true,
       "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/for-loop/frozenset": {
+      "counted": true,
+      "status": "FAIL",
       "tier": "spec"
     },
     "generated/boundary/for-loop/int": {
@@ -420,6 +900,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/for-loop/set": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "generated/boundary/for-loop/str": {
       "counted": true,
       "status": "PASS",
@@ -440,6 +925,106 @@
       "status": "PASS",
       "tier": "spec"
     },
+    "generated/boundary/global-roundtrip/bool-false": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/global-roundtrip/bool-true": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/global-roundtrip/bytes": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/global-roundtrip/complex": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/boundary/global-roundtrip/dict": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/global-roundtrip/float": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/global-roundtrip/float-zero": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/global-roundtrip/frozenset": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/global-roundtrip/int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/global-roundtrip/int-big": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/global-roundtrip/int-negative": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/global-roundtrip/int-zero": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/global-roundtrip/list": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/global-roundtrip/list-nested": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/global-roundtrip/none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/global-roundtrip/set": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/global-roundtrip/str": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/global-roundtrip/str-empty": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/global-roundtrip/tuple": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/global-roundtrip/tuple-empty": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "generated/boundary/identity/bool-false": {
       "counted": true,
       "status": "FAIL",
@@ -448,6 +1033,16 @@
     "generated/boundary/identity/bool-true": {
       "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/identity/bytes": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/identity/complex": {
+      "counted": true,
+      "status": "REFUSED",
       "tier": "spec"
     },
     "generated/boundary/identity/dict": {
@@ -463,6 +1058,11 @@
     "generated/boundary/identity/float-zero": {
       "counted": true,
       "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/identity/frozenset": {
+      "counted": true,
+      "status": "FAIL",
       "tier": "spec"
     },
     "generated/boundary/identity/int": {
@@ -500,6 +1100,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/identity/set": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "generated/boundary/identity/str": {
       "counted": true,
       "status": "PASS",
@@ -530,6 +1135,16 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/instance-field-roundtrip/bytes": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/instance-field-roundtrip/complex": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
     "generated/boundary/instance-field-roundtrip/dict": {
       "counted": true,
       "status": "PASS",
@@ -543,6 +1158,11 @@
     "generated/boundary/instance-field-roundtrip/float-zero": {
       "counted": true,
       "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/instance-field-roundtrip/frozenset": {
+      "counted": true,
+      "status": "FAIL",
       "tier": "spec"
     },
     "generated/boundary/instance-field-roundtrip/int": {
@@ -580,6 +1200,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/instance-field-roundtrip/set": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "generated/boundary/instance-field-roundtrip/str": {
       "counted": true,
       "status": "PASS",
@@ -610,6 +1235,16 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/list-append-roundtrip/bytes": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/list-append-roundtrip/complex": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
     "generated/boundary/list-append-roundtrip/dict": {
       "counted": true,
       "status": "FAIL",
@@ -623,6 +1258,11 @@
     "generated/boundary/list-append-roundtrip/float-zero": {
       "counted": true,
       "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/list-append-roundtrip/frozenset": {
+      "counted": true,
+      "status": "FAIL",
       "tier": "spec"
     },
     "generated/boundary/list-append-roundtrip/int": {
@@ -660,6 +1300,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/list-append-roundtrip/set": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "generated/boundary/list-append-roundtrip/str": {
       "counted": true,
       "status": "PASS",
@@ -690,6 +1335,16 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/list-roundtrip/bytes": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/list-roundtrip/complex": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
     "generated/boundary/list-roundtrip/dict": {
       "counted": true,
       "status": "FAIL",
@@ -703,6 +1358,11 @@
     "generated/boundary/list-roundtrip/float-zero": {
       "counted": true,
       "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/list-roundtrip/frozenset": {
+      "counted": true,
+      "status": "FAIL",
       "tier": "spec"
     },
     "generated/boundary/list-roundtrip/int": {
@@ -740,6 +1400,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/list-roundtrip/set": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "generated/boundary/list-roundtrip/str": {
       "counted": true,
       "status": "PASS",
@@ -770,6 +1435,16 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/nested-list-roundtrip/bytes": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/nested-list-roundtrip/complex": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
     "generated/boundary/nested-list-roundtrip/dict": {
       "counted": true,
       "status": "FAIL",
@@ -783,6 +1458,11 @@
     "generated/boundary/nested-list-roundtrip/float-zero": {
       "counted": true,
       "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/nested-list-roundtrip/frozenset": {
+      "counted": true,
+      "status": "FAIL",
       "tier": "spec"
     },
     "generated/boundary/nested-list-roundtrip/int": {
@@ -820,6 +1500,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/nested-list-roundtrip/set": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "generated/boundary/nested-list-roundtrip/str": {
       "counted": true,
       "status": "PASS",
@@ -850,6 +1535,16 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/object-annotated-param/bytes": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/object-annotated-param/complex": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
     "generated/boundary/object-annotated-param/dict": {
       "counted": true,
       "status": "FAIL",
@@ -863,6 +1558,11 @@
     "generated/boundary/object-annotated-param/float-zero": {
       "counted": true,
       "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/object-annotated-param/frozenset": {
+      "counted": true,
+      "status": "FAIL",
       "tier": "spec"
     },
     "generated/boundary/object-annotated-param/int": {
@@ -900,6 +1600,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/object-annotated-param/set": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "generated/boundary/object-annotated-param/str": {
       "counted": true,
       "status": "PASS",
@@ -930,6 +1635,16 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/returned-from-closure/bytes": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/returned-from-closure/complex": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
     "generated/boundary/returned-from-closure/dict": {
       "counted": true,
       "status": "FAIL",
@@ -941,6 +1656,11 @@
       "tier": "spec"
     },
     "generated/boundary/returned-from-closure/float-zero": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/returned-from-closure/frozenset": {
       "counted": true,
       "status": "FAIL",
       "tier": "spec"
@@ -980,6 +1700,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/returned-from-closure/set": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "generated/boundary/returned-from-closure/str": {
       "counted": true,
       "status": "FAIL",
@@ -1000,6 +1725,86 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/set-element-roundtrip/bool-false": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/set-element-roundtrip/bool-true": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/set-element-roundtrip/bytes": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/boundary/set-element-roundtrip/complex": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/boundary/set-element-roundtrip/float": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/set-element-roundtrip/float-zero": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/set-element-roundtrip/frozenset": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/set-element-roundtrip/int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/set-element-roundtrip/int-big": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/set-element-roundtrip/int-negative": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/set-element-roundtrip/int-zero": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/set-element-roundtrip/none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/set-element-roundtrip/str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/set-element-roundtrip/str-empty": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/set-element-roundtrip/tuple": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/set-element-roundtrip/tuple-empty": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "generated/boundary/star-args/bool-false": {
       "counted": true,
       "status": "FAIL",
@@ -1008,6 +1813,16 @@
     "generated/boundary/star-args/bool-true": {
       "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/star-args/bytes": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/star-args/complex": {
+      "counted": true,
+      "status": "REFUSED",
       "tier": "spec"
     },
     "generated/boundary/star-args/dict": {
@@ -1023,6 +1838,11 @@
     "generated/boundary/star-args/float-zero": {
       "counted": true,
       "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/star-args/frozenset": {
+      "counted": true,
+      "status": "FAIL",
       "tier": "spec"
     },
     "generated/boundary/star-args/int": {
@@ -1060,6 +1880,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/star-args/set": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "generated/boundary/star-args/str": {
       "counted": true,
       "status": "PASS",
@@ -1090,6 +1915,16 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/tuple-roundtrip/bytes": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/tuple-roundtrip/complex": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
     "generated/boundary/tuple-roundtrip/dict": {
       "counted": true,
       "status": "FAIL",
@@ -1103,6 +1938,11 @@
     "generated/boundary/tuple-roundtrip/float-zero": {
       "counted": true,
       "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/tuple-roundtrip/frozenset": {
+      "counted": true,
+      "status": "FAIL",
       "tier": "spec"
     },
     "generated/boundary/tuple-roundtrip/int": {
@@ -1140,6 +1980,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/tuple-roundtrip/set": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "generated/boundary/tuple-roundtrip/str": {
       "counted": true,
       "status": "PASS",
@@ -1170,6 +2015,16 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/two-calls/bytes": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/two-calls/complex": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
     "generated/boundary/two-calls/dict": {
       "counted": true,
       "status": "PASS",
@@ -1183,6 +2038,11 @@
     "generated/boundary/two-calls/float-zero": {
       "counted": true,
       "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/two-calls/frozenset": {
+      "counted": true,
+      "status": "FAIL",
       "tier": "spec"
     },
     "generated/boundary/two-calls/int": {
@@ -1220,6 +2080,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/two-calls/set": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "generated/boundary/two-calls/str": {
       "counted": true,
       "status": "PASS",
@@ -1250,6 +2115,16 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/unannotated-param/bytes": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/boundary/unannotated-param/complex": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
     "generated/boundary/unannotated-param/dict": {
       "counted": true,
       "status": "PASS",
@@ -1263,6 +2138,11 @@
     "generated/boundary/unannotated-param/float-zero": {
       "counted": true,
       "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/boundary/unannotated-param/frozenset": {
+      "counted": true,
+      "status": "FAIL",
       "tier": "spec"
     },
     "generated/boundary/unannotated-param/int": {
@@ -1300,6 +2180,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/boundary/unannotated-param/set": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "generated/boundary/unannotated-param/str": {
       "counted": true,
       "status": "PASS",
@@ -1323,6 +2208,21 @@
     "generated/consumer/comprehension-nested/bool": {
       "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/comprehension-nested/bytes-elems": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/comprehension-nested/dict-elems": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/comprehension-nested/empty": {
+      "counted": true,
+      "status": "REFUSED",
       "tier": "spec"
     },
     "generated/consumer/comprehension-nested/float": {
@@ -1357,7 +2257,22 @@
     },
     "generated/consumer/comprehension/bool": {
       "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/comprehension/bytes-elems": {
+      "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/comprehension/dict-elems": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/comprehension/empty": {
+      "counted": true,
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/consumer/comprehension/float": {
@@ -1392,7 +2307,22 @@
     },
     "generated/consumer/concat/bool": {
       "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/concat/bytes-elems": {
+      "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/concat/dict-elems": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/concat/empty": {
+      "counted": true,
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/consumer/concat/float": {
@@ -1427,7 +2357,22 @@
     },
     "generated/consumer/copy-via-list/bool": {
       "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/copy-via-list/bytes-elems": {
+      "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/copy-via-list/dict-elems": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/copy-via-list/empty": {
+      "counted": true,
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/consumer/copy-via-list/float": {
@@ -1462,7 +2407,17 @@
     },
     "generated/consumer/dict-value/bool": {
       "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/dict-value/bytes-elems": {
+      "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/dict-value/dict-elems": {
+      "counted": true,
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/consumer/dict-value/float": {
@@ -1500,6 +2455,21 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/consumer/enumerate/bytes-elems": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/enumerate/dict-elems": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/enumerate/empty": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
     "generated/consumer/enumerate/float": {
       "counted": true,
       "status": "REFUSED",
@@ -1532,7 +2502,22 @@
     },
     "generated/consumer/for-loop/bool": {
       "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/for-loop/bytes-elems": {
+      "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/for-loop/dict-elems": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/for-loop/empty": {
+      "counted": true,
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/consumer/for-loop/float": {
@@ -1570,6 +2555,16 @@
       "status": "PASS",
       "tier": "spec"
     },
+    "generated/consumer/index-method/bytes-elems": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/index-method/dict-elems": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
     "generated/consumer/index-method/float": {
       "counted": true,
       "status": "REFUSED",
@@ -1582,7 +2577,7 @@
     },
     "generated/consumer/index-method/mixed": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/consumer/index-method/nested-list": {
@@ -1601,6 +2596,21 @@
       "tier": "spec"
     },
     "generated/consumer/len/bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/len/bytes-elems": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/len/dict-elems": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/len/empty": {
       "counted": true,
       "status": "PASS",
       "tier": "spec"
@@ -1640,6 +2650,16 @@
       "status": "PASS",
       "tier": "spec"
     },
+    "generated/consumer/membership/bytes-elems": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/membership/dict-elems": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
     "generated/consumer/membership/float": {
       "counted": true,
       "status": "REFUSED",
@@ -1652,7 +2672,7 @@
     },
     "generated/consumer/membership/mixed": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/consumer/membership/nested-list": {
@@ -1672,7 +2692,17 @@
     },
     "generated/consumer/min-max-by-repr/bool": {
       "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/consumer/min-max-by-repr/bytes-elems": {
+      "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/min-max-by-repr/dict-elems": {
+      "counted": true,
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/consumer/min-max-by-repr/float": {
@@ -1707,7 +2737,17 @@
     },
     "generated/consumer/negative-index/bool": {
       "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/negative-index/bytes-elems": {
+      "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/negative-index/dict-elems": {
+      "counted": true,
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/consumer/negative-index/float": {
@@ -1745,6 +2785,16 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/consumer/pass-to-function/bytes-elems": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/pass-to-function/dict-elems": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
     "generated/consumer/pass-to-function/float": {
       "counted": true,
       "status": "PASS",
@@ -1777,7 +2827,17 @@
     },
     "generated/consumer/pop-method/bool": {
       "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/pop-method/bytes-elems": {
+      "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/pop-method/dict-elems": {
+      "counted": true,
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/consumer/pop-method/float": {
@@ -1812,7 +2872,17 @@
     },
     "generated/consumer/remove-method/bool": {
       "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/remove-method/bytes-elems": {
+      "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/remove-method/dict-elems": {
+      "counted": true,
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/consumer/remove-method/float": {
@@ -1850,6 +2920,21 @@
       "status": "PASS",
       "tier": "spec"
     },
+    "generated/consumer/repr-container/bytes-elems": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/repr-container/dict-elems": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/repr-container/empty": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
     "generated/consumer/repr-container/float": {
       "counted": true,
       "status": "PASS",
@@ -1882,7 +2967,22 @@
     },
     "generated/consumer/repr-nested/bool": {
       "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/repr-nested/bytes-elems": {
+      "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/repr-nested/dict-elems": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/repr-nested/empty": {
+      "counted": true,
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/consumer/repr-nested/float": {
@@ -1916,6 +3016,16 @@
       "tier": "spec"
     },
     "generated/consumer/return-from-function/bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/return-from-function/bytes-elems": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/return-from-function/dict-elems": {
       "counted": true,
       "status": "FAIL",
       "tier": "spec"
@@ -1952,7 +3062,22 @@
     },
     "generated/consumer/reversed/bool": {
       "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/reversed/bytes-elems": {
+      "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/reversed/dict-elems": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/reversed/empty": {
+      "counted": true,
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/consumer/reversed/float": {
@@ -1987,7 +3112,22 @@
     },
     "generated/consumer/slice-step/bool": {
       "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/slice-step/bytes-elems": {
+      "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/slice-step/dict-elems": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/slice-step/empty": {
+      "counted": true,
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/consumer/slice-step/float": {
@@ -2022,7 +3162,22 @@
     },
     "generated/consumer/slice/bool": {
       "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/slice/bytes-elems": {
+      "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/slice/dict-elems": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/slice/empty": {
+      "counted": true,
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/consumer/slice/float": {
@@ -2057,7 +3212,22 @@
     },
     "generated/consumer/sorted-by-repr/bool": {
       "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/consumer/sorted-by-repr/bytes-elems": {
+      "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/sorted-by-repr/dict-elems": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/sorted-by-repr/empty": {
+      "counted": true,
+      "status": "REFUSED",
       "tier": "spec"
     },
     "generated/consumer/sorted-by-repr/float": {
@@ -2091,6 +3261,16 @@
       "tier": "spec"
     },
     "generated/consumer/star-args/bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/star-args/bytes-elems": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/star-args/dict-elems": {
       "counted": true,
       "status": "FAIL",
       "tier": "spec"
@@ -2127,6 +3307,16 @@
     },
     "generated/consumer/store-in-instance/bool": {
       "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/store-in-instance/bytes-elems": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/store-in-instance/dict-elems": {
+      "counted": true,
       "status": "FAIL",
       "tier": "spec"
     },
@@ -2162,7 +3352,17 @@
     },
     "generated/consumer/subscript-computed/bool": {
       "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/subscript-computed/bytes-elems": {
+      "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/subscript-computed/dict-elems": {
+      "counted": true,
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/consumer/subscript-computed/float": {
@@ -2197,7 +3397,17 @@
     },
     "generated/consumer/subscript/bool": {
       "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/subscript/bytes-elems": {
+      "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/subscript/dict-elems": {
+      "counted": true,
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/consumer/subscript/float": {
@@ -2232,7 +3442,17 @@
     },
     "generated/consumer/unpack-first/bool": {
       "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/unpack-first/bytes-elems": {
+      "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/unpack-first/dict-elems": {
+      "counted": true,
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/consumer/unpack-first/float": {
@@ -2267,7 +3487,22 @@
     },
     "generated/consumer/zip/bool": {
       "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/zip/bytes-elems": {
+      "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/consumer/zip/dict-elems": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/consumer/zip/empty": {
+      "counted": true,
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/consumer/zip/float": {
@@ -2300,6 +3535,1526 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "generated/operator/add/bool-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/add/bool-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/add/dict-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/add/float-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/add/float-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/add/int-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/add/int-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/add/int-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/add/int-list": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/add/int-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/add/int-str": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/add/int-tuple": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/add/list-int": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/add/list-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/add/none-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/add/str-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/add/str-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/add/str-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/add/tuple-tuple": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/and-op/bool-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/and-op/bool-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/and-op/dict-dict": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/and-op/float-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/and-op/float-int": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/and-op/int-bool": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/and-op/int-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/and-op/int-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/and-op/int-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/and-op/int-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/and-op/int-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/and-op/int-tuple": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/and-op/list-int": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/and-op/list-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/and-op/none-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/and-op/str-dict": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/and-op/str-int": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/and-op/str-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/and-op/tuple-tuple": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/contains/bool-bool": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/contains/bool-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/contains/dict-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/contains/float-float": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/contains/float-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/contains/int-bool": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/contains/int-float": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/contains/int-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/contains/int-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/contains/int-none": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/contains/int-str": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/contains/int-tuple": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/contains/list-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/contains/list-list": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/contains/none-none": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/contains/str-dict": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/contains/str-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/contains/str-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/contains/tuple-tuple": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/eq/bool-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/eq/bool-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/eq/dict-dict": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/eq/float-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/eq/float-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/eq/int-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/eq/int-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/eq/int-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/eq/int-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/eq/int-none": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/eq/int-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/eq/int-tuple": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/eq/list-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/eq/list-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/eq/none-none": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/eq/str-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/eq/str-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/eq/str-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/eq/tuple-tuple": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/floordiv/bool-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/floordiv/bool-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/floordiv/dict-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/floordiv/float-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/floordiv/float-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/floordiv/int-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/floordiv/int-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/floordiv/int-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/floordiv/int-list": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/floordiv/int-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/floordiv/int-str": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/floordiv/int-tuple": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/floordiv/list-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/floordiv/list-list": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/floordiv/none-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/floordiv/str-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/floordiv/str-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/floordiv/str-str": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/floordiv/tuple-tuple": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/ge/bool-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ge/bool-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ge/dict-dict": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/ge/float-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ge/float-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ge/int-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ge/int-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ge/int-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ge/int-list": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/ge/int-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/ge/int-str": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/ge/int-tuple": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/ge/list-int": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/ge/list-list": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/ge/none-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/ge/str-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/ge/str-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/ge/str-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ge/tuple-tuple": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/gt/bool-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/gt/bool-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/gt/dict-dict": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/gt/float-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/gt/float-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/gt/int-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/gt/int-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/gt/int-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/gt/int-list": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/gt/int-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/gt/int-str": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/gt/int-tuple": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/gt/list-int": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/gt/list-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/gt/none-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/gt/str-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/gt/str-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/gt/str-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/gt/tuple-tuple": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/le/bool-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/le/bool-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/le/dict-dict": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/le/float-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/le/float-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/le/int-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/le/int-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/le/int-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/le/int-list": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/le/int-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/le/int-str": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/le/int-tuple": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/le/list-int": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/le/list-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/le/none-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/le/str-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/le/str-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/le/str-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/le/tuple-tuple": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/lt/bool-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/lt/bool-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/lt/dict-dict": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/lt/float-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/lt/float-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/lt/int-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/lt/int-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/lt/int-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/lt/int-list": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/lt/int-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/lt/int-str": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/lt/int-tuple": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/lt/list-int": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/lt/list-list": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/lt/none-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/lt/str-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/lt/str-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/lt/str-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/lt/tuple-tuple": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/mod/bool-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/mod/bool-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/mod/dict-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/mod/float-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/mod/float-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/mod/int-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/mod/int-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/mod/int-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/mod/int-list": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/mod/int-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/mod/int-str": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/mod/int-tuple": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/mod/list-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/mod/list-list": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/mod/none-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/mod/str-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/mod/str-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/mod/str-str": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/mod/tuple-tuple": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/mul/bool-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/mul/bool-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/mul/dict-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/mul/float-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/mul/float-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/mul/int-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/mul/int-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/mul/int-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/mul/int-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/mul/int-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/mul/int-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/mul/int-tuple": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/mul/list-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/mul/list-list": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/mul/none-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/mul/str-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/mul/str-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/mul/str-str": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/mul/tuple-tuple": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/ne/bool-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ne/bool-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ne/dict-dict": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ne/float-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ne/float-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ne/int-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ne/int-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ne/int-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ne/int-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ne/int-none": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ne/int-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ne/int-tuple": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ne/list-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ne/list-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ne/none-none": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ne/str-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/ne/str-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ne/str-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/ne/tuple-tuple": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/or-op/bool-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/or-op/bool-int": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/or-op/dict-dict": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/or-op/float-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/or-op/float-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/or-op/int-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/or-op/int-float": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/or-op/int-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/or-op/int-list": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/or-op/int-none": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/or-op/int-str": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/or-op/int-tuple": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/or-op/list-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/or-op/list-list": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/or-op/none-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/or-op/str-dict": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/or-op/str-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/or-op/str-str": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/or-op/tuple-tuple": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/pow/bool-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/pow/bool-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/pow/dict-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/pow/float-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/pow/float-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/pow/int-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/pow/int-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/pow/int-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/pow/int-list": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/pow/int-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/pow/int-str": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/pow/int-tuple": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/pow/list-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/pow/list-list": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/pow/none-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/pow/str-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/pow/str-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/pow/str-str": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/pow/tuple-tuple": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/sub/bool-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/sub/bool-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/sub/dict-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/sub/float-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/sub/float-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/sub/int-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/sub/int-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/sub/int-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/sub/int-list": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/sub/int-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/sub/int-str": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/sub/int-tuple": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/sub/list-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/sub/list-list": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/sub/none-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/sub/str-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/sub/str-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/sub/str-str": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/sub/tuple-tuple": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/truediv/bool-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/truediv/bool-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/truediv/dict-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/truediv/float-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/truediv/float-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/truediv/int-bool": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/truediv/int-float": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/truediv/int-int": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "generated/operator/truediv/int-list": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/truediv/int-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/truediv/int-str": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/truediv/int-tuple": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/truediv/list-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/truediv/list-list": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/truediv/none-none": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "generated/operator/truediv/str-dict": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/truediv/str-int": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/truediv/str-str": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "generated/operator/truediv/tuple-tuple": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
     "identity/bool-is-not-int-display": {
       "counted": true,
       "status": "PASS",
@@ -2330,6 +5085,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "iteration/dict-resize-during-iteration-raises": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "iteration/enumerate-and-reversed": {
       "counted": true,
       "status": "PASS",
@@ -2350,6 +5110,11 @@
       "status": "PASS",
       "tier": "spec"
     },
+    "iteration/generator-resumes-where-it-left-off": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "iteration/iterating-exhausts-once": {
       "counted": true,
       "status": "FAIL",
@@ -2360,7 +5125,17 @@
       "status": "PASS",
       "tier": "spec"
     },
+    "iteration/list-mutation-during-iteration": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "cpython"
+    },
     "iteration/nested-comprehension-order": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "iteration/nested-yield-from-order": {
       "counted": true,
       "status": "PASS",
       "tier": "spec"
@@ -2620,6 +5395,11 @@
       "status": "PASS",
       "tier": "spec"
     },
+    "pep/0252-descriptor-protocol/get-set-delete": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
     "pep/0255-generators/basic-yield": {
       "counted": true,
       "status": "PASS",
@@ -2635,9 +5415,19 @@
       "status": "PASS",
       "tier": "spec"
     },
+    "pep/0318-decorators/stacking-order": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "pep/0342-generator-send/send-and-return": {
       "counted": true,
       "status": "REFUSED",
+      "tier": "spec"
+    },
+    "pep/0343-with-statement/multiple-and-nested": {
+      "counted": true,
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0380-yield-from/delegation": {
@@ -2645,9 +5435,19 @@
       "status": "REFUSED",
       "tier": "spec"
     },
+    "pep/0393-flexible-string/len-is-codepoints": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "pep/0448-unpacking-generalizations/call-and-literal": {
       "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "pep/0461-bytes-formatting/percent-on-bytes": {
+      "counted": true,
+      "status": "REFUSED",
       "tier": "spec"
     },
     "pep/0465-matrix-multiplication/matmul-dunder": {
@@ -2658,6 +5458,21 @@
     "pep/0468-kwargs-order/preserved-in-kwargs": {
       "counted": true,
       "status": "PASS",
+      "tier": "spec"
+    },
+    "pep/0479-stopiteration-in-generator/becomes-runtimeerror": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "pep/0487-set-name/descriptor-informed-of-name": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "pep/0492-async-await/coroutine-runs": {
+      "counted": true,
+      "status": "FAIL",
       "tier": "spec"
     },
     "pep/0498-fstrings/expression-and-spec": {
@@ -2675,9 +5490,29 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "pep/0525-async-generators/async-for": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
     "pep/0526-variable-annotations/runtime-behaviour": {
       "counted": true,
       "status": "REFUSED",
+      "tier": "spec"
+    },
+    "pep/0530-async-comprehensions/comprehension-with-async-for": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "pep/0557-dataclasses/generated-methods": {
+      "counted": true,
+      "status": "PASS",
+      "tier": "spec"
+    },
+    "pep/0563-postponed-annotations/future-import-stringifies": {
+      "counted": true,
+      "status": "FAIL",
       "tier": "spec"
     },
     "pep/0572-assignment-expressions/walrus": {
@@ -2700,6 +5535,11 @@
       "status": "FAIL",
       "tier": "spec"
     },
+    "pep/0613-type-alias/typealias-annotation": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
     "pep/0616-str-removeprefix/removeprefix-removesuffix": {
       "counted": true,
       "status": "PASS",
@@ -2715,14 +5555,79 @@
       "status": "REFUSED",
       "tier": "spec"
     },
+    "pep/0654-exception-groups/except-star": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "pep/0673-self-type/self-annotation": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "pep/0675-literal-string/runtime-is-just-typing": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "pep/0692-typeddict-kwargs/unpack-in-signature": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "pep/0695-type-params/generic-function-typeparams": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "pep/0695-type-params/type-alias-and-generic": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "pep/0696-typeparam-defaults/default-type-parameter": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "pep/0701-fstring-grammar/nested-quotes-and-backslash": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "pep/0702-deprecated/warns-on-use": {
+      "counted": true,
+      "status": "REFUSED",
+      "tier": "spec"
+    },
+    "pep/3107-function-annotations/annotations-dict": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "pep/3115-metaclass-prepare/namespace-hook": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
+    "pep/3129-class-decorators/applied-to-class": {
+      "counted": true,
+      "status": "FAIL",
+      "tier": "spec"
+    },
     "pep/3132-extended-unpacking/starred-targets": {
       "counted": true,
       "status": "PASS",
       "tier": "spec"
     },
-    "pep/3155-qualified-name/qualname": {
+    "pep/3141-numeric-tower/numbers-registration": {
       "counted": true,
       "status": "FAIL",
+      "tier": "spec"
+    },
+    "pep/3155-qualified-name/qualname": {
+      "counted": true,
+      "status": "TIMEOUT",
       "tier": "spec"
     },
     "sequence/list/copy-is-shallow": {
@@ -2926,8 +5831,8 @@
       "tier": "spec"
     }
   },
-  "counted": 582,
-  "passed": 292,
+  "counted": 1163,
+  "passed": 540,
   "shim": "asmpython",
   "tiers": [
     "spec",
