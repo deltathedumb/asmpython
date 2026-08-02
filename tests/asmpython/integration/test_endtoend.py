@@ -192,6 +192,73 @@ PROGRAMS = {
             print(stepped)
             return total
     """,
+    # Everything below was found untested by asking "which construct does
+    # every existing program happen to avoid?" -- the question that turned up
+    # `if`/`else`, whose entire else branch had been unreachable.
+    "else_branches": """
+        def classify(n: int) -> int:
+            if n < 0:
+                return 1
+            elif n == 0:
+                return 2
+            elif n < 10:
+                return 3
+            else:
+                return 4
+
+        def main() -> int:
+            print(classify(-1))
+            print(classify(0))
+            print(classify(5))
+            print(classify(50))
+            total: int = 0
+            for i in range(6):
+                if i % 2 == 0:
+                    total = total + 1
+                else:
+                    total = total + 100
+            print(total)
+            return 0
+    """,
+    "and_or_yield_an_operand": """
+        def main() -> int:
+            a: int = 5
+            b: int = 7
+            print(a and b)
+            print(0 and b)
+            print(a or b)
+            print(0 or b)
+            return 0
+    """,
+    "void_functions": """
+        def shout(n: int) -> None:
+            print(n)
+
+        def main() -> int:
+            shout(3)
+            shout(4)
+            return 0
+    """,
+    "booleans": """
+        def flip(b: bool) -> bool:
+            return not b
+
+        def main() -> int:
+            t: bool = True
+            print(int(flip(t)))
+            print(int(t))
+            print(int(t and False))
+            print(int(1 < 2 < 3 < 4))
+            print(int(1 < 2 < 1 < 4))
+            return 0
+    """,
+    "nested_conditional_expressions": """
+        def main() -> int:
+            a: int = 3
+            print(1 if a > 0 else (2 if a < -1 else 3))
+            print(1 if a < 0 else (2 if a < -1 else 3))
+            return 0
+    """,
     "conversions": """
         def main() -> int:
             print(int(2.7))
