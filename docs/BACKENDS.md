@@ -141,7 +141,7 @@ Start with hand-written IR rather than compiled Python. Twenty lines you wrote
 yourself is a far better first test than a program that requires a frontend, a
 runtime and your backend to all be correct simultaneously:
 
-```
+```bash
 apc build prog.py --emit-ir -o prog.ir     # then edit prog.ir freely
 apc run prog.ir                            # what it SHOULD do
 ```
@@ -149,15 +149,79 @@ apc run prog.ir                            # what it SHOULD do
 ## Targets
 
 `emit` receives a `Target` rather than baking one in, so one code generator can
-serve several configurations:
+serve several platforms. Targets live in their own registry — see
+[TARGETS.md](TARGETS.md) — and a backend names the one it defaults to:
 
 ```python
-Target(name="x86_64-linux", pointer_size=8, little_endian=True,
-       stack_alignment=16, object_format="elf")
+class MyBackend(Backend):
+    name = "my-machine"
+    default_target = "my-machine-linux"   # a NAME, resolved by the driver
 ```
 
-A backend supporting only one shape simply ignores the fields it does not vary
-over.
+**Read the fields; never parse `target.name`.** This backend used to choose
+its calling convention with `"windows" in target.name`. It worked for the two
+targets that shipped and silently gave System V to everything else — a target
+called `uefi-x64` would have compiled, linked, and passed its arguments in the
+wrong registers, which appears as corrupted data inside a callee and nowhere
+near the call. `target.abi` says what it is.
+
+A backend supporting only one shape ignores the fields it does not vary over.
+One it cannot support at all should refuse:
+
+```python
+raise BackendUnsupported(
+    f"target {target.name!r} declares ABI {target.abi!r}, which this "
+    f"backend does not implement")
+```
+
+`BackendUnsupported` becomes a diagnostic naming the backend and the target.
+Any other exception reaches the user as a traceback with a compiler stack in
+it, which reads as "you found a bug in apc" when it means "use another
+backend".
+
+## Producing a program
+
+`emit` returns artifacts, not an executable. Turning `{filename: bytes}` into
+something runnable is a *toolchain*, and the shipped one hands your `.s` or
+`.c` to a C compiler driver. See [LINKERS.md](LINKERS.md).
+
+Two things a machine backend owes it:
+
+```python
+class MyBackend(Backend):
+    self_contained = False    # my artifacts need the runtime linked in
+```
+
+and emitting the IR's `main` under `ENTRY_SYMBOL`, not as `main` — it returns
+i64 where C requires int, and would collide with the runtime's entry point:
+
+```python
+from apc.backend import ENTRY_SYMBOL
+
+def symbol(self, name):
+    return ENTRY_SYMBOL if name == "main" else name
+```
+
+Use one function for that, called at definitions **and** at call sites. Here
+they were computed separately, and the moment the entry symbol was renamed,
+`main` defined its labels under one name and jumped to another — accepted by
+the assembler, rejected by the linker.
+
+## Arguments are a parallel assignment
+
+If your backend moves values into ABI registers, emit the moves in an order
+that respects their dependencies:
+
+```asm
+movq %rax, %rcx     arg0 (in rax) -> rcx
+movq %rcx, %rdx     arg1 was IN rcx, which the line above destroyed
+```
+
+Nine arguments summed to 30 instead of 36 that way, in a program that
+compiled, linked and ran. Emit any move whose destination is nobody else's
+source, repeat, and break a real cycle (`f(b, a)`) through a scratch register.
+A memory source cannot be clobbered — but its *destination* is still someone
+else's source, which is a second, quieter version of the same bug.
 
 ## Checklist
 
@@ -165,6 +229,11 @@ over.
 - [ ] Listed in `apc.backend.load_builtin`
 - [ ] `case _` raises on an unhandled opcode
 - [ ] No defensive checks for the ten invariants above
+- [ ] Behaviour read from `target` fields, never parsed out of `target.name`
+- [ ] Anything unsupported raises `BackendUnsupported`, not a bare exception
+- [ ] `self_contained` set correctly, and the IR's `main` emitted under
+      `ENTRY_SYMBOL` by one function used at definitions and call sites
+- [ ] Argument moves scheduled, not emitted in argument order
 - [ ] Diff-tested against the interpreter on at least: arithmetic at several
       widths, a loop, a call, and a comparison
 - [ ] If you allocate registers, `verify_allocation` is clean at small register

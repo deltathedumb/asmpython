@@ -17,6 +17,48 @@ deliverable.
 
 ### Added
 
+- **apc, a from-scratch retargetable compiler** (`src/apc/`) — a
+  language-independent IR with four registries (frontends, backends, targets,
+  toolchains) whose built-ins register through exactly the same call a third
+  party makes, because an extension path the built-ins bypass is one nobody
+  has tested. `apc build prog.py` produces an executable.
+
+  The IR is 39 opcodes. The type is a FIELD on the instruction rather than
+  part of the mnemonic (`%3 = i64.add %1, %2`), which is what keeps it at 39
+  instead of several hundred; signedness lives on the type, so there is one
+  `DIV`; and registers are mutable with no phi nodes, so a frontend assigns
+  the same register on both paths where SSA would need one. The verifier
+  states ten invariants a backend may assume *without defensive checks*, and
+  each has a test that breaks it.
+
+  Python's semantics are paid for once in the frontend rather than owed by
+  every backend: `//` floors where the machine truncates, `%` takes the
+  divisor's sign where the machine takes the dividend's, `and`/`or` yield an
+  operand, and `a < b < c` evaluates `b` once.
+
+  Every program in the suite runs five ways — CPython, the interpreter on
+  unoptimised IR, the interpreter on optimised IR, the C backend compiled and
+  executed, and the x86-64 backend assembled, linked and executed — and all
+  five must agree. 341 tests.
+
+  Documented in `README.md` and `docs/{BACKENDS,TARGETS,LINKERS,LANGUAGE}.md`;
+  every code example in those four was executed as written.
+
+- **Targets are an extension point, in both trees.** They were three constants
+  inside `apc`'s backend interface and seven modules inside the legacy
+  `_compiler/`. Both are now registries — `apc.target` / `asmpython._targets`
+  — that the compiler asks by name, so adding a platform is a registration
+  rather than an edit to the driver. Public API at `asmpython/target.py`,
+  alongside `backend.py`, `frontend.py` and `linker.py`.
+
+- **A link stage** (`apc.link`). `src/apc/link/` had been an empty directory
+  since the tree was created: `apc build` emitted assembly and stopped, so the
+  compiler had never once been asked to produce something that runs. Shipped
+  toolchains are `cc` (hand it to gcc/clang, which knows where crt1.o and libc
+  live on this machine — the genuinely hard part) and `none` (write artifacts,
+  stop). A missing assembler is a diagnostic naming what was looked for, not an
+  exception: it is an ordinary state for a machine to be in.
+
 - **pyconform, a CPython microbehaviour conformance suite** (`conformance/`) —
   asmpython's correctness was measured against `tests/`, a corpus written
   alongside the compiler, which cannot contain the shapes the compiler was

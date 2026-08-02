@@ -193,9 +193,13 @@ def cmd_targets(args) -> int:
         aliases.setdefault(canonical, []).append(alias)
     width = max((len(n) for n in targets), default=4)
     for name, t in sorted(targets.items()):
-        alias = f"   aka {', '.join(sorted(aliases.get(name, [])))}"             if aliases.get(name) else ""
+        alias = (f"   aka {', '.join(sorted(aliases.get(name, [])))}"
+                 if aliases.get(name) else "")
         print(f"  {name:<{width}}  {t.arch}/{t.os}  abi={t.abi} "
               f"format={t.object_format}{alias}")
+    print()
+    print(f"  {'host':<{width}}  resolves to this machine "
+          f"({target_registry.host().name}); the default for a machine backend")
     return 0
 
 

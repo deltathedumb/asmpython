@@ -84,6 +84,20 @@ class TestTargetRegistry:
     def test_host_matches_the_running_platform(self):
         assert target_registry.host().name == HOST_TARGET
 
+    def test_host_resolves_as_a_target_name(self):
+        assert target_registry.get("host").name == HOST_TARGET
+
+    def test_a_machine_backend_defaults_to_the_host(self):
+        """Not to a platform fixed when the backend was written. `apc build
+        --backend x86-64` on Windows used to emit ELF directives and hand
+        them to a COFF assembler."""
+        from apc.backend import get, load_builtin
+        load_builtin()
+        assert get("x86-64").default_target == "host"
+        assert target_registry.get(
+            get("x86-64").default_target).object_format == (
+                "coff" if sys.platform == "win32" else "elf")
+
 
 class TestAbiComesFromTheTarget:
     """The field, not the name. Sniffing gave System V to anything unfamiliar."""

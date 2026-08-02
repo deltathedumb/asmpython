@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from .base import Target
 from .registry import (
-    aliases, available, get, host, load_builtin, register, resolve,
+    HOST, aliases, available, get, host, load_builtin, register, resolve,
 )
 
-__all__ = ["Target", "register", "get", "available", "aliases", "resolve",
-           "host", "load_builtin"]
+__all__ = ["HOST", "Target", "register", "get", "available", "aliases",
+           "resolve", "host", "load_builtin"]

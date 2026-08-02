@@ -393,7 +393,10 @@ class _Emitter:
 class X86_64Backend(Backend):
     name = "x86-64"
     description = "System V AMD64 assembly (integers only)"
-    default_target = "x86_64-linux"
+    # The machine this is running on, not a platform fixed at
+    # authoring time: `apc build --backend x86-64` on Windows used to
+    # emit ELF directives and hand them to a COFF assembler.
+    default_target = "host"
     description_note = "ABI chosen by target: sysv or win64"
 
     def symbol(self, name: str, dialect: AsmDialect) -> str:

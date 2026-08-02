@@ -38,15 +38,26 @@ def resolve(name: str) -> str:
     return _ALIASES.get(name, name)
 
 
+#: Resolves to whatever machine this is running on. A name rather than a
+#: registered target because the answer depends on the host, and a backend
+#: that says `default_target = "host"` then compiles for the machine you are
+#: on instead of for whichever platform the author happened to develop on.
+#: Without it, `apc build --backend x86-64` on Windows emitted ELF directives
+#: and handed them to a COFF assembler.
+HOST = "host"
+
+
 def get(name: str) -> Target:
     load_builtin()
+    if name == HOST:
+        return host()
     canonical = resolve(name)
     try:
         return _REGISTRY[canonical]
     except KeyError:
         known = ", ".join(sorted(_REGISTRY)) or "(none)"
         raise LookupError(
-            f"unknown target {name!r}\navailable: {known}") from None
+            f"unknown target {name!r}\navailable: {known}, {HOST}") from None
 
 
 def available() -> dict[str, Target]:
