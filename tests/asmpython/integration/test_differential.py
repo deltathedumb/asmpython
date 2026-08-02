@@ -240,9 +240,79 @@ class ProgramGenerator:
         return Bounded(f"({self.bool_expr(depth + 1)} {op} "
                        f"{self.bool_expr(depth + 1)})", 1)
 
+    # -- functions -----------------------------------------------------------
+    #: Ceiling assumed for every argument passed to a generated function. The
+    #: call sites are built to respect it, so a body can be bounded without
+    #: knowing which call it came from.
+    ARG_BOUND = 1000.0
+
+    def function(self, index: int) -> tuple[str, str, list[str], float]:
+        """One helper function: (source, name, parameter types, return bound).
+
+        Arity goes up to nine deliberately. Every ABI bug in this compiler was
+        in argument passing, and none of them could happen with fewer than
+        four arguments: System V and Microsoft x64 disagree about how the
+        integer and SSE sequences are indexed, arguments past the register
+        file go on the stack, and moving values into argument registers in
+        argument order silently collapses them when one register is another's
+        source. Two-argument calls exercise none of that.
+        """
+        r = self.rng
+        name = f"fn{index}"
+        arity = r.randint(0, 9)
+        types = [r.choice(["int", "float"]) for _ in range(arity)]
+        returns = r.choice(["int", "float"])
+
+        # The body sees only its own parameters, so the caller's variables are
+        # swapped out and restored -- a generated function must not reference
+        # a name from main's scope, which the frontend has no closures for.
+        saved_int, saved_float = self.int_vars, self.float_vars
+        self.int_vars = {f"p{i}": self.ARG_BOUND
+                         for i, t in enumerate(types) if t == "int"}
+        self.float_vars = {f"p{i}": self.ARG_BOUND
+                           for i, t in enumerate(types) if t == "float"}
+        expr = self.int_expr() if returns == "int" else self.float_expr()
+        bound = expr.bound
+        self.int_vars, self.float_vars = saved_int, saved_float
+
+        # EVERY parameter is read, and that is the point. An argument the body
+        # ignores is an argument whose value nothing observes, so a call that
+        # passed it in the wrong register would produce the right answer
+        # anyway -- and the ABI bugs this is hunting would go unnoticed while
+        # appearing to be covered.
+        terms = [f"p{i}" if (t == "int") == (returns == "int")
+                 else (f"int(p{i})" if returns == "int" else f"float(p{i})")
+                 for i, t in enumerate(types)]
+        body = " + ".join(terms + [f"({expr})"])
+        bound += arity * self.ARG_BOUND
+
+        params = ", ".join(f"p{i}: {t}" for i, t in enumerate(types))
+        src = (f"def {name}({params}) -> {returns}:\n"
+               f"    return {body}\n")
+        return src, name, types, bound
+
+    def call(self, name: str, types: list[str], bound: float) -> Bounded:
+        """A call whose arguments respect `ARG_BOUND`."""
+        args = []
+        for t in types:
+            if t == "int":
+                v = self.rng.randint(-int(self.ARG_BOUND), int(self.ARG_BOUND))
+                args.append(str(v) if v >= 0 else f"({v})")
+            else:
+                args.append(f"{self.rng.uniform(-self.ARG_BOUND, self.ARG_BOUND):.4f}")
+        return Bounded(f"{name}({', '.join(args)})", bound)
+
     # -- whole program -------------------------------------------------------
     def program(self) -> str:
         r = self.rng
+        functions: list[tuple[str, list[str], float, str]] = []
+        preamble: list[str] = []
+        for i in range(r.randint(0, 3)):
+            src, name, types, bound = self.function(i)
+            preamble.append(src)
+            functions.append((name, types, bound,
+                              "int" if "-> int" in src else "float"))
+
         lines: list[str] = ["def main() -> int:"]
 
         for i in range(r.randint(2, 4)):
@@ -256,15 +326,33 @@ class ProgramGenerator:
 
         for _ in range(r.randint(3, 8)):
             kind = r.random()
-            if kind < 0.35:
+            if functions and kind < 0.18:
+                name, types, bound, returns = r.choice(functions)
+                call = self.call(name, types, bound)
+                if returns == "int":
+                    lines.append(f"    print({call})")
+                else:
+                    lines.append(f"    print({call})")
+            elif kind < 0.35:
                 lines.append(f"    print({self.int_expr()})")
-            elif kind < 0.55:
+            elif kind < 0.52:
                 lines.append(f"    print({self.float_expr()})")
-            elif kind < 0.70:
+            elif kind < 0.64:
                 lines.append(f"    print(int({self.bool_expr()}))")
-            elif kind < 0.85:
+            elif kind < 0.76:
                 lines.append(f"    if {self.bool_expr()}:")
                 lines.append(f"        print({self.int_expr()})")
+            elif kind < 0.86:
+                # A while loop with a counter, which the `for` form never
+                # produces: a different block shape reaching the same join.
+                name = r.choice(list(self.int_vars))
+                limit = r.randint(1, 5)
+                lines.append(f"    w{limit}: int = 0")
+                lines.append(f"    while w{limit} < {limit}:")
+                lines.append(f"        w{limit} = w{limit} + 1")
+                lines.append(f"        {name} = {name} + w{limit}")
+                self.int_vars[name] += 15
+                lines.append(f"    print({name})")
             else:
                 name = r.choice(list(self.int_vars))
                 lines.append(f"    for k in range({r.randint(1, 5)}):")
@@ -277,7 +365,7 @@ class ProgramGenerator:
                 lines.append(f"    print({name})")
 
         lines.append("    return 0")
-        return "\n".join(lines) + "\n"
+        return "\n".join(preamble + ["\n".join(lines)]) + "\n"
 
 
 def render(value) -> str:

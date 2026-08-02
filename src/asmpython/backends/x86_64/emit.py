@@ -184,6 +184,23 @@ class CoffDialect(AsmDialect):
         return out + [f"	.def {name}; .scl 2; .type 32; .endef", f"{name}:"]
 
 
+def _clobbers_volatiles(ins: Instruction) -> bool:
+    """Whether this instruction destroys caller-saved registers.
+
+    Not the same question as "is it a call" in the IR. This backend has no
+    float remainder instruction and lowers `Op.REM` on a float to `call
+    fmod`, which clobbers the volatiles exactly as any call does -- but the
+    IR shows an arithmetic opcode, so the shared liveness saw nothing and the
+    allocator put a value live across it in `rax`. `float(i0)` a few
+    instructions later read whatever fmod had left behind.
+
+    Any lowering that introduces a call belongs here. Forgetting one does not
+    fail to build; it produces a wrong number, sometimes.
+    """
+    return (ins.op in (Op.CALL, Op.CALL_PTR)
+            or (ins.op is Op.REM and ins.ty.is_float))
+
+
 def block_label(fn_name: str, label: str) -> str:
     """The assembler label for one IR block.
 
@@ -235,42 +252,67 @@ def _fmov(ty: T.Type) -> str:
 _MOVE_SCRATCH = "r11"
 
 
+#: Staging register for a memory-to-memory move. Distinct from the cycle
+#: scratch so the two can never be in flight at once.
+_COPY_SCRATCH = "r10"
+
+
 def _emit_parallel_moves(e: "_Emitter", moves: list[tuple[str, str]]) -> None:
     """Emit `dst <- src` moves as if they happened simultaneously.
 
-    Argument setup is a parallel assignment: every source is read from the
-    state before the call, not from the half-updated state left by the moves
-    already emitted. Doing them in argument order is correct only when no
-    destination is also a source, and wrong silently otherwise -- the value
-    that was overwritten is simply gone, and the callee gets a duplicate of
-    another argument.
+    Both ends are operand strings -- `%rcx` or `-8(%rbp)` -- because this runs
+    in two places that are mirror images:
 
-    The rule is: emit any move whose DESTINATION is nobody else's source,
-    repeat, and when only a cycle remains break it through a reserved scratch
-    register. A cycle is real -- `f(b, a)` where a is in the register b wants
-    and vice versa -- and no ordering alone can resolve it.
+        the caller   values in registers and slots  ->  argument registers
+        the prologue argument registers             ->  registers and slots
 
-    A memory source cannot be clobbered by these moves, so it never appears in
-    a cycle. Its DESTINATION still can: `rcx <- [rbp-8]` alongside
-    `rdx <- rcx` must not run first, or rdx gets the loaded value instead of
-    rcx's. Emitting the memory moves up front looked obviously safe and
-    reintroduced the same bug one layer down.
+    Both are parallel assignments: every source is read from the state before
+    the transfer, not the half-updated state the earlier moves leave. Doing
+    them in argument order is correct only when no destination is also a
+    source, and silently wrong otherwise -- the overwritten value is gone and
+    the callee gets a duplicate of another argument.
+
+    That was fixed for the caller and not for the prologue, so a six-argument
+    call still produced `movq %rcx, %r8` (p0 to its slot) ahead of
+    `movq %r8, %rcx` (p2 from its slot), and p2 arrived holding p0.
+
+    The rule: emit any move whose DESTINATION is nobody else's source, repeat,
+    and break a remaining cycle through a scratch register. A cycle is real --
+    `f(b, a)` with a and b already in each other's registers -- and no
+    ordering resolves it.
+
+    A memory source cannot be clobbered here, so it is never part of a cycle.
+    Its DESTINATION still can be someone's source, which is the subtlety that
+    made "emit the memory moves first" look safe and reintroduce the same bug
+    one layer down.
     """
-    pending = [(dst, src) for dst, src in moves if f"%{dst}" != src]
+    def is_register(operand: str) -> bool:
+        return operand.startswith("%")
+
+    def emit(dst: str, src: str) -> None:
+        if is_register(dst) or is_register(src):
+            e.emit(f"movq {src}, {dst}")
+        else:
+            # Neither end is a register, so nothing else can observe the
+            # staging register in between.
+            e.emit(f"movq {src}, %{_COPY_SCRATCH}")
+            e.emit(f"movq %{_COPY_SCRATCH}, {dst}")
+
+    pending = [(dst, src) for dst, src in moves if dst != src]
 
     while pending:
-        # Only register sources can be destroyed by a move, so only they
-        # constrain the order.
-        sources = {src for _, src in pending if src.startswith("%")}
-        ready = [m for m in pending if f"%{m[0]}" not in sources]
+        # Only a register source can be destroyed by another move, so only
+        # those constrain the order.
+        sources = {src for _, src in pending if is_register(src)}
+        ready = [m for m in pending if m[0] not in sources]
         if not ready:
             dst, src = pending[0]
             e.emit(f"movq {src}, %{_MOVE_SCRATCH}")
-            pending = [(d, f"%{_MOVE_SCRATCH}" if s == src else s)
-                       for d, s in pending]
+            scratch = f"%{_MOVE_SCRATCH}"
+            pending = [(d, scratch if s == src else s) for d, s in pending]
             continue
         for move in ready:
-            e.emit(f"movq {move[1]}, %{move[0]}")
+            emit(move[0], move[1])
             pending.remove(move)
 
 
@@ -458,8 +500,10 @@ class X86_64Backend(Backend):
         # not model, so float values are kept in frame slots and moved through
         # xmm0/xmm1. See `_Emitter.float_into`.
         floats = frozenset(r for r, ty in fn.registers.items() if ty.is_float)
-        alloc = allocate(fn, abi.register_file(), on_stack=floats)
-        problems = verify_allocation(fn, alloc)
+        file = abi.register_file()
+        alloc = allocate(fn, file, on_stack=floats, is_call=_clobbers_volatiles)
+        problems = verify_allocation(fn, alloc, file=file,
+                                     is_call=_clobbers_volatiles)
         if problems:
             # An allocation conflict is a compiler bug, and it produces a
             # program that computes the wrong answer rather than crashing. It
@@ -492,23 +536,26 @@ class X86_64Backend(Backend):
         # than merely unlikely.
         places = self._argument_places(
             [fn.register_type(p) for p in fn.params], abi)
+        arrivals: list[tuple[str, str]] = []
         for param, place in zip(fn.params, places):
-            if place.on_stack:
-                # The caller put it above its own frame. From in here that is
-                # rbp + 16 (the saved rbp and the return address) + whatever
-                # offset from rsp the caller used.
-                source = f"{16 + place.stack_offset}(%rbp)"
-                if place.is_float:
-                    ty = fn.register_type(param)
+            # A stacked argument sits above the caller's frame: from in here
+            # that is rbp + 16 (saved rbp and return address) + the offset
+            # from rsp the caller used.
+            source = (f"{16 + place.stack_offset}(%rbp)" if place.on_stack
+                      else f"%{place.register}")
+            if place.is_float:
+                # Floats always land in slots, so no float destination is a
+                # register and none can be another's source. They need no
+                # scheduling and do not interact with the integer file.
+                ty = fn.register_type(param)
+                if place.on_stack:
                     e.emit(f"{_fmov(ty)} {source}, %xmm0")
                     e.float_store("xmm0", param)
                 else:
-                    e.emit(f"movq {source}, %r10")
-                    e.store_from("r10", param)
-            elif place.is_float:
-                e.float_store(place.register, param)
+                    e.float_store(place.register, param)
             else:
-                e.store_from(place.register, param)
+                arrivals.append((e.loc(param), source))
+        _emit_parallel_moves(e, arrivals)
 
         for block in fn.blocks:
             # `fn.name`, not the exported symbol: branches inside the function
@@ -615,7 +662,7 @@ class X86_64Backend(Backend):
             if place.is_float:
                 e.float_into(arg, place.register)
             else:
-                moves.append((place.register, e.loc(arg)))
+                moves.append((f"%{place.register}", e.loc(arg)))
         _emit_parallel_moves(e, moves)
         return adjust
 

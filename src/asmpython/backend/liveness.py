@@ -36,9 +36,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from collections.abc import Callable
+
 from ..ir import Function
 from ..ir.cfg import ControlFlowGraph
-from ..ir.module import Register
+from ..ir.module import Instruction, Register
+
+#: "Does this instruction clobber caller-saved registers?"
+IsCall = Callable[[Instruction], bool]
+
+
+def default_is_call(ins: Instruction) -> bool:
+    """The IR's own calls. A backend that lowers something else to a call
+    must say so -- see `Liveness.live_across_calls`."""
+    from ..ir.opcodes import Op
+    return ins.op in (Op.CALL, Op.CALL_PTR)
 
 
 @dataclass
@@ -110,7 +122,7 @@ class Liveness:
             result[i] = set(live)
         return result
 
-    def live_across_calls(self) -> set[Register]:
+    def live_across_calls(self, is_call: IsCall | None = None) -> set[Register]:
         """Registers live across a call.
 
         These are the ones that must survive in callee-saved registers or on
@@ -118,14 +130,23 @@ class Liveness:
         caller-saved register and the callee destroys it -- a bug that only
         appears when the callee happens to use that register, which is to say
         intermittently and later.
+
+        `is_call` decides what counts, and defaults to the IR's own call
+        opcodes. A backend must override it when IT introduces a call the IR
+        does not show: x86-64 has no float remainder instruction and lowers
+        `Op.REM` on f64 to `call fmod`, which clobbers every caller-saved
+        register just as any call does. Leaving that invisible put a value
+        live across it into `rax`, and `float(i0)` afterwards read whatever
+        fmod had left there -- a wrong number in a program that ran, found by
+        a fuzzer and not by anything else.
         """
-        from ..ir.opcodes import Op
+        check = is_call or default_is_call
 
         out: set[Register] = set()
         for i, block in enumerate(self.function.blocks):
             per_instruction = self.live_at(i)
             for k, ins in enumerate(block.instructions):
-                if ins.op not in (Op.CALL, Op.CALL_PTR):
+                if not check(ins):
                     continue
                 # What is live AFTER the call, not before it minus the
                 # arguments. Those differ for the case that matters: a value
@@ -168,9 +189,13 @@ class LiveInterval:
         return self.start < other.end and other.start < self.end
 
 
-def compute_intervals(fn: Function, liveness: Liveness | None = None
-                      ) -> list[LiveInterval]:
-    """Live intervals for every register, sorted by start position."""
+def compute_intervals(fn: Function, liveness: Liveness | None = None, *,
+                      is_call: IsCall | None = None) -> list[LiveInterval]:
+    """Live intervals for every register, sorted by start position.
+
+    `is_call` is passed through to `live_across_calls`, so a backend's hidden
+    calls set `crosses_call` on the intervals the allocator then honours.
+    """
     from ..ir.opcodes import Op
 
     liveness = liveness or Liveness.compute(fn)
@@ -204,7 +229,7 @@ def compute_intervals(fn: Function, liveness: Liveness | None = None
         first.setdefault(reg, 0)
         last.setdefault(reg, 1)
 
-    crossing = liveness.live_across_calls()
+    crossing = liveness.live_across_calls(is_call)
     intervals = [
         LiveInterval(reg, first[reg], max(last.get(reg, first[reg] + 1),
                                           first[reg] + 1),

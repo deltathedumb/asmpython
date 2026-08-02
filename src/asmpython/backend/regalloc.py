@@ -34,7 +34,9 @@ from dataclasses import dataclass, field
 
 from ..ir import Function
 from ..ir.module import Register
-from .liveness import LiveInterval, Liveness, compute_intervals
+from .liveness import (
+    IsCall, LiveInterval, Liveness, compute_intervals,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,7 +108,8 @@ class Allocation:
 
 def allocate(fn: Function, file: RegisterFile,
              liveness: Liveness | None = None, *,
-             on_stack: frozenset[Register] = frozenset()) -> Allocation:
+             on_stack: frozenset[Register] = frozenset(),
+             is_call: IsCall | None = None) -> Allocation:
     """Assign every virtual register a machine register or a frame slot.
 
     `on_stack` names registers the backend cannot keep in this register file
@@ -120,7 +123,7 @@ def allocate(fn: Function, file: RegisterFile,
     allocator that nobody has tested under pressure.
     """
     liveness = liveness or Liveness.compute(fn)
-    intervals = compute_intervals(fn, liveness)
+    intervals = compute_intervals(fn, liveness, is_call=is_call)
     result = Allocation()
 
     free_volatile = list(file.volatile)
@@ -205,7 +208,9 @@ def allocate(fn: Function, file: RegisterFile,
 
 
 def verify_allocation(fn: Function, alloc: Allocation,
-                      liveness: Liveness | None = None) -> list[str]:
+                      liveness: Liveness | None = None, *,
+                      file: RegisterFile | None = None,
+                      is_call: IsCall | None = None) -> list[str]:
     """Check the allocation is sound. Returns problems; empty means good.
 
     Two properties, and they are exactly the ones whose violation is silent:
@@ -213,7 +218,13 @@ def verify_allocation(fn: Function, alloc: Allocation,
       * No two simultaneously-live registers share a machine register. This is
         the check that would have caught the 949,336 conflicting pairs the
         duplicated analysis produced -- and which nothing was running.
-      * Nothing live across a call sits in a caller-saved register.
+      * Nothing live across a call sits in a caller-saved register. This one
+        needs `file`, to know which registers those are.
+
+    THE SECOND CHECK WAS DOCUMENTED HERE AND NOT IMPLEMENTED, which is how a
+    value live across a backend-introduced `call fmod` ended up in `rax`. The
+    docstring said it was covered; nothing was checking. Pass `file` and it
+    is.
 
     Cheap enough to run under a debug flag on every compile.
     """
@@ -232,5 +243,13 @@ def verify_allocation(fn: Function, alloc: Allocation,
                         f"{fn.name}/{fn.blocks[i].label}: %{seen[loc.name]} and "
                         f"%{reg} are both live and both in {loc.name}")
                 seen[loc.name] = reg
+
+    if file is not None:
+        for reg in liveness.live_across_calls(is_call):
+            loc = alloc.locations.get(reg)
+            if isinstance(loc, InRegister) and loc.name not in file.callee_saved:
+                problems.append(
+                    f"{fn.name}: %{reg} is live across a call but sits in "
+                    f"{loc.name}, which the callee may destroy")
 
     return problems
