@@ -96,6 +96,12 @@ body assigns counts as assigned afterwards — `for i in range(0): pass` then
 Arithmetic, comparison and bitwise operators, `not`/`and`/`or`, conditional
 expressions, calls, `int()`/`float()`/`bool()`.
 
+`print` takes any number of arguments, separates them with a space and ends
+with a newline, as Python does — `print()` is an empty line.
+
+Augmented assignment (`+=`, `//=`, `**=`, `<<=`, …) is checked as the
+operation it stands for, so every rule below applies to it too.
+
 `**` needs a **non-negative integer literal** exponent:
 
 ```python
@@ -158,3 +164,48 @@ error[E0044]: `**` with a negative exponent is float-valued
 One unknown name produces one diagnostic, not one per use: an unresolved type
 poisons everything derived from it and every operation on a poisoned type is
 silent.
+
+The full set the frontend can emit:
+
+| code | what it means |
+| --- | --- |
+| `E0001` | something other than a function at module level |
+| `E0002` | a function defined twice |
+| `E0003` | no `main` |
+| `E0004` | a duplicate parameter name |
+| `E0005` | `*args`, `**kwargs`, or keyword-only/positional-only parameters |
+| `E0006` | a default argument |
+| `E0007` | a decorator |
+| `E0008` | `main` takes no parameters |
+| `E0009` | `main` must return `int` |
+| `E0010` | a missing type annotation |
+| `E0011` | a type this frontend does not have |
+| `E0020` | an assignment other than `name = value` |
+| `E0021` | a loop target that is not a plain name |
+| `E0022` | an unsupported statement |
+| `E0023` | a `for` over something other than `range(...)` |
+| `E0024` | `range()` with the wrong number of arguments |
+| `E0025` | `for ... else` |
+| `E0026` | `while ... else` |
+| `E0027` | `break` or `continue` outside a loop |
+| `E0028` | a `range()` step that is not a literal |
+| `E0029` | a `range()` step of zero |
+| `E0030` | a name redeclared with another type |
+| `E0031` | an undefined name |
+| `E0032` | a name used before it is assigned on every path |
+| `E0040` | an unsupported expression |
+| `E0041` | an operator applied to non-numbers |
+| `E0042` | a bitwise operator applied to a float |
+| `E0043` | `**` without a literal exponent |
+| `E0044` | `**` with a negative exponent |
+| `E0045` | an operator this frontend does not lower |
+| `E0050` | a call to something other than a name |
+| `E0051` | a keyword argument |
+| `E0052` | a call to an unknown function |
+| `E0053` | a call with the wrong number of arguments |
+| `E0054` | a conversion with the wrong number of arguments |
+| `E0055` | a conversion of something not numeric |
+| `E0060` | a type mismatch |
+
+Each applies wherever the construct appears, including inside an augmented
+assignment -- `x **= n` reports `E0043` exactly as `x = x ** n` does.

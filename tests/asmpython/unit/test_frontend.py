@@ -92,6 +92,37 @@ UNSUPPORTED = [
 ]
 
 
+class TestTheDocumentedDiagnostics:
+    """Every code the frontend emits is in docs/LANGUAGE.md, and vice versa.
+
+    A table of error codes is exactly the kind of documentation that rots: a
+    new diagnostic is added where the check is, and nobody remembers the list
+    three directories away. Checked in both directions -- an undocumented code
+    is a gap, and a documented code that no longer exists is a lie.
+    """
+
+    def codes_in_source(self) -> set[str]:
+        import re
+        from pathlib import Path
+        import asmpython.frontends.python.analysis as analysis
+        text = Path(analysis.__file__).read_text(encoding="utf-8")
+        return set(re.findall(r'"(E\d{4})"', text))
+
+    def codes_in_docs(self) -> set[str]:
+        import re
+        from pathlib import Path
+        docs = Path(__file__).resolve().parents[3] / "docs" / "LANGUAGE.md"
+        return set(re.findall(r"E\d{4}", docs.read_text(encoding="utf-8")))
+
+    def test_every_emitted_code_is_documented(self):
+        missing = self.codes_in_source() - self.codes_in_docs()
+        assert not missing, f"undocumented diagnostics: {sorted(missing)}"
+
+    def test_every_documented_code_exists(self):
+        stale = self.codes_in_docs() - self.codes_in_source()
+        assert not stale, f"documented but not emitted: {sorted(stale)}"
+
+
 class TestNothingCrashes:
     """A result or a diagnostic. Never a traceback."""
 
