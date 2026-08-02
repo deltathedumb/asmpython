@@ -45,7 +45,18 @@ _CMP_OPS = {
 
 #: Runtime functions the frontend may call. A frontend decides its own runtime;
 #: the IR has no I/O opcodes, so printing is a call like any other.
-_RUNTIME = {"print_int": ([T.I64], T.VOID), "print_float": ([T.F64], T.VOID)}
+#:
+#: `pow` is libm's, and is here for the same reason `print_int` is: the IR has
+#: no opcode for it. It is NOT an implementation detail that could be expanded
+#: inline -- CPython's float `**` calls this exact function, and expanding
+#: `x ** 3` to `x * (x * x)` rounds twice where pow rounds once. The results
+#: differ in the last bit, which surfaces several multiplications later as a
+#: differing printed digit.
+_RUNTIME = {
+    "print_int": ([T.I64], T.VOID),
+    "print_float": ([T.F64], T.VOID),
+    "pow": ([T.F64, T.F64], T.F64),
+}
 
 #: `int(x)`/`float(x)`/`bool(x)`. Lowered as coercions, not calls -- there is
 #: nothing to call, and emitting a call would make every backend depend on a
@@ -327,15 +338,25 @@ class Lowerer:
         return out
 
     def _pow(self, base: int, exponent: int, ty: T.Type) -> int:
-        """`x ** n` for a non-negative literal n, by squaring.
+        """`x ** n` for a non-negative literal n.
 
-        Analysis guarantees the exponent is a non-negative int literal, so
-        this is a compile-time expansion: no loop, no runtime call, and no
-        branch. `x ** 8` is three multiplications, not eight.
+        INTEGERS expand by squaring: a compile-time expansion with no loop, no
+        runtime call and no branch, and `x ** 8` is three multiplications
+        rather than eight. Integer multiplication is exact, so the expansion
+        is exactly what Python computes.
 
-        The exponent being known is also what makes `x ** 0` correct without a
-        special case at runtime -- it is simply the constant 1.
+        FLOATS call libm's `pow`, because that is what CPython's `**` calls.
+        Expanding them the same way rounds once per multiplication where pow
+        rounds once in total, and `26.3747 ** 3` comes out one bit low --
+        invisible until it is multiplied by something large, and then visible
+        as a differing digit in printed output.
+
+        The exponent being known is what makes `x ** 0` correct with no
+        runtime test: it is the constant 1.
         """
+        if ty.is_float:
+            return self.b.call(ty, "pow",
+                               [base, self.b.const(ty, float(exponent))])
         if exponent == 0:
             return self.b.const(ty, 1.0 if ty.is_float else 1)
         if exponent == 1:
@@ -418,6 +439,7 @@ class Lowerer:
             self.b.cmp(Op.GT, ty, q, neg_limit)]))
 
         trunc_b = self.b.new_block("floorf")
+        inexact_b = self.b.new_block("floorinexact")
         fix_b = self.b.new_block("floorfix")
         join = self.b.new_block("endfloorf")
         self.b.branch(small, trunc_b, join)
@@ -427,6 +449,14 @@ class Lowerer:
         self.b.emit(Instruction(Op.FTOI, T.I64, dst=as_int, args=[q]))
         truncated = self.b.reg(ty)
         self.b.emit(Instruction(Op.ITOF, ty, dst=truncated, args=[as_int]))
+        # An exact quotient IS the answer, and `out` already holds it. Taking
+        # the truncated value instead would be numerically equal and lose the
+        # sign of zero: `0.0 // -9.2` is -0.0 in Python, and round-tripping it
+        # through an integer gives +0.0. They compare equal, print
+        # differently, and divide to opposite infinities.
+        self.b.branch(self.b.cmp(Op.EQ, ty, truncated, q), join, inexact_b)
+
+        self.b.switch_to(inexact_b)
         self.b.copy(out, truncated)
         self.b.branch(self.b.cmp(Op.GT, ty, truncated, q), fix_b, join)
 
@@ -451,13 +481,50 @@ class Lowerer:
         # and right on every test, because no test used one.
         out = self.b.reg(ty)
         self.b.copy(out, r)
-        fix, join = self.b.new_block("floormod"), self.b.new_block("endfloormod")
-        self.b.branch(self._signs_differ(r, b, ty), fix, join)
+
+        if not ty.is_float:
+            fix = self.b.new_block("floormod")
+            join = self.b.new_block("endfloormod")
+            self.b.branch(self._signs_differ(r, b, ty), fix, join)
+            self.b.switch_to(fix)
+            adjusted = self.b.reg(ty)
+            self.b.emit(Instruction(Op.ADD, ty, dst=adjusted, args=[r, b]))
+            self.b.copy(out, adjusted)
+            self.b.jump(join)
+            self.b.switch_to(join)
+            return out
+
+        # A float remainder of zero still carries a sign, and Python gives it
+        # the DIVISOR's: `0.0 % -6.2` is -0.0, where fmod returns +0.0. It
+        # reads like a curiosity until the result is multiplied by something
+        # negative, at which point the answer differs in a printed digit --
+        # which is exactly how this was found.
+        #
+        # `0.0 * b` is copysign(0, b) for any finite non-zero b, and b cannot
+        # be zero here: dividing by it already happened.
+        zero_b = self.b.new_block("modzero")
+        nonzero_b = self.b.new_block("modnonzero")
+        fix = self.b.new_block("floormod")
+        join = self.b.new_block("endfloormod")
+        self.b.branch(self.b.cmp(Op.EQ, ty, r, self.b.const(ty, 0.0)),
+                      zero_b, nonzero_b)
+
+        self.b.switch_to(zero_b)
+        signed_zero = self.b.reg(ty)
+        self.b.emit(Instruction(Op.MUL, ty, dst=signed_zero,
+                                args=[self.b.const(ty, 0.0), b]))
+        self.b.copy(out, signed_zero)
+        self.b.jump(join)
+
+        self.b.switch_to(nonzero_b)
+        self.b.branch(self._signs_differ_raw(r, b, ty), fix, join)
+
         self.b.switch_to(fix)
         adjusted = self.b.reg(ty)
         self.b.emit(Instruction(Op.ADD, ty, dst=adjusted, args=[r, b]))
         self.b.copy(out, adjusted)
         self.b.jump(join)
+
         self.b.switch_to(join)
         return out
 

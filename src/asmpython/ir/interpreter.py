@@ -119,6 +119,12 @@ class Interpreter:
         if name == "print_int":
             self._emit(f"{int(args[0])}\n")
             return None
+        if name == "pow":
+            # libm's, matching what a compiled binary links against and what
+            # CPython's `**` calls. Python's float ** is this function; a
+            # reimplementation here would disagree in the last bit.
+            import math
+            return math.pow(float(args[0]), float(args[1]))
         if name == "print_float":
             # Six decimals: C's `%f`, which is what the runtime the compiled
             # paths link against prints. NOT Python's repr -- `32.0` there,
