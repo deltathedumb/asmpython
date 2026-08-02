@@ -115,7 +115,20 @@ def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
                   + "|".join(sorted(frontend_registry.available()))))
         return Result()
 
-    module = fe.compile(source, sink)
+    try:
+        module = fe.compile(source, sink)
+    except RecursionError:
+        # A long expression is a deep tree, and analysis and lowering both
+        # walk it recursively. `1 + 2 + ... + 999` exhausted the interpreter
+        # stack and reached the user as a traceback ending in `_binop`, which
+        # reads as a compiler crash. It is a real limit and it has a real
+        # cause, so it gets said.
+        sink.report(
+            error("E9105", "expression is too deeply nested to compile")
+            .note("analysis and lowering walk the expression tree "
+                  "recursively, and this one is deeper than the stack allows")
+            .help("split it across several statements"))
+        return Result()
     if module is None or sink.failed:
         return Result()
 

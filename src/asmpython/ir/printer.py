@@ -172,58 +172,72 @@ def parse_module(text: str) -> Module:
         if not line:
             continue
 
-        if line.startswith("module "):
-            m.name = line[7:].strip()
-            continue
+        # ONE guard for the whole line, not one per parse site. The
+        # parser is full of `int(token[1:])`, `parts[1]` and
+        # `T.parse(word)`, and each is a separate way for corrupt text to
+        # raise something that is not a ParseError -- which reaches
+        # `asmpython run` as a traceback. Mutating a valid module 18000
+        # times found two such escapes; wrapping each site as it turned up
+        # would have left the third.
+        try:
+            if line.startswith("module "):
+                m.name = line[7:].strip()
+                continue
 
-        g = _RE_GLOBAL.match(line)
-        if g and fn is None:
-            name, size, lit, flags = g.groups()
-            data = _parse_bytes(lit) if lit else None
-            m.globals.append(Global(
-                name=name,
-                size=len(data) if data is not None else int(size),
-                data=data,
-                readonly="readonly" in (flags or ""),
-                linkage=(Linkage.EXPORT if "export" in (flags or "")
-                         else Linkage.INTERNAL),
-            ))
-            continue
+            g = _RE_GLOBAL.match(line)
+            if g and fn is None:
+                name, size, lit, flags = g.groups()
+                data = _parse_bytes(lit) if lit else None
+                m.globals.append(Global(
+                    name=name,
+                    size=len(data) if data is not None else int(size),
+                    data=data,
+                    readonly="readonly" in (flags or ""),
+                    linkage=(Linkage.EXPORT if "export" in (flags or "")
+                             else Linkage.INTERNAL),
+                ))
+                continue
 
-        f = _RE_FUNC.match(line)
-        if f:
-            exported, name, params, ret, tail = f.groups()
-            fn = Function(
-                name, T.parse(ret),
-                linkage=Linkage.EXPORT if exported else Linkage.INTERNAL,
-                external=(tail == "external"))
-            m.functions.append(fn)
-            blk = None
-            for p in [x.strip() for x in params.split(",") if x.strip()]:
-                mreg = re.match(r"%(\d+)\s*:\s*(\w+)$", p)
-                if not mreg:
-                    raise ParseError(n, raw, f"bad parameter {p!r}")
-                reg, ty = int(mreg.group(1)), T.parse(mreg.group(2))
-                fn.params.append(reg)
-                fn.registers[reg] = ty
-            continue
+            f = _RE_FUNC.match(line)
+            if f:
+                exported, name, params, ret, tail = f.groups()
+                fn = Function(
+                    name, T.parse(ret),
+                    linkage=Linkage.EXPORT if exported else Linkage.INTERNAL,
+                    external=(tail == "external"))
+                m.functions.append(fn)
+                blk = None
+                for p in [x.strip() for x in params.split(",") if x.strip()]:
+                    mreg = re.match(r"%(\d+)\s*:\s*(\w+)$", p)
+                    if not mreg:
+                        raise ParseError(n, raw, f"bad parameter {p!r}")
+                    reg, ty = int(mreg.group(1)), T.parse(mreg.group(2))
+                    fn.params.append(reg)
+                    fn.registers[reg] = ty
+                continue
 
-        if line == "}":
-            fn, blk = None, None
-            continue
+            if line == "}":
+                fn, blk = None, None
+                continue
 
-        if fn is None:
-            raise ParseError(n, raw, "statement outside a function")
+            if fn is None:
+                raise ParseError(n, raw, "statement outside a function")
 
-        b = _RE_BLOCK.match(line)
-        if b:
-            blk = Block(b.group(1))
-            fn.blocks.append(blk)
-            continue
+            b = _RE_BLOCK.match(line)
+            if b:
+                blk = Block(b.group(1))
+                fn.blocks.append(blk)
+                continue
 
-        if blk is None:
-            raise ParseError(n, raw, "instruction before any block label")
-        blk.instructions.append(_parse_instr(n, raw, line, fn))
+            if blk is None:
+                raise ParseError(n, raw, "instruction before any block label")
+
+            blk.instructions.append(_parse_instr(n, raw, line, fn))
+        except ParseError:
+            raise
+        except (ValueError, IndexError, KeyError, AttributeError) as exc:
+            raise ParseError(n, raw,
+                             f"{type(exc).__name__}: {exc}") from None
 
     return m
 
