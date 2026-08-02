@@ -192,6 +192,76 @@ class TestEveryPathAgrees:
         assert build_and_run(text, backend, tmp_path) == want
 
 
+def narrow(name: str, body: str) -> str:
+    return f"module {name}\n\nexport func main() -> i64 {{\nentry:\n{body}\n}}\n"
+
+
+#: Arithmetic at widths the Python frontend never uses. It emits only i64,
+#: f64 and i1, so every narrow type was implemented and unexercised -- and
+#: x86-64 computed all of them at 64 bits and kept the answer. `i8.add 127, 1`
+#: gave 128 where the IR says an i8 wraps to -128.
+NARROW = {
+    "i8_add_wraps": (narrow("a", """    %0 = i8.const 127
+    %1 = i8.const 1
+    %2 = i8.add %0, %1
+    %3 = i64.extend %2
+    ret %3"""), -128),
+    "i8_trunc_sign_extends": (narrow("b", """    %0 = i64.const 200
+    %1 = i8.trunc %0
+    %2 = i64.extend %1
+    ret %2"""), -56),
+    "i16_add_wraps": (narrow("c", """    %0 = i16.const 32767
+    %1 = i16.const 1
+    %2 = i16.add %0, %1
+    %3 = i64.extend %2
+    ret %3"""), -32768),
+    "u8_add_wraps_unsigned": (narrow("d", """    %0 = u8.const 255
+    %1 = u8.const 1
+    %2 = u8.add %0, %1
+    %3 = i64.extend %2
+    ret %3"""), 0),
+    "i8_neg_of_min": (narrow("e", """    %0 = i8.const -128
+    %1 = i8.neg %0
+    %2 = i64.extend %1
+    ret %2"""), -128),
+    "i32_mul_wraps": (narrow("f", """    %0 = i32.const 100000
+    %1 = i32.const 100000
+    %2 = i32.mul %0, %1
+    %3 = i64.extend %2
+    ret %3"""), 1410065408),
+    "u16_shift": (narrow("g", """    %0 = u16.const 65535
+    %1 = u16.const 4
+    %2 = u16.shl %0, %1
+    %3 = i64.extend %2
+    ret %3"""), 65520),
+}
+
+
+class TestNarrowIntegerWidths:
+    """Every width the IR declares, computed at that width.
+
+    `TRUNC` is the sharpest of these. Masking with `andq $0xFF` gives 200 for
+    `i8.trunc 200`, and the answer is -56: a signed narrow type has to be
+    sign-extended back, not merely masked.
+    """
+
+    @pytest.mark.parametrize("name", sorted(NARROW))
+    def test_the_interpreter_is_the_reference(self, name):
+        text, expected = NARROW[name]
+        assert interpret(text) == expected
+
+    @pytest.mark.skipif(not HAS_CC, reason="no C compiler available")
+    @pytest.mark.parametrize("name", sorted(NARROW))
+    @pytest.mark.parametrize("backend", ["c", "x86-64"])
+    def test_the_backends_agree(self, name, backend, tmp_path):
+        text, expected = NARROW[name]
+        # An exit code carries 32 bits on Windows and 8 on POSIX, so the
+        # comparison is against the reference truncated the same way -- the
+        # claim is agreement, not that a byte can hold -32768.
+        mask = 0xFFFFFFFF if sys.platform == "win32" else 0xFF
+        assert build_and_run(text, backend, tmp_path) == expected & mask
+
+
 class TestStoreOperandOrder:
     """`store` takes (value, address). Backwards is silent."""
 

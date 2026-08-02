@@ -236,6 +236,37 @@ def _access_width(ty: T.Type) -> int:
     return 8 if ty is T.I1 else ty.bits
 
 
+def _normalise(e: "_Emitter", scratch: str, ty: T.Type) -> None:
+    """Force `scratch` to hold a valid value of `ty`.
+
+    Every arithmetic instruction here operates at 64 bits, because that is
+    what the registers are. For a narrow type the result must then be brought
+    back into range, and it was not: `i8.add 127, 1` produced 128, where the
+    IR says an i8 wraps to -128. The C backend casts to the type and got this
+    right from the start; this one computed in the wrong width and kept the
+    answer.
+
+    Signed types sign-extend and unsigned types zero-extend, so the 64-bit
+    slot always holds the value the interpreter's `_wrap` would produce --
+    which is what makes a comparison between the two meaningful.
+    """
+    bits = ty.bits
+    if ty.is_ptr or ty.is_float or bits >= 64:
+        return
+    if bits == 1:
+        e.emit(f"andq $1, %{scratch}")
+        return
+    sub = _SUBREG[scratch][bits]
+    if bits == 32 and not ty.is_signed:
+        # Writing a 32-bit register zeroes the upper half; no widening needed.
+        e.emit(f"movl %{sub}, %{sub}")
+        return
+    widen = {(8, True): "movsbq", (8, False): "movzbq",
+             (16, True): "movswq", (16, False): "movzwq",
+             (32, True): "movslq"}[(bits, ty.is_signed)]
+    e.emit(f"{widen} %{sub}, %{scratch}")
+
+
 def block_label(fn_name: str, label: str) -> str:
     """The assembler label for one IR block.
 
@@ -890,6 +921,7 @@ class X86_64Backend(Backend):
                     e.emit(f"movq {a}, %r10")
                 b = e.into_scratch(ins.args[1], "r11")
                 e.emit(f"{_SIMPLE_BINOP[op]} {b}, %r10")
+                _normalise(e, "r10", ty)
                 e.store_from("r10", ins.dst)
 
             case Op.DIV | Op.REM:
@@ -919,6 +951,7 @@ class X86_64Backend(Backend):
                 e.emit(f"movq %{'rax' if op is Op.DIV else 'rdx'}, %r10")
                 e.emit("popq %rdx")
                 e.emit("popq %rax")
+                _normalise(e, "r10", ty)
                 e.store_from("r10", ins.dst)
 
             case Op.NEG:
@@ -926,6 +959,7 @@ class X86_64Backend(Backend):
                 if a != "%r10":
                     e.emit(f"movq {a}, %r10")
                 e.emit("negq %r10")
+                _normalise(e, "r10", ty)
                 e.store_from("r10", ins.dst)
 
             case Op.NOT:
@@ -933,6 +967,7 @@ class X86_64Backend(Backend):
                 if a != "%r10":
                     e.emit(f"movq {a}, %r10")
                 e.emit("notq %r10")
+                _normalise(e, "r10", ty)
                 e.store_from("r10", ins.dst)
 
             case Op.SHL | Op.SHR:
@@ -946,6 +981,7 @@ class X86_64Backend(Backend):
                     "sarq" if ins.ty.is_signed else "shrq")
                 e.emit(f"{mnemonic} %cl, %r10")
                 e.emit("popq %rcx")
+                _normalise(e, "r10", ty)
                 e.store_from("r10", ins.dst)
 
             case Op.EQ | Op.NE | Op.LT | Op.LE | Op.GT | Op.GE:
@@ -965,9 +1001,9 @@ class X86_64Backend(Backend):
                 a = e.into_scratch(ins.args[0], "r10")
                 if a != "%r10":
                     e.emit(f"movq {a}, %r10")
-                width = ins.ty.bits
-                if op is Op.TRUNC and width < 64:
-                    e.emit(f"andq ${(1 << width) - 1}, %r10")
+                # Masking alone is wrong for a signed narrow type:
+                # truncating 200 to i8 is -56, and `andq $0xFF` leaves 200.
+                _normalise(e, "r10", ty)
                 e.store_from("r10", ins.dst)
 
             case Op.ALLOCA:
