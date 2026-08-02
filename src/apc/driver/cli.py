@@ -1,11 +1,13 @@
 """`apc` -- the command line.
 
-    apc build prog.py -o prog.c        source -> IR -> backend artifacts
+    apc build prog.py                  source -> IR -> a program you can run
+    apc build prog.py --emit            stop at the artifacts; do not link
     apc build prog.py --emit-ir        stop after the IR and print it
     apc build prog.py -O --time-passes optimise, and show what each pass cost
+    apc build prog.py --target x86_64-linux --backend x86-64
     apc run prog.py                    execute in the reference interpreter
     apc check prog.py                  analyse and verify, produce nothing
-    apc ops / types / backends / frontends / passes
+    apc ops / types / targets / backends / frontends / toolchains / passes
 
 Every stage can be stopped at and dumped, and `--emit-ir` writes text that
 `apc run` accepts. That round trip is what makes a backend debuggable: you can
@@ -20,6 +22,8 @@ from pathlib import Path
 
 from .. import backend as backend_registry
 from .. import frontend as frontend_registry
+from .. import link as link_registry
+from .. import target as target_registry
 from ..diagnostics import DiagnosticSink, Renderer, SourceFile
 from ..ir import opcodes, types as T
 from ..ir.interpreter import Interpreter, Trap
@@ -42,6 +46,14 @@ def _options(args) -> Options:
         output=Path(args.output) if getattr(args, "output", None) else None,
         frontend=getattr(args, "frontend", None),
         backend=getattr(args, "backend", "c"),
+        target=(target_registry.get(args.target)
+                if getattr(args, "target", None) else None),
+        link=not getattr(args, "emit", False),
+        toolchain=getattr(args, "toolchain", "cc"),
+        link_inputs=tuple(getattr(args, "link_input", None) or ()),
+        workdir=Path(args.workdir) if getattr(args, "workdir", None) else None,
+        keep_intermediates=getattr(args, "keep_intermediates", False),
+        verbose=getattr(args, "verbose", False),
         passes=tuple(p for p in (getattr(args, "passes", "") or "").split(",") if p),
         optimise=getattr(args, "optimise", False),
         emit_ir=getattr(args, "emit_ir", False),
@@ -72,6 +84,14 @@ def cmd_build(args) -> int:
             sys.stdout.write(result.ir_text)
         return 0
 
+    if opts.verbose:
+        for cmd in result.commands:
+            print("$ " + " ".join(cmd), file=sys.stderr)
+
+    if result.program is not None:
+        print(f"wrote {result.program}")
+        return 0
+
     out = opts.output
     for name, data in sorted(result.artifacts.items()):
         # One artifact goes exactly where -o said. Several are written beside
@@ -79,6 +99,7 @@ def cmd_build(args) -> int:
         # path would silently overwrite the first.
         dest = out if (out and len(result.artifacts) == 1) else \
             ((out.parent / name) if out else Path(name))
+        dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
         print(f"wrote {dest} ({len(data)} bytes)")
     return 0
@@ -97,6 +118,8 @@ def cmd_run(args) -> int:
     else:
         sink = _sink(args)
         opts = _options(args)
+        opts.emit_ir = True             # the interpreter runs IR, not artifacts
+        opts.link = False
         result = compile_source(opts, sink)
         sink.emit()
         if not result.ok:
@@ -117,6 +140,7 @@ def cmd_check(args) -> int:
     sink = _sink(args)
     opts = _options(args)
     opts.emit_ir = True                     # stop before any backend
+    opts.link = False
     result = compile_source(opts, sink)
     sink.emit()
     if not result.ok:
@@ -159,6 +183,25 @@ def cmd_backends(args) -> int:
     for name, be in sorted(backend_registry.available().items()):
         flag = "" if be.ready else "   (unfinished)"
         print(f"  {name:<10} {be.description}{flag}")
+    return 0
+
+
+def cmd_targets(args) -> int:
+    targets = target_registry.available()
+    aliases: dict[str, list[str]] = {}
+    for alias, canonical in target_registry.aliases().items():
+        aliases.setdefault(canonical, []).append(alias)
+    width = max((len(n) for n in targets), default=4)
+    for name, t in sorted(targets.items()):
+        alias = f"   aka {', '.join(sorted(aliases.get(name, [])))}"             if aliases.get(name) else ""
+        print(f"  {name:<{width}}  {t.arch}/{t.os}  abi={t.abi} "
+              f"format={t.object_format}{alias}")
+    return 0
+
+
+def cmd_toolchains(args) -> int:
+    for name, tc in sorted(link_registry.available().items()):
+        print(f"  {name:<10} {tc.description}")
     return 0
 
 
@@ -220,6 +263,19 @@ def build_parser() -> argparse.ArgumentParser:
     pass_args(b)
     b.add_argument("-o", "--output")
     b.add_argument("--backend", default="c")
+    b.add_argument("--target",
+                   help="platform to emit for; see `apc targets`")
+    b.add_argument("--emit", action="store_true",
+                   help="write backend artifacts and stop; do not link")
+    b.add_argument("--toolchain", default="cc",
+                   help="how to turn artifacts into a program "
+                        "(see `apc toolchains`)")
+    b.add_argument("--link-input", action="append", metavar="INPUT",
+                   help="extra object, archive or -l name for the link step")
+    b.add_argument("--workdir", help="where intermediates go (default .apc)")
+    b.add_argument("--keep-intermediates", action="store_true")
+    b.add_argument("-v", "--verbose", action="store_true",
+                   help="print the external commands that were run")
     b.add_argument("--emit-ir", action="store_true")
     b.add_argument("--show-spans", action="store_true",
                    help="annotate each instruction with its source position")
@@ -241,7 +297,9 @@ def build_parser() -> argparse.ArgumentParser:
     for name, fn, doc in (
         ("ops", cmd_ops, "print the instruction set"),
         ("types", cmd_types, "print the type system"),
+        ("targets", cmd_targets, "list target platforms"),
         ("backends", cmd_backends, "list backends"),
+        ("toolchains", cmd_toolchains, "list ways of producing a program"),
         ("frontends", cmd_frontends, "list frontends"),
         ("passes", cmd_passes, "list optimisation passes"),
     ):

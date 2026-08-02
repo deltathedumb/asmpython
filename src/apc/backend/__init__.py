@@ -7,8 +7,7 @@ their own, which is how the tree this replaces ended up with two copies of one
 analysis that silently diverged.
 """
 from .base import (
-    HOST_X86_64_LINUX, HOST_X86_64_WINDOWS, PORTABLE_C, Backend, Target,
-    available, get, load_builtin, register,
+    ENTRY_SYMBOL, Backend, Target, available, get, load_builtin, register,
 )
 from .liveness import LiveInterval, Liveness, compute_intervals
 from .regalloc import (
@@ -16,8 +15,8 @@ from .regalloc import (
 )
 
 __all__ = [
-    "Allocation", "Backend", "HOST_X86_64_LINUX", "HOST_X86_64_WINDOWS",
-    "InRegister", "InSlot", "LiveInterval", "Liveness", "PORTABLE_C",
-    "RegisterFile", "Target", "allocate", "available", "compute_intervals",
-    "get", "load_builtin", "register", "verify_allocation",
+    "Allocation", "Backend", "ENTRY_SYMBOL", "InRegister", "InSlot", "LiveInterval",
+    "Liveness", "RegisterFile", "Target", "allocate", "available",
+    "compute_intervals", "get", "load_builtin", "register",
+    "verify_allocation",
 ]

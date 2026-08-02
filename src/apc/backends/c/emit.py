@@ -81,6 +81,9 @@ _PROVIDED = {"print_int", "print_float", "print_str", "putchar"}
 class CBackend(Backend):
     name = "c"
     description = "portable C99 source; one local per register, no allocation"
+    default_target = "c"
+    #: The emitted C defines its own `main` and its own host functions.
+    self_contained = True
 
     def emit(self, module: Module, target) -> dict[str, bytes]:
         out: list[str] = [_PRELUDE]

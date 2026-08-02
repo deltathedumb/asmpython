@@ -297,8 +297,9 @@ class TestAgreement:
         early. The interpreter was right, the backend was wrong, and only
         running both revealed which.
         """
-        from apc.backend import Target, get, load_builtin
+        from apc.backend import get, load_builtin
         from apc.backends.x86_64.emit import UnsupportedOperation
+        from apc.target import get as get_target
         load_builtin()
         src = self.program(name)
         want_out, want_value = cpython_output(src)
@@ -306,7 +307,7 @@ class TestAgreement:
 
         # The IR entry is `main`; C's main wraps it.
         module.function("main").name = "main_ir"
-        target = Target(_HOST_TARGET_NAME, object_format=_HOST_OBJECT_FORMAT)
+        target = get_target(_HOST_TARGET_NAME)
         try:
             asm = get("x86-64").emit(module, target)["out.s"]
         except UnsupportedOperation as exc:
@@ -326,14 +327,15 @@ class TestAgreement:
 
     @pytest.mark.skipif(not HAS_CC, reason="no C compiler available")
     def test_c_backend_matches_cpython(self, name, tmp_path):
-        from apc.backend import PORTABLE_C, get, load_builtin
+        from apc.backend import get, load_builtin
+        from apc.target import get as get_target
         load_builtin()
         src = self.program(name)
         want_out, want_value = cpython_output(src)
         module = compile_module(src, tmp_path, True)
 
         c_file = tmp_path / "out.c"
-        c_file.write_bytes(get("c").emit(module, PORTABLE_C)["out.c"])
+        c_file.write_bytes(get("c").emit(module, get_target("c"))["out.c"])
         exe = tmp_path / "out.exe"
         built = subprocess.run([HAS_CC, str(c_file), "-o", str(exe)],
                                capture_output=True, text=True)

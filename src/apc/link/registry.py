@@ -1,0 +1,40 @@
+"""The toolchain registry."""
+from __future__ import annotations
+
+from .base import Toolchain
+
+_REGISTRY: dict[str, Toolchain] = {}
+
+
+def register(tc: Toolchain) -> Toolchain:
+    if not tc.name:
+        raise ValueError(f"{type(tc).__name__} has no name")
+    _REGISTRY[tc.name] = tc
+    return tc
+
+
+def get(name: str) -> Toolchain:
+    load_builtin()
+    try:
+        return _REGISTRY[name]
+    except KeyError:
+        known = ", ".join(sorted(_REGISTRY)) or "(none)"
+        raise LookupError(
+            f"unknown toolchain {name!r}\navailable: {known}") from None
+
+
+def available() -> dict[str, Toolchain]:
+    load_builtin()
+    return dict(_REGISTRY)
+
+
+_loaded = False
+
+
+def load_builtin() -> None:
+    global _loaded
+    if _loaded:
+        return
+    _loaded = True
+    from .toolchains import load_builtin as _load
+    _load()

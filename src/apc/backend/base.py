@@ -16,37 +16,22 @@ is a library a backend may call; it is not a stage anyone must implement, and
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
 
 from ..ir import Module
+# Re-exported so a backend author needs one import. The TYPE belongs to the
+# backend interface -- every `emit` receives one -- but the INSTANCES do not
+# live here: they are registered in `apc.targets`, so adding a platform never
+# means editing the compiler. See docs/TARGETS.md.
+from ..target import Target
 
-
-@dataclass(frozen=True, slots=True)
-class Target:
-    """What a backend needs to know about the machine it is emitting for.
-
-    Passed in rather than baked into a backend so that one code generator can
-    serve several configurations -- 32- and 64-bit, little- and big-endian --
-    without a fork. A backend that genuinely supports only one shape simply
-    ignores the fields it does not vary over.
-    """
-
-    name: str
-    pointer_size: int = 8
-    little_endian: bool = True
-    #: Stack alignment required at a call boundary, in bytes.
-    stack_alignment: int = 16
-    #: Object format the linker stage should produce.
-    object_format: str = "elf"
-
-    @property
-    def pointer_bits(self) -> int:
-        return self.pointer_size * 8
-
-
-HOST_X86_64_LINUX = Target("x86_64-linux", object_format="elf")
-HOST_X86_64_WINDOWS = Target("x86_64-windows", object_format="coff")
-PORTABLE_C = Target("c", object_format="source")
+#: The symbol a backend emits the IR's `main` under.
+#:
+#: The IR's `main` is not C's `main` -- it returns i64 where C requires int --
+#: so a backend that emitted it verbatim would collide with the entry point in
+#: whatever runtime gets linked alongside. Named here because the backend
+#: writing the symbol and the runtime calling it must agree, and two constants
+#: that must agree are one constant.
+ENTRY_SYMBOL = "apc_main"
 
 
 class Backend(abc.ABC):
@@ -56,8 +41,18 @@ class Backend(abc.ABC):
     description: str = ""
     #: False for a work in progress; the driver warns.
     ready: bool = True
-    #: Default target if the user names none.
-    default_target: Target = PORTABLE_C
+    #: Name of the target used when the user names none. A NAME, not a
+    #: Target: holding an instance here would import the built-in targets
+    #: to define the backend interface, putting platforms back inside the
+    #: compiler.
+    default_target: str = "c"
+    #: True if the artifacts already form a complete program -- an entry point
+    #: and every host function the frontend calls. The C backend is: it emits
+    #: its own `main` wrapper and its own `print_int`. A machine backend is
+    #: not, and the link stage supplies the runtime for it. Getting this wrong
+    #: produces either a duplicate-symbol error or an undefined one, both at
+    #: link time and both clear.
+    self_contained: bool = False
 
     @abc.abstractmethod
     def emit(self, module: Module, target: Target) -> dict[str, bytes]:
@@ -96,3 +91,14 @@ def available() -> dict[str, Backend]:
 
 def load_builtin() -> None:
     from ..backends import c, x86_64  # noqa: F401
+
+
+class BackendUnsupported(Exception):
+    """A backend cannot compile this program for this target.
+
+    Distinct from a crash and from a user error: the program is valid and the
+    compiler is working, but this particular code generator does not implement
+    the construct yet. The driver turns it into a diagnostic naming the
+    backend and the target, so the answer ("use --backend c") is visible
+    rather than something to work out from a traceback.
+    """

@@ -73,6 +73,18 @@ class Lowerer:
 
         for info in self.infos.values():
             self.module.functions.append(self._function(info))
+
+        # Drop runtime declarations nothing called. A module that declares an
+        # import it never uses is not merely untidy: the link stage decides
+        # whether to pull the runtime in by looking at what is declared, so a
+        # program that only does arithmetic would still acquire a dependency
+        # on stdio -- and "no runtime dependencies" would quietly stop being
+        # true for every program.
+        called = {ins.sym for fn in self.module.functions for b in fn.blocks
+                  for ins in b.instructions if ins.op is Op.CALL}
+        self.module.functions = [
+            f for f in self.module.functions
+            if not (f.external and f.name in _RUNTIME and f.name not in called)]
         return self.module
 
     # ── one function ────────────────────────────────────────────────────────

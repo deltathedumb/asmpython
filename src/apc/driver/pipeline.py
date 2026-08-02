@@ -28,9 +28,11 @@ from pathlib import Path
 
 from .. import backend as backend_registry
 from .. import frontend as frontend_registry
-from ..backend import Target
+from .. import target as target_registry
+from ..target import Target
 from ..diagnostics import DiagnosticSink, Severity, SourceFile, error
 from ..ir import Module, print_module, verify
+from ..backend.base import BackendUnsupported
 from ..ir.verifier import VerifyError
 from ..passes import PassManager
 
@@ -49,6 +51,14 @@ class Options:
     target: Target | None = None
     passes: tuple[str, ...] = ()
     optimise: bool = False
+    #: Produce a program, not just artifacts. False is `--emit`.
+    link: bool = False
+    toolchain: str = "cc"
+    #: Extra objects/archives/-l names handed to the toolchain.
+    link_inputs: tuple[str, ...] = ()
+    workdir: Path | None = None
+    keep_intermediates: bool = False
+    verbose: bool = False
     emit_ir: bool = False
     show_spans: bool = False
     verify_each: bool = False
@@ -71,6 +81,14 @@ class Result:
     artifacts: dict[str, bytes] = field(default_factory=dict)
     ir_text: str | None = None
     pass_report: str = ""
+    #: The executable, if the link stage ran and succeeded.
+    program: Path | None = None
+    #: External commands the link stage ran, in order.
+    commands: list[list[str]] = field(default_factory=list)
+    #: The target actually used. Recorded because the link stage needs the
+    #: object format and suffixes, and re-deriving them from the options
+    #: would mean two places deciding what "the target" was.
+    target: Target | None = None
 
     @property
     def ok(self) -> bool:
@@ -127,9 +145,62 @@ def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
             error("W9102", f"backend {be.name!r} is not finished")
             .note("its output may be incorrect or incomplete"))
         sink.diagnostics[-1].severity = Severity.WARNING
-    target = opts.target or be.default_target
-    result.artifacts = be.emit(module, target)
+    target = opts.target if opts.target is not None \
+        else target_registry.get(be.default_target)
+    result.target = target
+    try:
+        result.artifacts = be.emit(module, target)
+    except BackendUnsupported as exc:
+        sink.report(
+            error("E9103", f"the {be.name} backend cannot compile this program "
+                           f"for {target.name}")
+            .note(str(exc)))
+        return Result()
+
+    if opts.link:
+        _link_stage(opts, result, be, target, module, sink)
     return result
+
+
+def _link_stage(opts: Options, result: Result, be, target: Target,
+                module: Module, sink: DiagnosticSink) -> None:
+    """Artifacts to a program.
+
+    Separate from emission because they fail for unrelated reasons and the
+    user needs to know which happened: a backend that cannot compile a
+    construct is a compiler limitation, while a missing assembler is a machine
+    that needs a package installed. Collapsing both into "build failed" sends
+    people to the wrong place.
+    """
+    from .. import link as link_registry
+
+    toolchain = link_registry.get(opts.toolchain)
+    workdir = opts.workdir or (opts.output or opts.source).parent / ".apc"
+    output = opts.output or opts.source.with_suffix(target.executable_suffix)
+    if output.suffix != target.executable_suffix and target.executable_suffix:
+        output = output.with_suffix(target.executable_suffix)
+
+    runtime_sources: tuple[Path, ...] = ()
+    if not be.self_contained and link_registry.needs_runtime(module):
+        runtime_sources = (link_registry.write_runtime(workdir),)
+
+    request = link_registry.LinkRequest(
+        artifacts=result.artifacts, target=target, output=output,
+        workdir=workdir, extra_inputs=opts.link_inputs,
+        runtime_sources=runtime_sources,
+        keep_intermediates=opts.keep_intermediates, verbose=opts.verbose)
+    try:
+        result.program = toolchain.link(request)
+    except link_registry.LinkError as exc:
+        d = error("E9104", exc.message)
+        if exc.detail:
+            d.note(exc.detail)
+        if exc.help:
+            d.help(exc.help)
+        sink.report(d)
+        result.module = None          # nothing usable was produced
+    finally:
+        result.commands = [list(c) for c in request.commands]
 
 
 def _verify_stage(module: Module, sink: DiagnosticSink, who: str) -> bool:

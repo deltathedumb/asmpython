@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ...backend.base import Backend, Target, register
+from ...backend.base import ENTRY_SYMBOL, Backend, Target, register
 from ...backend.regalloc import (
     Allocation, InRegister, InSlot, RegisterFile, allocate, verify_allocation,
 )
@@ -92,8 +92,25 @@ MICROSOFT_X64 = ABI(
 )
 
 
+_ABIS = {"sysv": SYSTEM_V, "win64": MICROSOFT_X64}
+
+
 def abi_for(target: Target) -> ABI:
-    return MICROSOFT_X64 if "windows" in target.name else SYSTEM_V
+    """The calling convention `target` declares.
+
+    Reads the field rather than looking for "windows" in the name. Name
+    sniffing worked for the two targets that shipped and silently gave System
+    V to everything else -- a target called `win64-custom` would have compiled,
+    linked, and passed its arguments in the wrong registers, which is a bug
+    that appears as corrupted data in a callee and nowhere near this line.
+    """
+    try:
+        return _ABIS[target.abi]
+    except KeyError:
+        raise UnsupportedOperation(
+            f"target {target.name!r} declares ABI {target.abi!r}, which this "
+            f"backend does not implement (knows: "
+            f"{', '.join(sorted(_ABIS))})") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +157,16 @@ class CoffDialect(AsmDialect):
     def function_header(self, name: str, exported: bool) -> list[str]:
         out = [f"	.globl {name}"] if exported else []
         return out + [f"	.def {name}; .scl 2; .type 32; .endef", f"{name}:"]
+
+
+def block_label(fn_name: str, label: str) -> str:
+    """The assembler label for one IR block.
+
+    One function, used by the definition and by every branch. They were
+    computed separately once and drifted the moment the function symbol was
+    renamed, which the assembler accepted and the linker rejected.
+    """
+    return f".L_{fn_name}_{label}"
 
 
 def dialect_for(target: Target) -> AsmDialect:
@@ -217,8 +244,24 @@ class _Emitter:
 class X86_64Backend(Backend):
     name = "x86-64"
     description = "System V AMD64 assembly (integers only)"
-    default_target = Target("x86_64-linux", object_format="elf")
+    default_target = "x86_64-linux"
     description_note = "ABI chosen by target: sysv or win64"
+
+    def symbol(self, name: str, dialect: AsmDialect) -> str:
+        """The assembler symbol for an IR function name.
+
+        One place, used by definitions AND call sites. They used to be
+        computed separately -- definitions applied `dialect.symbol_prefix` and
+        calls did not -- so on any dialect with a prefix a program defined
+        `_f` and called `f`. Both are here now, so they cannot drift.
+
+        The IR's `main` is renamed. It is not C's `main`: it returns i64 where
+        C requires int, and the runtime that provides the real entry point
+        would collide with it at link time.
+        """
+        if name == "main":
+            name = ENTRY_SYMBOL
+        return dialect.symbol_prefix + name
 
     def emit(self, module: Module, target: Target) -> dict[str, bytes]:
         abi = abi_for(target)
@@ -275,7 +318,7 @@ class X86_64Backend(Backend):
         frame = (frame + 15) & ~15
         e.frame = frame
 
-        name = dialect.symbol_prefix + fn.name
+        name = self.symbol(fn.name, dialect)
         e.lines.extend(
             dialect.function_header(name, fn.linkage is Linkage.EXPORT))
         e.emit("pushq %rbp")
@@ -295,9 +338,14 @@ class X86_64Backend(Backend):
             e.store_from(abi.argument_registers[i], param)
 
         for block in fn.blocks:
-            e.label(f".L_{name}_{block.label}")
+            # `fn.name`, not the exported symbol: branches inside the function
+            # build their targets from `fn.name` too. Using the symbol here
+            # made every jump in `main` reference a label that was defined
+            # under the renamed one -- an undefined-symbol error at link time
+            # for a function whose assembly reads correctly.
+            e.label(block_label(fn.name, block.label))
             for ins in block.instructions:
-                self._instruction(e, ins, saved, abi)
+                self._instruction(e, ins, saved, abi, dialect)
 
         e.lines.extend(dialect.function_footer(name))
         return e.lines
@@ -313,7 +361,7 @@ class X86_64Backend(Backend):
 
     # ── one instruction ─────────────────────────────────────────────────────
     def _instruction(self, e: _Emitter, ins: Instruction, saved: list[str],
-                     abi: ABI) -> None:
+                     abi: ABI, dialect: AsmDialect) -> None:
         op = ins.op
         fn_name = e.fn.name
 
@@ -453,27 +501,27 @@ class X86_64Backend(Backend):
                     e.emit(f"movq {src}, %{abi.argument_registers[i]}")
                 if abi.shadow_space:
                     e.emit(f"subq ${abi.shadow_space}, %rsp")
-                e.emit(f"call {ins.sym}")
+                e.emit(f"call {self.symbol(ins.sym, dialect)}")
                 if abi.shadow_space:
                     e.emit(f"addq ${abi.shadow_space}, %rsp")
                 if ins.dst is not None:
                     e.store_from("rax", ins.dst)
 
             case Op.JUMP:
-                e.emit(f"jmp .L_{fn_name}_{ins.labels[0]}")
+                e.emit(f"jmp {block_label(fn_name, ins.labels[0])}")
 
             case Op.BRANCH:
                 cond = e.into_scratch(ins.args[0], "r10")
                 e.emit(f"testq {cond}, {cond}")
-                e.emit(f"jne .L_{fn_name}_{ins.labels[0]}")
-                e.emit(f"jmp .L_{fn_name}_{ins.labels[1]}")
+                e.emit(f"jne {block_label(fn_name, ins.labels[0])}")
+                e.emit(f"jmp {block_label(fn_name, ins.labels[1])}")
 
             case Op.SWITCH:
                 value = e.into_scratch(ins.args[0], "r10")
                 for case_value, target in ins.cases:
                     e.emit(f"cmpq ${case_value}, {value}")
-                    e.emit(f"je .L_{fn_name}_{target}")
-                e.emit(f"jmp .L_{fn_name}_{ins.labels[0]}")
+                    e.emit(f"je {block_label(fn_name, target)}")
+                e.emit(f"jmp {block_label(fn_name, ins.labels[0])}")
 
             case Op.RET:
                 if ins.args:
