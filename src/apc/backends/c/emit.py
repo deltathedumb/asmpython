@@ -65,9 +65,17 @@ _PRELUDE = """\
 /* The host functions the IR may call. A frontend emits calls to these by
    name; a real target would resolve them from a runtime library. */
 static void print_int(int64_t v) { printf("%lld\\n", (long long)v); }
+static void print_float(double v) { printf("%f\\n", v); }
 static void print_str(uintptr_t p) { fputs((const char *)p, stdout); }
 static int  putchar_(int64_t c) { return putchar((int)c); }
 """
+
+#: Host functions defined by the prelude above. Any OTHER external the module
+#: declares gets an `extern` declaration generated from its IR signature --
+#: without one, C assumes `int f()`, and a call to a function returning double
+#: reads the wrong register and produces a plausible wrong number instead of
+#: any kind of error.
+_PROVIDED = {"print_int", "print_float", "print_str", "putchar"}
 
 
 class CBackend(Backend):
@@ -84,7 +92,10 @@ class CBackend(Backend):
 
         # Forward declarations, so call order in the module never matters.
         for f in module.functions:
-            if not f.external:
+            if f.external:
+                if f.name not in _PROVIDED:
+                    out.append("extern " + _signature(f) + ";")
+            else:
                 out.append(_signature(f) + ";")
         out.append("")
 

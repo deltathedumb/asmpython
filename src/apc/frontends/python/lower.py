@@ -35,7 +35,7 @@ from ...ir import Builder, Function, Module, types as T
 from ...ir.module import Instruction, Linkage
 from ...ir.opcodes import Op
 from .analysis import (
-    BOOL, FLOAT, INT, NONE, FunctionInfo, SemType, TO_IR, span_of,
+    BOOL, FLOAT, INT, NONE, FunctionInfo, SemType, TO_IR, int_literal, span_of,
 )
 
 _CMP_OPS = {
@@ -46,6 +46,11 @@ _CMP_OPS = {
 #: Runtime functions the frontend may call. A frontend decides its own runtime;
 #: the IR has no I/O opcodes, so printing is a call like any other.
 _RUNTIME = {"print_int": ([T.I64], T.VOID), "print_float": ([T.F64], T.VOID)}
+
+#: `int(x)`/`float(x)`/`bool(x)`. Lowered as coercions, not calls -- there is
+#: nothing to call, and emitting a call would make every backend depend on a
+#: runtime for what is one instruction or none.
+_CONVERSIONS = {"int": INT, "float": FLOAT, "bool": BOOL}
 
 
 class Lowerer:
@@ -77,6 +82,10 @@ class Lowerer:
                       else Linkage.INTERNAL)
         self.info, self.fn = info, fn
         self.b = Builder(fn)
+        #: (continue-target, break-target) per enclosing loop. `continue` in a
+        #: `for` must reach the increment, not the test, so the two targets
+        #: differ and both are recorded rather than recomputed.
+        self.loops: list[tuple[int, int]] = []
 
         for sym in info.params:
             reg = fn.new_register(TO_IR[sym.type])
@@ -136,8 +145,19 @@ class Lowerer:
                 self._while(node)
             case ast.For(target=ast.Name(id=name)):
                 self._for(node, name)
+            case ast.Break():
+                self.b.jump(self.loops[-1][1])
+            case ast.Continue():
+                self.b.jump(self.loops[-1][0])
             case ast.Pass():
                 pass
+            case _:
+                # Analysis accepted it and lowering does not know it. Silently
+                # dropping the statement is the one outcome to rule out: the
+                # program compiles, runs, and quietly does less than it says.
+                raise AssertionError(
+                    f"lowering reached statement {type(node).__name__}; "
+                    f"analysis accepted something lowering does not handle")
 
     def _store(self, name: str, value_node) -> None:
         sym = self.info.locals[name]
@@ -174,8 +194,10 @@ class Lowerer:
         self.b.switch_to(head)
         self.b.branch(self._truth(node.test), body, done)
         self.b.switch_to(body)
+        self.loops.append((head, done))
         for s in node.body:
             self._stmt(s)
+        self.loops.pop()
         if self.b.current.terminator is None:
             self.b.jump(head)
         self.b.switch_to(done)
@@ -192,21 +214,35 @@ class Lowerer:
 
         var = self.info.locals[name].register
         self.b.copy(var, start)
-        head, body, done = (self.b.new_block("for"), self.b.new_block("forbody"),
-                            self.b.new_block("endfor"))
+        # Created in the order they are emitted, and the increment gets its own
+        # block: `continue` has to reach the step, not the test, or the loop
+        # never advances and hangs.
+        head, body, step_b, done = (self.b.new_block("for"),
+                                    self.b.new_block("forbody"),
+                                    self.b.new_block("forstep"),
+                                    self.b.new_block("endfor"))
         self.b.jump(head)
         self.b.switch_to(head)
         # `range` counts up or down depending on the sign of the step, and the
         # test differs. With a constant step the comparison is chosen here; a
         # runtime step would need both tests and a branch, which this subset
         # does not accept.
-        self.b.branch(self.b.cmp(Op.LT, T.I64, var, stop), body, done)
+        # Analysis guarantees a literal step, so the sign -- and therefore the
+        # loop test -- is known here.
+        descending = (len(args) == 3
+                      and (int_literal(node.iter.args[2]) or 0) < 0)
+        self.b.branch(self.b.cmp(Op.GT if descending else Op.LT, T.I64,
+                                 var, stop), body, done)
         self.b.switch_to(body)
+        self.loops.append((step_b, done))
         for s in node.body:
             self._stmt(s)
+        self.loops.pop()
         if self.b.current.terminator is None:
-            self.b.copy(var, self.b.add(T.I64, var, step))
-            self.b.jump(head)
+            self.b.jump(step_b)
+        self.b.switch_to(step_b)
+        self.b.copy(var, self.b.add(T.I64, var, step))
+        self.b.jump(head)
         self.b.switch_to(done)
 
     # ── expressions ─────────────────────────────────────────────────────────
@@ -267,6 +303,8 @@ class Lowerer:
             return self._floor_div(a, b, ty)
         if isinstance(node.op, ast.Mod):
             return self._floor_mod(a, b, ty)
+        if isinstance(node.op, ast.Pow):
+            return self._pow(a, node.right.value, ty)
         op = {
             ast.Add: Op.ADD, ast.Sub: Op.SUB, ast.Mult: Op.MUL,
             ast.Div: Op.DIV, ast.BitAnd: Op.AND, ast.BitOr: Op.OR,
@@ -275,6 +313,40 @@ class Lowerer:
         out = self.b.reg(ty)
         self.b.emit(Instruction(op, ty, dst=out, args=[a, b]))
         return out
+
+    def _pow(self, base: int, exponent: int, ty: T.Type) -> int:
+        """`x ** n` for a non-negative literal n, by squaring.
+
+        Analysis guarantees the exponent is a non-negative int literal, so
+        this is a compile-time expansion: no loop, no runtime call, and no
+        branch. `x ** 8` is three multiplications, not eight.
+
+        The exponent being known is also what makes `x ** 0` correct without a
+        special case at runtime -- it is simply the constant 1.
+        """
+        if exponent == 0:
+            return self.b.const(ty, 1.0 if ty.is_float else 1)
+        if exponent == 1:
+            return base
+        result: int | None = None
+        square = base
+        while exponent:
+            if exponent & 1:
+                if result is None:
+                    result = square
+                else:
+                    out = self.b.reg(ty)
+                    self.b.emit(Instruction(Op.MUL, ty, dst=out,
+                                            args=[result, square]))
+                    result = out
+            exponent >>= 1
+            if exponent:
+                out = self.b.reg(ty)
+                self.b.emit(Instruction(Op.MUL, ty, dst=out,
+                                        args=[square, square]))
+                square = out
+        assert result is not None
+        return result
 
     def _floor_div(self, a: int, b: int, ty: T.Type) -> int:
         """Python's `//`. See the module docstring.
@@ -427,6 +499,11 @@ class Lowerer:
                                 [self._coerce(value, ty, INT)])
             return self.b.const(T.I64, 0)
 
+        if name in _CONVERSIONS and name not in self.infos:
+            arg = node.args[0]
+            return self._coerce(self._expr(arg), self._type_of(arg),
+                                _CONVERSIONS[name])
+
         info = self.infos[name]
         params, ret = info.signature
         args = [self._coerce(self._expr(a), self._type_of(a), want)
@@ -447,6 +524,12 @@ class Lowerer:
     def _coerce(self, value: int, have: SemType, want: SemType) -> int:
         if have == want:
             return value
+        # `bool(x)` is `x != 0`, NOT a narrowing conversion. Truncating 2 to
+        # one bit gives 0, so a numeric cast here would make `bool(2)` False
+        # and `bool(2.5)` whatever the low bit of the truncation happened to
+        # be -- wrong, and wrong in a way that only shows on even numbers.
+        if want is BOOL:
+            return self._truth_of(value, have)
         src, dst = TO_IR[have], TO_IR[want]
         if src == dst:
             return value
@@ -468,11 +551,14 @@ class Lowerer:
         return self.info.expr_types.get(id(node), INT)
 
     def _span(self, node) -> Span:
-        return self.b.span if not hasattr(node, "lineno") else self._span_of(node)
+        """Where this node came from.
 
-    def _span_of(self, node) -> Span:
-        from .analysis import Analyzer
-        # Reuse the same computation analysis used, so a diagnostic and an
-        # instruction point at exactly the same bytes.
-        return _span_from(self.module.metadata.get("__source__"), node) \
-            if False else self.b.span
+        Uses the same `span_of` analysis uses, so a diagnostic and the
+        instruction it describes point at exactly the same bytes. An earlier
+        version of this returned the builder's sticky span for everything,
+        which meant every instruction in a function claimed to come from
+        whatever statement was lowered last -- invisible until a backend
+        reported an error and pointed at the wrong line.
+        """
+        return span_of(self.source, node) if hasattr(node, "lineno") \
+            else self.b.span

@@ -119,6 +119,16 @@ class Interpreter:
         if name == "print_int":
             self._emit(f"{int(args[0])}\n")
             return None
+        if name == "print_float":
+            # Six decimals: C's `%f`, which is what the runtime the compiled
+            # paths link against prints. NOT Python's repr -- `32.0` there,
+            # `32.000000` here. The divergence is deliberate and documented,
+            # and it belongs in exactly one place: if this formatted like
+            # Python, the interpreter and every compiled binary would disagree
+            # on the same program, which is the one thing the reference
+            # implementation must never do.
+            self._emit(f"{float(args[0]):f}\n")
+            return None
         if name == "print_str":
             addr = int(args[0])
             end = self.mem.buf.index(0, addr)

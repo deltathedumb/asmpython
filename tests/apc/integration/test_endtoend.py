@@ -142,12 +142,100 @@ PROGRAMS = {
             print(count)
             return count
     """,
+    "power": """
+        def main() -> int:
+            print(2 ** 10)
+            print(3 ** 0)
+            print(7 ** 1)
+            print((-3) ** 3)
+            print(2 ** 5 + 1)
+            return 0
+    """,
+    "break_continue": """
+        def main() -> int:
+            total: int = 0
+            for i in range(10):
+                if i == 5:
+                    break
+                total = total + i
+            print(total)
+            odd: int = 0
+            for j in range(10):
+                if j % 2 == 0:
+                    continue
+                odd = odd + j
+            print(odd)
+            n: int = 0
+            while True:
+                n = n + 1
+                if n > 3:
+                    break
+            print(n)
+            inner: int = 0
+            for a in range(4):
+                for b in range(4):
+                    if b == 2:
+                        break
+                    inner = inner + 1
+            print(inner)
+            return 0
+    """,
+    "descending_range": """
+        def main() -> int:
+            total: int = 0
+            for k in range(5, 0, -1):
+                total = total + k
+            print(total)
+            stepped: int = 0
+            for m in range(0, 10, 3):
+                stepped = stepped + m
+            print(stepped)
+            return total
+    """,
+    "conversions": """
+        def main() -> int:
+            print(int(2.7))
+            print(int(-2.7))
+            print(int(bool(2)))
+            print(int(bool(0)))
+            print(int(bool(2.5)))
+            print(int(float(3)))
+            return 0
+    """,
 }
+
+#: Float printing is the one place the frontend does not match CPython: the
+#: runtime prints C's `%f` (`32.000000`), not Python's repr (`32.0`). The
+#: oracle stays CPython for the VALUE, so the comparison formats the same way
+#: rather than pretending the difference is not there.
+FLOAT_PROGRAMS = {
+    "float_arithmetic": """
+        def main() -> int:
+            a: float = 7.5
+            b: float = 2.0
+            print(a + b)
+            print(a - b)
+            print(a * b)
+            print(a / b)
+            print(2.0 ** 5)
+            print(float(3) / 2.0)
+            return 0
+    """,
+}
+
+
+def _render(value) -> str:
+    """Format one printed value the way the runtime does.
+
+    Only floats differ: the runtime uses C's `%f`. Everything else is str().
+    """
+    return f"{value:f}" if isinstance(value, float) else str(value)
 
 
 def cpython_output(src: str) -> tuple[list[str], int]:
     captured: list[str] = []
-    namespace: dict = {"print": lambda *a: captured.append(" ".join(str(x) for x in a))}
+    namespace: dict = {
+        "print": lambda *a: captured.append(" ".join(_render(x) for x in a))}
     exec(compile(src, "<test>", "exec"), namespace)
     return captured, namespace["main"]()
 
@@ -167,10 +255,13 @@ def interpret(module) -> tuple[list[str], int]:
     return out.getvalue().split("\n")[:-1] if out.getvalue() else [], value
 
 
-@pytest.mark.parametrize("name", sorted(PROGRAMS))
+ALL_PROGRAMS = {**PROGRAMS, **FLOAT_PROGRAMS}
+
+
+@pytest.mark.parametrize("name", sorted(ALL_PROGRAMS))
 class TestAgreement:
     def program(self, name: str) -> str:
-        return textwrap.dedent(PROGRAMS[name]).strip() + "\n"
+        return textwrap.dedent(ALL_PROGRAMS[name]).strip() + "\n"
 
     def test_unoptimised_matches_cpython(self, name, tmp_path):
         src = self.program(name)

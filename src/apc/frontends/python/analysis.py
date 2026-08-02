@@ -86,6 +86,27 @@ class FunctionInfo:
         return [p.type for p in self.params], self.ret
 
 
+def int_literal(node) -> int | None:
+    """The value of `node` if it is an integer literal, else None.
+
+    `-1` is not `Constant(-1)` -- Python parses it as `UnaryOp(USub,
+    Constant(1))`, and code that only checks for Constant silently treats a
+    negative literal as "not a literal". That mistake made `range(5, 0, -1)`
+    compile to an ascending loop that ran zero times.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, int) \
+            and not isinstance(node.value, bool):
+        return node.value
+    if isinstance(node, ast.UnaryOp) and isinstance(node.operand, ast.Constant) \
+            and isinstance(node.operand.value, int) \
+            and not isinstance(node.operand.value, bool):
+        if isinstance(node.op, ast.USub):
+            return -node.operand.value
+        if isinstance(node.op, ast.UAdd):
+            return node.operand.value
+    return None
+
+
 def span_of(source: SourceFile, node) -> Span:
     """The source range an AST node occupies.
 
@@ -114,6 +135,10 @@ class Analyzer:
         self.sink = sink
         self.functions: dict[str, FunctionInfo] = {}
         self.current: FunctionInfo | None = None
+        #: `break`/`continue` are only meaningful inside a loop, and Python
+        #: makes that a syntax error. ast.parse does NOT -- it happily parses
+        #: a bare `break` in a function body -- so it is checked here.
+        self.loop_depth = 0
 
     # ── entry point ─────────────────────────────────────────────────────────
     def run(self, tree: ast.Module) -> dict[str, FunctionInfo]:
@@ -222,16 +247,29 @@ class Analyzer:
                 got = self._expr(node.value) if node.value else NONE
                 self._check_assignable(got, info.ret, node,
                                        what="return value")
-            case ast.If() | ast.While():
+            case ast.If():
                 self._expr(node.test)
                 for s in node.body:
                     self._stmt(s)
-                for s in getattr(node, "orelse", []):
+                for s in node.orelse:
                     self._stmt(s)
+            case ast.While():
+                self._expr(node.test)
+                self.loop_depth += 1
+                for s in node.body:
+                    self._stmt(s)
+                self.loop_depth -= 1
+                for s in node.orelse:
+                    self._error("E0026", "`while ... else` is not supported", s)
             case ast.For(target=ast.Name(id=name)):
                 self._for_range(node, name)
             case ast.For():
                 self._error("E0021", "loop target must be a plain name", node)
+            case ast.Break() | ast.Continue():
+                if self.loop_depth == 0:
+                    self._error(
+                        "E0027",
+                        f"`{type(node).__name__.lower()}` outside a loop", node)
             case ast.Pass():
                 pass
             case _:
@@ -251,9 +289,23 @@ class Analyzer:
         for a in call.args:
             got = self._expr(a)
             self._check_assignable(got, INT, a, what="range() argument")
+        if len(call.args) == 3:
+            # The step's SIGN decides whether the loop test is `<` or `>`.
+            # A runtime step would need both tests and a branch on the sign;
+            # accepting one and emitting `<` would make every descending loop
+            # run zero times and report success.
+            step = int_literal(call.args[2])
+            if step is None:
+                self._error("E0028", "range() step must be a literal",
+                            call.args[2])
+            elif step == 0:
+                self._error("E0029", "range() step must not be zero",
+                            call.args[2])
         self._declare(name, INT, node)
+        self.loop_depth += 1
         for s in node.body:
             self._stmt(s)
+        self.loop_depth -= 1
         for s in node.orelse:
             self._error("E0025", "`for ... else` is not supported", s)
 
@@ -343,8 +395,24 @@ class Analyzer:
                     f"unsupported expression: {type(node).__name__}", node)
         return ERROR
 
+    #: Every binary operator this frontend lowers. Checked explicitly, because
+    #: the failure mode of NOT checking is a traceback rather than an error:
+    #: `@` and `**` both type-checked as ordinary arithmetic here and then hit
+    #: a lowering table that had never heard of them. An operator missing from
+    #: this set is refused by the type checker, which is where a user can see
+    #: it.
+    _LOWERABLE_BINOPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv,
+                         ast.Mod, ast.Pow, ast.BitAnd, ast.BitOr, ast.BitXor,
+                         ast.LShift, ast.RShift)
+
     def _binop(self, node: ast.BinOp) -> SemType:
         left, right = self._expr(node.left), self._expr(node.right)
+        if not isinstance(node.op, self._LOWERABLE_BINOPS):
+            self.sink.report(
+                error("E0045",
+                      f"operator {_op_symbol(node.op)} is not supported")
+                .at(self._span(node)))
+            return ERROR
         if left.is_error or right.is_error:
             return ERROR
         if not (left.is_numeric and right.is_numeric):
@@ -358,6 +426,8 @@ class Analyzer:
             return ERROR
         if isinstance(node.op, ast.Div):
             return FLOAT          # Python's `/` is always float
+        if isinstance(node.op, ast.Pow):
+            return self._pow(node, left, right)
         if isinstance(node.op, (ast.BitAnd, ast.BitOr, ast.BitXor,
                                 ast.LShift, ast.RShift)):
             if FLOAT in (left, right):
@@ -368,6 +438,46 @@ class Analyzer:
                 return ERROR
             return INT
         return self._unify_all([left, right], node)
+
+    def _pow(self, node: ast.BinOp, left: SemType, right: SemType) -> SemType:
+        """`**`, restricted to a non-negative integer literal exponent.
+
+        Python's `**` is not one operation. `2 ** 10` is an int, `2 ** -1` is
+        the float 0.5, and `2.0 ** x` is a libm call. A statically typed
+        subset cannot give one expression two types, so accepting a runtime
+        exponent would mean picking one and being silently wrong about the
+        other -- `2 ** n` yielding 0 for negative n is exactly the kind of
+        plausible wrong answer that never gets reported as a bug.
+
+        A literal exponent has none of that ambiguity: the result type is the
+        base's, and lowering expands it to multiplications with no loop and no
+        runtime at all. Anything else is refused with the expression that does
+        work.
+        """
+        exponent = node.right
+        value = int_literal(exponent)
+        if value is None:
+            self.sink.report(
+                error("E0043", "`**` needs a literal integer exponent")
+                .at(self._span(node.right), "not a literal")
+                .note("`x ** n` for a runtime n is float-valued in Python "
+                      "when n may be negative, and this subset gives every "
+                      "expression one static type")
+                .help("for a square write `x * x`; for a float power call "
+                      "into a runtime yourself"))
+            return ERROR
+        if value < 0:
+            self.sink.report(
+                error("E0044", "`**` with a negative exponent is float-valued")
+                .at(self._span(node.right), f"{value}")
+                .help(f"write `1.0 / ({ast.unparse(node.left)} "
+                      f"** {-value})`"))
+            return ERROR
+        return FLOAT if left is FLOAT else INT
+
+    #: Type conversions. Not "functions" -- they are the only calls whose
+    #: result type depends on which one you named rather than on a signature.
+    _CONVERSIONS = {"int": INT, "float": FLOAT, "bool": BOOL}
 
     def _call(self, node: ast.Call) -> SemType:
         if not isinstance(node.func, ast.Name):
@@ -380,6 +490,22 @@ class Analyzer:
             for a in node.args:
                 self._expr(a)
             return NONE
+        if name in self._CONVERSIONS and name not in self.functions:
+            want = self._CONVERSIONS[name]
+            if len(node.args) != 1:
+                self._error("E0054",
+                            f"{name}() takes exactly one argument, "
+                            f"got {len(node.args)}", node)
+                for a in node.args:
+                    self._expr(a)
+                return want
+            got = self._expr(node.args[0])
+            if not (got.is_numeric or got.is_error):
+                self.sink.report(
+                    error("E0055", f"cannot convert {got} to {want}")
+                    .at(self._span(node.args[0]), str(got)))
+                return ERROR
+            return want
         info = self.functions.get(name)
         if info is None:
             self.sink.report(
@@ -445,7 +571,7 @@ _OP_SYMBOLS = {
     ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.Div: "/",
     ast.FloorDiv: "//", ast.Mod: "%", ast.Pow: "**",
     ast.BitAnd: "&", ast.BitOr: "|", ast.BitXor: "^",
-    ast.LShift: "<<", ast.RShift: ">>",
+    ast.LShift: "<<", ast.RShift: ">>", ast.MatMult: "@",
 }
 
 
