@@ -20,6 +20,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from .. import plugins
 from .. import backend as backend_registry
 from .. import frontend as frontend_registry
 from .. import link as link_registry
@@ -185,11 +186,25 @@ def cmd_types(args) -> int:
     return 0
 
 
+def _column(items, floor: int = 10) -> int:
+    """How wide the name column has to be.
+
+    Computed rather than fixed, because a fixed width is only ever right for
+    the names that shipped. Every built-in fits in ten characters and a
+    third party's `counting-link` does not, so the first registration from
+    outside this repository broke the alignment -- a small thing that is also
+    the only kind of bug an extension point can have that nobody in-tree sees.
+    """
+    return max([floor, *(len(name) for name, _ in items)])
+
+
 def cmd_backends(args) -> int:
     backend_registry.load_builtin()
-    for name, be in sorted(backend_registry.available().items()):
+    items = sorted(backend_registry.available().items())
+    width = _column(items)
+    for name, be in items:
         flag = "" if be.ready else "   (unfinished)"
-        print(f"  {name:<10} {be.description}{flag}")
+        print(f"  {name:<{width}} {be.description}{flag}")
     return 0
 
 
@@ -211,22 +226,29 @@ def cmd_targets(args) -> int:
 
 
 def cmd_toolchains(args) -> int:
-    for name, tc in sorted(link_registry.available().items()):
-        print(f"  {name:<10} {tc.description}")
+    link_registry.load_builtin()
+    items = sorted(link_registry.available().items())
+    width = _column(items)
+    for name, tc in items:
+        print(f"  {name:<{width}} {tc.description}")
     return 0
 
 
 def cmd_frontends(args) -> int:
     frontend_registry.load_builtin()
-    for name, fe in sorted(frontend_registry.available().items()):
-        print(f"  {name:<10} {fe.description:<42} {' '.join(fe.extensions)}")
+    items = sorted(frontend_registry.available().items())
+    width = _column(items)
+    for name, fe in items:
+        print(f"  {name:<{width}} {fe.description:<42} {' '.join(fe.extensions)}")
     return 0
 
 
 def cmd_passes(args) -> int:
     print(f"default pipeline for -O: {', '.join(DEFAULT_PASSES)}\n")
-    for name, p in sorted(available_passes().items()):
-        print(f"  {name:<12} {p.description}")
+    items = sorted(available_passes().items())
+    width = _column(items)
+    for name, p in items:
+        print(f"  {name:<{width}} {p.description}")
         tags = []
         for label, s in (("requires", p.requires), ("provides", p.provides),
                          ("invalidates", p.invalidates)):
@@ -252,6 +274,15 @@ def _wrap(text: str, width: int) -> list[str]:
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="asmpython", description=__doc__.split("\n")[0])
+    # Two dests, one flag. A subparser's argument OVERWRITES the namespace
+    # attribute rather than appending to it, so sharing `dest` would make
+    # `asmpython --plugin a build x.py --plugin b` load only `b` -- silently,
+    # and only when both positions are used.
+    ap.add_argument("--plugin", action="append", default=[], metavar="MODULE",
+                    dest="plugin_before",
+                    help="import MODULE before running, so its backends, "
+                         "targets, toolchains and frontends register "
+                         "(repeatable; also accepted after the command)")
     sub = ap.add_subparsers(dest="command", required=True)
 
     def source_args(p):
@@ -316,6 +347,13 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         p = sub.add_parser(name, help=doc)
         p.set_defaults(fn=fn)
+
+    # argparse accepts a parser-level flag only BEFORE the subcommand, and
+    # `asmpython build prog.py --plugin mine` is what people type. So every
+    # subparser takes it too, and main() merges the two lists.
+    for p in sub.choices.values():
+        p.add_argument("--plugin", action="append", default=[],
+                       metavar="MODULE", help=argparse.SUPPRESS)
     return ap
 
 
@@ -332,6 +370,20 @@ def main(argv: list[str] | None = None) -> int:
     traceback is the most useful thing to show.
     """
     args = build_parser().parse_args(argv)
+
+    # Plugins load before anything asks a registry a question, because that
+    # is the whole point: a third-party backend has to be registered by the
+    # time `--backend` is resolved, and every command resolves something.
+    try:
+        loaded = plugins.load_all(
+            list(getattr(args, "plugin_before", []))
+            + list(getattr(args, "plugin", [])))
+    except plugins.PluginError as exc:
+        print(f"asmpython: {exc}", file=sys.stderr)
+        return 2
+    if loaded and getattr(args, "verbose", False):
+        print(f"loaded plugins: {', '.join(loaded)}", file=sys.stderr)
+
     try:
         return args.fn(args)
     except LookupError as exc:

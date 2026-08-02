@@ -42,7 +42,7 @@ deliverable.
 
   Documented in `README.md` and
   `docs/{FRONTENDS,BACKENDS,TARGETS,LINKERS,LANGUAGE}.md`; every code example
-  in those five is executed as written, by the suite, on every run. 812 tests.
+  in those five is executed as written, by the suite, on every run. 853 tests.
 
   The pre-rewrite compiler moved to `legacy/asmpython/` unchanged. Two
   packages cannot share an import name, and the rewrite owns it; the old tree
@@ -55,6 +55,30 @@ deliverable.
   Linking was an empty directory: `build` emitted assembly and stopped, so
   the compiler had never once been asked to produce something that runs.
   Shipped toolchains are `cc`, `baremetal` and `none`.
+
+- **Third-party extensions are reachable from the command line**
+  (`plugins.py`, `--plugin`) — the four registries always accepted an outside
+  backend, target, toolchain or frontend, because `register()` is deliberately
+  the same call the built-ins make. What did not work was getting there:
+  registration is a side effect of importing a module, and nothing ever
+  imported anyone else's. Embedding asmpython as a library worked; from the
+  command line a correctly registered backend reported as `unknown backend`.
+  The extension point existed and could not be used, which is worse than not
+  having one, because the documentation says it works.
+
+  Three ways in, all ending in `import`: `--plugin MODULE` (repeatable, and
+  accepted both before and after the subcommand), `ASMPYTHON_PLUGINS`, and an
+  `asmpython.plugins` entry point for an installed distribution. A plugin that
+  fails to import is an error naming itself, not a traceback and not silence —
+  carrying on without it produces `unknown backend` for a backend the user is
+  looking at in their own file.
+
+  Two things only an outsider could find, both fixed: the subparser's
+  `--plugin` shared a `dest` with the parser-level one, so argparse
+  OVERWROTE rather than appended and a plugin named in both positions was
+  silently dropped; and every listing padded names to ten columns, which is
+  correct for exactly the names that shipped and misaligns on a third party's
+  `counting-link`.
 
 - **An AArch64 backend, executed under QEMU** (`backends/arm64/`) — Python to
   IR to AArch64 to a freestanding ELF that boots under

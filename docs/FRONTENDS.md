@@ -128,3 +128,24 @@ and still change meaning in combination, and nothing else finds that.
 - [ ] the module passes `verify()` — the driver checks, and blames you by name
 - [ ] tested against your language's reference implementation, on optimised
       and unoptimised IR
+
+## Getting it loaded
+
+`register()` runs when your module is imported, and nothing imports it for
+you. From the command line:
+
+```bash
+asmpython build prog.py --plugin mypack ...     # repeatable
+ASMPYTHON_PLUGINS=mypack asmpython backends     # same thing, no flag
+```
+
+An installed distribution can skip both by advertising an entry point:
+
+```toml
+[project.entry-points."asmpython.plugins"]
+mypack = "mypack"
+```
+
+Embedding asmpython as a library needs none of this -- you already imported
+your module. This exists because the command line could not, which made a
+correctly registered extension report as unknown.

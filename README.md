@@ -39,6 +39,16 @@ Four registries — frontends, backends, targets, toolchains — and the
 built-ins register through exactly the same call a third party makes. An
 extension path the built-ins bypass is one nobody has tested.
 
+Registering happens on import, so a third party's module has to be imported:
+
+```
+asmpython build prog.py --plugin mypack --backend mine
+ASMPYTHON_PLUGINS=mypack asmpython backends
+```
+
+An installed distribution needs neither, if it advertises an
+`asmpython.plugins` entry point.
+
 ## The three decisions
 
 **The type is a field on the instruction, not part of the mnemonic.**
