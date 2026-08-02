@@ -11,6 +11,8 @@ a copy of the same toolchain search.
 ## The whole thing
 
 ```python
+from pathlib import Path
+
 from asmpython.link import (
     LinkError, LinkRequest, Toolchain, find_tool, register, run,
 )

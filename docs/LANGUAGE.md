@@ -60,7 +60,9 @@ because the step's sign decides whether the loop test is `<` or `>`:
 
 ```python
 for i in range(5, 0, -1):   # fine
+    print(i)
 for i in range(5, 0, s):    # error[E0028]: step must be a literal
+    print(i)
 ```
 
 Accepting a runtime step would mean picking one comparison and being silently

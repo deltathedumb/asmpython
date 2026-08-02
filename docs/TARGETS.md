@@ -59,12 +59,15 @@ backend interprets; a backend that does not implement the ABI a target
 declares should refuse:
 
 ```python
-try:
-    return _ABIS[target.abi]
-except KeyError:
-    raise UnsupportedOperation(
-        f"target {target.name!r} declares ABI {target.abi!r}, which this "
-        f"backend does not implement")
+from asmpython.backend import BackendUnsupported
+
+def calling_convention(target):
+    try:
+        return _ABIS[target.abi]
+    except KeyError:
+        raise BackendUnsupported(
+            f"target {target.name!r} declares ABI {target.abi!r}, which this "
+            f"backend does not implement")
 ```
 
 Refusing is the point. A backend that falls back to a default produces a

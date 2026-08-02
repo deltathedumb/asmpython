@@ -42,7 +42,7 @@ deliverable.
 
   Documented in `README.md` and
   `docs/{FRONTENDS,BACKENDS,TARGETS,LINKERS,LANGUAGE}.md`; every code example
-  in those five was executed as written. 748 tests.
+  in those five is executed as written, by the suite, on every run. 804 tests.
 
   The pre-rewrite compiler moved to `legacy/asmpython/` unchanged. Two
   packages cannot share an import name, and the rewrite owns it; the old tree
@@ -101,6 +101,36 @@ deliverable.
   parallel assignment, thirty live values forcing spills), and twelve programs
   straight from the differential fuzzer, which knows nothing about AArch64 and
   compares against CPython exactly as before.
+
+- **The documentation is executed, not proofread**
+  (`tests/asmpython/integration/test_documentation.py`) — the README claimed
+  every code example in the five extension documents had been run, and nothing
+  kept that true. Each document is now executed as a SESSION: its blocks run
+  in order sharing one namespace, because a document imports at the top and
+  then shows variations, and treating each block as an isolated file reports
+  almost all of them as unrunnable fragments — a checker that looks thorough
+  and checks nothing. Which kind a block is, is decided by analysing the names
+  it reads without binding, not by a list of substrings to skip; a skip-list
+  is always extended after the mistake has already gone through.
+
+  LANGUAGE.md is checked against what it CLAIMS. `-7 // 2  # -4, not -3` is an
+  assertion and is run as one, as is `# error[E0060]` — 7 documented values
+  and 4 diagnostic codes. Those four divergences are the entire reason `//`
+  and `%` are lowered in the frontend rather than left to the backends, so
+  they are exactly what goes quietly wrong when that lowering changes, and a
+  document is the last place anyone looks for a regression.
+
+  It found three defects, one of them in the compiler: `BackendUnsupported` is
+  what both BACKENDS.md and TARGETS.md tell a backend author to raise, and it
+  was not exported from `asmpython.backend` — the documented way to refuse a
+  target could not be imported from the documented place. TARGETS.md also
+  named `UnsupportedOperation`, which is a private subclass each backend
+  defines for itself, and LINKERS.md's worked example annotated `-> Path`
+  without importing it.
+
+  Verified by mutation: a stale value, a renamed diagnostic code, an
+  unexported name, a new `Target` field, and a new package missing from the
+  README's layout each turn the suite red.
 
 - **A differential fuzzer** (`tests/asmpython/integration/test_differential.py`)
   generating programs from the accepted grammar and comparing CPython, the

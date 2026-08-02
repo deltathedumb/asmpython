@@ -73,7 +73,7 @@ no test names.
 
 ## Reading an instruction
 
-```python
+```text
 %3 = i64.add %1, %2      Instruction(op=Op.ADD, ty=i64, dst=3, args=[1, 2])
 ```
 
@@ -173,6 +173,8 @@ A backend supporting only one shape ignores the fields it does not vary over.
 One it cannot support at all should refuse:
 
 ```python
+from asmpython.backend import BackendUnsupported
+
 raise BackendUnsupported(
     f"target {target.name!r} declares ABI {target.abi!r}, which this "
     f"backend does not implement")
