@@ -484,6 +484,35 @@ def test_compiled_matches_cpython(seed, backend, tmp_path):
     assert compiled_output(src, tmp_path, backend) == cpython_output(src), src
 
 
+def _pass_names() -> list[str]:
+    from asmpython.passes import available
+    return sorted(available())
+
+
+@pytest.mark.parametrize("pass_name", _pass_names())
+@pytest.mark.parametrize("seed", SEEDS[:12])
+def test_each_pass_alone_preserves_meaning(pass_name, seed, tmp_path):
+    """One pass at a time, not just the pipeline.
+
+    A pass can be wrong in a way the others hide: constfold folding something
+    incorrectly and dce then deleting the evidence still produces the right
+    answer, and the bug waits for a pipeline that runs them in a different
+    order. Each is also verified after it runs, so a pass that produces
+    malformed IR is attributed to itself rather than to whatever ran next.
+    """
+    src = ProgramGenerator(seed).program()
+    path = tmp_path / "gen.py"
+    path.write_text(src, encoding="utf-8")
+    sink = DiagnosticSink()
+    result = compile_source(
+        Options(source=path, passes=(pass_name,), verify_each=True), sink)
+    assert result.ok, [d.message for d in sink.diagnostics]
+    out = StringIO()
+    Interpreter(result.module, out=out).run("main")
+    got = out.getvalue().split("\n")[:-1] if out.getvalue() else []
+    assert got == cpython_output(src), f"{pass_name} changed the meaning:\n{src}"
+
+
 class TestTheGeneratorItself:
     """A generator that quietly produced nothing interesting would pass."""
 

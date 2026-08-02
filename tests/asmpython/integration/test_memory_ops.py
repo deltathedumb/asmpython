@@ -234,6 +234,40 @@ NARROW = {
     %2 = u16.shl %0, %1
     %3 = i64.extend %2
     ret %3"""), 65520),
+    "u8_div_is_unsigned": (narrow("h", """    %0 = u8.const 200
+    %1 = u8.const 3
+    %2 = u8.div %0, %1
+    %3 = i64.extend %2
+    ret %3"""), 66),
+    "u64_compare_is_unsigned": (narrow("i", """    %0 = u64.const 18446744073709551615
+    %1 = u64.const 1
+    %2 = u64.gt %0, %1
+    %3 = i64.extend %2
+    ret %3"""), 1),
+    # f32 uses the `ss` instruction forms throughout, and the frontend emits
+    # only f64, so nothing else reaches them.
+    "f32_arithmetic": (narrow("j", """    %0 = f32.const 1.5
+    %1 = f32.const 2.25
+    %2 = f32.add %0, %1
+    %3 = i64.ftoi %2
+    ret %3"""), 3),
+    "f32_negate": (narrow("k", """    %0 = f32.const 7.0
+    %1 = f32.neg %0
+    %2 = f64.ftof %1
+    %3 = i64.ftoi %2
+    ret %3"""), -7),
+    "f32_widens_exactly": (narrow("l", """    %0 = f32.const 2.5
+    %1 = f64.ftof %0
+    %2 = f64.const 2.5
+    %3 = f64.eq %1, %2
+    %4 = i64.extend %3
+    ret %4"""), 1),
+    "f32_through_memory": (narrow("m", """    %0 = ptr.alloca 16
+    %1 = f32.const 9.5
+    f32.store %1, %0
+    %2 = f32.load %0
+    %3 = i64.ftoi %2
+    ret %3"""), 9),
 }
 
 
