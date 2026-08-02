@@ -17,7 +17,7 @@ deliverable.
 
 ### Added
 
-- **asmpython, a from-scratch retargetable compiler** (`src/asmpython/`) — a
+- **A from-scratch retargetable compiler** (`src/asmpython/`) — a
   language-independent IR with four registries (frontends, backends, targets,
   toolchains) whose built-ins register through exactly the same call a third
   party makes, because an extension path the built-ins bypass is one nobody
@@ -39,25 +39,50 @@ deliverable.
   Every program in the suite runs five ways — CPython, the interpreter on
   unoptimised IR, the interpreter on optimised IR, the C backend compiled and
   executed, and the x86-64 backend assembled, linked and executed — and all
-  five must agree. 341 tests.
+  five must agree.
 
-  Documented in `README.md` and `docs/{BACKENDS,TARGETS,LINKERS,LANGUAGE}.md`;
-  every code example in those four was executed as written.
+  Documented in `README.md` and
+  `docs/{FRONTENDS,BACKENDS,TARGETS,LINKERS,LANGUAGE}.md`; every code example
+  in those five was executed as written. 658 tests.
 
-- **Targets are an extension point, in both trees.** They were three constants
-  inside `asmpython`'s backend interface and seven modules inside the legacy
-  `_compiler/`. Both are now registries — `asmpython.target` / `asmpython._targets`
-  — that the compiler asks by name, so adding a platform is a registration
-  rather than an edit to the driver. Public API at `asmpython/target.py`,
-  alongside `backend.py`, `frontend.py` and `linker.py`.
+  The pre-rewrite compiler moved to `legacy/asmpython/` unchanged. Two
+  packages cannot share an import name, and the rewrite owns it; the old tree
+  needs `PYTHONPATH=legacy`. See `legacy/README.md`.
 
-- **A link stage** (`asmpython.link`). `src/asmpython/link/` had been an empty directory
-  since the tree was created: `asmpython build` emitted assembly and stopped, so the
-  compiler had never once been asked to produce something that runs. Shipped
-  toolchains are `cc` (hand it to gcc/clang, which knows where crt1.o and libc
-  live on this machine — the genuinely hard part) and `none` (write artifacts,
-  stop). A missing assembler is a diagnostic naming what was looked for, not an
-  exception: it is an ordinary state for a machine to be in.
+- **Targets and linking are extension points.** Targets were three constants
+  inside the backend interface in the new tree and seven modules inside
+  `_compiler/` in the old one. Both are registries now, asked by name, so
+  adding a platform is a registration rather than an edit to a driver.
+  Linking was an empty directory: `build` emitted assembly and stopped, so
+  the compiler had never once been asked to produce something that runs.
+  Shipped toolchains are `cc` and `none`.
+
+- **A differential fuzzer** (`tests/asmpython/integration/test_differential.py`)
+  generating programs from the accepted grammar and comparing CPython, the
+  interpreter on unoptimised and optimised IR, and both backends compiled and
+  executed. Overflow is made unbuildable rather than unlikely: every
+  expression carries a ceiling on its magnitude, because bounding the leaves
+  does not bound a product of two of them.
+
+  It found seven bugs that no hand-written test had, every one a wrong answer
+  in a program that compiled, linked and ran:
+
+  - argument setup was emitted in argument order, so a register that was one
+    argument's destination and another's source collapsed the two. Nine
+    arguments summed to 30 instead of 36.
+  - the same bug in the prologue, which is the mirror image: a six-argument
+    call returned -785 instead of 147, and adding a print statement made it
+    go away.
+  - x86-64 lowers float `%` to `call fmod`, which the shared liveness could
+    not see, so a value live across it sat in `rax` and was destroyed.
+    `verify_allocation` documented a check for exactly this and did not
+    implement it.
+  - x86-64 computed narrow integers at 64 bits and kept the answer:
+    `i8.add 127, 1` gave 128, and `i8.trunc 200` gave 200 rather than -56.
+  - `load` and `store` ignored the type width and always moved eight bytes.
+  - `0.0 // -9.2` and `0.0 % -6.2` lost the sign of zero.
+  - float `**` expanded to multiplications, which round twice where CPython's
+    `pow` rounds once.
 
 - **pyconform, a CPython microbehaviour conformance suite** (`conformance/`) —
   asmpython's correctness was measured against `tests/`, a corpus written
