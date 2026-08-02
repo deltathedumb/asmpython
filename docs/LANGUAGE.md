@@ -130,6 +130,24 @@ Each produces a diagnostic with a code. **The compiler never raises on Python
 it does not support** — a result or a diagnostic, never a traceback. That is
 enforced by a test that feeds 42 unsupported constructs at the whole pipeline.
 
+## Where static typing shows
+
+Every expression has ONE type. Python's `and`, `or` and `x if c else y`
+return whichever operand they picked, and those operands may have different
+types; here the expression's type is their unification, so the value is
+converted:
+
+```python
+0 and 2.5           # Python: 0        here: 0.0
+1 if c else 2.5     # Python: 1        here: 1.0
+True or 2           # Python: True     here: 1
+```
+
+The values are equal — `0 == 0.0` and `True == 1` — and only the type, and so
+the printed form, differs. This is not a rough edge to be filed off: it is
+what "every expression has one static type" means, and the alternative is
+carrying a tag at runtime, which is the thing this compiler exists not to do.
+
 ## One deliberate divergence
 
 `print` of a float uses C's `%f`, not Python's `repr`:

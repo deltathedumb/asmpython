@@ -697,3 +697,58 @@ class TestSpans:
                  if i.span is not None and i.span.end > i.span.start}
         assert len(lines) > 1, \
             "all instructions share one span -- spans are not being recorded"
+
+
+class TestStaticTypingIsVisible:
+    """Where a single static type per expression changes the answer.
+
+    Python's `and`, `or` and `x if c else y` return whichever operand they
+    picked, and the operands may differ in type. Here the expression has one
+    type -- their unification -- so the chosen operand is converted to it.
+
+    The values stay equal; the printed form does not. These lock the
+    behaviour in and record why it is not a bug: the alternative is a runtime
+    tag on every value, which is the thing this compiler exists not to do.
+    Documented in docs/LANGUAGE.md.
+    """
+
+    def test_and_unifies_to_float(self, tmp_path):
+        lines, _ = run_text("""
+            def main() -> int:
+                a: int = 0
+                f: float = 2.5
+                print(a and f)
+                return 0
+        """, tmp_path)
+        assert lines == ["0.000000"], "CPython prints 0; the value is equal"
+
+    def test_conditional_unifies_to_float(self, tmp_path):
+        lines, _ = run_text("""
+            def main() -> int:
+                c: int = 1
+                print(1 if c > 0 else 2.5)
+                return 0
+        """, tmp_path)
+        assert lines == ["1.000000"], "CPython prints 1; the value is equal"
+
+    def test_or_unifies_bool_to_int(self, tmp_path):
+        lines, _ = run_text("""
+            def main() -> int:
+                b: bool = True
+                print(b or 2)
+                return 0
+        """, tmp_path)
+        assert lines == ["1"], "CPython prints True; the value is equal"
+
+    def test_same_typed_operands_are_untouched(self, tmp_path):
+        """The unification only shows when the operands actually differ."""
+        lines, _ = run_text("""
+            def main() -> int:
+                a: int = 0
+                b: int = 7
+                print(a and b)
+                print(a or b)
+                print(1 if a > 0 else 2)
+                return 0
+        """, tmp_path)
+        assert lines == ["0", "7", "2"]
