@@ -283,6 +283,104 @@ class TestUnreachableCode:
         assert lines == ["1", "2"]
 
 
+class TestAugmentedAssignment:
+    """`x += 1` is `x = x + 1`, and must be checked as one.
+
+    Analysis used to look only at the right-hand side, so none of the operator
+    rules applied: `x **= n` type-checked as ordinary arithmetic and then hit
+    the lowering table that requires a literal exponent, raising at the user.
+    Analysis and lowering now share one synthetic node, so they cannot look at
+    different trees.
+    """
+
+    def test_every_arithmetic_operator(self, tmp_path):
+        lines, _ = run_text("""
+            def main() -> int:
+                x: int = 20
+                x += 5
+                print(x)
+                x -= 3
+                print(x)
+                x *= 2
+                print(x)
+                x //= 7
+                print(x)
+                x %= 4
+                print(x)
+                x **= 3
+                print(x)
+                return 0
+        """, tmp_path)
+        assert lines == ["25", "22", "44", "6", "2", "8"]
+
+    def test_every_bitwise_operator(self, tmp_path):
+        lines, _ = run_text("""
+            def main() -> int:
+                x: int = 12
+                x &= 10
+                print(x)
+                x |= 5
+                print(x)
+                x ^= 3
+                print(x)
+                x <<= 2
+                print(x)
+                x >>= 1
+                print(x)
+                return 0
+        """, tmp_path)
+        assert lines == ["8", "13", "14", "56", "28"]
+
+    def test_floats(self, tmp_path):
+        lines, _ = run_text("""
+            def main() -> int:
+                f: float = 7.5
+                f /= 2.0
+                print(f)
+                f *= 4.0
+                print(f)
+                return 0
+        """, tmp_path)
+        assert lines == ["3.750000", "15.000000"]
+
+    @pytest.mark.parametrize("statement, code", [
+        ("x **= n", "E0043"),          # runtime exponent
+        ("x **= -1", "E0044"),         # negative exponent
+        ("x @= 2", "E0045"),           # unsupported operator
+        ("x /= 2", "E0060"),           # float result into an int
+    ])
+    def test_the_operator_rules_apply(self, statement, code, tmp_path):
+        _, sink = compile_text(f"""
+            def main() -> int:
+                n: int = 2
+                x: int = 3
+                {statement}
+                return 0
+        """, tmp_path)
+        assert code in codes(sink), codes(sink)
+
+    def test_bitwise_on_a_float_is_refused(self, tmp_path):
+        _, sink = compile_text("""
+            def main() -> int:
+                f: float = 1.5
+                f &= 2
+                return 0
+        """, tmp_path)
+        assert "E0042" in codes(sink)
+
+    def test_it_reads_the_target_first(self, tmp_path):
+        """`x += 1` reads x, so an unassigned x is an error."""
+        _, sink = compile_text("""
+            def main() -> int:
+                c: int = 0
+                if c > 0:
+                    y: int = 1
+                y += 1
+                return 0
+        """, tmp_path)
+        assert "E0032" in codes(sink)
+
+
 class TestPower:
     def test_literal_exponent_is_expanded(self, tmp_path):
         lines, _ = run_text("""

@@ -80,6 +80,12 @@ class FunctionInfo:
     #: hashable in a way that survives equality, and analysis and lowering walk
     #: the same tree objects.
     expr_types: dict[int, SemType] = field(default_factory=dict)
+    #: AugAssign node id -> the equivalent BinOp, built once by analysis and
+    #: reused by lowering. `x += 1` is `x = x + 1` and both passes need that
+    #: tree; building it twice meant only one of them checked it, and
+    #: `x **= n` type-checked as ordinary arithmetic before hitting a
+    #: lowering table that requires a literal exponent.
+    aug_nodes: dict[int, ast.BinOp] = field(default_factory=dict)
 
     @property
     def signature(self) -> tuple[list[SemType], SemType]:
@@ -273,8 +279,19 @@ class Analyzer:
                 # `x += 1` READS x first, so an unassigned x is an error here
                 # for the same reason it is in an expression.
                 have = self._lookup(name, node)
-                self._expr(node.value)
-                self._bind(name, have, node)
+                # Analysed as the binary operation it is, through the same
+                # path a written-out `x = x + 1` takes. Checking only the
+                # right-hand side let `x **= n` and `x @= y` past the operator
+                # rules and into lowering, which raised at the user.
+                synthetic = ast.BinOp(
+                    left=ast.Name(id=name, ctx=ast.Load()),
+                    op=node.op, right=node.value)
+                ast.copy_location(synthetic, node)
+                ast.copy_location(synthetic.left, node)
+                info.aug_nodes[id(node)] = synthetic
+                result = self._expr(synthetic)
+                self._check_assignable(result, have, node,
+                                       what=f"assignment to {name!r}")
                 self.assigned.add(name)
             case ast.Return():
                 got = self._expr(node.value) if node.value else NONE
