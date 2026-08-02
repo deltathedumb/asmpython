@@ -27,6 +27,7 @@ src/asmpython/
   backend(s)/    IR -> artifacts      (c; x86-64; arm64)
   target(s)/     the platforms        (x86_64-*, aarch64-*, c)
   link/          artifacts -> program (cc; baremetal; none)
+  plugins/       third-party registrations: manifest, resolution, install
   driver/        options, pipeline, command line
 ```
 
@@ -39,15 +40,39 @@ Four registries — frontends, backends, targets, toolchains — and the
 built-ins register through exactly the same call a third party makes. An
 extension path the built-ins bypass is one nobody has tested.
 
-Registering happens on import, so a third party's module has to be imported:
+A plugin declares what it provides and is installed once:
+
+```python
+# my_plugin_module.py
+from asmpython.plugins import Plugin, Backend, Target, Frontend, Linker
+
+plugin = Plugin("mypack")
+plugin.backends.append(MyBackend())
+plugin.add_target(Target("my-machine", arch="my"), aliases=("mm",))
+
+__asmpython_plugin__ = plugin
+```
 
 ```
-asmpython build prog.py --plugin mypack --backend mine
-ASMPYTHON_PLUGINS=mypack asmpython backends
+asmpython plugin add my_plugin_module     # remembered; loaded every run
+asmpython plugin show my_plugin_module    # what it provides, registering none of it
+asmpython plugin list | remove
+asmpython build prog.py --backend my-backend
 ```
 
-An installed distribution needs neither, if it advertises an
-`asmpython.plugins` entry point.
+`plugin add` resolves from the working directory, then the Python path, then
+`pip` — each switchable with `--cwd 1|0`, `--pypath 1|0`, `--pip 1|0`. pip is
+off unless you ask, because a build command should not install software from
+the network on its own.
+
+A plugin may also patch the compiler directly (`CompilerPatch`) for what the
+registries do not cover — with two sealed targets that can never be patched
+and a guarded set needing an explicit, reported `force=True`. See
+[docs/BACKENDS.md](docs/BACKENDS.md).
+
+For one invocation, or without installing: `--plugin MODULE`, or
+`ASMPYTHON_PLUGINS=mypack`. An installed distribution needs none of it if it
+advertises an `asmpython.plugins` entry point.
 
 ## The three decisions
 

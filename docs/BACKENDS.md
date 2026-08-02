@@ -248,20 +248,74 @@ else's source, which is a second, quieter version of the same bug.
 ## Getting it loaded
 
 `register()` runs when your module is imported, and nothing imports it for
-you. From the command line:
+you. Declare what you provide and install it once:
+
+```python
+from asmpython.plugins import Plugin
+
+plugin = Plugin("mypack")
+plugin.backends.append(MyBackend)         # a class or an instance, either
+__asmpython_plugin__ = plugin
+```
 
 ```bash
-asmpython build prog.py --plugin mypack ...     # repeatable
-ASMPYTHON_PLUGINS=mypack asmpython backends     # same thing, no flag
+asmpython plugin add mypack        # remembered; loaded on every run afterwards
+asmpython plugin show mypack       # what it provides, registering none of it
+asmpython plugin list | remove
 ```
 
-An installed distribution can skip both by advertising an entry point:
+`add` looks in the working directory, then the Python path, then pip --
+`--cwd 1|0`, `--pypath 1|0`, `--pip 1|0`, with pip off unless asked.
 
-```toml
-[project.entry-points."asmpython.plugins"]
-mypack = "mypack"
+Without installing: `--plugin mypack` for one invocation, `ASMPYTHON_PLUGINS`
+for a CI job, or an `asmpython.plugins` entry point if you ship a
+distribution. Declaring a manifest is better than calling `register()` at
+import time, which also works: a manifest can be READ, so `plugin show` and
+the install-time report can say what a module provides without letting it
+change the compiler's state first.
+
+## Patching the compiler
+
+The registries cover the four things asmpython expected people to extend.
+`CompilerPatch` covers everything else — a pass that needs to behave
+differently, a diagnostic worth rewording, an experiment you would otherwise
+maintain as a fork:
+
+```python
+from asmpython.plugins import Plugin, CompilerPatch
+
+def louder(original, module, sink):
+    sink.report(...)
+    return original(module, sink)
+
+plugin.patches.append(
+    CompilerPatch("asmpython.passes.transforms.DeadCodeElimination.run",
+                  wrap=louder, reason="log what DCE removes"))
 ```
 
-Embedding asmpython as a library needs none of this -- you already imported
-your module. This exists because the command line could not, which made a
-correctly registered extension report as unknown.
+Four kinds — `replace`, `wrap`, `before`, `after` — and **`wrap` is the one to
+reach for**. It receives the original as its first argument, and two plugins
+wrapping one function both run without knowing about each other. Two plugins
+*replacing* one function means whichever installed second silently wins, so
+that combination is refused as a conflict rather than discovered later.
+
+Two tiers are protected:
+
+| | |
+|---|---|
+| **sealed** | `asmpython.plugins.patch`, `asmpython.plugins.store` — never patchable. A patch that can disable the check makes every other rule advisory, and one that can rewrite the plugin store can reinstall itself after `plugin remove`. |
+| **guarded** | the verifier and the four registries — patchable with `force=True`, which `plugin show` then displays. Other plugins rely on these: a backend author is promised ten invariants hold *without checking*, and a patch that quietly stops enforcing them turns their correct code into a crash far away. |
+
+Everything else is open, deliberately. Guessing in advance which internals
+someone will legitimately need is wrong in the direction that makes people
+fork.
+
+**The one thing that will surprise you:** patching `mod.func` rebinds the
+attribute on `mod`, so a caller that did `from mod import func` holds the
+function directly and never sees it. Patch what the callers reach —
+`asmpython.driver.pipeline.print_module`, not
+`asmpython.ir.printer.print_module`. When a patch appears to do nothing, this
+is why.
+
+Patches are reversible (`revert_all()`), so a patch is something you can
+experiment with rather than a decision that lasts until you restart.

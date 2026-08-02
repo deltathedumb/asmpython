@@ -132,20 +132,28 @@ and still change meaning in combination, and nothing else finds that.
 ## Getting it loaded
 
 `register()` runs when your module is imported, and nothing imports it for
-you. From the command line:
+you. Declare what you provide and install it once:
+
+```python
+from asmpython.plugins import Plugin
+
+plugin = Plugin("mypack")
+plugin.backends.append(MyBackend)         # a class or an instance, either
+__asmpython_plugin__ = plugin
+```
 
 ```bash
-asmpython build prog.py --plugin mypack ...     # repeatable
-ASMPYTHON_PLUGINS=mypack asmpython backends     # same thing, no flag
+asmpython plugin add mypack        # remembered; loaded on every run afterwards
+asmpython plugin show mypack       # what it provides, registering none of it
+asmpython plugin list | remove
 ```
 
-An installed distribution can skip both by advertising an entry point:
+`add` looks in the working directory, then the Python path, then pip --
+`--cwd 1|0`, `--pypath 1|0`, `--pip 1|0`, with pip off unless asked.
 
-```toml
-[project.entry-points."asmpython.plugins"]
-mypack = "mypack"
-```
-
-Embedding asmpython as a library needs none of this -- you already imported
-your module. This exists because the command line could not, which made a
-correctly registered extension report as unknown.
+Without installing: `--plugin mypack` for one invocation, `ASMPYTHON_PLUGINS`
+for a CI job, or an `asmpython.plugins` entry point if you ship a
+distribution. Declaring a manifest is better than calling `register()` at
+import time, which also works: a manifest can be READ, so `plugin show` and
+the install-time report can say what a module provides without letting it
+change the compiler's state first.

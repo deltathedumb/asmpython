@@ -259,6 +259,106 @@ def cmd_passes(args) -> int:
     return 0
 
 
+def _flag(value: str | None, default: bool) -> bool:
+    """`--pip 1` / `--pip 0`, with the flag absent meaning the default.
+
+    Spelled as an explicit value rather than `--pip`/`--no-pip` because these
+    three switch a SEARCH ORDER, and a reader of a script wants to see which
+    sources were on without knowing what the defaults were that week.
+    """
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _sources(args) -> plugins.Sources:
+    return plugins.Sources(
+        cwd=_flag(getattr(args, "cwd", None), True),
+        pypath=_flag(getattr(args, "pypath", None), True),
+        pip=_flag(getattr(args, "pip", None), False),
+    )
+
+
+def cmd_plugin_add(args) -> int:
+    sources = _sources(args)
+    try:
+        entry = plugins.install(args.name, sources)
+    except plugins.PluginError as exc:
+        print(f"asmpython: {exc}", file=sys.stderr)
+        print(f"  searched: {', '.join(sources.enabled()) or 'nothing'}",
+              file=sys.stderr)
+        if not sources.pip:
+            print("  try --pip 1 to install it from an index",
+                  file=sys.stderr)
+        return 2
+    print(f"added {entry.name}  ({entry.source}: {entry.origin})")
+    contents = {k: v for k, v in entry.provides.items() if v}
+    if contents:
+        for kind, names in contents.items():
+            print(f"  {kind:<10} {', '.join(names)}")
+    else:
+        # A module with no manifest registers on import; nothing here can say
+        # what it added without diffing the registries, and claiming it added
+        # nothing would be worse than saying so.
+        print("  registered on import; declare __asmpython_plugin__ to list "
+              "its contents")
+    print(f"stored in {plugins.store.config_file()}")
+    return 0
+
+
+def cmd_plugin_remove(args) -> int:
+    if not plugins.uninstall(args.name):
+        print(f"asmpython: {args.name!r} is not installed", file=sys.stderr)
+        return 2
+    print(f"removed {args.name}")
+    return 0
+
+
+def cmd_plugin_list(args) -> int:
+    entries = plugins.installed()
+    if not entries:
+        print("no plugins installed")
+        print(f"  ({plugins.store.config_file()})")
+        return 0
+    width = max(len(e.name) for e in entries)
+    for e in entries:
+        print(f"  {e.name:<{width}}  {e.source or 'unknown'}: "
+              f"{e.origin or '?'}")
+        for kind, names in e.provides.items():
+            if names:
+                print(f"  {'':<{width}}  {kind}: {', '.join(names)}")
+    return 0
+
+
+def cmd_plugin_show(args) -> int:
+    """What a module provides, without registering any of it."""
+    try:
+        found = plugins.resolve(args.name, _sources(args))
+    except plugins.ResolveError as exc:
+        print(f"asmpython: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:                    # noqa: BLE001 -- reported
+        # The module was found and raised on import. That is a bug in the
+        # user's plugin, and a compiler traceback for it reads as a bug in
+        # asmpython.
+        print(f"asmpython: plugin {args.name!r} raised while importing: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    plugin = plugins.manifest_of(found.module)
+    print(f"{args.name}  ({found.source}: {found.origin})")
+    if plugin is None:
+        print("  no __asmpython_plugin__; this module registers on import")
+        return 0
+    if plugin.name or plugin.version:
+        print(f"  {plugin.name} {plugin.version}".rstrip())
+    if plugin.description:
+        print(f"  {plugin.description}")
+    for kind, names in plugin.contents().items():
+        if names:
+            print(f"  {kind:<10} {', '.join(names)}")
+    return 0
+
+
 def _wrap(text: str, width: int) -> list[str]:
     words, lines, cur = text.split(), [], ""
     for w in words:
@@ -348,6 +448,35 @@ def build_parser() -> argparse.ArgumentParser:
         p = sub.add_parser(name, help=doc)
         p.set_defaults(fn=fn)
 
+    pl = sub.add_parser("plugin", help="install and inspect plugins")
+    pls = pl.add_subparsers(dest="plugin_command", required=True)
+
+    def where(p):
+        """The three sources, as explicit 1/0 values."""
+        p.add_argument("--cwd", metavar="1|0",
+                       help="look for NAME.py or NAME/ here (default 1)")
+        p.add_argument("--pypath", metavar="1|0",
+                       help="import NAME from the Python path (default 1)")
+        p.add_argument("--pip", metavar="1|0",
+                       help="pip install NAME first (default 0)")
+
+    a = pls.add_parser("add", help="install a plugin and remember it")
+    a.add_argument("name")
+    where(a)
+    a.set_defaults(fn=cmd_plugin_add)
+
+    rm = pls.add_parser("remove", help="forget an installed plugin")
+    rm.add_argument("name")
+    rm.set_defaults(fn=cmd_plugin_remove)
+
+    ls = pls.add_parser("list", help="what is installed")
+    ls.set_defaults(fn=cmd_plugin_list)
+
+    sh = pls.add_parser("show", help="what a module provides, registering none of it")
+    sh.add_argument("name")
+    where(sh)
+    sh.set_defaults(fn=cmd_plugin_show)
+
     # argparse accepts a parser-level flag only BEFORE the subcommand, and
     # `asmpython build prog.py --plugin mine` is what people type. So every
     # subparser takes it too, and main() merges the two lists.
@@ -375,14 +504,20 @@ def main(argv: list[str] | None = None) -> int:
     # is the whole point: a third-party backend has to be registered by the
     # time `--backend` is resolved, and every command resolves something.
     try:
-        loaded = plugins.load_all(
+        report = plugins.load_all(
             list(getattr(args, "plugin_before", []))
             + list(getattr(args, "plugin", [])))
     except plugins.PluginError as exc:
         print(f"asmpython: {exc}", file=sys.stderr)
         return 2
-    if loaded and getattr(args, "verbose", False):
-        print(f"loaded plugins: {', '.join(loaded)}", file=sys.stderr)
+    for name, why in report.failed:
+        # Installed but broken: said out loud every run, and never fatal.
+        # `asmpython plugin remove NAME` is how you fix it, and that command
+        # cannot be the one thing a broken plugin prevents.
+        print(f"asmpython: warning: installed plugin {name!r} did not load "
+              f"({why})", file=sys.stderr)
+    if report.loaded and getattr(args, "verbose", False):
+        print(f"loaded plugins: {', '.join(report.loaded)}", file=sys.stderr)
 
     try:
         return args.fn(args)
