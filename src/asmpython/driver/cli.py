@@ -108,8 +108,15 @@ def cmd_build(args) -> int:
 def cmd_run(args) -> int:
     path = Path(args.source)
     if path.suffix == ".ir":
-        module = parse_module(path.read_text(encoding="utf-8"))
         from ..ir import verify
+        from ..ir.printer import ParseError
+        try:
+            module = parse_module(path.read_text(encoding="utf-8"))
+        except (ParseError, OSError) as exc:
+            # Hand-edited IR is the documented way to test a backend, so
+            # malformed IR is expected input, not an internal error.
+            print(f"cannot read IR: {exc}", file=sys.stderr)
+            return 2
         try:
             verify(module)
         except VerifyError as exc:
@@ -313,8 +320,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Parse arguments and run the command.
+
+    `LookupError` is caught here rather than at each call site. Every registry
+    -- targets, toolchains, passes -- raises it for a name nobody registered,
+    which is a typo, and a typo should not print a traceback with a compiler
+    stack in it. Catching the type once means a new registry gets the same
+    treatment without anyone remembering to wire it up.
+
+    Nothing else is caught: an unexpected exception IS a compiler bug, and the
+    traceback is the most useful thing to show.
+    """
     args = build_parser().parse_args(argv)
-    return args.fn(args)
+    try:
+        return args.fn(args)
+    except LookupError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

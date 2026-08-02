@@ -239,12 +239,29 @@ def _signature(fn: Function) -> str:
 #: signatures differ from the IR's.
 _RESERVED = {"main": "ir_main", "putchar": "putchar_"}
 
+#: C keywords and the standard type names. A source language has no reason to
+#: avoid these -- `def double(n: int)` is perfectly good Python -- and emitting
+#: the name verbatim produces `r7 = double(r1);`, which is a C syntax error
+#: pointing at generated code the user never wrote. Everything here gets a
+#: trailing underscore instead.
+_C_KEYWORDS = frozenset("""
+auto break case char const continue default do double else enum extern float
+for goto if inline int long register restrict return short signed sizeof
+static struct switch typedef union unsigned void volatile while
+_Bool _Complex _Imaginary _Alignas _Alignof _Atomic _Generic _Noreturn
+_Static_assert _Thread_local bool true false NULL
+""".split())
+
 
 def _cname(name: str) -> str:
     """IR symbols may contain characters C does not allow in identifiers."""
     if name in _RESERVED:
         return _RESERVED[name]
-    return "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in name)
+    safe = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in name)
+    # A leading digit is not an identifier either; both cases are one rule.
+    if safe in _C_KEYWORDS or (safe and safe[0].isdigit()):
+        safe += "_"
+    return safe
 
 
 def _global(g) -> str:

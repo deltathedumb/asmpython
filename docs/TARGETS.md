@@ -34,9 +34,9 @@ asmpython build prog.py --target riscv64-linux --backend my-backend
 asmpython targets                       # lists it, with its aliases
 ```
 
-Built-in targets go through this same call. There is no privileged path — if
-`asmpython/targets/__init__.py` were deleted, asmpython would still compile and simply
-have no platforms until something registered one.
+Built-in targets go through this same call. There is no privileged path —
+if `asmpython/targets/__init__.py` were deleted, the compiler would still
+build and simply have no platforms until something registered one.
 
 ## Every field is explicit, and that matters
 
@@ -71,18 +71,18 @@ program that runs and is wrong.
 
 ## `host`
 
-`host` is not a registered target — it resolves to whichever platform asmpython is
-running on:
+`host` is not a registered target — it resolves to whichever platform the
+compiler is running on:
 
 ```bash
 asmpython build prog.py --target host      # or just omit --target
 ```
 
-A machine backend should declare `default_target = "host"` rather than naming
-a platform. The x86-64 backend defaulted to `x86_64-linux`, so `asmpython build
---backend x86-64` on Windows emitted ELF directives and handed them to a COFF
-assembler — a cross-compile nobody asked for, reported as an assembler syntax
-error.
+A machine backend should declare `default_target = "host"` rather than
+naming a platform. The x86-64 backend defaulted to `x86_64-linux`, so
+`asmpython build --backend x86-64` on Windows emitted ELF directives and
+handed them to a COFF assembler — a cross-compile nobody asked for,
+reported as an assembler syntax error.
 
 ## Overriding a built-in
 
@@ -112,5 +112,5 @@ platform, configured differently" is a thing people legitimately want.
       (`.obj`/`.exe` on Windows, `.o`/`` elsewhere)
 - [ ] a backend exists that implements your `abi`, or yours refuses clearly
 - [ ] `asmpython targets` shows it
-- [ ] a program compiled for it runs, and agrees with `asmpython run` on the same
-      program
+- [ ] a program compiled for it runs, and agrees with `asmpython run` on
+      the same program

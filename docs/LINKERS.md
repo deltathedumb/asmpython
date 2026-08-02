@@ -11,7 +11,9 @@ a copy of the same toolchain search.
 ## The whole thing
 
 ```python
-from asmpython.link import Toolchain, LinkRequest, LinkError, find_tool, run, register
+from asmpython.link import (
+    LinkError, LinkRequest, Toolchain, find_tool, register, run,
+)
 
 class BareMetal(Toolchain):
     name = "bare-metal"
@@ -88,8 +90,8 @@ internal error. `find_tool` already does this, and names everything it tried —
 ## The runtime
 
 The IR has no I/O opcodes: `print` is a call to a named function, and
-something has to define it. `asmpython.link.runtime` supplies a small C file for the
-Python frontend, and the driver adds it when the backend is not
+something has to define it. `asmpython.link.runtime` supplies a small C file
+for the Python frontend, and the driver adds it when the backend is not
 `self_contained`.
 
 ```python
@@ -101,10 +103,11 @@ The C backend sets `True` — it emits its own `main` and its own `print_int`.
 A machine backend sets `False`. Getting it wrong produces a duplicate-symbol
 error or an undefined one, both at link time and both clear.
 
-The IR's `main` is emitted under `ENTRY_SYMBOL` (`asmpython_main`), because it is
-not C's `main` — it returns i64 where C requires int, and would collide with
-the runtime's entry point. That constant lives in `asmpython.backend.base` so the
-backend writing the symbol and the runtime calling it cannot disagree.
+The IR's `main` is emitted under `ENTRY_SYMBOL` (`asmpython_main`), because
+it is not C's `main` — it returns i64 where C requires int, and would
+collide with the runtime's entry point. That constant lives in
+`asmpython.backend.base` so the backend writing the symbol and the runtime
+calling it cannot disagree.
 
 ## Checklist
 
@@ -112,5 +115,5 @@ backend writing the symbol and the runtime calling it cannot disagree.
 - [ ] `supports(target)` returns False for platforms you cannot produce
 - [ ] every external command goes through `run(request, ...)`
 - [ ] every failure a user can act on is a `LinkError` with `help`
-- [ ] the produced program runs, and its output matches `asmpython run` on the same
-      source
+- [ ] the produced program runs, and its output matches `asmpython run` on
+      the same source
