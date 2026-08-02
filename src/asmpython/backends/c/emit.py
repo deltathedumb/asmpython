@@ -133,7 +133,7 @@ class CBackend(Backend):
             L.append(f"    {_CTYPE[fn.registers[reg]]} r{reg} = 0;")
 
         for blk in fn.blocks:
-            L.append(f"{blk.label}:;")
+            L.append(f"{_label(blk.label)}:;")
             for ins in blk.instructions:
                 L.append("    " + self._instr(fn, ins))
 
@@ -153,7 +153,7 @@ class CBackend(Backend):
             case Op.COPY:
                 return f"{d} = {a[0]};"
             case Op.GLOBAL_ADDR:
-                return f"{d} = (uintptr_t)g_{ins.sym};"
+                return f"{d} = (uintptr_t)g_{_cname(ins.sym)};"
             case Op.FUNC_ADDR:
                 return f"{d} = (uintptr_t)&{ins.sym};"
 
@@ -205,15 +205,15 @@ class CBackend(Backend):
                 return f"{d} = {call};" if ins.dst is not None else f"{call};"
 
             case Op.JUMP:
-                return f"goto {ins.labels[0]};"
+                return f"goto {_label(ins.labels[0])};"
             case Op.BRANCH:
-                return (f"if ({a[0]}) goto {ins.labels[0]}; "
-                        f"else goto {ins.labels[1]};")
+                return (f"if ({a[0]}) goto {_label(ins.labels[0])}; "
+                        f"else goto {_label(ins.labels[1])};")
             case Op.SWITCH:
                 arms = " ".join(
-                    f"case {v}: goto {l};" for v, l in ins.cases)
+                    f"case {v}: goto {_label(l)};" for v, l in ins.cases)
                 return (f"switch ({a[0]}) {{ {arms} "
-                        f"default: goto {ins.labels[0]}; }}")
+                        f"default: goto {_label(ins.labels[0])}; }}")
             case Op.RET:
                 return f"return {a[0]};" if ins.args else "return;"
             case Op.UNREACHABLE:
@@ -253,23 +253,40 @@ _Static_assert _Thread_local bool true false NULL
 """.split())
 
 
+def _label(name: str) -> str:
+    """A C label for an IR block label.
+
+    Block labels are frontend-chosen and hand-written IR is a documented way
+    to test a backend, so nothing stops one being called `default` or
+    `switch`. Prefixed rather than suffixed: a label is not a symbol anyone
+    links against, so there is no reason to keep it recognisable to a linker,
+    and a prefix cannot collide with a keyword at all.
+    """
+    return "L_" + _cname(name)
+
+
 def _cname(name: str) -> str:
     """IR symbols may contain characters C does not allow in identifiers."""
     if name in _RESERVED:
         return _RESERVED[name]
     safe = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in name)
-    # A leading digit is not an identifier either; both cases are one rule.
-    if safe in _C_KEYWORDS or (safe and safe[0].isdigit()):
+    # Two different problems needing two different fixes. A keyword stops
+    # being one with any suffix; a leading digit needs a PREFIX, and
+    # suffixing `2fast` gives `2fast_`, which is still not an identifier.
+    if safe and safe[0].isdigit():
+        safe = "n" + safe
+    if safe in _C_KEYWORDS:
         safe += "_"
     return safe
 
 
 def _global(g) -> str:
     if g.data is None:
-        return f"static uint8_t g_{g.name}[{max(1, g.size)}];"
+        return f"static uint8_t g_{_cname(g.name)}[{max(1, g.size)}];"
     body = ", ".join(str(b) for b in g.data)
     const = "const " if g.readonly else ""
-    return f"static {const}uint8_t g_{g.name}[{len(g.data)}] = {{{body}}};"
+    return (f"static {const}uint8_t g_{_cname(g.name)}[{len(g.data)}]"
+            f" = {{{body}}};")
 
 
 def _lit(ty: T.Type, v) -> str:
