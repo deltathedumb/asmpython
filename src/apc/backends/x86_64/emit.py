@@ -1,4 +1,4 @@
-"""x86-64 backend: System V assembly, using the shared register allocator.
+"""x86-64 backend: assembly for either ABI, using the shared register allocator.
 
 Emits GNU-syntax assembly rather than machine code. That is a deliberate
 staging decision, not a shortcut: instruction SELECTION and instruction
@@ -11,15 +11,20 @@ WHAT THIS DEMONSTRATES that the C backend cannot: using `apc.backend.regalloc`.
 Values live in machine registers, spilled ones in frame slots, and the prologue
 saves exactly the callee-saved registers the allocation actually used.
 
-THE ABI is System V AMD64:
+THE ABI comes from the target, and there are two:
 
     System V      args rdi rsi rdx rcx r8 r9;  callee-saved rbx r12-r15
     Microsoft x64 args rcx rdx r8 r9;          callee-saved rbx rsi rdi r12-r15,
                   and the caller reserves 32 bytes of shadow space
 
-The ABI comes from the Target. Hardcoding one produces code that links fine on
-the other platform and corrupts its arguments, which reads as a miscompilation
-of the callee rather than of the call.
+Hardcoding one produces code that links fine on the other platform and
+corrupts its arguments, which reads as a miscompilation of the callee rather
+than of the call.
+
+Arguments beyond the register file go on the stack, and the moves into
+argument registers are SCHEDULED rather than emitted in order -- see
+`_emit_parallel_moves`, which exists because doing them in order silently
+collapsed four arguments into one value.
 
 FLOATS use SSE, and are kept in frame slots rather than allocated. The shared
 allocator models one register file and xmm* is a second; handing floats to it
@@ -392,12 +397,11 @@ class _Emitter:
 
 class X86_64Backend(Backend):
     name = "x86-64"
-    description = "System V AMD64 assembly (integers only)"
+    description = "x86-64 assembly; ABI and dialect chosen by target"
     # The machine this is running on, not a platform fixed at
     # authoring time: `apc build --backend x86-64` on Windows used to
     # emit ELF directives and hand them to a COFF assembler.
     default_target = "host"
-    description_note = "ABI chosen by target: sysv or win64"
 
     def symbol(self, name: str, dialect: AsmDialect) -> str:
         """The assembler symbol for an IR function name.
