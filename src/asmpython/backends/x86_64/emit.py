@@ -201,6 +201,41 @@ def _clobbers_volatiles(ins: Instruction) -> bool:
             or (ins.op is Op.REM and ins.ty.is_float))
 
 
+#: Sub-register names for the two scratch registers, by width. Needed because
+#: a load or store must touch EXACTLY the type's width: `movq` on an `i8.load`
+#: reads eight bytes, and `i8.load` of a byte table returned 0x07060504
+#: instead of 4 -- a plausible integer, from four bytes past the one asked
+#: for.
+_SUBREG = {
+    "r10": {8: "r10b", 16: "r10w", 32: "r10d", 64: "r10"},
+    "r11": {8: "r11b", 16: "r11w", 32: "r11d", 64: "r11"},
+}
+
+#: Load mnemonic by width and signedness. A narrow load must extend into the
+#: full register, because the slot holding the value is 64 bits wide and
+#: everything downstream reads all of it. Signed types sign-extend so that
+#: -1 as an i8 stays -1, matching what the interpreter's `_wrap` produces.
+_LOAD = {
+    (8, True): "movsbq", (8, False): "movzbq",
+    (16, True): "movswq", (16, False): "movzwq",
+    (32, True): "movslq", (32, False): "movl",
+    (64, True): "movq", (64, False): "movq",
+}
+
+
+def _store_mnemonic(bits: int) -> str:
+    return {8: "movb", 16: "movw", 32: "movl", 64: "movq"}[bits]
+
+
+def _access_width(ty: T.Type) -> int:
+    """The width a load or store of `ty` touches.
+
+    `i1` is stored as a byte: it is the width the C backend uses for it too,
+    and the two must agree or a value written by one is misread by the other.
+    """
+    return 8 if ty is T.I1 else ty.bits
+
+
 def block_label(fn_name: str, label: str) -> str:
     """The assembler label for one IR block.
 
@@ -824,7 +859,7 @@ class X86_64Backend(Backend):
     # ── one instruction ─────────────────────────────────────────────────────
     def _instruction(self, e: _Emitter, ins: Instruction, saved: list[str],
                      abi: ABI, dialect: AsmDialect) -> None:
-        op = ins.op
+        op, ty = ins.op, ins.ty
         fn_name = e.fn.name
 
         # Floating point is a different instruction set on the same machine:
@@ -943,7 +978,10 @@ class X86_64Backend(Backend):
 
             case Op.LOAD:
                 addr = e.into_scratch(ins.args[0], "r11")
-                e.emit(f"movq ({addr}), %r10")
+                bits = _access_width(ty)
+                mnemonic = _LOAD[(bits, ty.is_signed)]
+                dest = "%r10d" if mnemonic == "movl" else "%r10"
+                e.emit(f"{mnemonic} ({addr}), {dest}")
                 e.store_from("r10", ins.dst)
 
             case Op.STORE:
@@ -951,7 +989,9 @@ class X86_64Backend(Backend):
                 if value != "%r10":
                     e.emit(f"movq {value}, %r10")
                 addr = e.into_scratch(ins.args[1], "r11")
-                e.emit(f"movq %r10, ({addr})")
+                bits = _access_width(ty)
+                e.emit(f"{_store_mnemonic(bits)} "
+                       f"%{_SUBREG['r10'][bits]}, ({addr})")
 
             case Op.OFFSET:
                 base = e.into_scratch(ins.args[0], "r10")

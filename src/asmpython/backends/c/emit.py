@@ -184,7 +184,8 @@ class CBackend(Backend):
             case Op.BITCAST:
                 src = _CTYPE[fn.register_type(ins.args[0])]
                 return (f"memcpy(&{d}, &{a[0]}, "
-                        f"sizeof({c}) < sizeof({src}) ? sizeof({c}) : sizeof({src})));")
+                        f"sizeof({c}) < sizeof({src}) "
+                        f"? sizeof({c}) : sizeof({src}));")
 
             case Op.ALLOCA:
                 return f"{d} = (uintptr_t)alloca({ins.imm});"
