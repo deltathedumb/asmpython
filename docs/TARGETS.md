@@ -113,11 +113,17 @@ compiler is running on:
 asmpython build prog.py --target host      # or just omit --target
 ```
 
-A machine backend should declare `default_target = "host"` rather than
-naming a platform. The x86-64 backend defaulted to `x86_64-linux`, so
-`asmpython build --backend x86-64` on Windows emitted ELF directives and
-handed them to a COFF assembler — a cross-compile nobody asked for,
-reported as an assembler syntax error.
+A backend that can emit for the machine it runs on should declare
+`default_target = "host"` rather than naming a platform. The x86-64 backend
+defaulted to `x86_64-linux`, so `asmpython build --backend x86-64` on Windows
+emitted ELF directives and handed them to a COFF assembler — a cross-compile
+nobody asked for, reported as an assembler syntax error.
+
+A backend that can *never* target the host is the opposite case and should
+name its platform. `arm64` defaults to `aarch64-none`, because "host" on an
+x86-64 machine would resolve to a target it must refuse — turning the common
+invocation into an error message about a target the user never mentioned.
+The rule underneath both is the same: default to what the user meant.
 
 ## Overriding a built-in
 

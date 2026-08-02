@@ -42,7 +42,7 @@ deliverable.
 
   Documented in `README.md` and
   `docs/{FRONTENDS,BACKENDS,TARGETS,LINKERS,LANGUAGE}.md`; every code example
-  in those five is executed as written, by the suite, on every run. 824 tests.
+  in those five is executed as written, by the suite, on every run. 812 tests.
 
   The pre-rewrite compiler moved to `legacy/asmpython/` unchanged. Two
   packages cannot share an import name, and the rewrite owns it; the old tree
@@ -98,9 +98,9 @@ deliverable.
   driver instead of the link stage guessing from the architecture. 30 tests:
   the shared program corpus, the places earlier backends were silently wrong
   (narrow widths, a value live across a float remainder, argument setup as a
-  parallel assignment, thirty live values forcing spills), and twelve programs
-  straight from the differential fuzzer, which knows nothing about AArch64 and
-  compares against CPython exactly as before.
+  parallel assignment, thirty live values forcing spills). The fuzzer's
+  generated programs run against it in `test_differential.py` alongside the
+  other two backends, not in a copy here.
 
   The fuzzer's whole generated corpus now runs on it too, so "six ways and
   they must all agree" is what the suite does rather than what it aspires to.

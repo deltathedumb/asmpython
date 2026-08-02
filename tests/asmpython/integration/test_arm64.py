@@ -319,16 +319,8 @@ int main(void) {
         assert "0 bad" in ran.stdout, ran.stdout
 
 
-@pytest.mark.parametrize("seed", range(12))
-def test_generated_programs_match_cpython(seed, tmp_path):
-    """The differential fuzzer's programs, on a third machine.
-
-    The generator knows nothing about AArch64 -- it emits the same Python it
-    always did, and the comparison is against CPython as always. That is the
-    point: a backend is right when the same evidence that convinced you about
-    the other two applies to it unchanged.
-    """
-    from tests.asmpython.integration.test_differential import (
-        ProgramGenerator, cpython_output)
-    src = ProgramGenerator(seed).program()
-    assert build_and_run(src, tmp_path) == cpython_output(src), src
+# The fuzzer's generated programs used to run here too, on twelve seeds. They
+# now run in `test_differential.py` on twenty, alongside the other backends,
+# which is where they belong: the generator knows nothing about AArch64, so a
+# copy over here was the same test in a worse place -- and two places to
+# update when the corpus changes.
