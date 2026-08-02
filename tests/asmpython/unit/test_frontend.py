@@ -217,6 +217,53 @@ class TestElse:
             f"false edge goes to {branch.labels[1]!r}, not the else block")
 
 
+class TestTheEntryPoint:
+    """`main`'s signature is fixed, and saying so is the frontend's job.
+
+    A `main` that takes an argument compiles to IR the backend emits happily
+    and then fails at the C compiler, complaining about a wrapper function the
+    user never wrote. That is a confusing place to learn the entry point has a
+    required shape.
+    """
+
+    def test_parameters_are_refused(self, tmp_path):
+        _, sink = compile_text("""
+            def main(x: int) -> int:
+                return x
+        """, tmp_path)
+        assert "E0008" in codes(sink)
+
+    @pytest.mark.parametrize("returns", ["None", "float", "bool"])
+    def test_the_return_type_is_int(self, returns, tmp_path):
+        _, sink = compile_text(f"""
+            def main() -> {returns}:
+                return {"" if returns == "None" else "0"}
+        """, tmp_path)
+        assert "E0009" in codes(sink), codes(sink)
+
+    def test_a_correct_main_is_accepted(self, tmp_path):
+        result, sink = compile_text("""
+            def main() -> int:
+                return 0
+        """, tmp_path)
+        assert result.ok, [d.message for d in sink.diagnostics]
+
+    def test_other_functions_may_return_anything(self, tmp_path):
+        result, sink = compile_text("""
+            def nothing() -> None:
+                print(1)
+
+            def fraction() -> float:
+                return 0.5
+
+            def main() -> int:
+                nothing()
+                print(fraction())
+                return 0
+        """, tmp_path)
+        assert result.ok, [d.message for d in sink.diagnostics]
+
+
 class TestUnreachableCode:
     """Python allows dead code after a terminator; so must this.
 

@@ -454,6 +454,12 @@ class ProgramGenerator:
                 e = self.int_expr(2)
                 if self.int_vars[name] + trip * e.bound > INT_LIMIT:
                     lines.append(f"{indent}print({e})")
+                elif r.random() < 0.5:
+                    # `x += e`, which is the same operation written the other
+                    # way -- and the way that skipped every operator rule
+                    # until analysis and lowering were made to share a node.
+                    lines.append(f"{indent}{name} += {e}")
+                    self.int_vars[name] += trip * e.bound
                 else:
                     lines.append(f"{indent}{name} = {name} + {e}")
                     self.int_vars[name] += trip * e.bound
@@ -635,7 +641,8 @@ class TestTheGeneratorItself:
         """Each of these was a real bug found in this compiler."""
         corpus = "".join(ProgramGenerator(s).program() for s in range(60))
         for fragment in ("//", "%", "**", "<<", ">>", "float(", "int(",
-                         "break", "continue", "and", "or", "not "):
+                         "break", "continue", "and", "or", "not ", "+=",
+                         "else:", "while "):
             assert fragment in corpus, f"the generator never emits {fragment!r}"
 
     def test_it_reaches_the_shapes_the_abi_bugs_lived_in(self):

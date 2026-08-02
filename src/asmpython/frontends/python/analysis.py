@@ -168,10 +168,35 @@ class Analyzer:
         for node in defs:
             self._body(self.functions[node.name])
 
-        if "main" not in self.functions:
+        self._check_entry()
+        return self.functions
+
+    def _check_entry(self) -> None:
+        """`main` is the program's entry point and its signature is fixed.
+
+        Checked here rather than left to the backend. A `main` that takes an
+        argument or returns None compiles to IR the backend happily emits and
+        then fails at the C compiler or the linker, with a message about a
+        wrapper function the user never wrote -- which is a confusing place to
+        learn that the entry point has a required shape.
+        """
+        info = self.functions.get("main")
+        if info is None:
             self.sink.report(error("E0003", "no `main` function")
                              .help("add `def main() -> int:`"))
-        return self.functions
+            return
+        if info.params:
+            self.sink.report(
+                error("E0008", "`main` takes no parameters")
+                .at(self._span(info.node))
+                .note("it is the program's entry point; there is nothing to "
+                      "pass it")
+                .help("read arguments from a runtime function instead"))
+        if info.ret is not INT and not info.ret.is_error:
+            self.sink.report(
+                error("E0009", f"`main` must return int, not {info.ret}")
+                .at(self._span(info.node))
+                .note("the return value becomes the process exit code"))
 
     # ── signatures ──────────────────────────────────────────────────────────
     def _signature(self, node: ast.FunctionDef) -> FunctionInfo:
