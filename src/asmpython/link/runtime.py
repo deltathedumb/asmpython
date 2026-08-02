@@ -31,6 +31,12 @@ RUNTIME_C = """\
 #include <stdio.h>
 #include <stdint.h>
 
+/* `put_*` write a value and nothing else. The frontend supplies the space
+   between printed arguments and the newline at the end with putchar, because
+   a primitive that always appends a newline cannot express `print(1, 2)` --
+   one line reading "1 2" -- or `print()`, an empty line. */
+void put_int(int64_t v)     { printf("%lld", (long long)v); }
+void put_float(double v)    { printf("%f", v); }
 void print_int(int64_t v)   { printf("%lld\\n", (long long)v); }
 void print_float(double v)  { printf("%f\\n", v); }
 void print_str(const char *s) { fputs(s, stdout); }
@@ -66,7 +72,8 @@ def needs_runtime(module) -> bool:
     unused object is how a "no dependencies" claim quietly stops being true.
     """
     from ..ir.opcodes import Op
-    provided = {"print_int", "print_float", "print_str"}
+    provided = {"put_int", "put_float", "print_int", "print_float",
+                "print_str"}
     return any(ins.sym in provided
                for f in module.functions for b in f.blocks
                for ins in b.instructions if ins.op is Op.CALL)

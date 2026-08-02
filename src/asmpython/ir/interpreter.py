@@ -116,6 +116,12 @@ class Interpreter:
         if name == "putchar":
             self._emit(chr(int(args[0]) & 0xFF))
             return 0
+        if name == "put_int":
+            self._emit(str(int(args[0])))
+            return None
+        if name == "put_float":
+            self._emit(f"{float(args[0]):f}")
+            return None
         if name == "print_int":
             self._emit(f"{int(args[0])}\n")
             return None

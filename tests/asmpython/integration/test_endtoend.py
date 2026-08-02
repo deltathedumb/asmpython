@@ -46,6 +46,8 @@ _HOST_TARGET_NAME = ("x86_64-windows" if sys.platform == "win32"
 _RUNTIME_C = (
     "#include <stdio.h>\n"
     "#include <stdint.h>\n"
+    'void put_int(int64_t v)    { printf("%lld", (long long)v); }\n'
+    'void put_float(double v)   { printf("%f", v); }\n'
     'void print_int(int64_t v)  { printf("%lld\\n", (long long)v); }\n'
     'void print_float(double v) { printf("%f\\n", v); }\n'
     "extern int64_t main_ir(void);\n"
@@ -257,6 +259,14 @@ PROGRAMS = {
             a: int = 3
             print(1 if a > 0 else (2 if a < -1 else 3))
             print(1 if a < 0 else (2 if a < -1 else 3))
+            return 0
+    """,
+    "print_arity": """
+        def main() -> int:
+            print(1, 2)
+            print(1, 2, 3)
+            print()
+            print(7)
             return 0
     """,
     "conversions": """

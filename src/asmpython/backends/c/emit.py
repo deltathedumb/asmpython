@@ -65,6 +65,8 @@ _PRELUDE = """\
 
 /* The host functions the IR may call. A frontend emits calls to these by
    name; a real target would resolve them from a runtime library. */
+static void put_int(int64_t v)   { printf("%lld", (long long)v); }
+static void put_float(double v)  { printf("%f", v); }
 static void print_int(int64_t v) { printf("%lld\\n", (long long)v); }
 static void print_float(double v) { printf("%f\\n", v); }
 static void print_str(uintptr_t p) { fputs((const char *)p, stdout); }
@@ -76,7 +78,8 @@ static int  putchar_(int64_t c) { return putchar((int)c); }
 #: without one, C assumes `int f()`, and a call to a function returning double
 #: reads the wrong register and produces a plausible wrong number instead of
 #: any kind of error.
-_PROVIDED = {"print_int", "print_float", "print_str", "putchar"}
+_PROVIDED = {"put_int", "put_float", "print_int", "print_float",
+             "print_str", "putchar"}
 
 
 class CBackend(Backend):

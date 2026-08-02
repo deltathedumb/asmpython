@@ -52,11 +52,19 @@ _CMP_OPS = {
 #: `x ** 3` to `x * (x * x)` rounds twice where pow rounds once. The results
 #: differ in the last bit, which surfaces several multiplications later as a
 #: differing printed digit.
+#: `put_*` write a value with NO newline, and `putchar` supplies the space
+#: between arguments and the newline at the end. Python's `print(1, 2)` is one
+#: line reading `1 2`, and `print()` is an empty line; a runtime whose only
+#: primitive appends a newline can express neither, and the frontend produced
+#: two separate lines for the first and no output at all for the second.
 _RUNTIME = {
-    "print_int": ([T.I64], T.VOID),
-    "print_float": ([T.F64], T.VOID),
+    "put_int": ([T.I64], T.VOID),
+    "put_float": ([T.F64], T.VOID),
+    "putchar": ([T.I64], T.I64),
     "pow": ([T.F64, T.F64], T.F64),
 }
+
+_SPACE, _NEWLINE = 32, 10
 
 #: `int(x)`/`float(x)`/`bool(x)`. Lowered as coercions, not calls -- there is
 #: nothing to call, and emitting a call would make every backend depend on a
@@ -645,14 +653,18 @@ class Lowerer:
     def _call(self, node: ast.Call) -> int:
         name = node.func.id
         if name == "print":
-            for arg in node.args:
+            for i, arg in enumerate(node.args):
+                if i:
+                    self.b.call(T.I64, "putchar",
+                                [self.b.const(T.I64, _SPACE)])
                 ty = self._type_of(arg)
                 value = self._expr(arg)
                 if ty is FLOAT:
-                    self.b.call(T.VOID, "print_float", [value])
+                    self.b.call(T.VOID, "put_float", [value])
                 else:
-                    self.b.call(T.VOID, "print_int",
+                    self.b.call(T.VOID, "put_int",
                                 [self._coerce(value, ty, INT)])
+            self.b.call(T.I64, "putchar", [self.b.const(T.I64, _NEWLINE)])
             return self.b.const(T.I64, 0)
 
         if name in _CONVERSIONS and name not in self.infos:
