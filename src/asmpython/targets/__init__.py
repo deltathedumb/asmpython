@@ -35,4 +35,27 @@ X86_64_MACOS = register(Target(
     object_format="macho", object_suffix=".o", executable_suffix="",
 ), aliases=("macos", "darwin"))
 
-__all__ = ["PORTABLE_C", "X86_64_LINUX", "X86_64_WINDOWS", "X86_64_MACOS"]
+#: Bare-metal AArch64: no operating system, no libc entry point. This is the
+#: one that can be EXECUTED on a developer machine without an ARM box --
+#: qemu-system-aarch64 boots it directly with `-M virt -kernel`, which is why
+#: the arm64 backend defaults to it and the tests use it.
+AARCH64_NONE = register(Target(
+    "aarch64-none", arch="aarch64", os="none", abi="aapcs64",
+    object_format="elf", object_suffix=".o", executable_suffix=".elf",
+    cc_names=("aarch64-none-elf-gcc", "aarch64-elf-gcc"),
+), aliases=("arm64-bare", "aarch64-elf"))
+
+AARCH64_LINUX = register(Target(
+    "aarch64-linux", arch="aarch64", os="linux", abi="aapcs64",
+    object_format="elf", object_suffix=".o", executable_suffix="",
+    cc_names=("aarch64-linux-gnu-gcc", "aarch64-none-linux-gnu-gcc"),
+), aliases=("arm64", "arm64-linux"))
+
+AARCH64_MACOS = register(Target(
+    "aarch64-macos", arch="aarch64", os="macos", abi="aapcs64",
+    object_format="macho", object_suffix=".o", executable_suffix="",
+    cc_names=("clang",),
+), aliases=("arm64-macos", "apple-silicon"))
+
+__all__ = ["PORTABLE_C", "X86_64_LINUX", "X86_64_WINDOWS", "X86_64_MACOS",
+           "AARCH64_NONE", "AARCH64_LINUX", "AARCH64_MACOS"]

@@ -187,7 +187,13 @@ def _link_stage(opts: Options, result: Result, be, target: Target,
     """
     from .. import link as link_registry
 
-    toolchain = link_registry.get(opts.toolchain)
+    # A bare-metal target cannot be linked by the hosted toolchain: no libc,
+    # no start files, and a linker script that has to match the machine. The
+    # default follows the target rather than making every invocation say so.
+    name = opts.toolchain
+    if name == "cc" and target.os == "none":
+        name = "baremetal"
+    toolchain = link_registry.get(name)
     workdir = opts.workdir or (opts.output or opts.source).parent / ".asmpython"
     output = opts.output or opts.source.with_suffix(target.executable_suffix)
     if output.suffix != target.executable_suffix and target.executable_suffix:

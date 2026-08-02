@@ -90,7 +90,7 @@ def available() -> dict[str, Backend]:
 
 
 def load_builtin() -> None:
-    from ..backends import c, x86_64  # noqa: F401
+    from ..backends import arm64, c, x86_64  # noqa: F401
 
 
 class BackendUnsupported(Exception):

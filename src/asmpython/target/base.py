@@ -45,6 +45,12 @@ class Target:
     #: Filename suffixes for the link stage.
     object_suffix: str = ".o"
     executable_suffix: str = ""
+    #: Compiler drivers that can assemble and link for this target, in
+    #: preference order. Empty means the host's own -- a cross target names
+    #: its toolchain here so the link stage does not have to guess from the
+    #: architecture, and so a second toolchain for the same architecture is a
+    #: registration rather than a special case.
+    cc_names: tuple[str, ...] = ()
 
     @property
     def pointer_bits(self) -> int:

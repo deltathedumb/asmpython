@@ -38,3 +38,5 @@ def load_builtin() -> None:
     _loaded = True
     from .toolchains import load_builtin as _load
     _load()
+    from .baremetal import load_builtin as _load_bare
+    _load_bare()

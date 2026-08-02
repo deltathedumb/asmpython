@@ -38,8 +38,13 @@ class CcToolchain(Toolchain):
         return not target.is_source or True
 
     def link(self, request: LinkRequest) -> Path:
-        cc = find_tool(self.CANDIDATES, what="C compiler driver",
-                       install="install gcc or clang, or pass --toolchain none")
+        # A cross target names its own driver; the host's gcc cannot produce
+        # code for it, and guessing the name from the architecture is the
+        # kind of sniffing that put System V code on a Windows target.
+        candidates = request.target.cc_names or self.CANDIDATES
+        cc = find_tool(candidates, what=f"compiler for {request.target.name}",
+                       install="install a suitable toolchain and put it on "
+                               "PATH, or pass --toolchain none")
         work = request.workdir
         work.mkdir(parents=True, exist_ok=True)
 

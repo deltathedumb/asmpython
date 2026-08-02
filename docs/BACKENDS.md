@@ -61,7 +61,11 @@ for function in module.defined_functions():
 ```
 
 `backends/c/emit.py` is exactly this, complete, in about 200 lines. Read it
-before writing anything.
+before writing anything. `backends/arm64/emit.py` is the same shape for a real
+machine, and its header lists what differs from x86-64 and what each
+difference costs — three-operand arithmetic, no memory operands, no 64-bit
+immediate, no remainder instruction, and a stack pointer that must stay
+aligned at all times rather than only at a call.
 
 The `case _` matters. An unhandled opcode must fail loudly at build time; a
 silent fallthrough emits nothing and produces a program that is wrong in a way

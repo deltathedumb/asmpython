@@ -24,9 +24,9 @@ src/asmpython/
                  parser, interpreter
   passes/        pass manager with invariant checking, and transforms
   frontend(s)/   source -> IR         (python: an annotated subset)
-  backend(s)/    IR -> artifacts      (c: portable C99; x86-64: assembly)
-  target(s)/     the platforms        (x86_64-linux/-windows/-macos, c)
-  link/          artifacts -> program (cc; none)
+  backend(s)/    IR -> artifacts      (c; x86-64; arm64)
+  target(s)/     the platforms        (x86_64-*, aarch64-*, c)
+  link/          artifacts -> program (cc; baremetal; none)
   driver/        options, pipeline, command line
 ```
 
@@ -68,9 +68,11 @@ correction — emitted **once in the frontend** rather than Python's semantics
 owed by each backend.
 
 That is the whole argument for a small IR, and it is checked: the test suite
-runs each program five ways — CPython, the interpreter on unoptimised IR, the
-interpreter on optimised IR, the C backend compiled and executed, and the
-x86-64 backend assembled, linked and executed — and all five must agree.
+runs each program six ways — CPython, the interpreter on unoptimised IR, the
+interpreter on optimised IR, and all three backends compiled, linked and
+executed — and all six must agree. The AArch64 one runs under
+`qemu-system-aarch64`, which needs no ARM hardware because the target is bare
+metal: the image boots directly with `-M virt -kernel`, no guest OS involved.
 
 ## Extending it
 
