@@ -12,7 +12,7 @@ for a target by name, so adding one is a registration.
 ## The whole thing
 
 ```python
-from apc.target import Target, register
+from asmpython.target import Target, register
 
 register(Target(
     "riscv64-linux",
@@ -30,12 +30,12 @@ register(Target(
 Then:
 
 ```bash
-apc build prog.py --target riscv64-linux --backend my-backend
-apc targets                       # lists it, with its aliases
+asmpython build prog.py --target riscv64-linux --backend my-backend
+asmpython targets                       # lists it, with its aliases
 ```
 
 Built-in targets go through this same call. There is no privileged path — if
-`apc/targets/__init__.py` were deleted, apc would still compile and simply
+`asmpython/targets/__init__.py` were deleted, asmpython would still compile and simply
 have no platforms until something registered one.
 
 ## Every field is explicit, and that matters
@@ -71,15 +71,15 @@ program that runs and is wrong.
 
 ## `host`
 
-`host` is not a registered target — it resolves to whichever platform apc is
+`host` is not a registered target — it resolves to whichever platform asmpython is
 running on:
 
 ```bash
-apc build prog.py --target host      # or just omit --target
+asmpython build prog.py --target host      # or just omit --target
 ```
 
 A machine backend should declare `default_target = "host"` rather than naming
-a platform. The x86-64 backend defaulted to `x86_64-linux`, so `apc build
+a platform. The x86-64 backend defaulted to `x86_64-linux`, so `asmpython build
 --backend x86-64` on Windows emitted ELF directives and handed them to a COFF
 assembler — a cross-compile nobody asked for, reported as an assembler syntax
 error.
@@ -111,6 +111,6 @@ platform, configured differently" is a thing people legitimately want.
 - [ ] `object_suffix` and `executable_suffix` match what the platform expects
       (`.obj`/`.exe` on Windows, `.o`/`` elsewhere)
 - [ ] a backend exists that implements your `abi`, or yours refuses clearly
-- [ ] `apc targets` shows it
-- [ ] a program compiled for it runs, and agrees with `apc run` on the same
+- [ ] `asmpython targets` shows it
+- [ ] a program compiled for it runs, and agrees with `asmpython run` on the same
       program

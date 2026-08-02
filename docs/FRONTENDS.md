@@ -4,8 +4,8 @@ A frontend turns source text into a `Module`. It is the mirror image of a
 backend and about the same size.
 
 ```python
-from apc.frontend import Frontend, register
-from apc.ir import Module
+from asmpython.frontend import Frontend, register
+from asmpython.ir import Module
 
 class MyLang(Frontend):
     name = "mylang"
@@ -18,7 +18,7 @@ class MyLang(Frontend):
 register(MyLang())
 ```
 
-Then `apc build prog.ml`, or `--frontend mylang` if the extension is
+Then `asmpython build prog.ml`, or `--frontend mylang` if the extension is
 ambiguous.
 
 ## Everything language-specific lives on your side
@@ -71,7 +71,7 @@ case _:
 The test that finds this class of bug is cheap: feed a corpus of unsupported
 source at the whole pipeline and assert only that a compiler behaves like one
 — a result or a diagnostic, never an exception. See
-`tests/apc/unit/test_frontend.py::TestNothingCrashes`.
+`tests/asmpython/unit/test_frontend.py::TestNothingCrashes`.
 
 ## Registers are mutable, and there are no phi nodes
 

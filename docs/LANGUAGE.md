@@ -105,7 +105,7 @@ enforced by a test that feeds 42 unsupported constructs at the whole pipeline.
 `print` of a float uses C's `%f`, not Python's `repr`:
 
 ```
-apc:     32.000000
+asmpython:     32.000000
 CPython: 32.0
 ```
 

@@ -17,11 +17,11 @@ deliverable.
 
 ### Added
 
-- **apc, a from-scratch retargetable compiler** (`src/apc/`) — a
+- **asmpython, a from-scratch retargetable compiler** (`src/asmpython/`) — a
   language-independent IR with four registries (frontends, backends, targets,
   toolchains) whose built-ins register through exactly the same call a third
   party makes, because an extension path the built-ins bypass is one nobody
-  has tested. `apc build prog.py` produces an executable.
+  has tested. `asmpython build prog.py` produces an executable.
 
   The IR is 39 opcodes. The type is a FIELD on the instruction rather than
   part of the mnemonic (`%3 = i64.add %1, %2`), which is what keeps it at 39
@@ -45,14 +45,14 @@ deliverable.
   every code example in those four was executed as written.
 
 - **Targets are an extension point, in both trees.** They were three constants
-  inside `apc`'s backend interface and seven modules inside the legacy
-  `_compiler/`. Both are now registries — `apc.target` / `asmpython._targets`
+  inside `asmpython`'s backend interface and seven modules inside the legacy
+  `_compiler/`. Both are now registries — `asmpython.target` / `asmpython._targets`
   — that the compiler asks by name, so adding a platform is a registration
   rather than an edit to the driver. Public API at `asmpython/target.py`,
   alongside `backend.py`, `frontend.py` and `linker.py`.
 
-- **A link stage** (`apc.link`). `src/apc/link/` had been an empty directory
-  since the tree was created: `apc build` emitted assembly and stopped, so the
+- **A link stage** (`asmpython.link`). `src/asmpython/link/` had been an empty directory
+  since the tree was created: `asmpython build` emitted assembly and stopped, so the
   compiler had never once been asked to produce something that runs. Shipped
   toolchains are `cc` (hand it to gcc/clang, which knows where crt1.o and libc
   live on this machine — the genuinely hard part) and `none` (write artifacts,

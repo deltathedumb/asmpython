@@ -7,8 +7,8 @@ reading a second, the second one would be the bug.
 ## The interface
 
 ```python
-from apc.backend import Backend, Target, register
-from apc.ir import Module
+from asmpython.backend import Backend, Target, register
+from asmpython.ir import Module
 
 class MyBackend(Backend):
     name = "my-machine"
@@ -99,7 +99,7 @@ the hardest case to debug.
 When you want it:
 
 ```python
-from apc.backend import RegisterFile, allocate, verify_allocation
+from asmpython.backend import RegisterFile, allocate, verify_allocation
 
 alloc = allocate(function, RegisterFile(
     general=("rax", "rcx", "rdx", "rbx", "rsi", "rdi"),
@@ -129,7 +129,7 @@ Diff against the reference interpreter. It is the executable specification, so
 any disagreement is your bug, localised to one program:
 
 ```python
-from apc.ir.interpreter import Interpreter
+from asmpython.ir.interpreter import Interpreter
 from io import StringIO
 
 out = StringIO()
@@ -142,8 +142,8 @@ yourself is a far better first test than a program that requires a frontend, a
 runtime and your backend to all be correct simultaneously:
 
 ```bash
-apc build prog.py --emit-ir -o prog.ir     # then edit prog.ir freely
-apc run prog.ir                            # what it SHOULD do
+asmpython build prog.py --emit-ir -o prog.ir     # then edit prog.ir freely
+asmpython run prog.ir                            # what it SHOULD do
 ```
 
 ## Targets
@@ -176,7 +176,7 @@ raise BackendUnsupported(
 
 `BackendUnsupported` becomes a diagnostic naming the backend and the target.
 Any other exception reaches the user as a traceback with a compiler stack in
-it, which reads as "you found a bug in apc" when it means "use another
+it, which reads as "you found a bug in asmpython" when it means "use another
 backend".
 
 ## Producing a program
@@ -196,7 +196,7 @@ and emitting the IR's `main` under `ENTRY_SYMBOL`, not as `main` — it returns
 i64 where C requires int, and would collide with the runtime's entry point:
 
 ```python
-from apc.backend import ENTRY_SYMBOL
+from asmpython.backend import ENTRY_SYMBOL
 
 def symbol(self, name):
     return ENTRY_SYMBOL if name == "main" else name
@@ -226,7 +226,7 @@ else's source, which is a second, quieter version of the same bug.
 ## Checklist
 
 - [ ] `name` and `description` set; `register()` called at import
-- [ ] Listed in `apc.backend.load_builtin`
+- [ ] Listed in `asmpython.backend.load_builtin`
 - [ ] `case _` raises on an unhandled opcode
 - [ ] No defensive checks for the ten invariants above
 - [ ] Behaviour read from `target` fields, never parsed out of `target.name`

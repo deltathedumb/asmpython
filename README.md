@@ -1,24 +1,24 @@
-# apc — a retargetable compiler
+# asmpython — a retargetable compiler
 
 A language-independent IR with pluggable frontends, backends, targets and
 toolchains. Python in, a native executable out, and no half knows about
 another.
 
 ```
-apc build prog.py                   # -> prog.exe, ready to run
-apc build prog.py -O                # optimise first
-apc build prog.py --backend x86-64 --target x86_64-linux
-apc build prog.py --emit            # artifacts only; do not link
-apc build prog.py --emit-ir         # stop at the IR and read it
-apc run prog.py                     # execute in the reference interpreter
-apc check prog.py                   # analyse and verify, produce nothing
-apc ops | types | passes | backends | frontends | targets | toolchains
+asmpython build prog.py                   # -> prog.exe, ready to run
+asmpython build prog.py -O                # optimise first
+asmpython build prog.py --backend x86-64 --target x86_64-linux
+asmpython build prog.py --emit            # artifacts only; do not link
+asmpython build prog.py --emit-ir         # stop at the IR and read it
+asmpython run prog.py                     # execute in the reference interpreter
+asmpython check prog.py                   # analyse and verify, produce nothing
+asmpython ops | types | passes | backends | frontends | targets | toolchains
 ```
 
 ## Layout
 
 ```
-src/apc/
+src/asmpython/
   diagnostics/   spans, structured diagnostics, terminal rendering
   ir/            types, opcodes, module, cfg, builder, verifier, printer,
                  parser, interpreter
@@ -29,6 +29,11 @@ src/apc/
   link/          artifacts -> program (cc; none)
   driver/        options, pipeline, command line
 ```
+
+`legacy/asmpython/` is the pre-rewrite compiler, kept for its code generation
+and not maintained. It answers to the same import name, and two packages
+cannot share one — so the rewrite owns `asmpython` and the old tree needs
+`PYTHONPATH=legacy`. See [legacy/README.md](legacy/README.md).
 
 Four registries — frontends, backends, targets, toolchains — and the
 built-ins register through exactly the same call a third party makes. An
@@ -71,10 +76,10 @@ x86-64 backend assembled, linked and executed — and all five must agree.
 
 | you want | read | register with |
 | --- | --- | --- |
-| a language | [docs/FRONTENDS.md](docs/FRONTENDS.md) | `apc.frontend.register` |
-| a code generator | [docs/BACKENDS.md](docs/BACKENDS.md) | `apc.backend.register` |
-| a platform | [docs/TARGETS.md](docs/TARGETS.md) | `apc.target.register` |
-| a way to link | [docs/LINKERS.md](docs/LINKERS.md) | `apc.link.register` |
+| a language | [docs/FRONTENDS.md](docs/FRONTENDS.md) | `asmpython.frontend.register` |
+| a code generator | [docs/BACKENDS.md](docs/BACKENDS.md) | `asmpython.backend.register` |
+| a platform | [docs/TARGETS.md](docs/TARGETS.md) | `asmpython.target.register` |
+| a way to link | [docs/LINKERS.md](docs/LINKERS.md) | `asmpython.link.register` |
 
 [docs/LANGUAGE.md](docs/LANGUAGE.md) describes the Python subset — what it
 accepts, and the four places Python and the machine disagree.
@@ -82,7 +87,7 @@ accepts, and the four places Python and the machine disagree.
 ## Running the tests
 
 ```
-python -m pytest tests/apc -q
+python -m pytest tests/asmpython -q
 ```
 
 The C and x86-64 stages need a C compiler on PATH; without one they skip

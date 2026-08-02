@@ -3,20 +3,20 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "apc"
+name = "asmpython"
 version = "0.1.0"
 description = "A retargetable compiler: language-independent IR, pluggable frontends and backends"
 requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
-apc = "apc.driver.cli:main"
+asmpython = "asmpython.driver.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests/apc"]
+testpaths = ["tests/asmpython"]
 pythonpath = ["src"]
 
 [tool.ruff]
