@@ -217,6 +217,72 @@ class TestElse:
             f"false edge goes to {branch.labels[1]!r}, not the else block")
 
 
+class TestUnreachableCode:
+    """Python allows dead code after a terminator; so must this.
+
+    A terminated block cannot take another instruction -- the builder refuses,
+    correctly. Lowering on regardless raised `RuntimeError: block already ends
+    in 'ret'` at the user, for a program CPython runs without complaint.
+    """
+
+    def test_after_return(self, tmp_path):
+        lines, _ = run_text("""
+            def f(n: int) -> int:
+                if n > 0:
+                    return 1
+                    print(99)
+                return 0
+
+            def main() -> int:
+                print(f(1))
+                print(f(-1))
+                return 0
+        """, tmp_path)
+        assert lines == ["1", "0"]
+
+    def test_after_break_and_continue(self, tmp_path):
+        lines, _ = run_text("""
+            def main() -> int:
+                total: int = 0
+                for i in range(5):
+                    if i == 2:
+                        break
+                        print(99)
+                    total = total + i
+                    continue
+                    print(98)
+                print(total)
+                return 0
+        """, tmp_path)
+        assert lines == ["1"]
+
+    def test_the_dead_statements_are_not_emitted(self, tmp_path):
+        """Dropped, not merely unexecuted: they must not reach the IR, where
+        they would be instructions in a block that already returned."""
+        result, _ = compile_text("""
+            def main() -> int:
+                return 1
+                print(12345)
+        """, tmp_path)
+        text = str(result.module.function("main"))
+        assert "12345" not in text
+
+    def test_a_function_whose_every_path_returns(self, tmp_path):
+        lines, _ = run_text("""
+            def f(n: int) -> int:
+                if n > 0:
+                    return 1
+                else:
+                    return 2
+
+            def main() -> int:
+                print(f(1))
+                print(f(-1))
+                return 0
+        """, tmp_path)
+        assert lines == ["1", "2"]
+
+
 class TestPower:
     def test_literal_exponent_is_expanded(self, tmp_path):
         lines, _ = run_text("""

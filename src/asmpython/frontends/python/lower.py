@@ -123,8 +123,7 @@ class Lowerer:
             if sym.register is None:
                 sym.register = self.b.reg(TO_IR[sym.type])
 
-        for stmt in info.node.body:
-            self._stmt(stmt)
+        self._stmts(info.node.body)
 
         if self.b.current.terminator is None:
             if info.ret is NONE:
@@ -134,6 +133,24 @@ class Lowerer:
         return fn
 
     # ── statements ──────────────────────────────────────────────────────────
+    def _stmts(self, body: list) -> None:
+        """Lower a list of statements, stopping at the first terminator.
+
+        Python allows dead code after `return`, `break` and `continue`, and a
+        terminated block cannot take another instruction -- the builder
+        refuses, correctly, because appending after a `ret` would produce IR
+        the verifier rejects. Lowering on regardless raised
+        `RuntimeError: block already ends in 'ret'` at the user, for a program
+        CPython runs without complaint.
+
+        Dropping the statements is what every compiler does with them, and it
+        is what Python effectively does too.
+        """
+        for stmt in body:
+            if self.b.current.terminator is not None:
+                return
+            self._stmt(stmt)
+
     def _stmt(self, node) -> None:
         self.b.span = self._span(node)
         match node:
@@ -202,15 +219,13 @@ class Lowerer:
         self.b.branch(cond, then_b, join if else_b is None else else_b)
 
         self.b.switch_to(then_b)
-        for s in node.body:
-            self._stmt(s)
+        self._stmts(node.body)
         if self.b.current.terminator is None:
             self.b.jump(join)
 
         if else_b is not None:
             self.b.switch_to(else_b)
-            for s in node.orelse:
-                self._stmt(s)
+            self._stmts(node.orelse)
             if self.b.current.terminator is None:
                 self.b.jump(join)
 
@@ -224,8 +239,7 @@ class Lowerer:
         self.b.branch(self._truth(node.test), body, done)
         self.b.switch_to(body)
         self.loops.append((head, done))
-        for s in node.body:
-            self._stmt(s)
+        self._stmts(node.body)
         self.loops.pop()
         if self.b.current.terminator is None:
             self.b.jump(head)
@@ -264,8 +278,7 @@ class Lowerer:
                                  var, stop), body, done)
         self.b.switch_to(body)
         self.loops.append((step_b, done))
-        for s in node.body:
-            self._stmt(s)
+        self._stmts(node.body)
         self.loops.pop()
         if self.b.current.terminator is None:
             self.b.jump(step_b)
