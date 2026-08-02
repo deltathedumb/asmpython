@@ -21,7 +21,6 @@ to ignore is worse than a smaller green one.
 """
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import textwrap
@@ -33,44 +32,9 @@ from asmpython import target as target_registry
 from asmpython.diagnostics import DiagnosticSink
 from asmpython.driver import Options, compile_source
 
-#: Neither the Arm GNU Toolchain nor QEMU puts itself on PATH after an
-#: unzip on Windows, so the usual install locations are checked too, and an
-#: environment variable overrides both -- guessing at install paths is a
-#: convenience for the common case and must not be the only way in.
-_TOOLCHAIN_DIRS = (
-    Path(os.environ["ASMPYTHON_AARCH64_BIN"]),
-) if os.environ.get("ASMPYTHON_AARCH64_BIN") else (
-    Path(r"C:\tools\aarch64-none-elf\bin"),
-    Path("/opt/aarch64-none-elf/bin"),
-    Path("/usr/bin"),
-)
-_QEMU_DIRS = (
-    Path(os.environ["ASMPYTHON_QEMU_BIN"]),
-) if os.environ.get("ASMPYTHON_QEMU_BIN") else (
-    Path(r"C:\Program Files\qemu"),
-    Path("/usr/bin"),
-)
+from . import aarch64
 
-
-def _find(names: tuple[str, ...], extra: tuple[Path, ...]) -> str | None:
-    for name in names:
-        found = shutil.which(name)
-        if found:
-            return found
-        for directory in extra:
-            for suffix in ("", ".exe"):
-                candidate = directory / (name + suffix)
-                if candidate.is_file():
-                    return str(candidate)
-    return None
-
-
-CC = _find(("aarch64-none-elf-gcc", "aarch64-elf-gcc"), _TOOLCHAIN_DIRS)
-QEMU = _find(("qemu-system-aarch64",), _QEMU_DIRS)
-
-pytestmark = pytest.mark.skipif(
-    not (CC and QEMU),
-    reason="needs aarch64-none-elf-gcc and qemu-system-aarch64")
+pytestmark = pytest.mark.skipif(not aarch64.AVAILABLE, reason=aarch64.REASON)
 
 
 def build_and_run(src: str, tmp_path: Path, *, optimise: bool = False) -> list[str]:
@@ -79,29 +43,15 @@ def build_and_run(src: str, tmp_path: Path, *, optimise: bool = False) -> list[s
     path.write_text(textwrap.dedent(src).strip() + "\n", encoding="utf-8")
     exe = tmp_path / "prog.elf"
 
-    env_path = os.environ.get("PATH", "")
-    os.environ["PATH"] = str(Path(CC).parent) + os.pathsep + env_path
-    try:
+    with aarch64.on_path():
         sink = DiagnosticSink()
         result = compile_source(Options(
             source=path, output=exe, backend="arm64", link=True,
             optimise=optimise, workdir=tmp_path / "work",
             target=target_registry.get("aarch64-none")), sink)
         assert result.ok, [d.message for d in sink.diagnostics]
-    finally:
-        os.environ["PATH"] = env_path
 
-    ran = subprocess.run(
-        [QEMU, "-M", "virt", "-cpu", "cortex-a57", "-nographic",
-         "-kernel", str(result.program)],
-        capture_output=True, text=True, timeout=120)
-    # Only the trailing empty entry from the final newline is dropped. A
-    # blank line in the MIDDLE is output: `print()` produces one, and
-    # filtering every empty line made that case silently pass.
-    lines = [line.rstrip("\r") for line in ran.stdout.split("\n")]
-    if lines and lines[-1] == "":
-        lines.pop()
-    return lines
+    return aarch64.run_image(result.program)
 
 
 def cpython_lines(src: str) -> list[str]:

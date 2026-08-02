@@ -42,7 +42,7 @@ deliverable.
 
   Documented in `README.md` and
   `docs/{FRONTENDS,BACKENDS,TARGETS,LINKERS,LANGUAGE}.md`; every code example
-  in those five is executed as written, by the suite, on every run. 804 tests.
+  in those five is executed as written, by the suite, on every run. 824 tests.
 
   The pre-rewrite compiler moved to `legacy/asmpython/` unchanged. Two
   packages cannot share an import name, and the rewrite owns it; the old tree
@@ -102,6 +102,12 @@ deliverable.
   straight from the differential fuzzer, which knows nothing about AArch64 and
   compares against CPython exactly as before.
 
+  The fuzzer's whole generated corpus now runs on it too, so "six ways and
+  they must all agree" is what the suite does rather than what it aspires to.
+  Both the toolchain discovery and the QEMU runner live in one module the two
+  test files share: copying them would have been three lines and the start of
+  the exact failure this compiler was rewritten to avoid.
+
 - **The documentation is executed, not proofread**
   (`tests/asmpython/integration/test_documentation.py`) — the README claimed
   every code example in the five extension documents had been run, and nothing
@@ -140,7 +146,9 @@ deliverable.
   does not bound a product of two of them.
 
   It found eight bugs that no hand-written test had, every one a wrong answer
-  in a program that compiled, linked and ran:
+  in a program that compiled, linked and ran (and the AArch64 backend, added
+  later, passed the same corpus on its first run -- which is the only reason
+  to trust it):
 
   - **`if`/`else` never ran its else branch.** `Block` defines `__len__`, so a
     freshly created one is empty and falsy, and `else_b or join` took the join

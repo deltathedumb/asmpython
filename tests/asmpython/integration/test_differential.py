@@ -1,4 +1,4 @@
-"""Randomly generated programs, run four ways and compared.
+"""Randomly generated programs, run six ways and compared.
 
 Every hand-written test asserts something someone thought of. The bugs that
 survive are the ones nobody thought of: the parallel-move collapse needed four
@@ -8,8 +8,13 @@ descending-range bug needed a literal negative step. Each was found by
 accident, and each was a wrong answer in a program that ran.
 
 So this generates programs from the grammar the frontend accepts and checks
-that CPython, the reference interpreter, the C backend and the x86-64 backend
-all agree. Seeded, so a failure reproduces exactly: the seed is the test id.
+that CPython, the interpreter on unoptimised IR, the interpreter on optimised
+IR, and the C, x86-64 and AArch64 backends compiled and executed all agree.
+Seeded, so a failure reproduces exactly: the seed is the test id.
+
+The generator knows nothing about any of them, which is the property that
+makes it worth having: a backend earns trust by surviving the corpus that
+broke the others, not one written afterwards to fit it.
 
 It works. On its first run it found `0.0 // -9.2` returning +0.0 where Python
 gives -0.0, then `0.0 % -6.2` with the same sign lost, then float `**`
@@ -36,6 +41,8 @@ from asmpython import target as target_registry
 from asmpython.diagnostics import DiagnosticSink
 from asmpython.driver import Options, compile_source
 from asmpython.ir.interpreter import Interpreter
+
+from . import aarch64
 
 HAS_CC = shutil.which("gcc") or shutil.which("cc")
 HOST_TARGET = "x86_64-windows" if sys.platform == "win32" else "x86_64-linux"
@@ -561,15 +568,36 @@ def interpreter_output(src: str, tmp_path: Path, optimise: bool) -> list[str]:
     return out.getvalue().split("\n")[:-1] if out.getvalue() else []
 
 
+#: How to build for each backend, and how to run what comes out. Naming the
+#: runner alongside the target is what lets a cross backend join at all: an
+#: AArch64 image is not something this machine can execute, and a runner that
+#: assumed it could is why the generated corpus covered two backends for as
+#: long as it did.
+BACKENDS = {
+    "c": ("c", None),
+    "x86-64": (HOST_TARGET, None),
+    "arm64": ("aarch64-none", "qemu"),
+}
+
+
 def compiled_output(src: str, tmp_path: Path, backend: str) -> list[str]:
+    target, runner = BACKENDS[backend]
     path = tmp_path / "gen.py"
     path.write_text(src, encoding="utf-8")
     sink = DiagnosticSink()
-    result = compile_source(Options(
+
+    build = Options(
         source=path, output=tmp_path / "gen.exe", backend=backend, link=True,
-        target=target_registry.get("c" if backend == "c" else HOST_TARGET),
-        workdir=tmp_path / f"w_{backend}"), sink)
+        target=target_registry.get(target), workdir=tmp_path / f"w_{backend}")
+    if runner == "qemu":
+        with aarch64.on_path():
+            result = compile_source(build, sink)
+    else:
+        result = compile_source(build, sink)
     assert result.ok, [d.message for d in sink.diagnostics] + [src]
+
+    if runner == "qemu":
+        return aarch64.run_image(result.program)
     ran = subprocess.run([str(result.program)], capture_output=True, text=True)
     assert ran.returncode == 0, ran.stderr
     return ran.stdout.split("\n")[:-1]
@@ -597,6 +625,25 @@ def test_optimised_matches_cpython(seed, tmp_path):
 def test_compiled_matches_cpython(seed, backend, tmp_path):
     src = ProgramGenerator(seed).program()
     assert compiled_output(src, tmp_path, backend) == cpython_output(src), src
+
+
+@pytest.mark.skipif(not aarch64.AVAILABLE, reason=aarch64.REASON)
+@pytest.mark.parametrize("seed", SEEDS[:20])
+def test_aarch64_matches_cpython(seed, tmp_path):
+    """The same generated corpus, on a machine that is not this one.
+
+    Separate from the parametrised test above only because it skips for a
+    different reason -- a C compiler and a cross toolchain are independently
+    present or absent, and one skip message covering both would name the
+    wrong missing thing half the time.
+
+    The generator knows nothing about AArch64. That is the point: these are
+    the programs that found the argument-scheduling collapse and the float
+    sign errors on x86-64, and a backend earns trust by surviving the corpus
+    that broke the others rather than a corpus written for it.
+    """
+    src = ProgramGenerator(seed).program()
+    assert compiled_output(src, tmp_path, "arm64") == cpython_output(src), src
 
 
 def _pass_names() -> list[str]:
