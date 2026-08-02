@@ -80,6 +80,11 @@ class ProgramGenerator:
         #: name -> ceiling, so a variable's magnitude is known where it is used
         self.int_vars: dict[str, float] = {}
         self.float_vars: dict[str, float] = {}
+        #: (name, parameter types, return bound, return type) for every
+        #: function already defined -- callable from a later one, and from
+        #: main. Only backwards, because the frontend resolves signatures
+        #: first but a cycle would not terminate here.
+        self.callables: list[tuple[str, list[str], float, str]] = []
 
     # -- leaves --------------------------------------------------------------
     def int_literal(self) -> Bounded:
@@ -273,6 +278,14 @@ class ProgramGenerator:
                            for i, t in enumerate(types) if t == "float"}
         expr = self.int_expr() if returns == "int" else self.float_expr()
         bound = expr.bound
+        if self.callables and r.random() < 0.4:
+            inner_name, inner_types, inner_bound, inner_returns =                 r.choice(self.callables)
+            inner = self.call(inner_name, inner_types, inner_bound)
+            cast = (str(inner) if inner_returns == returns
+                    else (f"int({inner})" if returns == "int"
+                          else f"float({inner})"))
+            expr = Bounded(f"({expr} + {cast})", bound + inner.bound)
+            bound = expr.bound
         self.int_vars, self.float_vars = saved_int, saved_float
 
         # EVERY parameter is read, and that is the point. An argument the body
@@ -291,15 +304,47 @@ class ProgramGenerator:
                f"    return {body}\n")
         return src, name, types, bound
 
-    def call(self, name: str, types: list[str], bound: float) -> Bounded:
-        """A call whose arguments respect `ARG_BOUND`."""
+    def call(self, name: str, types: list[str], bound: float,
+             depth: int = 0) -> Bounded:
+        """A call whose arguments respect `ARG_BOUND`.
+
+        Arguments are expressions, not literals, and may themselves be calls.
+        A nested call is the case worth reaching: evaluating it happens partway
+        through setting up the outer one, so the inner call's clobbers land on
+        top of arguments already placed. Passing only literals never gets
+        there -- the literals are materialised immediately before the call and
+        nothing runs in between.
+        """
         args = []
         for t in types:
-            if t == "int":
-                v = self.rng.randint(-int(self.ARG_BOUND), int(self.ARG_BOUND))
-                args.append(str(v) if v >= 0 else f"({v})")
+            if depth < 1 and self.callables and self.rng.random() < 0.30:
+                inner_name, inner_types, inner_bound, returns = \
+                    self.rng.choice(self.callables)
+                inner = self.call(inner_name, inner_types, inner_bound,
+                                  depth + 1)
+                # Clamped rather than rejected. A function's return ceiling is
+                # its arity times ARG_BOUND, so an inner call almost never
+                # fits an outer parameter on its own -- checking and giving up
+                # meant nesting was generated 0 times in 300 programs while
+                # appearing to be covered. `% ARG_BOUND` makes it fit by
+                # construction, and drags a float remainder into argument
+                # position as a bonus.
+                limit = int(self.ARG_BOUND)
+                args.append(f"(int({inner}) % {limit})" if t == "int"
+                            else f"(float({inner}) % {limit}.0)")
+                continue
+            # An expression whose ceiling fits the callee's assumption.
+            for _ in range(4):
+                e = self.int_expr(2) if t == "int" else self.float_expr(2)
+                if e.bound <= self.ARG_BOUND:
+                    args.append(str(e))
+                    break
             else:
-                args.append(f"{self.rng.uniform(-self.ARG_BOUND, self.ARG_BOUND):.4f}")
+                if t == "int":
+                    v = self.rng.randint(-100, 100)
+                    args.append(str(v) if v >= 0 else f"({v})")
+                else:
+                    args.append(f"{self.rng.uniform(-100, 100):.4f}")
         return Bounded(f"{name}({', '.join(args)})", bound)
 
     # -- whole program -------------------------------------------------------
@@ -310,8 +355,10 @@ class ProgramGenerator:
         for i in range(r.randint(0, 3)):
             src, name, types, bound = self.function(i)
             preamble.append(src)
-            functions.append((name, types, bound,
-                              "int" if "-> int" in src else "float"))
+            entry = (name, types, bound,
+                     "int" if "-> int" in src else "float")
+            functions.append(entry)
+            self.callables.append(entry)
 
         lines: list[str] = ["def main() -> int:"]
 
@@ -358,6 +405,13 @@ class ProgramGenerator:
                 lines.append(f"    for k in range({r.randint(1, 5)}):")
                 lines.append(f"        {name} = {name} + k")
                 self.int_vars[name] += 10        # 0+1+2+3+4 at most
+                if self.callables and r.random() < 0.4:
+                    # A call inside a loop, with the counter live across it.
+                    # That is exactly the shape of the first miscompilation
+                    # this compiler had: `add(total, i)` clobbered `i`.
+                    fname, ftypes, fbound, freturns = r.choice(self.callables)
+                    call = self.call(fname, ftypes, fbound)
+                    lines.append(f"        print({call})")
                 if r.random() < 0.4:
                     keyword = "break" if r.random() < 0.5 else "continue"
                     lines.append("        if k == 2:")
@@ -445,6 +499,35 @@ class TestTheGeneratorItself:
         for fragment in ("//", "%", "**", "<<", ">>", "float(", "int(",
                          "break", "continue", "and", "or", "not "):
             assert fragment in corpus, f"the generator never emits {fragment!r}"
+
+    def test_it_reaches_the_shapes_the_abi_bugs_lived_in(self):
+        """A generator can stop producing a shape and go on passing.
+
+        This one did: nesting a call inside an argument was written, looked
+        right, and happened 0 times in 300 programs, because a function's
+        return ceiling never fitted an outer parameter and the code quietly
+        fell back to a literal. Coverage that is asserted is coverage; the
+        rest is intention.
+        """
+        import re
+        programs = [ProgramGenerator(s).program() for s in range(120)]
+
+        wide = sum(1 for p in programs
+                   if re.search(r"def fn\d\((?:[^)]*,){5}", p))
+        assert wide >= 5, "no function takes enough arguments to stack any"
+
+        nested = sum(1 for p in programs for line in p.split("\n")
+                     if len(re.findall(r"fn\d\(", line)) >= 2)
+        assert nested >= 10, "a call is never nested inside an argument"
+
+        in_loop = sum(1 for p in programs for line in p.split("\n")
+                      if line.startswith("        print(fn"))
+        assert in_loop >= 5, "no call happens inside a loop"
+
+        mixed = sum(1 for p in programs
+                    if re.search(r"p\d: int, p\d: float", p)
+                    or re.search(r"p\d: float, p\d: int", p))
+        assert mixed >= 5, "no function mixes integer and float parameters"
 
     def test_no_generated_value_overflows(self):
         """The bound is the reason these tests can compare against CPython at
