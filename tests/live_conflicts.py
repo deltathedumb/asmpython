@@ -33,8 +33,9 @@ if str(REPO) not in sys.path:
 
 from asmpython import _passes
 from asmpython._backends.x86_64.regalloc import RegLoc, XmmLoc, allocate
-from asmpython._compiler import driver, ir_lower
-from asmpython._compiler.cfg import successor_indices
+from asmpython._compiler import driver
+from asmpython._compiler.ssa import ir_lower
+from asmpython._compiler.ssa.cfg import successor_indices
 
 
 def _value_names(operands) -> list[str]:

@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from asmpython._compiler import program
-from asmpython._compiler.site_packages import (
+from asmpython._compiler.packaging.site_packages import (
     install_native_import_resolution,
     resolve_site_package,
 )

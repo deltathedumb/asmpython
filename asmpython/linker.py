@@ -46,8 +46,8 @@ class _ConfiguredLinker:
         return getattr(self._impl, "requested_args", [])
 
     def link(self, ctx: dict) -> bytes:
-        from ._compiler.build_options import inject_build_options
-        from ._compiler.build_report import event, stage
+        from ._compiler.build.build_options import inject_build_options
+        from ._compiler.build.build_report import event, stage
 
         resolved = inject_build_options(ctx)
         with stage(

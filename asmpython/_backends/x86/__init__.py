@@ -1,7 +1,7 @@
 """
 asmpython's built-in x86 (32-bit / IA-32) backend (driver.py's --backend x86).
 
-Compiles an IRModule (see asmpython._compiler.ir / ir_lower.py) to a
+Compiles an IRModule (see asmpython._compiler.ssa.ir / ir_lower.py) to a
 relocatable ELF32/COFF object file, then links it with this package's own
 from-scratch ELF32/PE32 linkers (elf_linker.py/pe_linker.py) -- no gcc/ld
 involved, mirroring x86_64's "builtin" default linker path. There is no
@@ -10,7 +10,7 @@ toolchain isn't assumed to be on PATH, and the builtin linkers are already
 real-toolchain-verified (see elf.py/elf_linker.py/coff.py/pe_linker.py's own
 docstrings), so builtin is the only linker this backend registers.
 
-Plugin interface (the convention asmpython._compiler.ir.ModuleBackend
+Plugin interface (the convention asmpython._compiler.ssa.ir.ModuleBackend
 adapts to IRBackend):
   requested_args: list[dict]
   default_linker: str
@@ -32,7 +32,7 @@ from .elf_linker import link_elf
 from .coff import build_coff
 from .pe_linker import link_pe
 from .. import register_backend
-from ..._compiler.ir import ModuleBackend
+from ..._compiler.ssa.ir import ModuleBackend
 
 
 # ── CLI arguments this backend registers ─────────────────────────────────────

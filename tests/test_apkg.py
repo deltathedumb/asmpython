@@ -19,7 +19,7 @@ from pathlib import Path
 
 import asmpython
 from asmpython._backends import get_backend
-from asmpython._compiler import apkg
+from asmpython._compiler.packaging import apkg
 from asmpython._compiler.__main__ import (
     _load_backend_plugin,
     _load_linker_plugin,

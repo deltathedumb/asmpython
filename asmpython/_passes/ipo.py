@@ -24,7 +24,7 @@ that exists, do not re-add this pass.
 
 from __future__ import annotations
 
-from .._compiler.ir import IRInstr, IRModule, IRPass, IRValue
+from .._compiler.ssa.ir import IRInstr, IRModule, IRPass, IRValue
 
 #: Ops with no side effects (superset used for marking, mirrors dce.PURE_OPS).
 _PURE = frozenset({
@@ -148,7 +148,7 @@ class SinkPass(IRPass):
         return changed
 
     def _run_func(self, func) -> bool:
-        from .._compiler.cfg import loop_membership
+        from .._compiler.ssa.cfg import loop_membership
 
         # Never sink INTO a loop the instruction is not already in.
         #

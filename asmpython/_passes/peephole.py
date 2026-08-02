@@ -24,7 +24,7 @@ value into one that already dominates every use, because the replacement is an
 
 from __future__ import annotations
 
-from .._compiler.ir import IRInstr, IRModule, IRPass, IRValue
+from .._compiler.ssa.ir import IRInstr, IRModule, IRPass, IRValue
 
 #: Ops whose result is a plain integer computation this pass may rewrite.
 _INT_BINOPS = frozenset({

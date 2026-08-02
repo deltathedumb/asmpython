@@ -7,7 +7,7 @@ agree on the width a boolean or a plain integer occupies.
 
 from __future__ import annotations
 
-from ..._compiler.ir import (
+from ..._compiler.ssa.ir import (
     F32, F64, I8, I16, I32, I64, PTR, U8, U16, U32, U64, IRType,
 )
 

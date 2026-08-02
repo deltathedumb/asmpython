@@ -12,7 +12,7 @@ change program behavior.
 
 from __future__ import annotations
 
-from .._compiler.ir import IRInstr, IRModule, IRPass, IRValue
+from .._compiler.ssa.ir import IRInstr, IRModule, IRPass, IRValue
 
 
 def _wrap(value: int, ty) -> int | None:

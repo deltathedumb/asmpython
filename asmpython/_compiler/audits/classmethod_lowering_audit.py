@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .. import ir_lower as IR
+from ..ssa import ir_lower as IR
 from ..program import load_program
 from ..sema import SemaAnalyzer
 

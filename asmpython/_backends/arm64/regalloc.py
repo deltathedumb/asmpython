@@ -40,7 +40,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Union
 
-from ..._compiler.cfg import try_regions_resolved
+from ..._compiler.ssa.cfg import try_regions_resolved
 from .encoder import (
     Reg, VReg,
     ARG_REGS, FP_ARG_REGS,

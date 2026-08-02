@@ -27,7 +27,7 @@ IO
   The simulator's io_out list accumulates (0, value) tuples; the
   caller is expected to print them.
 
-Plugin interface (asmpython._compiler.ir.ModuleBackend)
+Plugin interface (asmpython._compiler.ssa.ir.ModuleBackend)
 ---------------------------------------------------------
   requested_args      list[dict]
   default_linker      str
@@ -43,7 +43,7 @@ from typing import Any
 
 from . import encoder as E
 from .codegen import TernaryFuncCodegen
-from ..._compiler.ir import ModuleBackend
+from ..._compiler.ssa.ir import ModuleBackend
 from ..._compiler.unpack_normalize import install_ir_lowering_prepass
 
 

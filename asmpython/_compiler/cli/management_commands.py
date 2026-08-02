@@ -8,8 +8,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import cache_manager
-from .profiles import (
+from ..build import cache_manager
+from ..build.profiles import (
     ProfileError,
     SCOPES,
     delete_profile,
@@ -375,6 +375,6 @@ def dispatch(argv: list[str]) -> int | None:
         from .ir_command import command_main
         return command_main(rest)
     if command == "test":
-        from .test_runner import command_main
+        from ..test_runner import command_main
         return command_main(rest)
     return None

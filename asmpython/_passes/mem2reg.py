@@ -52,7 +52,7 @@ the function into the "body") and stalls the build. See the KNOWN GAP comment in
 
 from __future__ import annotations
 
-from .._compiler.ir import IRInstr, IRModule, IRPass, IRValue
+from .._compiler.ssa.ir import IRInstr, IRModule, IRPass, IRValue
 from ._cfg import (
     compute_idom,
     dom_tree_children,

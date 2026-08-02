@@ -668,7 +668,7 @@ class Codegen:
         # undefined symbol `property`, from collections.py's `namedtuple()`)
         # for code that never runs. Reused as-is: it's a pure function of the
         # already-fully-typed `self.mod` with no IR-specific state.
-        from .ir_lower import _reachable_callables
+        from .ssa.ir_lower import _reachable_callables
 
         reachable_funcs, reachable_methods = _reachable_callables(self.mod)
         reachable_func_names = {f.name for f in reachable_funcs}

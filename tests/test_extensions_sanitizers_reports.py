@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from asmpython._compiler.build_options import (
+from asmpython._compiler.build.build_options import (
     extract_shared_build_options,
     inject_build_options,
     shared_build_options,
 )
-from asmpython._compiler.build_report import event, report_session, stage
-from asmpython._compiler.extension_packages import (
+from asmpython._compiler.build.build_report import event, report_session, stage
+from asmpython._compiler.packaging.extension_packages import (
     install_extension,
     list_installed,
     load_installed_extensions,
@@ -17,7 +17,7 @@ from asmpython._compiler.extension_packages import (
     read_manifest,
     uninstall_extension,
 )
-from asmpython._compiler.profiles import profile_to_argv
+from asmpython._compiler.build.profiles import profile_to_argv
 
 
 def test_apext_package_install_discover_and_load(tmp_path: Path) -> None:

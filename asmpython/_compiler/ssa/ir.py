@@ -431,8 +431,8 @@ class ModuleBackend(IRBackend):
         return bool(getattr(self._module, "production_suitable", True))
 
     def compile(self, module: IRModule, args: dict) -> dict[str, bytes]:
-        from .build_options import inject_build_options
-        from .build_report import event, stage
+        from ..build.build_options import inject_build_options
+        from ..build.build_report import event, stage
 
         resolved = inject_build_options(args)
         with stage("backend.compile", backend=self.name):
@@ -448,8 +448,8 @@ class ModuleBackend(IRBackend):
         return outputs
 
     def link(self, objects: list[bytes], args: dict) -> dict[str, bytes]:
-        from .build_options import inject_build_options
-        from .build_report import event, stage
+        from ..build.build_options import inject_build_options
+        from ..build.build_report import event, stage
 
         resolved = inject_build_options(args)
         with stage("backend.link", backend=self.name, input_objects=len(objects)):

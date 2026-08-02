@@ -7,8 +7,8 @@ from asmpython._backends.x86_64.unpack_normalize import (
     normalize_literal_unpacks,
 )
 from asmpython._compiler import ast_nodes as A
-from asmpython._compiler import ir_lower
-from asmpython._compiler.ir import F64, PTR
+from asmpython._compiler.ssa import ir_lower
+from asmpython._compiler.ssa.ir import F64, PTR
 from asmpython._compiler.lexer import Lexer
 from asmpython._compiler.parser import Parser
 from asmpython._compiler.sema import analyze

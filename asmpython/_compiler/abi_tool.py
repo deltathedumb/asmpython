@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .artifact_verify import verify_artifact
+from .build.artifact_verify import verify_artifact
 
 
 ABI_FORMAT = "asmpython.abi"

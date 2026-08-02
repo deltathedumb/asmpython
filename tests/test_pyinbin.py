@@ -8,13 +8,13 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from asmpython._compiler.pyinbin_package import (
+from asmpython._compiler.packaging.pyinbin_package import (
     MANIFEST_NAME,
     PyinbinPackageError,
     build_source_bundle,
     verify_source_bundle,
 )
-from asmpython._compiler.project import load_project
+from asmpython._compiler.packaging.project import load_project
 from asmpython.pyinbin import CodeObject, Instruction, Op, VirtualMachine, run_source
 
 

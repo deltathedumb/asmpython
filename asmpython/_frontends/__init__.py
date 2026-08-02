@@ -3,7 +3,7 @@ source-language frontends.
 
 A frontend is the mirror image of a backend: it turns source text of some
 language into the typed module the IR pipeline consumes (see
-``asmpython._compiler.ir.IRFrontend``). ``--frontend NAME`` selects one; the
+``asmpython._compiler.ssa.ir.IRFrontend``). ``--frontend NAME`` selects one; the
 default is ``python``.
 
 The real ``python`` frontend is registered eagerly here. Every other planned

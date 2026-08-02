@@ -23,20 +23,20 @@ from pathlib import Path
 from . import native_libraries as _native_libraries
 from .driver import compile_source, compile_targets, detect_default_target
 from .errors import CompileError, MultiSemaError, explain as _explain_code
-from .packages import (
+from .packaging.packages import (
     PackageError,
     find_project_type,
     install_package,
     run_project_init_script,
     uninstall_package,
 )
-from .pypi import (
+from .packaging.pypi import (
     PypiError,
     install_pypi_package,
     list_pypi_packages,
     uninstall_pypi_package,
 )
-from .project import (
+from .packaging.project import (
     ProjectConfig,
     ProjectError,
     find_default_project,
@@ -798,7 +798,7 @@ def _load_backend_plugin(path: Path) -> str:
     diffing `asmpython._backends._REGISTRY` instead of the extension
     registry, since a Backend has no id-based activation step -- its
     registered name IS what `--backend` selects."""
-    from . import apkg
+    from .packaging import apkg
     from asmpython import _backends
 
     before = set(_backends._REGISTRY.keys())
@@ -829,7 +829,7 @@ def _load_backend_plugin(path: Path) -> str:
 def _load_linker_plugin(path: Path) -> str:
     """Exec a plugin file (bare .py or a .apl package zip) and return the
     name of the linker it registered. Mirrors `_load_backend_plugin`."""
-    from . import apkg
+    from .packaging import apkg
     from asmpython import _linkers
 
     before = set(_linkers._REGISTRY.keys())
@@ -1209,7 +1209,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         bundle: Path | None = None
         if cfg is not None and cfg.pyinbin_imports:
             assert project_dir is not None
-            from .pyinbin_package import PyinbinPackageError, build_source_bundle
+            from .packaging.pyinbin_package import PyinbinPackageError, build_source_bundle
 
             bundle = project_dir / "build" / "pyinbin"
             try:
@@ -1268,7 +1268,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     if cfg is not None and cfg.pyinbin_imports:
         return native_rejection(RuntimeError("project declares pyinbin_imports"))
 
-    from . import apkg
+    from .packaging import apkg
 
     try:
         active_extensions: frozenset = frozenset()
@@ -1790,7 +1790,7 @@ def cmd_pyinbin_package(args: argparse.Namespace) -> int:
         print(f"asmpython: {project_path}: no pyinbin_imports declared", file=sys.stderr)
         return 1
 
-    from .pyinbin_package import PyinbinPackageError, build_source_bundle
+    from .packaging.pyinbin_package import PyinbinPackageError, build_source_bundle
 
     root = project_path.resolve().parent
     destination = args.output or root / "build" / "pyinbin"

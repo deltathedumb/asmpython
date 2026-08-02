@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .embedded_data import EmbeddedDataError, read_resources
+from ..embedded_data import EmbeddedDataError, read_resources
 
 
 @dataclass
@@ -136,7 +136,7 @@ def verify_artifact(path: Path) -> VerificationResult:
             result.error(f"invalid ZIP container: {exc}")
         if format_name == "apext" and result.valid:
             try:
-                from .extension_packages import read_manifest
+                from ..packaging.extension_packages import read_manifest
                 manifest = read_manifest(path, verify=True)
                 result.details["extension"] = {
                     "id": manifest.get("id"),
@@ -160,7 +160,7 @@ def verify_artifact(path: Path) -> VerificationResult:
     signature = path.with_suffix(path.suffix + ".apsig")
     if signature.is_file():
         try:
-            from .package_signing import verify_signature
+            from ..packaging.package_signing import verify_signature
             verified = verify_signature(path, signature)
             result.details["signature"] = verified
             if not verified.get("valid", False):

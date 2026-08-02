@@ -17,9 +17,10 @@ from __future__ import annotations
 import unittest
 
 from asmpython._backends.x86_64 import __module_backend__ as x86_backend
-from asmpython._compiler import driver, ir_lower
-from asmpython._compiler.ir_print import IRParseError, format_module, parse_module
-from asmpython._compiler.ir_verify import validate_ir
+from asmpython._compiler import driver
+from asmpython._compiler.ssa import ir_lower
+from asmpython._compiler.ssa.ir_print import IRParseError, format_module, parse_module
+from asmpython._compiler.ssa.ir_verify import validate_ir
 from asmpython._frontends.apc import emit_module
 from asmpython._frontends.apc import parse as apc_parse
 

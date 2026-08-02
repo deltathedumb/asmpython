@@ -103,7 +103,7 @@ def format_module(module: IRModule, *, with_alloc: bool = False,
         locs = None
         if with_alloc:
             try:
-                from .._backends.x86_64.regalloc import allocate
+                from ..._backends.x86_64.regalloc import allocate
 
                 locs = allocate(func, abi).locs
             except Exception as exc:                # noqa: BLE001 - diagnostic

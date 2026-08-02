@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Union
 
-from ..._compiler.cfg import successor_indices, try_regions_resolved
+from ..._compiler.ssa.cfg import successor_indices, try_regions_resolved
 from .encoder import (
     Reg, XmmReg,
     ARG_REGS_SYSV, ARG_REGS_WIN64,

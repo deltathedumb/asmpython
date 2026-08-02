@@ -4,9 +4,9 @@ from types import SimpleNamespace
 
 import asmpython
 from asmpython._backends import get_backend
-from asmpython._compiler.build_options import extract_speedy_lossy, speedy_lossy_mode
-from asmpython._compiler.ir import ModuleBackend
-from asmpython._compiler.toolchain_policy import (
+from asmpython._compiler.build.build_options import extract_speedy_lossy, speedy_lossy_mode
+from asmpython._compiler.ssa.ir import ModuleBackend
+from asmpython._compiler.build.toolchain_policy import (
     backend_production_suitable,
     linker_production_suitable,
     warn_selected_nonproduction,

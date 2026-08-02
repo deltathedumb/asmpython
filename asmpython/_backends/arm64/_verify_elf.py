@@ -26,7 +26,7 @@ from .linux_link import (
     build_executable_from_object,
     discover_toolchain,
 )
-from asmpython._compiler.ir import (
+from asmpython._compiler.ssa.ir import (
     I64,
     PTR,
     IRBlock,

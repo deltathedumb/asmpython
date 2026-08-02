@@ -63,7 +63,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import register_backend
-from ..._compiler.ir import ModuleBackend
+from ..._compiler.ssa.ir import ModuleBackend
 from .classfile import resolve_class_version
 from .codegen import DEFAULT_RUNTIME
 from .module import DEFAULT_CLASS, compile_module

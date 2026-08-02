@@ -9,7 +9,7 @@ from pathlib import Path
 from asmpython._compiler.lexer import Lexer
 from asmpython._compiler.parser import Parser
 from asmpython._compiler.sema import analyze as sema_analyze
-from asmpython._compiler import ir_lower
+from asmpython._compiler.ssa import ir_lower
 from asmpython._backends.x86_64 import __module_backend__ as backend
 from asmpython._backends.x86_64.pe_linker import link_pe
 

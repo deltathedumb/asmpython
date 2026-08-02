@@ -14,7 +14,7 @@ could refer to either a list or a user ``__setitem__`` implementation.
 from __future__ import annotations
 
 from .. import ast_nodes as A
-from .. import ir_lower as IR
+from ..ssa import ir_lower as IR
 
 
 _ORIGINAL_LOWER_STMT = IR._lower_stmt

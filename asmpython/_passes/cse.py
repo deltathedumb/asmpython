@@ -22,7 +22,7 @@ only on their operand values, which are single-assignment temporaries.
 
 from __future__ import annotations
 
-from .._compiler.ir import IRModule, IRPass, IRValue
+from .._compiler.ssa.ir import IRModule, IRPass, IRValue
 
 #: Pure arithmetic/compare/convert ops: value depends only on the operands.
 _PURE_ARITH = frozenset({

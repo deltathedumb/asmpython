@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..._compiler.ir import (
+from ..._compiler.ssa.ir import (
     F32, F64, I64, PTR, IRBlock, IRFunc, IRGlobal, IRInstr, IRModule, IRType,
     IRValue, Visibility,
 )

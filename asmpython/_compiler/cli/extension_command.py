@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 
-from .extension_packages import (
+from ..packaging.extension_packages import (
     ExtensionPackageError,
     SCOPES,
     get_extension,

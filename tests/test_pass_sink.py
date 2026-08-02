@@ -17,9 +17,9 @@ from __future__ import annotations
 import unittest
 
 from asmpython import _passes
-from asmpython._compiler.cfg import loop_membership
-from asmpython._compiler.ir import IRModule
-from asmpython._compiler.ir_verify import validate_ir
+from asmpython._compiler.ssa.cfg import loop_membership
+from asmpython._compiler.ssa.ir import IRModule
+from asmpython._compiler.ssa.ir_verify import validate_ir
 from asmpython._frontends.apc import emit_module, parse
 
 SRC = """

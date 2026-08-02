@@ -21,7 +21,7 @@ from .linux_link import (
 )
 from .source_build import compile_source_object
 from asmpython._compiler.errors import CompileError, MultiSemaError
-from asmpython._compiler.ir_lower import LowerError
+from asmpython._compiler.ssa.ir_lower import LowerError
 
 
 def _default_object_path(source: Path) -> Path:

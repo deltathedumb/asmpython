@@ -19,13 +19,13 @@ import os
 from pathlib import Path
 from typing import Any
 
-from . import driver
-from .build_options import (
+from .. import driver
+from ..build.build_options import (
     active_sanitizers,
     debug_enabled,
     fastcomp_enabled,
 )
-from .build_report import event, stage
+from ..build.build_report import event, stage
 from .fastcomp import fast_compile_module
 from .fast_state import FastState, store_backend_state, store_ir
 

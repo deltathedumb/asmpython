@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from asmpython._compiler import __main__ as _legacy_cli
-from asmpython._compiler.project import ProjectError, load_project
+from asmpython._compiler.packaging.project import ProjectError, load_project
 from asmpython._backends.host_site_packages import (
     SitePackageImportError,
     install_pyinbin_site_package_resolution,

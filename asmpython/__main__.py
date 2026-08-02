@@ -1,7 +1,7 @@
 from ._compiler.__main__ import main as _legacy_main
 
 try:
-    from ._compiler.cli import main as _host_main
+    from ._compiler.cli.cli.cli import main as _host_main
 except ImportError:
     _host_main = None
 

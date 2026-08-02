@@ -14,7 +14,7 @@ Then: `asmpython build myfile.lua --frontend lua`.
 A frontend is the mirror image of a backend (see :mod:`asmpython.backend`):
 where a backend turns the shared IR into artifacts, a frontend turns source
 text of some language into the typed module the IR pipeline consumes. See
-``asmpython._compiler.ir.IRFrontend`` for the interface an ``impl`` implements.
+``asmpython._compiler.ssa.ir.IRFrontend`` for the interface an ``impl`` implements.
 """
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ class _ConfiguredFrontend:
         return tuple(getattr(self._impl, "source_extensions", ()))
 
     def parse(self, src: str, ctx: object) -> object:
-        from ._compiler.build_report import stage
+        from ._compiler.build.build_report import stage
 
         with stage("frontend.parse", frontend=self.name):
             return self._impl.parse(src, ctx)

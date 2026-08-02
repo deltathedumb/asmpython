@@ -11,7 +11,7 @@ from asmpython._backends.arm64.regalloc import (
     _FP_POOL,
     _GP_POOL,
 )
-from asmpython._compiler.ir import I64, PTR, IRBlock, IRFunc, IRInstr, IRValue
+from asmpython._compiler.ssa.ir import I64, PTR, IRBlock, IRFunc, IRInstr, IRValue
 
 
 class Arm64CodegenTests(unittest.TestCase):

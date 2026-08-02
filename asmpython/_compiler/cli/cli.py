@@ -6,11 +6,11 @@ import sys
 
 # Install shared policy extensions before plans, lockfiles, or the runtime import
 # their original modules.
-from . import target_triple_ext as _target_triple_ext  # noqa: F401
-from . import negotiation_ext as _negotiation_ext  # noqa: F401
-from . import build_lock_ext as _build_lock_ext  # noqa: F401
-from . import fast_state_ext as _fast_state_ext  # noqa: F401
-from . import fastcomp_bridge as _fastcomp_bridge  # noqa: F401
+from .. import target_triple_ext as _target_triple_ext  # noqa: F401
+from ..build import negotiation_ext as _negotiation_ext
+from ..build import build_lock_ext as _build_lock_ext
+from ..incremental import fast_state_ext as _fast_state_ext  # noqa: F401
+from ..incremental import fastcomp_bridge as _fastcomp_bridge  # noqa: F401
 from . import cli_runtime as _runtime
 
 
@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     os.environ.pop("ASMPYTHON_FAST_STATE", None)
 
     # Preserve the existing testing/embedding contract: callers can monkeypatch
-    # ``asmpython._compiler.cli.prepare_argv`` and the active invocation observes
+    # ``asmpython._compiler.cli.cli.prepare_argv`` and the active invocation observes
     # that replacement.
     _runtime.prepare_argv = prepare_argv
     return _runtime.main(argv)

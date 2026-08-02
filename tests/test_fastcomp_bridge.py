@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from asmpython._compiler import cli, driver
-from asmpython._compiler.build_options import SharedBuildOptions, shared_build_options
+from asmpython._compiler.cli import cli
+from asmpython._compiler import driver
+from asmpython._compiler.build.build_options import SharedBuildOptions, shared_build_options
 from asmpython._compiler import fastcomp_bridge
 
 

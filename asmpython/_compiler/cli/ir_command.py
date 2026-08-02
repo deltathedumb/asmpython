@@ -6,8 +6,8 @@ import json
 import sys
 from pathlib import Path
 
-from .driver import _run_backend, detect_default_target
-from .irfreeze import freeze_source, inspect_ir, load_ir
+from ..driver import _run_backend, detect_default_target
+from ..ssa.irfreeze import freeze_source, inspect_ir, load_ir
 
 
 class IRCommandError(RuntimeError):

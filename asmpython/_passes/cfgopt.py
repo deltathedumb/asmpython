@@ -12,7 +12,7 @@ repoint the region at the surviving label (``rewrite_try_region_labels``) --
 
 from __future__ import annotations
 
-from .._compiler.ir import (
+from .._compiler.ssa.ir import (
     IRModule, IRPass, IRValue, rewrite_try_region_labels,
 )
 

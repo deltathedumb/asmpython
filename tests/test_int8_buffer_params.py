@@ -9,7 +9,7 @@ from pathlib import Path
 from asmpython._compiler.lexer import Lexer
 from asmpython._compiler.parser import Parser
 from asmpython._compiler.sema import analyze as sema_analyze
-from asmpython._compiler import ir_lower
+from asmpython._compiler.ssa import ir_lower
 
 
 def _parse(source: str):

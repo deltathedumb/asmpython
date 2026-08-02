@@ -19,7 +19,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from .. import __version__
+from ... import __version__
 
 MAGIC = b"APIR\x00"
 FORMAT_VERSION = 1
@@ -233,15 +233,15 @@ def compile_ir(
     source_path = source_path.resolve()
     if stage == "parsed":
         if whole_program:
-            from .program import load_program
+            from ..program import load_program
             module = load_program(source, source_path)
         else:
-            from .lexer import Lexer
-            from .parser import Parser
+            from ..lexer import Lexer
+            from ..parser import Parser
             module = Parser(Lexer(source).tokenize()).parse()
         passes: list[str] = []
     else:
-        from .driver import _compile_program
+        from ..driver import _compile_program
         module = _compile_program(
             source,
             source_dir=source_path.parent,

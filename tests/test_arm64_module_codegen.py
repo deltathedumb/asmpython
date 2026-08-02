@@ -4,7 +4,7 @@ import struct
 import unittest
 
 import asmpython._backends.arm64 as arm64
-from asmpython._compiler.ir import I64, IRBlock, IRFunc, IRInstr, IRModule, IRValue
+from asmpython._compiler.ssa.ir import I64, IRBlock, IRFunc, IRInstr, IRModule, IRValue
 
 
 class Arm64ModuleCodegenTests(unittest.TestCase):

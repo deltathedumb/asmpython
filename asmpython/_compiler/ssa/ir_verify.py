@@ -1,6 +1,6 @@
 """Structural verifier for the neutral SSA IR (``ir.py``).
 
-This checks *well-formedness* of an :class:`~asmpython._compiler.ir.IRModule`
+This checks *well-formedness* of an :class:`~asmpython._compiler.ssa.ir.IRModule`
 with **no knowledge of any source language** -- it is the contract a frontend
 (Python, C, Lua, ...) must satisfy to hand a module to a backend, independent of
 how the module was produced. It catches the mistakes a hand-written or
@@ -16,7 +16,7 @@ bake in policy the neutral IR doesn't own.
 
 Usage::
 
-    from asmpython._compiler.ir_verify import validate_ir, IRVerifyError
+    from asmpython._compiler.ssa.ir_verify import validate_ir, IRVerifyError
     errors = validate_ir(module, strict=False)   # -> list[str]
     validate_ir(module)                           # raises IRVerifyError if bad
 """

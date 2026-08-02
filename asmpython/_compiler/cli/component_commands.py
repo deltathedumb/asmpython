@@ -6,7 +6,7 @@ import json
 import sys
 from typing import Any
 
-from .capability_negotiation import (
+from ..build.capability_negotiation import (
     component_contract,
     dependency_status,
     resolve_backend,

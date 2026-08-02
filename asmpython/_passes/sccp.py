@@ -22,7 +22,7 @@ arriving on reachable edges.
 
 from __future__ import annotations
 
-from .._compiler.ir import IRInstr, IRModule, IRPass, IRValue
+from .._compiler.ssa.ir import IRInstr, IRModule, IRPass, IRValue
 
 _TOP = "top"          # not yet known (undefined)
 _BOTTOM = "bottom"    # overdefined / not constant

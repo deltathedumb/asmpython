@@ -8,8 +8,8 @@ from typing import Any
 
 from .build_options import active_embed_paths, fastcomp_enabled
 from .capability_negotiation import negotiate_build
-from .embedded_data import collect_files
-from .fast_state import prepare_state, state_summary
+from ..embedded_data import collect_files
+from ..incremental.fast_state import prepare_state, state_summary
 
 
 class BuildPlanError(RuntimeError):

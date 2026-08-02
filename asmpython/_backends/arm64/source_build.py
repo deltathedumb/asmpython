@@ -15,8 +15,8 @@ from typing import Any
 
 from .linux_link import LinuxArm64Toolchain, build_executable_from_object
 from .module_codegen import compile_ir_module
-from asmpython._compiler import ir_lower
-from asmpython._compiler.ir import F64, IRInstr, IRValue
+from asmpython._compiler.ssa import ir_lower
+from asmpython._compiler.ssa.ir import F64, IRInstr, IRValue
 from asmpython._compiler.lexer import Lexer
 from asmpython._compiler.parser import Parser
 from asmpython._compiler.sema import analyze as sema_analyze

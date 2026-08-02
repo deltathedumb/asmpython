@@ -13,8 +13,8 @@ import pathlib
 import unittest
 
 from asmpython._backends.x86_64 import __module_backend__ as x86_backend
-from asmpython._compiler.ir import IRModule, Visibility
-from asmpython._compiler.ir_verify import validate_ir
+from asmpython._compiler.ssa.ir import IRModule, Visibility
+from asmpython._compiler.ssa.ir_verify import validate_ir
 from asmpython._frontends import get_frontend
 from asmpython._frontends.apc import APCError, emit_module, parse
 

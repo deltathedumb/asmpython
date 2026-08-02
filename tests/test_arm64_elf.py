@@ -15,7 +15,7 @@ from asmpython._backends.arm64.elf_inspect import (
     defined_global_symbols,
     undefined_symbols,
 )
-from asmpython._compiler.ir import I64, IRGlobal
+from asmpython._compiler.ssa.ir import I64, IRGlobal
 
 
 class Arm64ElfTests(unittest.TestCase):

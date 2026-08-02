@@ -12,7 +12,7 @@ dead, because a division by zero is an observable fault.
 
 from __future__ import annotations
 
-from .._compiler.ir import IRModule, IRPass, IRValue
+from .._compiler.ssa.ir import IRModule, IRPass, IRValue
 
 #: Ops with no side effects: safe to delete when their result is unused.
 PURE_OPS = frozenset({

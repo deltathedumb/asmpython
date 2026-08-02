@@ -12,7 +12,7 @@ genuinely new about control flow belongs in ``_compiler/cfg.py``.
 
 from __future__ import annotations
 
-from .._compiler.cfg import (
+from .._compiler.ssa.cfg import (
     dominance_frontiers as _dominance_frontiers_idx,
     dominators as _dominators_idx,
     natural_loops as _natural_loops_idx,
@@ -36,7 +36,7 @@ def build_preds(func) -> dict[str, list[str]]:
 
 
 def reverse_postorder(func) -> list[str]:
-    from .._compiler.cfg import reverse_postorder as _rpo_idx
+    from .._compiler.ssa.cfg import reverse_postorder as _rpo_idx
 
     labels = [b.label for b in func.blocks]
     return [labels[i] for i in _rpo_idx(func)]

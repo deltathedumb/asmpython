@@ -105,7 +105,7 @@ def normalize_typed_unpacks(root) -> None:
 
 def install_ir_lowering_prepass() -> None:
     """Install the prepass around ``ir_lower.lower_module`` exactly once."""
-    from . import ir_lower
+    from .ssa import ir_lower
 
     if getattr(ir_lower, "_typed_unpack_normalizer_installed", False):
         return

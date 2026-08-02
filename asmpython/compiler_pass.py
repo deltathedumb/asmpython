@@ -1,7 +1,7 @@
 """Public API for registering third-party compiler passes.
 
     import asmpython
-    from asmpython._compiler.ir import IRPass
+    from asmpython._compiler.ssa.ir import IRPass
 
     class StrengthReduce(IRPass):
         name = "strength-reduce"
@@ -66,7 +66,7 @@ class _ConfiguredPass:
         return frozenset(getattr(self._impl, "preserves", ()) or ())
 
     def run(self, module: object) -> bool:
-        from ._compiler.build_report import stage
+        from ._compiler.build.build_report import stage
 
         with stage("pass.run", pass_name=self.name):
             return bool(self._impl.run(module))

@@ -25,7 +25,7 @@ from .codegen import (
 
 if TYPE_CHECKING:
     from .codegen import FuncCode
-    from asmpython._compiler.ir import IRGlobal
+    from asmpython._compiler.ssa.ir import IRGlobal
 
 
 ET_REL = 1

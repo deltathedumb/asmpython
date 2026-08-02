@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..._compiler.cfg import successor_indices, try_regions_resolved
+from ..._compiler.ssa.cfg import successor_indices, try_regions_resolved
 
 _INF = (1 << 30, 1 << 30)
 

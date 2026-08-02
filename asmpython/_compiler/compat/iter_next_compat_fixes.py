@@ -39,7 +39,7 @@ already uses, so an enclosing ``except StopIteration`` catches it normally.
 from __future__ import annotations
 
 from .. import ast_nodes as A
-from .. import ir_lower as IR
+from ..ssa import ir_lower as IR
 
 
 # Patch `_lower_expr_INNER`, not `_lower_expr`: the outer `_lower_expr` always

@@ -14,7 +14,7 @@ unsupported rather than being mistaken for native imports.
 from __future__ import annotations
 
 from .. import ast_nodes as A
-from .. import ir_lower as IR
+from ..ssa import ir_lower as IR
 
 
 _ORIGINAL_LOWER_EXPR = IR._lower_expr

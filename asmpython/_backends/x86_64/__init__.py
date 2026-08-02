@@ -1,13 +1,13 @@
 """
 asmpython's built-in x86-64 backend (driver.py's --backend x86-64).
 
-Compiles an IRModule (see asmpython._compiler.ir / ir_lower.py) to a
+Compiles an IRModule (see asmpython._compiler.ssa.ir / ir_lower.py) to a
 relocatable object file (.o / .obj) using all available CPU cores, then
 links it via whichever linker plugin is selected (asmpython/_linkers) --
 `builtin` (this backend's own default: no gcc/ld involved at all) unless
 overridden by driver.py's --linker flag.
 
-Plugin interface (the convention asmpython._compiler.ir.ModuleBackend
+Plugin interface (the convention asmpython._compiler.ssa.ir.ModuleBackend
 adapts to IRBackend):
   requested_args: list[dict]
   default_linker: str
@@ -32,7 +32,7 @@ from ..._linkers import builtin as _builtin_linker
 from ..._linkers import gcc as _gcc_linker
 from .phi_elim import eliminate_phi
 from .unpack_normalize import install as _install_literal_unpack_normalizer
-from ..._compiler.ir import ModuleBackend
+from ..._compiler.ssa.ir import ModuleBackend
 
 
 # driver.py imports ir_lower immediately before this package and only calls

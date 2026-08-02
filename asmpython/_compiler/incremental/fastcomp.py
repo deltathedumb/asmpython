@@ -20,8 +20,8 @@ from pathlib import Path
 from types import MethodType
 from typing import Any
 
-from .. import __version__
-from .driver import (
+from ... import __version__
+from ..driver import (
     BuildResult,
     _build_icon_resource,
     _resolve_tool,
@@ -29,8 +29,8 @@ from .driver import (
     _run_backend,
     _shared_lib_path,
 )
-from .irfreeze import FrozenIR, component_hashes, dump_ir, load_ir
-from .._targets import get_target
+from ..ssa.irfreeze import FrozenIR, component_hashes, dump_ir, load_ir
+from ..._targets import get_target
 
 CACHE_SCHEMA = 1
 _LABEL_RE = re.compile(r"^\s*([A-Za-z_?$@][A-Za-z0-9_?$@.]*)\s*:")
@@ -486,7 +486,7 @@ def fast_compile_module(
                 link_cmd.append("-mconsole")
 
         if use_runtime_lib:
-            from .._runtime.build import _build_dir, build_runtime
+            from ..._runtime.build import _build_dir, build_runtime
 
             build_runtime(target)
             link_cmd += [

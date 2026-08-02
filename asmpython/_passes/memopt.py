@@ -18,7 +18,7 @@ worth having.
 
 from __future__ import annotations
 
-from .._compiler.ir import IRModule, IRPass, IRValue
+from .._compiler.ssa.ir import IRModule, IRPass, IRValue
 
 
 def _ptr_key(operand) -> "str | None":

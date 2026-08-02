@@ -12,7 +12,7 @@ from typing import Any, Iterable
 from asmpython._version import ASMPYTHON_VERSION, FULL_VERSION, PYTHON_LANGUAGE_VERSION
 from .build_options import active_sanitizers, bleach_enabled, speedy_lossy_enabled
 from .capability_negotiation import CapabilityNegotiationError, negotiate_build
-from .extension_packages import list_installed
+from ..packaging.extension_packages import list_installed
 
 
 LOCK_FORMAT = "asmpython.build-lock"

@@ -8,10 +8,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from asmpython._compiler import cli
-from asmpython._compiler.project import ProjectConfig, load_project, save_project
-from asmpython._compiler.site_packages import SitePackageImportError
-from asmpython._compiler.pypi import (
+from asmpython._compiler.cli import cli
+from asmpython._compiler.packaging.project import ProjectConfig, load_project, save_project
+from asmpython._compiler.packaging.site_packages import SitePackageImportError
+from asmpython._compiler.packaging.pypi import (
     PypiError,
     install_pypi_package,
     list_pypi_packages,

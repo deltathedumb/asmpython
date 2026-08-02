@@ -5,12 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from asmpython._compiler import cli
-from asmpython._compiler.cache_manager import clear_cache, scan_cache
-from asmpython._compiler.irfreeze import FrozenIR, dump_ir, load_ir
-from asmpython._compiler.management_commands import apply_build_profiles
-from asmpython._compiler.profiles import resolve_profile, save_profile
-from asmpython._compiler.ir import IRFunc, IRModule, IRValue, I64
+from asmpython._compiler.cli import cli
+from asmpython._compiler.build.cache_manager import clear_cache, scan_cache
+from asmpython._compiler.ssa.irfreeze import FrozenIR, dump_ir, load_ir
+from asmpython._compiler.cli.cli.management_commands import apply_build_profiles
+from asmpython._compiler.build.profiles import resolve_profile, save_profile
+from asmpython._compiler.ssa.ir import IRFunc, IRModule, IRValue, I64
 
 
 def test_backends_list_and_info(capsys: pytest.CaptureFixture[str]) -> None:

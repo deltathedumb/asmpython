@@ -14,7 +14,7 @@ is always correct.
 
 from __future__ import annotations
 
-from ..._compiler.ir import IRInstr, IRValue, IRType, IRBlock, IRFunc
+from ..._compiler.ssa.ir import IRInstr, IRValue, IRType, IRBlock, IRFunc
 
 
 _TERM = frozenset({"br", "br.t", "ret"})

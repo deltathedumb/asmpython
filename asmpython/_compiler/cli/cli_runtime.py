@@ -6,11 +6,11 @@ import sys
 from pathlib import Path
 
 from asmpython._backends import host_cli as _host_cli
-from .build_options import SharedBuildOptions, extract_shared_build_options, shared_build_options
-from .build_report import event, report_session
+from ..build.build_options import SharedBuildOptions, extract_shared_build_options, shared_build_options
+from ..build.build_report import event, report_session
 from .management_commands import MANAGEMENT_COMMANDS, REMOVED_COMMANDS, apply_build_profiles, dispatch
-from .profiles import ProfileError
-from .toolchain_policy import warn_selected_nonproduction
+from ..build.profiles import ProfileError
+from ..build.toolchain_policy import warn_selected_nonproduction
 
 
 _call_legacy_with_static_project_policy = _host_cli._call_legacy_with_static_project_policy
@@ -113,22 +113,22 @@ def _dispatch_extra(raw: list[str]) -> int | None:
         from .component_commands import command_main
         return command_main("linker", rest)
     if command == "lock":
-        from .build_lock import command_main
+        from ..build.build_lock import command_main
         return command_main(rest)
     if command == "verify":
-        from .artifact_verify import command_main
+        from ..build.artifact_verify import command_main
         return command_main(rest)
     if command == "abi":
-        from .abi_tool import command_main
+        from ..abi_tool import command_main
         return command_main(rest)
     if command == "sign":
-        from .package_signing import command_main
+        from ..packaging.package_signing import command_main
         return command_main(rest)
     return None
 
 
 def _load_extensions(report) -> bool:
-    from .extension_packages import ExtensionPackageError, load_installed_extensions
+    from ..packaging.extension_packages import ExtensionPackageError, load_installed_extensions
     try:
         loaded = load_installed_extensions()
     except ExtensionPackageError as exc:
@@ -194,9 +194,9 @@ def _legacy_target_argv(argv: list[str]) -> list[str]:
 
 
 def _postprocess_artifact(raw: list[str], options: SharedBuildOptions) -> int:
-    from .artifact_verify import verify_artifact
-    from .debug_support import infer_output_path, write_debug_sidecar
-    from .embedded_data import append_resources, collect_files
+    from ..build.artifact_verify import verify_artifact
+    from ..debug_support import infer_output_path, write_debug_sidecar
+    from ..embedded_data import append_resources, collect_files
 
     artifact = infer_output_path(raw)
     if artifact is None:
@@ -283,7 +283,7 @@ def _main_with_options(
     if not is_build:
         return _host_cli.main(raw, prepare=prepare_argv)
 
-    from .capability_negotiation import negotiate_build
+    from ..build.capability_negotiation import negotiate_build
     warn_selected_nonproduction(raw)
     negotiation = negotiate_build(raw)
     event(
@@ -309,7 +309,7 @@ def _main_with_options(
         return 2
 
     if options.locked:
-        from .build_lock import BuildLockError, enforce_locked_build
+        from ..build.build_lock import BuildLockError, enforce_locked_build
         try:
             enforce_locked_build(options.lockfile_path, raw)
         except BuildLockError as exc:
@@ -318,7 +318,7 @@ def _main_with_options(
         event("build.lock", path=options.lockfile_path, valid=True)
 
     if "--graphonly" in raw:
-        from .build_plan import BuildPlanError, graphonly_main
+        from ..build.build_plan import BuildPlanError, graphonly_main
         try:
             return graphonly_main(raw)
         except BuildPlanError as exc:
@@ -326,7 +326,7 @@ def _main_with_options(
             return 2
 
     if options.fastcomp:
-        from .fast_state import prepare_state, state_summary
+        from ..incremental.fast_state import prepare_state, state_summary
         source = _source_path(raw)
         if source is not None and source.suffix == ".py" and source.is_file():
             state = prepare_state(source, backend=negotiation.backend.name, target=negotiation.target)
@@ -372,9 +372,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         initial_build = _is_build_invocation(original)
-        from .build_config import BuildConfigError, apply_build_config
+        from ..build.build_config import BuildConfigError, apply_build_config
         configured, config_path = apply_build_config(original, is_build=initial_build)
-        from .target_triple import TargetTripleError, normalize_target_argv
+        from ..target_triple import TargetTripleError, normalize_target_argv
         configured, triple = normalize_target_argv(configured)
         if triple is not None:
             os.environ["ASMPYTHON_TARGET_TRIPLE"] = triple.canonical

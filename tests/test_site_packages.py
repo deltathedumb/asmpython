@@ -9,7 +9,7 @@ from unittest import mock
 from asmpython._compiler import program
 from asmpython._compiler.lexer import Lexer
 from asmpython._compiler.parser import Parser
-from asmpython._compiler.site_packages import (
+from asmpython._compiler.packaging.site_packages import (
     SitePackageImportError,
     _is_ffi_stdlib,
     install_native_import_resolution,

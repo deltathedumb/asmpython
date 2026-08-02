@@ -305,7 +305,7 @@ def _compile_program(
     function's signature (and every caller's) doesn't need to change.
     """
     from .._frontends import get_frontend
-    from .ir import FrontendContext
+    from .ssa.ir import FrontendContext
 
     impl = get_frontend(frontend)
     if impl is None:
@@ -323,7 +323,7 @@ def _compile_program(
     # Time every frontend, not just third-party ones -- `asmpython.frontend`'s
     # wrapper already stages plugin parses, but the built-in python and apc
     # frontends do not go through it, so a plain build reported nothing at all.
-    from .build_report import stage
+    from .build.build_report import stage
 
     with stage("frontend.parse", frontend=frontend, source_bytes=len(src)):
         return impl.parse(src, ctx)
@@ -350,7 +350,7 @@ def _write_backend_output(
 
 
 def _verbosity() -> int:
-    from .build_report import verbosity
+    from .build.build_report import verbosity
 
     return verbosity()
 
@@ -407,8 +407,8 @@ def _as_ir_module(module) -> "IRModule":
     through -- that is the documented "side chute", and lowering an already
     lowered module would be nonsense.
     """
-    from .build_report import event
-    from .ir import IRModule
+    from .build.build_report import event
+    from .ssa.ir import IRModule
 
     def _report(ir_mod, source: str):
         event(
@@ -423,7 +423,7 @@ def _as_ir_module(module) -> "IRModule":
 
     if isinstance(module, IRModule):
         return _report(module, "frontend")
-    from . import ir_lower
+    from .ssa import ir_lower
 
     return _report(
         ir_lower.lower_module(
@@ -490,7 +490,7 @@ def _run_backend_x86_64(
         )
     abi = "win64" if target == "windows" else "sysv"
 
-    from . import ir_lower
+    from .ssa import ir_lower
     from .._backends.x86_64 import __module_backend__ as backend
     from .._runtime.build import build_abi_shims, build_runtime, runtime_object_path
 
@@ -504,14 +504,14 @@ def _run_backend_x86_64(
         passes=tuple(p for p in (passes or "").split(",") if p),
     )
     # Dump the IR the backend is about to consume (ASMPYTHON_EMIT_IR).
-    from .ir_print import emit_if_requested as _emit_ir
+    from .ssa.ir_print import emit_if_requested as _emit_ir
 
     _emit_ir(ir_mod, abi=abi)
     # Opt-in structural check of the neutral IR (no language knowledge). Off by
     # default so it never affects normal builds; set ASMPYTHON_VERIFY_IR=1 to
     # have malformed IR fail loudly at the waist rather than deep in codegen.
     if os.environ.get("ASMPYTHON_VERIFY_IR"):
-        from .ir_verify import validate_ir
+        from .ssa.ir_verify import validate_ir
 
         validate_ir(ir_mod)
     compiled = backend.compile(ir_mod, {"target_os": target, "abi": abi})
@@ -619,13 +619,13 @@ def _run_backend_ternary(module, out_path: Path, passes: "str | None" = None) ->
     integers, one per balanced-ternary memory cell (8-trit values).
     Load into TernarySystem.mem starting at address 0 and run from PC=0.
     """
-    from . import ir_lower
+    from .ssa import ir_lower
     from .._backends.ternary import __module_backend__ as backend
 
     ir_mod = _as_ir_module(module)
     _apply_passes(ir_mod, passes)
     # Dump the IR the backend is about to consume (ASMPYTHON_EMIT_IR).
-    from .ir_print import emit_if_requested as _emit_ir
+    from .ssa.ir_print import emit_if_requested as _emit_ir
 
     _emit_ir(ir_mod, abi="sysv")
     compiled = backend.compile(ir_mod, {})
@@ -649,7 +649,7 @@ def _run_backend_registered(
     third-party backends get no bespoke per-backend wiring beyond the
     `IRBackend` contract itself (`requested_args`/`default_linker`/
     `compile`/`link`)."""
-    from . import ir_lower
+    from .ssa import ir_lower
     from .._backends import get_backend
 
     backend = get_backend(backend_name)
@@ -660,7 +660,7 @@ def _run_backend_registered(
     ir_mod = _as_ir_module(module)
     _apply_passes(ir_mod, passes)
     # Dump the IR the backend is about to consume (ASMPYTHON_EMIT_IR).
-    from .ir_print import emit_if_requested as _emit_ir
+    from .ssa.ir_print import emit_if_requested as _emit_ir
 
     _emit_ir(ir_mod, abi="sysv")
     # Registered backends used to get no options at all, which left every

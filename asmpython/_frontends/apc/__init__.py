@@ -23,7 +23,7 @@ then fail with a source-located message rather than being half-emitted.
 
 from __future__ import annotations
 
-from ..._compiler.ir import FrontendContext, IRFrontend, IRModule
+from ..._compiler.ssa.ir import FrontendContext, IRFrontend, IRModule
 from .emit import emit_module
 from .errors import APCError
 from .parser import parse

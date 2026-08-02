@@ -17,7 +17,7 @@ with no save/restore.
 
 from __future__ import annotations
 
-from .._compiler.ir import IRInstr, IRModule, IRPass, IRValue
+from .._compiler.ssa.ir import IRInstr, IRModule, IRPass, IRValue
 
 _COMMUTATIVE = frozenset({"iadd", "imul", "iand", "ior", "ixor"})
 _SHIFTS = frozenset({"shl", "shr", "sar"})

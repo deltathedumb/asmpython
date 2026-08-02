@@ -8,7 +8,7 @@ through the frontend registry is behavior-preserving for ordinary builds.
 
 from __future__ import annotations
 
-from .._compiler.ir import FrontendContext, IRFrontend
+from .._compiler.ssa.ir import FrontendContext, IRFrontend
 from .._compiler.lexer import Lexer
 from .._compiler.parser import Parser
 from .._compiler.program import load_program

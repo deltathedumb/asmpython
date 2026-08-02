@@ -23,7 +23,7 @@ locals are in alloca slots (memory) before calling.
 from __future__ import annotations
 
 from . import encoder as E
-from ..._compiler.ir import IRFunc, IRBlock, IRInstr, IRValue
+from ..._compiler.ssa.ir import IRFunc, IRBlock, IRInstr, IRValue
 
 _PARAM_REGS   = [0, 1, 2, 3]
 _FIRST_TEMP   = 4

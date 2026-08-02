@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 
 from .. import ast_nodes as A
-from .compat.object_flow_compat_fixes import _walk_statements
+from ..compat.object_flow_compat_fixes import _walk_statements
 from ..program import load_program
 from ..sema import SemaAnalyzer
 

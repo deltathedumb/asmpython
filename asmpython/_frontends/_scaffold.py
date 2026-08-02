@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import NoReturn
 
-from .._compiler.ir import FrontendContext, IRFrontend
+from .._compiler.ssa.ir import FrontendContext, IRFrontend
 
 
 @dataclass(frozen=True)

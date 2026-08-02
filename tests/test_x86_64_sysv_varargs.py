@@ -11,7 +11,7 @@ from asmpython._backends.x86_64.encoder import (
     encode_mov_ri,
 )
 from asmpython._backends.x86_64.regalloc import AllocResult, RegLoc
-from asmpython._compiler.ir import I64, PTR, IRBlock, IRFunc, IRInstr, IRValue
+from asmpython._compiler.ssa.ir import I64, PTR, IRBlock, IRFunc, IRInstr, IRValue
 
 
 class SysvVarargCallTests(unittest.TestCase):

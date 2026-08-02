@@ -7,14 +7,14 @@ from pathlib import Path
 import asmpython
 from asmpython import embedded
 from asmpython._compiler.abi_tool import diff_abi
-from asmpython._compiler.artifact_verify import verify_artifact
-from asmpython._compiler.build_config import apply_build_config
-from asmpython._compiler.build_options import SharedBuildOptions, shared_build_options
-from asmpython._compiler.build_plan import create_build_plan
+from asmpython._compiler.build.artifact_verify import verify_artifact
+from asmpython._compiler.build.build_config import apply_build_config
+from asmpython._compiler.build.build_options import SharedBuildOptions, shared_build_options
+from asmpython._compiler.build.build_plan import create_build_plan
 from asmpython._compiler.debug_support import write_debug_sidecar
 from asmpython._compiler.embedded_data import append_resources, decode_resources, encode_resources
-from asmpython._compiler.fast_state import prepare_state, store_backend_state, store_ir
-from asmpython._compiler.negotiation_ext import negotiate_build
+from asmpython._compiler.incremental.fast_state import prepare_state, store_backend_state, store_ir
+from asmpython._compiler.build.negotiation_ext import negotiate_build
 from asmpython._compiler.target_triple import TargetTriple, normalize_target_argv
 
 

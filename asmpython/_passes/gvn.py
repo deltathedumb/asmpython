@@ -54,8 +54,8 @@ where invalidation is tractable.
 
 from __future__ import annotations
 
-from .._compiler.cfg import cycle_membership, dominators
-from .._compiler.ir import IRModule, IRPass, IRValue
+from .._compiler.ssa.cfg import cycle_membership, dominators
+from .._compiler.ssa.ir import IRModule, IRPass, IRValue
 
 #: Expressions whose value depends only on their operands.
 _PURE = frozenset({

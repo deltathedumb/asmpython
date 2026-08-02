@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from .._compiler.ir import IRModule
+from .._compiler.ssa.ir import IRModule
 
 _REGISTRY: dict[str, object] = {}
 _ALIASES: dict[str, str] = {}

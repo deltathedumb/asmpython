@@ -9,7 +9,7 @@ import genericpath as _host_genericpath
 import sys as _host_sys
 import typing as _typing
 
-from asmpython._compiler.pyinbin_package import PackedModule, verify_source_bundle
+from asmpython._compiler.packaging.pyinbin_package import PackedModule, verify_source_bundle
 
 from .frontend import compile_source
 from .native import create_builtin_module

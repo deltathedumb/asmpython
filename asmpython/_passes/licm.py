@@ -28,11 +28,11 @@ times, because it has no effect beyond producing its value.
 
 from __future__ import annotations
 
-from .._compiler.cfg import (
+from .._compiler.ssa.cfg import (
     dominates, dominators, natural_loops, predecessor_indices,
     successor_indices,
 )
-from .._compiler.ir import IRModule, IRPass, IRValue
+from .._compiler.ssa.ir import IRModule, IRPass, IRValue
 
 #: Pure and trap-free: safe to execute unconditionally.
 _HOISTABLE = frozenset({
@@ -211,7 +211,7 @@ class LoopDeletePass(IRPass):
                 continue
             # Replace the header's terminator with a jump straight to the exit.
             exit_label = func.blocks[exits[0]].label
-            from .._compiler.ir import IRInstr
+            from .._compiler.ssa.ir import IRInstr
 
             func.blocks[header].instrs = [IRInstr("br", None, [exit_label])]
             changed = True

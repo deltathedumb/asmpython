@@ -52,8 +52,8 @@ class _ConfiguredBackend:
         return getattr(self._impl, "default_linker", "gcc")
 
     def compile(self, module: object, args: dict) -> dict[str, bytes]:
-        from ._compiler.build_options import inject_build_options
-        from ._compiler.build_report import event, stage
+        from ._compiler.build.build_options import inject_build_options
+        from ._compiler.build.build_report import event, stage
 
         resolved = inject_build_options(args)
         with stage("backend.compile", backend=self.name):
@@ -67,8 +67,8 @@ class _ConfiguredBackend:
         return outputs
 
     def link(self, objects: list[bytes], args: dict) -> dict[str, bytes]:
-        from ._compiler.build_options import inject_build_options
-        from ._compiler.build_report import event, stage
+        from ._compiler.build.build_options import inject_build_options
+        from ._compiler.build.build_report import event, stage
 
         resolved = inject_build_options(args)
         with stage("backend.link", backend=self.name, input_objects=len(objects)):
