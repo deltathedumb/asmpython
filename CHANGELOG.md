@@ -64,9 +64,14 @@ deliverable.
   expression carries a ceiling on its magnitude, because bounding the leaves
   does not bound a product of two of them.
 
-  It found seven bugs that no hand-written test had, every one a wrong answer
+  It found eight bugs that no hand-written test had, every one a wrong answer
   in a program that compiled, linked and ran:
 
+  - **`if`/`else` never ran its else branch.** `Block` defines `__len__`, so a
+    freshly created one is empty and falsy, and `else_b or join` took the join
+    every time. Every else body in the language was unreachable. Nothing
+    noticed because every test and example was written in the early-return
+    style, with no else anywhere.
   - argument setup was emitted in argument order, so a register that was one
     argument's destination and another's source collapsed the two. Nine
     arguments summed to 30 instead of 36.
@@ -83,6 +88,12 @@ deliverable.
   - `0.0 // -9.2` and `0.0 % -6.2` lost the sign of zero.
   - float `**` expanded to multiplications, which round twice where CPython's
     `pow` rounds once.
+
+  Reading a name assigned in only one branch produced invalid IR, which the
+  driver blamed on itself: "internal error ... this is a bug in the compiler,
+  not in your program". It is a bug in the program — Python raises
+  UnboundLocalError — so the frontend does definite-assignment analysis now
+  and reports E0032 against the use and the conditional assignment.
 
 - **pyconform, a CPython microbehaviour conformance suite** (`conformance/`) —
   asmpython's correctness was measured against `tests/`, a corpus written

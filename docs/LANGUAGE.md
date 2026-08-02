@@ -67,6 +67,30 @@ Accepting a runtime step would mean picking one comparison and being silently
 wrong about the other — every descending loop running zero times and reporting
 success.
 
+## A name must be assigned on every path
+
+```python
+if flag > 0:
+    later: int = 42
+print(later)        # error[E0032]: may be used before it is assigned
+```
+
+Python raises `UnboundLocalError` for this at runtime; saying it at compile
+time is strictly better, and it is the same rule. A branch that cannot fall
+through does not dilute it, so this is fine:
+
+```python
+if c:
+    x: int = 1
+else:
+    return 0
+print(x)            # every path here assigned x
+```
+
+A loop body may run zero times, so neither the loop variable nor anything the
+body assigns counts as assigned afterwards — `for i in range(0): pass` then
+`print(i)` is an error here and an `UnboundLocalError` in Python.
+
 ## Expressions
 
 Arithmetic, comparison and bitwise operators, `not`/`and`/`or`, conditional
