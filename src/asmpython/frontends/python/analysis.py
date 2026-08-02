@@ -218,11 +218,36 @@ class Analyzer:
         self.current = info
         for p in info.params:
             info.locals[p.name] = p
-        for stmt in info.node.body:
-            self._stmt(stmt)
+        #: Names definitely assigned at the current point. Parameters always
+        #: are; everything else has to be reached by an assignment on EVERY
+        #: path, which is what makes the intersection at a join the whole
+        #: analysis.
+        self.assigned = {p.name for p in info.params}
+        self._block(info.node.body)
         self.current = None
 
-    def _stmt(self, node) -> None:
+    def _block(self, body: list) -> bool:
+        """Analyse a list of statements. Returns whether control falls through.
+
+        Falling through matters for the join: a branch that always returns
+        contributes nothing to what is assigned afterwards, and treating it
+        as a normal path would reject
+
+            if c:
+                x: int = 1
+            else:
+                return 0
+            print(x)
+
+        which is correct code and a common shape.
+        """
+        for stmt in body:
+            if not self._stmt(stmt):
+                return False
+        return True
+
+    def _stmt(self, node) -> bool:
+        """Analyse one statement; returns whether control falls through."""
         info = self.current
         assert info is not None
         match node:
@@ -230,6 +255,7 @@ class Analyzer:
                 self._expr(node.value)
             case ast.Assign(targets=[ast.Name(id=name)]):
                 self._bind(name, self._expr(node.value), node)
+                self.assigned.add(name)
             case ast.Assign():
                 self._error("E0020", "only simple `name = value` assignment "
                                      "is supported", node)
@@ -239,26 +265,50 @@ class Analyzer:
                     actual = self._expr(node.value)
                     self._check_assignable(actual, declared, node)
                 self._declare(name, declared, node)
+                # `x: int` with no value declares a type and assigns nothing,
+                # exactly as in Python.
+                if node.value is not None:
+                    self.assigned.add(name)
             case ast.AugAssign(target=ast.Name(id=name)):
+                # `x += 1` READS x first, so an unassigned x is an error here
+                # for the same reason it is in an expression.
                 have = self._lookup(name, node)
                 self._expr(node.value)
                 self._bind(name, have, node)
+                self.assigned.add(name)
             case ast.Return():
                 got = self._expr(node.value) if node.value else NONE
                 self._check_assignable(got, info.ret, node,
                                        what="return value")
+                return False
             case ast.If():
                 self._expr(node.test)
-                for s in node.body:
-                    self._stmt(s)
-                for s in node.orelse:
-                    self._stmt(s)
+                before = set(self.assigned)
+                then_falls = self._block(node.body)
+                then_assigned = set(self.assigned)
+                self.assigned = before
+                else_falls = self._block(node.orelse)
+                else_assigned = set(self.assigned)
+                # A name is assigned after the `if` only if every path that
+                # reaches here assigned it.
+                if then_falls and else_falls:
+                    self.assigned = then_assigned & else_assigned
+                elif then_falls:
+                    self.assigned = then_assigned
+                elif else_falls:
+                    self.assigned = else_assigned
+                else:
+                    self.assigned = then_assigned | else_assigned
+                return then_falls or else_falls
             case ast.While():
                 self._expr(node.test)
+                # The body may run zero times, so nothing it assigns is
+                # definitely assigned afterwards.
+                before = set(self.assigned)
                 self.loop_depth += 1
-                for s in node.body:
-                    self._stmt(s)
+                self._block(node.body)
                 self.loop_depth -= 1
+                self.assigned = before
                 for s in node.orelse:
                     self._error("E0026", "`while ... else` is not supported", s)
             case ast.For(target=ast.Name(id=name)):
@@ -270,11 +320,13 @@ class Analyzer:
                     self._error(
                         "E0027",
                         f"`{type(node).__name__.lower()}` outside a loop", node)
+                return False
             case ast.Pass():
                 pass
             case _:
                 self._error("E0022",
                             f"unsupported statement: {type(node).__name__}", node)
+        return True
 
     def _for_range(self, node: ast.For, name: str) -> None:
         call = node.iter
@@ -302,10 +354,16 @@ class Analyzer:
                 self._error("E0029", "range() step must not be zero",
                             call.args[2])
         self._declare(name, INT, node)
+        # `range(0)` runs zero times, so neither the loop variable nor
+        # anything the body assigns is definitely assigned afterwards --
+        # `for i in range(0): pass` then `print(i)` is an UnboundLocalError
+        # in Python too.
+        before = set(self.assigned)
+        self.assigned.add(name)
         self.loop_depth += 1
-        for s in node.body:
-            self._stmt(s)
+        self._block(node.body)
         self.loop_depth -= 1
+        self.assigned = before
         for s in node.orelse:
             self._error("E0025", "`for ... else` is not supported", s)
 
@@ -347,6 +405,22 @@ class Analyzer:
                 .at(self._span(at))
                 .help("assign it before use, or annotate it"))
             return ERROR
+        if name not in self.assigned:
+            # Python raises UnboundLocalError for this at runtime; saying it
+            # at compile time is strictly better. Reporting it here also
+            # keeps it out of the IR, where the verifier catches the same
+            # thing as "reads %1 before any path writes it" and the driver
+            # correctly but unhelpfully calls it an internal compiler error.
+            self.sink.report(
+                error("E0032", f"{name!r} may be used before it is assigned")
+                .at(self._span(at))
+                .also(sym.span, "assigned here, but not on every path")
+                .note("Python raises UnboundLocalError for this at runtime")
+                .help("give it a value before the branch, or assign it in "
+                      "every branch"))
+            # Treated as assigned from here on, so one mistake yields one
+            # diagnostic rather than one per use.
+            self.assigned.add(name)
         sym.used = True
         return sym.type
 

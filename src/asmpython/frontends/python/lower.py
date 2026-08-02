@@ -193,7 +193,13 @@ class Lowerer:
         then_b = self.b.new_block("then")
         else_b = self.b.new_block("else") if node.orelse else None
         join = self.b.new_block("endif")
-        self.b.branch(cond, then_b, else_b or join)
+        # `else_b or join` was wrong, and quietly. A Block defines __len__, so
+        # a freshly created one is EMPTY and therefore FALSY -- the false edge
+        # went to the join every time and the else branch was never reached.
+        # Every `if`/`else` in the language compiled with its else body
+        # unreachable, and no test noticed because every test program was
+        # written in the early-return style with no else at all.
+        self.b.branch(cond, then_b, join if else_b is None else else_b)
 
         self.b.switch_to(then_b)
         for s in node.body:

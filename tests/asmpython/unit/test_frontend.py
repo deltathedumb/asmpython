@@ -125,6 +125,98 @@ class TestNothingCrashes:
             pytest.fail(f"compiler raised {type(exc).__name__}: {exc}")
 
 
+class TestElse:
+    """`if`/`else`, which was silently broken for the whole life of the tree.
+
+    `Block` defines `__len__`, so a freshly created (empty) one is FALSY, and
+    the lowerer chose the false edge with `else_b or join`. It picked the join
+    every time: every else body in the language was unreachable, and the code
+    in it simply did not run.
+
+    Nothing caught it because every test program and every example was written
+    in the early-return style -- `if n < 0: return -1` -- with no else
+    anywhere. The fuzzer found it within minutes of learning to emit one.
+    """
+
+    def test_the_else_branch_runs(self, tmp_path):
+        lines, _ = run_text("""
+            def main() -> int:
+                n: int = -5
+                if n > 0:
+                    print(1)
+                else:
+                    print(2)
+                return 0
+        """, tmp_path)
+        assert lines == ["2"]
+
+    def test_the_then_branch_still_runs(self, tmp_path):
+        lines, _ = run_text("""
+            def main() -> int:
+                n: int = 5
+                if n > 0:
+                    print(1)
+                else:
+                    print(2)
+                return 0
+        """, tmp_path)
+        assert lines == ["1"]
+
+    def test_elif_chains(self, tmp_path):
+        lines, _ = run_text("""
+            def classify(n: int) -> int:
+                if n < 0:
+                    return 1
+                elif n == 0:
+                    return 2
+                elif n < 10:
+                    return 3
+                else:
+                    return 4
+
+            def main() -> int:
+                print(classify(-1))
+                print(classify(0))
+                print(classify(5))
+                print(classify(50))
+                return 0
+        """, tmp_path)
+        assert lines == ["1", "2", "3", "4"]
+
+    def test_else_inside_a_loop(self, tmp_path):
+        lines, _ = run_text("""
+            def main() -> int:
+                total: int = 0
+                for i in range(6):
+                    if i % 2 == 0:
+                        total = total + 1
+                    else:
+                        total = total + 100
+                print(total)
+                return 0
+        """, tmp_path)
+        assert lines == ["303"]
+
+    def test_the_false_edge_targets_the_else_block(self, tmp_path):
+        """Asserted on the IR, because the wrong edge is invisible in output
+        whenever the else body happens to be empty or unobservable."""
+        from asmpython.ir.opcodes import Op
+        result, _ = compile_text("""
+            def main() -> int:
+                n: int = 1
+                if n > 0:
+                    n = 2
+                else:
+                    n = 3
+                return n
+        """, tmp_path)
+        fn = result.module.function("main")
+        branch = next(i for b in fn.blocks for i in b.instructions
+                      if i.op is Op.BRANCH)
+        assert branch.labels[1].startswith("else"), (
+            f"false edge goes to {branch.labels[1]!r}, not the else block")
+
+
 class TestPower:
     def test_literal_exponent_is_expanded(self, tmp_path):
         lines, _ = run_text("""

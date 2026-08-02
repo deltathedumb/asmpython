@@ -85,6 +85,12 @@ class ProgramGenerator:
         #: main. Only backwards, because the frontend resolves signatures
         #: first but a cycle would not terminate here.
         self.callables: list[tuple[str, list[str], float, str]] = []
+        #: Loop counters. Readable in expressions, never an assignment
+        #: target: a nested `w0 = w0 + <expr>` can decrease the counter its
+        #: own `while` tests, and the program never finishes. CPython hangs
+        #: on it too, so the comparison never even starts -- the whole sweep
+        #: just stops.
+        self.protected: set[str] = set()
 
     # -- leaves --------------------------------------------------------------
     def int_literal(self) -> Bounded:
@@ -347,6 +353,112 @@ class ProgramGenerator:
                     args.append(f"{self.rng.uniform(-100, 100):.4f}")
         return Bounded(f"{name}({', '.join(args)})", bound)
 
+    def assignable(self) -> str:
+        """An integer variable safe to assign to -- never a loop counter."""
+        free = [n for n in self.int_vars if n not in self.protected]
+        return self.rng.choice(free or list(self.int_vars))
+
+    # -- control flow --------------------------------------------------------
+    def statements(self, indent: str, depth: int, in_loop: bool = False,
+                   trip: int = 1) -> list[str]:
+        """A block of statements, possibly containing nested control flow.
+
+        Depth matters more than breadth. A loop inside a loop inside an `if`
+        produces a join reachable from several blocks at different loop
+        depths, which is where liveness, the dominator tree and simplifycfg
+        have to agree with each other -- and a flat sequence of statements
+        never builds one.
+
+        `in_loop` is tracked separately from `depth` because they are not the
+        same question: an `if` nested inside another `if` has depth 2 and no
+        enclosing loop, and emitting `break` there is a compile error rather
+        than an interesting program.
+
+        `trip` is the most times this block can run, and it is what keeps the
+        magnitude ceilings honest: `x = x + e` inside a loop of four adds `e`
+        four times, and accounting for it once let a generated value climb
+        past 2^63 -- an overflow the whole `Bounded` machinery exists to make
+        unbuildable.
+        """
+        r = self.rng
+        if depth >= 3:
+            # Leaf statements only. Loops were already capped at depth 2, but
+            # `if` was not, and an `if` whose body may contain an `if`
+            # recurses until the stack gives out -- which it promptly did.
+            return [f"{indent}print({self.int_expr(2)})"]
+
+        lines: list[str] = []
+        for _ in range(r.randint(1, 3)):
+            kind = r.random()
+
+            if depth < 2 and kind < 0.22:
+                name = self.assignable()
+                var = f"k{depth}"
+                self.protected.add(var)
+                iterations = r.randint(1, 4)
+                self.int_vars[var] = iterations
+                lines.append(f"{indent}for {var} in range({iterations}):")
+                lines += self.statements(indent + "    ", depth + 1,
+                                         in_loop=True, trip=trip * iterations)
+                lines.append(f"{indent}    {name} = {name} + {var}")
+                self.int_vars[name] += trip * iterations * iterations
+                # `range(0)` runs zero times, so the loop variable is not
+                # assigned after the loop -- Python raises UnboundLocalError
+                # and the frontend now says so at compile time. Dropping it
+                # here keeps the generator inside the language.
+                self.int_vars.pop(var, None)
+                self.protected.discard(var)
+            elif depth < 2 and kind < 0.38:
+                name = self.assignable()
+                counter = f"w{depth}"
+                limit = r.randint(1, 3)
+                lines.append(f"{indent}{counter}: int = 0")
+                self.int_vars[counter] = limit
+                self.protected.add(counter)
+                lines.append(f"{indent}while {counter} < {limit}:")
+                # Incremented FIRST, so a `continue` in the body cannot skip
+                # it and hang the program.
+                lines.append(f"{indent}    {counter} = {counter} + 1")
+                lines += self.statements(indent + "    ", depth + 1,
+                                         in_loop=True, trip=trip * limit)
+                lines.append(f"{indent}    {name} = {name} + {counter}")
+                self.int_vars[name] += trip * limit * limit
+                if depth > 0:
+                    # Declared inside a nested block, so it is not in scope --
+                    # definitely assigned, at least -- outside it.
+                    self.int_vars.pop(counter, None)
+                    self.protected.discard(counter)
+            elif kind < 0.58:
+                lines.append(f"{indent}if {self.bool_expr()}:")
+                before = dict(self.int_vars)
+                lines += self.statements(indent + "    ", depth + 1, in_loop,
+                                         trip)
+                if r.random() < 0.5:
+                    lines.append(f"{indent}else:")
+                    lines += self.statements(indent + "    ", depth + 1,
+                                             in_loop, trip)
+                # Anything introduced in a branch is assigned on that path
+                # only, and reading it afterwards is the error the frontend
+                # now reports. Keep the outer scope as it was.
+                for gone in set(self.int_vars) - set(before):
+                    self.int_vars.pop(gone, None)
+                    self.protected.discard(gone)
+            elif in_loop and kind < 0.66:
+                keyword = "break" if r.random() < 0.5 else "continue"
+                lines.append(f"{indent}if {self.bool_expr()}:")
+                lines.append(f"{indent}    {keyword}")
+            elif kind < 0.80:
+                lines.append(f"{indent}print({self.int_expr()})")
+            else:
+                name = self.assignable()
+                e = self.int_expr(2)
+                if self.int_vars[name] + trip * e.bound > INT_LIMIT:
+                    lines.append(f"{indent}print({e})")
+                else:
+                    lines.append(f"{indent}{name} = {name} + {e}")
+                    self.int_vars[name] += trip * e.bound
+        return lines or [f"{indent}pass"]
+
     # -- whole program -------------------------------------------------------
     def program(self) -> str:
         r = self.rng
@@ -390,16 +502,13 @@ class ProgramGenerator:
                 lines.append(f"    if {self.bool_expr()}:")
                 lines.append(f"        print({self.int_expr()})")
             elif kind < 0.86:
-                # A while loop with a counter, which the `for` form never
-                # produces: a different block shape reaching the same join.
-                name = r.choice(list(self.int_vars))
-                limit = r.randint(1, 5)
-                lines.append(f"    w{limit}: int = 0")
-                lines.append(f"    while w{limit} < {limit}:")
-                lines.append(f"        w{limit} = w{limit} + 1")
-                lines.append(f"        {name} = {name} + w{limit}")
-                self.int_vars[name] += 15
-                lines.append(f"    print({name})")
+                # Nested control flow: loops in loops, if/else inside them,
+                # and `break`/`continue` at depth. A join reachable from
+                # several blocks at different loop depths is where liveness,
+                # dominators and simplifycfg have to agree, and a flat
+                # sequence never produces one.
+                lines += self.statements("    ", 0)
+                lines.append(f"    print({r.choice(list(self.int_vars))})")
             else:
                 name = r.choice(list(self.int_vars))
                 lines.append(f"    for k in range({r.randint(1, 5)}):")
