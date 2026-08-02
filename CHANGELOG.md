@@ -36,14 +36,13 @@ deliverable.
   divisor's sign where the machine takes the dividend's, `and`/`or` yield an
   operand, and `a < b < c` evaluates `b` once.
 
-  Every program in the suite runs five ways — CPython, the interpreter on
-  unoptimised IR, the interpreter on optimised IR, the C backend compiled and
-  executed, and the x86-64 backend assembled, linked and executed — and all
-  five must agree.
+  Every program in the suite runs six ways — CPython, the interpreter on
+  unoptimised IR, the interpreter on optimised IR, and the C, x86-64 and
+  AArch64 backends compiled, linked and executed — and all six must agree.
 
   Documented in `README.md` and
   `docs/{FRONTENDS,BACKENDS,TARGETS,LINKERS,LANGUAGE}.md`; every code example
-  in those five was executed as written. 658 tests.
+  in those five was executed as written. 748 tests.
 
   The pre-rewrite compiler moved to `legacy/asmpython/` unchanged. Two
   packages cannot share an import name, and the rewrite owns it; the old tree
@@ -55,12 +54,58 @@ deliverable.
   adding a platform is a registration rather than an edit to a driver.
   Linking was an empty directory: `build` emitted assembly and stopped, so
   the compiler had never once been asked to produce something that runs.
-  Shipped toolchains are `cc` and `none`.
+  Shipped toolchains are `cc`, `baremetal` and `none`.
+
+- **An AArch64 backend, executed under QEMU** (`backends/arm64/`) — Python to
+  IR to AArch64 to a freestanding ELF that boots under
+  `qemu-system-aarch64 -M virt -kernel` and prints over the UART. No ARM
+  hardware, no guest OS, no user-mode emulation.
+
+  A third backend is how you find out whether the shared parts are shared.
+  `liveness` and `regalloc` had been written against one machine and used by
+  one machine, which proves nothing; this one uses them unchanged. The only
+  machine-specific inputs are the register file and the "does this clobber the
+  volatiles" predicate x86-64 already needed for its own hidden `call fmod`.
+  Nothing had to be added to either — and AAPCS64 is not a small delta from
+  System V.
+
+  What differs from x86-64, and what each difference costs: three-operand
+  arithmetic removes the move-into-place before every binary operation; no
+  memory operands make every spilled value an explicit load; an arbitrary
+  64-bit constant takes up to four instructions; there is no remainder
+  instruction (`sdiv` then `msub`); and SP must be 16-byte aligned AT ALL
+  TIMES rather than only at a call, which rules out the push/pop x86-64 uses
+  around division and is why `alloca` is served from space reserved in the
+  frame. Slots are addressed from SP rather than FP because the scaled 12-bit
+  offset reaches 32KB where FP's signed 9-bit reaches 256 bytes.
+
+  Two things every bare-metal AArch64 image needs, both of which fail with no
+  output and no error: the FPU traps until `CPACR_EL1.FPEN` is set (and GCC
+  uses SIMD registers for ordinary code, so the first call faults), and QEMU's
+  `virt` machine has RAM at 0x40000000, so an image linked at the toolchain's
+  default 0x400000 is loaded nowhere.
+
+  The runtime is freestanding rather than newlib, which ships with the
+  toolchain and would give a real `printf`: newlib's `snprintf` takes an
+  alignment fault at EL1 the moment malloc hands it a block. Sixty lines of
+  formatting whose output can be CHECKED beat chasing that, and it is checked
+  — against the host's `printf` on 200,000 values including the ties a naive
+  round-half gets wrong (0.5, 1.5, 2.5) and negative zero.
+
+  Three targets (`aarch64-none`, `aarch64-linux`, `aarch64-macos`), a
+  `baremetal` toolchain selected automatically when a target's `os` is
+  `"none"`, and `Target.cc_names` so a cross target names its own compiler
+  driver instead of the link stage guessing from the architecture. 30 tests:
+  the shared program corpus, the places earlier backends were silently wrong
+  (narrow widths, a value live across a float remainder, argument setup as a
+  parallel assignment, thirty live values forcing spills), and twelve programs
+  straight from the differential fuzzer, which knows nothing about AArch64 and
+  compares against CPython exactly as before.
 
 - **A differential fuzzer** (`tests/asmpython/integration/test_differential.py`)
   generating programs from the accepted grammar and comparing CPython, the
-  interpreter on unoptimised and optimised IR, and both backends compiled and
-  executed. Overflow is made unbuildable rather than unlikely: every
+  interpreter on unoptimised and optimised IR, and all three backends compiled
+  and executed. Overflow is made unbuildable rather than unlikely: every
   expression carries a ceiling on its magnitude, because bounding the leaves
   does not bound a product of two of them.
 

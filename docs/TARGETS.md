@@ -24,6 +24,7 @@ register(Target(
     stack_alignment=16,
     object_suffix=".o",
     executable_suffix="",
+    cc_names=("riscv64-linux-gnu-gcc",),
 ), aliases=("rv64",))
 ```
 
@@ -43,7 +44,7 @@ build and simply have no platforms until something registered one.
 ```python
 Target(name, arch, os, abi, object_format,
        pointer_size, little_endian, stack_alignment,
-       object_suffix, executable_suffix)
+       object_suffix, executable_suffix, cc_names)
 ```
 
 **Never parse `name` to decide behaviour.** Read the field that says what you
@@ -68,6 +69,37 @@ except KeyError:
 
 Refusing is the point. A backend that falls back to a default produces a
 program that runs and is wrong.
+
+## Cross targets name their own compiler
+
+`cc_names` lists the compiler drivers that can build for this platform, in
+preference order; empty means the host's own.
+
+```python
+cc_names=("aarch64-none-elf-gcc", "aarch64-elf-gcc", "aarch64-linux-gnu-gcc")
+```
+
+The alternative is a toolchain deriving the name from `arch`, which works
+until two toolchains target the same architecture — `aarch64-none-elf-gcc`
+builds a bare-metal image and `aarch64-linux-gnu-gcc` builds a Linux one, and
+they are not interchangeable. Naming them on the target makes the second one a
+registration instead of a special case in the link stage.
+
+Order matters, because a machine may have several and the first that exists
+wins. Put the one you mean first.
+
+## Bare metal is `os="none"`
+
+There is nothing else to it, and it is worth saying because it looks like it
+should need more: an image with no operating system is a target whose `os` is
+`"none"`, and the link stage reads that field to pick the freestanding
+toolchain. The AArch64 backend needed no notion of "bare metal" at all.
+
+```python
+register(Target("aarch64-none", arch="aarch64", os="none", abi="aapcs64",
+                object_format="elf",
+                cc_names=("aarch64-none-elf-gcc", "aarch64-elf-gcc")))
+```
 
 ## `host`
 
@@ -110,6 +142,7 @@ platform, configured differently" is a thing people legitimately want.
       name
 - [ ] `object_suffix` and `executable_suffix` match what the platform expects
       (`.obj`/`.exe` on Windows, `.o`/`` elsewhere)
+- [ ] `cc_names` set if it is a cross target, most-preferred first
 - [ ] a backend exists that implements your `abi`, or yours refuses clearly
 - [ ] `asmpython targets` shows it
 - [ ] a program compiled for it runs, and agrees with `asmpython run` on

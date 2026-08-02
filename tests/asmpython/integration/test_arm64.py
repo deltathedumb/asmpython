@@ -33,14 +33,20 @@ from asmpython import target as target_registry
 from asmpython.diagnostics import DiagnosticSink
 from asmpython.driver import Options, compile_source
 
-#: The Arm GNU Toolchain is not on PATH by default after an unzip, so the
-#: usual install location is checked too. Named once here.
+#: Neither the Arm GNU Toolchain nor QEMU puts itself on PATH after an
+#: unzip on Windows, so the usual install locations are checked too, and an
+#: environment variable overrides both -- guessing at install paths is a
+#: convenience for the common case and must not be the only way in.
 _TOOLCHAIN_DIRS = (
+    Path(os.environ["ASMPYTHON_AARCH64_BIN"]),
+) if os.environ.get("ASMPYTHON_AARCH64_BIN") else (
     Path(r"C:\tools\aarch64-none-elf\bin"),
     Path("/opt/aarch64-none-elf/bin"),
     Path("/usr/bin"),
 )
 _QEMU_DIRS = (
+    Path(os.environ["ASMPYTHON_QEMU_BIN"]),
+) if os.environ.get("ASMPYTHON_QEMU_BIN") else (
     Path(r"C:\Program Files\qemu"),
     Path("/usr/bin"),
 )

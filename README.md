@@ -92,6 +92,17 @@ accepts, and the four places Python and the machine disagree.
 python -m pytest tests/asmpython -q
 ```
 
-The C and x86-64 stages need a C compiler on PATH; without one they skip
-rather than fail. A machine without gcc can still run everything else, and a
-red suite people are told to ignore is worse than a smaller green one.
+The C and x86-64 stages need a C compiler on PATH, and the AArch64 stage needs
+`aarch64-none-elf-gcc` and `qemu-system-aarch64`; without them those tests
+skip rather than fail. A machine without any of it can still run everything
+else, and a red suite people are told to ignore is worse than a smaller green
+one.
+
+Neither AArch64 tool puts itself on PATH after an unzip on Windows, so the
+usual install locations are checked as well, and either can be pointed
+somewhere else:
+
+```
+ASMPYTHON_AARCH64_BIN=/path/to/aarch64-none-elf/bin
+ASMPYTHON_QEMU_BIN=/path/to/qemu
+```
