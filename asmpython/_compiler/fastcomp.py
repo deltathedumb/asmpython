@@ -30,8 +30,7 @@ from .driver import (
     _shared_lib_path,
 )
 from .irfreeze import FrozenIR, component_hashes, dump_ir, load_ir
-from .target_linux import LinuxCodegen
-from .target_windows import WindowsCodegen
+from .._targets import get_target
 
 CACHE_SCHEMA = 1
 _LABEL_RE = re.compile(r"^\s*([A-Za-z_?$@][A-Za-z0-9_?$@.]*)\s*:")
@@ -342,9 +341,9 @@ def _write_manifest(path: Path, document: dict[str, Any]) -> None:
 
 def _select_codegen(module: Any, target: str, use_runtime_lib: bool) -> tuple[Any, str, str]:
     if target == "linux":
-        return LinuxCodegen(module, use_runtime_lib=use_runtime_lib), "elf64", ".o"
+        return get_target("linux")(module, use_runtime_lib=use_runtime_lib), "elf64", ".o"
     if target == "windows":
-        return WindowsCodegen(module, use_runtime_lib=use_runtime_lib), "win64", ".obj"
+        return get_target("windows")(module, use_runtime_lib=use_runtime_lib), "win64", ".obj"
     raise ValueError(f"fastcomp fragmentation is not available for target {target!r}")
 
 

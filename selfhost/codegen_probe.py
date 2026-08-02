@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 
 from asmpython._compiler.program import load_program  # noqa: E402
 from asmpython._compiler.sema import analyze as sema_analyze  # noqa: E402
-from asmpython._compiler.target_windows import WindowsCodegen  # noqa: E402
+from asmpython._targets.target_windows import WindowsCodegen  # noqa: E402
 from asmpython._compiler.errors import CompileError  # noqa: E402
 
 from selfhost.check import TARGETS  # noqa: E402

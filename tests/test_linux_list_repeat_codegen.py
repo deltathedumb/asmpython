@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from asmpython._compiler.target_linux import LinuxCodegen
+from asmpython._targets.target_linux import LinuxCodegen
 
 
 def test_list_repeat_malloc_sizes_use_sysv_rdi() -> None:

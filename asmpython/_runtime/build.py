@@ -19,20 +19,19 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 from .._compiler import ast_nodes as A
-from .._compiler.target_linux import LinuxCodegen
-from .._compiler.target_windows import WindowsCodegen
-from .._compiler.target_x86_32_linux import X86_32LinuxCodegen
+from .._targets import get_target
 
 
 _TARGETS = {
-    "linux": (LinuxCodegen, "elf64", "libasmpython_rt_linux.a"),
-    "windows": (WindowsCodegen, "win64", "libasmpython_rt_win.a"),
+    "linux": (get_target("linux"), "elf64", "libasmpython_rt_linux.a"),
+    "windows": (get_target("windows"), "win64", "libasmpython_rt_win.a"),
     # x86-32 (i386) Linux -- the legacy runtime port is PARTIAL (see
     # target_x86_32_linux.py's own module docstring and its
     # _UNPORTED_RUNTIME_HELPERS list): exception handling and the dict/
@@ -42,7 +41,8 @@ _TARGETS = {
     # that only uses what IS ported builds and runs correctly; one that
     # calls an unported primitive gets a real, clear NASM/linker
     # undefined-symbol error at build time, not a silent wrong answer.
-    "x86_32_linux": (X86_32LinuxCodegen, "elf32", "libasmpython_rt_x86_32_linux.a"),
+    "x86_32_linux": (get_target("x86_32_linux"), "elf32",
+                     "libasmpython_rt_x86_32_linux.a"),
 }
 
 # Shared-library outputs, keyed by the same target name. The build_shared
@@ -58,11 +58,18 @@ def _build_dir() -> Path:
 
 
 def _source_paths(target: str) -> list[Path]:
-    """The files whose CONTENTS determine the runtime .asm."""
+    """The files whose CONTENTS determine the runtime .asm.
+
+    The target's own source is found from the loaded class rather than by
+    guessing a path. A hard-coded path that stops existing hashes nothing and
+    silently stops invalidating -- the exact stale-archive failure the digest
+    below exists to prevent -- and it would have to be edited again the next
+    time targets move, or be wrong for a target registered from outside.
+    """
     compiler_dir = Path(__file__).resolve().parent.parent / "_compiler"
     return [
         compiler_dir / "codegen.py",
-        compiler_dir / f"target_{target}.py",
+        Path(inspect.getfile(get_target(target))).resolve(),
         Path(__file__).resolve(),
     ]
 

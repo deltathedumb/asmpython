@@ -10,9 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import native_libraries as _native_libraries
-from .target_freestanding import FreestandingCodegen
-from .target_linux import LinuxCodegen
-from .target_windows import WindowsCodegen
+# Targets are not part of the compiler: they are resolved by name through the
+# registry in asmpython/_targets/, so a new platform is a registration rather
+# than an edit here. See asmpython/target.py for the public API.
+from .._targets import get_target
 
 
 @dataclass
@@ -800,36 +801,32 @@ def _run_backend(
 
     entry_path_str = str(entry_path) if entry_path is not None else None
     if target == "linux":
-        gen = LinuxCodegen(module, use_runtime_lib=use_runtime_lib, entry_path=entry_path_str)
+        gen = get_target("linux")(module, use_runtime_lib=use_runtime_lib, entry_path=entry_path_str)
         gen.gc_mode = _gc_mode_of(options)
         nasm_fmt = "elf64"
         obj_suffix = ".o"
     elif target == "x86_32_linux":
-        from .target_x86_32_linux import X86_32LinuxCodegen
-
         # PARTIAL runtime port -- see target_x86_32_linux.py's own module
         # docstring and _UNPORTED_RUNTIME_HELPERS list. A program calling
         # only what's ported (exception handling, dict/hash/sort core)
         # builds and runs correctly; one that hits an unported primitive
         # fails at the NASM/link step with a real, clear undefined-symbol
         # error, not a silent wrong answer.
-        gen = X86_32LinuxCodegen(module, use_runtime_lib=use_runtime_lib, entry_path=entry_path_str)
+        gen = get_target("x86_32_linux")(module, use_runtime_lib=use_runtime_lib, entry_path=entry_path_str)
         gen.gc_mode = _gc_mode_of(options)
         nasm_fmt = "elf32"
         obj_suffix = ".o"
     elif target == "windows":
-        gen = WindowsCodegen(module, use_runtime_lib=use_runtime_lib, entry_path=entry_path_str)
+        gen = get_target("windows")(module, use_runtime_lib=use_runtime_lib, entry_path=entry_path_str)
         gen.gc_mode = _gc_mode_of(options)
         nasm_fmt = "win64"
         obj_suffix = ".obj"
     elif target == "freestanding":
-        gen = FreestandingCodegen(module, use_runtime_lib=False)
+        gen = get_target("freestanding")(module, use_runtime_lib=False)
         nasm_fmt = "bin"
         obj_suffix = ".bin"
     elif target == "freestanding16":
-        from .target_freestanding16 import Freestanding16Codegen
-
-        gen = Freestanding16Codegen(module, use_runtime_lib=False)
+        gen = get_target("freestanding16")(module, use_runtime_lib=False)
         nasm_fmt = "bin"
         obj_suffix = ".img"
     else:
@@ -883,9 +880,7 @@ def _run_backend(
             # The boot sector issues a fixed-size INT 13h read; INT 13h fails the
             # whole read if any requested sector is past end-of-file, so pad the
             # image to (1 boot + BOOT_READ_SECTORS) whole sectors.
-            from .target_freestanding16 import Freestanding16Codegen as _F16
-
-            need = (_F16.BOOT_READ_SECTORS + 1) * 512
+            need = (get_target("freestanding16").BOOT_READ_SECTORS + 1) * 512
             data = obj_path.read_bytes()
             if len(data) < need:
                 obj_path.write_bytes(data + b"\x00" * (need - len(data)))

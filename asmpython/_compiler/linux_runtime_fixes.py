@@ -7,7 +7,7 @@ before the compiler driver imports it.
 
 from __future__ import annotations
 
-from .target_linux import LinuxCodegen
+from .._targets.target_linux import LinuxCodegen
 
 
 def _emit_list_repeat_helper(self: LinuxCodegen) -> None:

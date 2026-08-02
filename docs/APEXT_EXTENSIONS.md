@@ -1,7 +1,7 @@
 # ASMPython `.apext` extensions
 
 ASMPython extensions are deterministic ZIP archives containing Python code and
-an `apext.json` manifest. They can register backends, linkers, mlang
+an `apext.json` manifest. They can register backends, targets, linkers, mlang
 configurations, lifecycle hooks, or other host-side compiler integrations.
 
 ## Minimal extension
@@ -31,6 +31,35 @@ The default output is `<extension-id>.apext`. `--root` chooses the source tree
 and `--output` chooses the archive path. The `module:object` target identifies
 the exact exported `Extension` descriptor, while other package modules may
 register backends, linkers, or lifecycle behavior during loading.
+
+## Registering a target
+
+A *target* is the platform code is emitted for -- object format, entry point,
+syscall convention, runtime startup. A *backend* is the code generator that
+produces it. They are separate registries because they vary independently: one
+code generator serves several platforms, and one platform can be reached by
+several code generators.
+
+```python
+from asmpython import target
+from asmpython._targets.target_linux import LinuxCodegen
+
+class MyOSCodegen(LinuxCodegen):
+    SYSCALL_WRITE = 4          # usually this is most of the difference
+
+target.Target(name="my_os", codegen=MyOSCodegen, aliases=("myos",))
+```
+
+Then `asmpython build myfile.py --target my_os`.
+
+The compiler holds no list of platforms: `driver.py` asks the registry for a
+target by name, so adding one is a registration rather than an edit to the
+compiler. The built-in targets go through exactly the same path, and load
+lazily -- a Windows build never imports the 16-bit freestanding lowering.
+
+Registering an existing name replaces it, so an extension may override a
+built-in platform. `target.available()` lists what is registered and
+`target.aliases()` maps the short names.
 
 ## Installation scopes
 

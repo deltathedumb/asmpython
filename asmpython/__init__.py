@@ -27,6 +27,7 @@ from . import (
     linker,
     mlang,
     runtime,
+    target,
 )
 from .annotations import *
 from .annotations import __all__ as _annotations_all
@@ -133,6 +134,7 @@ __all__ = [
     "linker",
     "mlang",
     "runtime",
+    "target",
     "compile_function",
     "__version__",
     *_annotations_all,
