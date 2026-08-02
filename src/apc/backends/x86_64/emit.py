@@ -21,16 +21,21 @@ The ABI comes from the Target. Hardcoding one produces code that links fine on
 the other platform and corrupts its arguments, which reads as a miscompilation
 of the callee rather than of the call.
 
-Floats are not implemented here. The IR has f32/f64 and this backend would need
-the SSE register file and its own calling-convention class to handle them; a
-backend that emits wrong float code is worse than one that refuses, so
-`emit` raises on a float operation rather than pretending.
+FLOATS use SSE, and are kept in frame slots rather than allocated. The shared
+allocator models one register file and xmm* is a second; handing floats to it
+as `on_stack` is slower than allocating them and correct at every register
+count, which is the order to do these in. The float ABI is the part worth
+reading: System V indexes the integer and SSE argument sequences
+independently, Microsoft x64 indexes both by argument POSITION, and the
+difference is invisible until a call mixes types.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ...backend.base import ENTRY_SYMBOL, Backend, Target, register
+from ...backend.base import (
+    ENTRY_SYMBOL, Backend, BackendUnsupported, Target, register,
+)
 from ...backend.regalloc import (
     Allocation, InRegister, InSlot, RegisterFile, allocate, verify_allocation,
 )
@@ -56,6 +61,17 @@ class ABI:
     #: Microsoft x64 requires 32 ("shadow space") for the callee to spill its
     #: register arguments into; System V requires none.
     shadow_space: int = 0
+    #: SSE registers carrying floating-point arguments.
+    float_argument_registers: tuple[str, ...] = ()
+    #: True if an argument's POSITION consumes a slot in both sequences.
+    #:
+    #: The two conventions disagree in a way that is invisible until a call
+    #: mixes types. On System V the sequences are independent: f(int, float)
+    #: passes the int in rdi and the float in xmm0. On Microsoft x64 they are
+    #: one sequence indexed by position: the same call passes the int in rcx
+    #: and the float in xmm1, and xmm0 is skipped. Getting this wrong reads
+    #: the wrong register in the callee and produces garbage, not a crash.
+    positional_float_slots: bool = False
 
     @property
     def allocation_order(self) -> tuple[str, ...]:
@@ -80,6 +96,8 @@ SYSTEM_V = ABI(
     "sysv",
     argument_registers=("rdi", "rsi", "rdx", "rcx", "r8", "r9"),
     callee_saved=frozenset({"rbx", "r12", "r13", "r14", "r15"}),
+    float_argument_registers=("xmm0", "xmm1", "xmm2", "xmm3",
+                              "xmm4", "xmm5", "xmm6", "xmm7"),
 )
 MICROSOFT_X64 = ABI(
     "win64",
@@ -89,6 +107,8 @@ MICROSOFT_X64 = ABI(
     # call if the ABI is assumed rather than looked up.
     callee_saved=frozenset({"rbx", "rsi", "rdi", "r12", "r13", "r14", "r15"}),
     shadow_space=32,
+    float_argument_registers=("xmm0", "xmm1", "xmm2", "xmm3"),
+    positional_float_slots=True,
 )
 
 
@@ -196,12 +216,122 @@ _SIMPLE_BINOP = {
 }
 
 
-class UnsupportedOperation(Exception):
+def _fsuffix(ty: T.Type) -> str:
+    """`sd` for a double, `ss` for a single. The whole float ISA keys on it."""
+    return "sd" if ty is T.F64 else "ss"
+
+
+def _fmov(ty: T.Type) -> str:
+    return "movsd" if ty is T.F64 else "movss"
+
+
+#: Scratch for breaking a cycle of register moves. Reserved, so the allocator
+#: never holds a live value in it.
+_MOVE_SCRATCH = "r11"
+
+
+def _emit_parallel_moves(e: "_Emitter", moves: list[tuple[str, str]]) -> None:
+    """Emit `dst <- src` moves as if they happened simultaneously.
+
+    Argument setup is a parallel assignment: every source is read from the
+    state before the call, not from the half-updated state left by the moves
+    already emitted. Doing them in argument order is correct only when no
+    destination is also a source, and wrong silently otherwise -- the value
+    that was overwritten is simply gone, and the callee gets a duplicate of
+    another argument.
+
+    The rule is: emit any move whose DESTINATION is nobody else's source,
+    repeat, and when only a cycle remains break it through a reserved scratch
+    register. A cycle is real -- `f(b, a)` where a is in the register b wants
+    and vice versa -- and no ordering alone can resolve it.
+
+    A memory source cannot be clobbered by these moves, so it never appears in
+    a cycle. Its DESTINATION still can: `rcx <- [rbp-8]` alongside
+    `rdx <- rcx` must not run first, or rdx gets the loaded value instead of
+    rcx's. Emitting the memory moves up front looked obviously safe and
+    reintroduced the same bug one layer down.
+    """
+    pending = [(dst, src) for dst, src in moves if f"%{dst}" != src]
+
+    while pending:
+        # Only register sources can be destroyed by a move, so only they
+        # constrain the order.
+        sources = {src for _, src in pending if src.startswith("%")}
+        ready = [m for m in pending if f"%{m[0]}" not in sources]
+        if not ready:
+            dst, src = pending[0]
+            e.emit(f"movq {src}, %{_MOVE_SCRATCH}")
+            pending = [(d, f"%{_MOVE_SCRATCH}" if s == src else s)
+                       for d, s in pending]
+            continue
+        for move in ready:
+            e.emit(f"movq {move[1]}, %{move[0]}")
+            pending.remove(move)
+
+
+@dataclass(frozen=True, slots=True)
+class _Place:
+    """Where one argument travels: a register, or a slot on the stack."""
+
+    register: str = ""
+    is_float: bool = False
+    #: Byte offset from rsp at the call, or None for a register argument.
+    stack_offset: int | None = None
+
+    @property
+    def on_stack(self) -> bool:
+        return self.stack_offset is not None
+
+
+def _ucomis(ty: T.Type) -> str:
+    """The ordered-compare mnemonic.
+
+    NOT `"ucomis" + _fsuffix(ty)`: that spells `ucomissd`, which is not an
+    instruction. The suffix convention breaks for exactly this mnemonic
+    because it already ends in `s`.
+    """
+    return "ucomisd" if ty is T.F64 else "ucomiss"
+
+
+def _float_bits(ty: T.Type, value: float) -> int:
+    """The IEEE-754 bit pattern of `value` at `ty`'s width.
+
+    Emitted as an integer and moved into an SSE register, rather than placed
+    in .rodata and loaded. Both work; this keeps the constant next to its use
+    and avoids a second section, at the cost of two instructions.
+    """
+    import struct
+    fmt = "<d" if ty is T.F64 else "<f"
+    return int.from_bytes(struct.pack(fmt, float(value)), "little")
+
+
+#: `ucomis*` sets the flags as an UNSIGNED comparison, so the set codes are
+#: the unsigned ones. It also sets PF when either operand is NaN, and that is
+#: the case worth being careful about: every comparison against NaN is false in
+#: Python, including `nan == nan`.
+#:
+#: For `<` and `<=` the operands are swapped and the "above" forms used, so an
+#: unordered result yields 0 rather than 1. `==` and `!=` cannot be expressed
+#: that way and take an extra instruction on PF.
+_FLOAT_CMP = {
+    Op.LT: ("swap", "seta"),
+    Op.LE: ("swap", "setae"),
+    Op.GT: ("plain", "seta"),
+    Op.GE: ("plain", "setae"),
+}
+
+
+class UnsupportedOperation(BackendUnsupported):
     """This backend cannot emit the requested operation.
 
     Raised rather than emitting something plausible. A backend that guesses
     produces a program that runs and is wrong, which costs far more to diagnose
     than one that refuses to build.
+
+    It derives from `BackendUnsupported` so the driver turns it into a
+    diagnostic. As a bare Exception it reached the user as a traceback with a
+    compiler stack in it, which says "you found a bug in apc" when the true
+    message is "this backend does not do that yet; use --backend c".
     """
 
 
@@ -233,6 +363,25 @@ class _Emitter:
                 self.emit(f"movq %{scratch}, %{place.name}")
         else:
             self.emit(f"movq %{scratch}, -{place.offset}(%rbp)")
+
+    # ── floating point ──────────────────────────────────────────────────────
+    # Float values always live in frame slots, never in an SSE register across
+    # instructions. The shared allocator models ONE register file, and x86-64
+    # floats are a second one; rather than teach it about classes (or fork a
+    # second allocator that nothing would exercise under pressure), floats are
+    # handed to `allocate(on_stack=...)` and moved through xmm0/xmm1 exactly as
+    # spilled integers move through r10/r11. Slower than it could be, and
+    # correct at every register count -- which is the order to do these in.
+
+    def float_into(self, reg: Register, xmm: str) -> str:
+        """Load a float value into `xmm` and return its operand form."""
+        ty = self.fn.register_type(reg)
+        self.emit(f"{_fmov(ty)} {self.loc(reg)}, %{xmm}")
+        return f"%{xmm}"
+
+    def float_store(self, xmm: str, reg: Register) -> None:
+        ty = self.fn.register_type(reg)
+        self.emit(f"{_fmov(ty)} %{xmm}, {self.loc(reg)}")
 
     def emit(self, text: str) -> None:
         self.lines.append(f"\t{text}")
@@ -298,9 +447,11 @@ class X86_64Backend(Backend):
     # ── one function ────────────────────────────────────────────────────────
     def _function(self, fn: Function, abi: ABI,
                   dialect: AsmDialect) -> list[str]:
-        self._reject_floats(fn)
-
-        alloc = allocate(fn, abi.register_file())
+        # SSE registers are a second register file the shared allocator does
+        # not model, so float values are kept in frame slots and moved through
+        # xmm0/xmm1. See `_Emitter.float_into`.
+        floats = frozenset(r for r, ty in fn.registers.items() if ty.is_float)
+        alloc = allocate(fn, abi.register_file(), on_stack=floats)
         problems = verify_allocation(fn, alloc)
         if problems:
             # An allocation conflict is a compiler bug, and it produces a
@@ -328,14 +479,29 @@ class X86_64Backend(Backend):
         for i, reg in enumerate(saved):
             e.emit(f"movq %{reg}, -{alloc.frame_size + 8 * (i + 1)}(%rbp)")
 
-        # Arguments arrive in ABI registers; move them where they were allocated.
-        for i, param in enumerate(fn.params):
-            if i >= len(abi.argument_registers):
-                raise UnsupportedOperation(
-                    f"{fn.name}: more than {len(abi.argument_registers)} "
-                    f"parameters "
-                    f"(stack arguments are not implemented)")
-            e.store_from(abi.argument_registers[i], param)
+        # Arguments arrive in ABI registers; move them where they were
+        # allocated. The SAME placement the caller used -- one function
+        # computes it for both sides, so a disagreement is impossible rather
+        # than merely unlikely.
+        places = self._argument_places(
+            [fn.register_type(p) for p in fn.params], abi)
+        for param, place in zip(fn.params, places):
+            if place.on_stack:
+                # The caller put it above its own frame. From in here that is
+                # rbp + 16 (the saved rbp and the return address) + whatever
+                # offset from rsp the caller used.
+                source = f"{16 + place.stack_offset}(%rbp)"
+                if place.is_float:
+                    ty = fn.register_type(param)
+                    e.emit(f"{_fmov(ty)} {source}, %xmm0")
+                    e.float_store("xmm0", param)
+                else:
+                    e.emit(f"movq {source}, %r10")
+                    e.store_from("r10", param)
+            elif place.is_float:
+                e.float_store(place.register, param)
+            else:
+                e.store_from(place.register, param)
 
         for block in fn.blocks:
             # `fn.name`, not the exported symbol: branches inside the function
@@ -350,20 +516,270 @@ class X86_64Backend(Backend):
         e.lines.extend(dialect.function_footer(name))
         return e.lines
 
+    # ── calls ───────────────────────────────────────────────────────────────
     @staticmethod
-    def _reject_floats(fn: Function) -> None:
-        for _, ins in fn.instructions():
-            if ins.ty.is_float:
+    def _argument_places(types: list, abi: ABI) -> list[_Place]:
+        """Where each argument goes.
+
+        Computed once for the caller AND the prologue, so the two cannot
+        disagree about a convention neither of them owns.
+
+        The conventions differ in two ways that only show on calls the simple
+        cases never make. They index the register sequences differently --
+        `f(int, float)` puts the float in xmm0 under System V and in xmm1
+        under Microsoft x64, which skips a slot for the int. And once the
+        registers run out, arguments go on the stack, in order, above the
+        shadow space where the ABI reserves one.
+        """
+        places: list[_Place] = []
+        int_index = float_index = stack_index = 0
+        for position, ty in enumerate(types):
+            pool = (abi.float_argument_registers if ty.is_float
+                    else abi.argument_registers)
+            index = position if abi.positional_float_slots else (
+                float_index if ty.is_float else int_index)
+            if index < len(pool):
+                places.append(_Place(register=pool[index],
+                                     is_float=ty.is_float))
+            else:
+                places.append(_Place(
+                    is_float=ty.is_float,
+                    stack_offset=abi.shadow_space + 8 * stack_index))
+                stack_index += 1
+            if ty.is_float:
+                float_index += 1
+            else:
+                int_index += 1
+        return places
+
+    def _place_arguments(self, e: _Emitter, ins: Instruction, abi: ABI, *,
+                         skip_first: bool) -> int:
+        """Move a call's arguments where the ABI wants them.
+
+        Returns the number of bytes subtracted from rsp, which the caller must
+        add back. The adjustment covers the shadow space and any stacked
+        arguments together, and is rounded to a multiple of 16: rsp is
+        16-aligned at every call site here, and an ABI-conforming callee is
+        entitled to assume that. Adjusting by a non-multiple works until the
+        callee uses an aligned SSE store, and then faults.
+        """
+        args = ins.args[1:] if skip_first else list(ins.args)
+        places = self._argument_places([e.fn.register_type(a) for a in args],
+                                       abi)
+        stacked = sum(1 for p in places if p.stack_offset is not None)
+        adjust = abi.shadow_space + 8 * stacked
+        adjust = (adjust + 15) & ~15
+        if adjust:
+            e.emit(f"subq ${adjust}, %rsp")
+
+        # Stacked arguments first: loading a register argument and then
+        # touching rsp would be fine, but doing the memory stores while the
+        # scratch registers are still free keeps this in one direction.
+        for arg, place in zip(args, places):
+            if place.stack_offset is None:
+                continue
+            if place.is_float:
+                e.float_into(arg, "xmm0")
+                ty = e.fn.register_type(arg)
+                e.emit(f"{_fmov(ty)} %xmm0, {place.stack_offset}(%rsp)")
+            else:
+                src = e.into_scratch(arg, "r10")
+                if src != "%r10":
+                    e.emit(f"movq {src}, %r10")
+                e.emit(f"movq %r10, {place.stack_offset}(%rsp)")
+
+        # Register arguments last, and ORDERED. Emitting them in argument
+        # order is wrong whenever an argument's source register is another
+        # argument's destination:
+        #
+        #     movq %rax, %rcx     arg0 (in rax) -> rcx
+        #     movq %rcx, %rdx     arg1 was IN rcx, which the line above just
+        #                         destroyed -- so arg1 becomes arg0
+        #
+        # It produced 30 for a call that should have summed to 36: four
+        # arguments collapsed into one value, silently, on a program with
+        # enough arguments to fill the register file. Floats never appear here
+        # -- they live in frame slots, so their sources are memory and cannot
+        # be clobbered by a register write.
+        moves: list[tuple[str, str]] = []
+        for arg, place in zip(args, places):
+            if place.on_stack:
+                continue
+            if place.is_float:
+                e.float_into(arg, place.register)
+            else:
+                moves.append((place.register, e.loc(arg)))
+        _emit_parallel_moves(e, moves)
+        return adjust
+
+    # ── floating point ──────────────────────────────────────────────────────
+    #: The opcodes the SSE path implements. An explicit list, not a test on
+    #: `ins.ty.is_float`: `ret` of a double also has a float type, and routing
+    #: it here made returning a float from a function an "unimplemented
+    #: operation" while returning an int worked. Calls and terminators handle
+    #: their own float cases in the main dispatch, because the rest of what
+    #: they do -- the ABI, the epilogue -- is identical either way.
+    _FLOAT_PATH = frozenset({
+        Op.CONST, Op.COPY, Op.ADD, Op.SUB, Op.MUL, Op.DIV, Op.REM, Op.NEG,
+        Op.EQ, Op.NE, Op.LT, Op.LE, Op.GT, Op.GE,
+        Op.FTOI, Op.ITOF, Op.FTOF, Op.LOAD, Op.STORE,
+    })
+
+    @classmethod
+    def _is_float_op(cls, e: _Emitter, ins: Instruction) -> bool:
+        """Whether this instruction belongs to the SSE path.
+
+        `ins.ty` alone does not decide it. A comparison of two doubles has
+        `ty=f64` and defines an i1; a conversion from f64 to i64 has `ty=i64`
+        and reads a float. Both are float operations, and `ftoi` sent down the
+        integer path would `movq` a bit pattern and call it an integer.
+        """
+        if ins.op not in cls._FLOAT_PATH:
+            return False
+        if ins.op in (Op.FTOI, Op.ITOF, Op.FTOF) or ins.ty.is_float:
+            return True
+        return bool(ins.args) and e.fn.register_type(ins.args[0]).is_float
+
+    def _float_instruction(self, e: _Emitter, ins: Instruction,
+                           abi: ABI) -> None:
+        op, ty = ins.op, ins.ty
+        sfx = _fsuffix(ty)
+
+        match op:
+            case Op.CONST:
+                bits = _float_bits(ty, ins.imm)
+                if ty is T.F64:
+                    e.emit(f"movabsq ${bits}, %r10")
+                    e.emit("movq %r10, %xmm0")
+                else:
+                    e.emit(f"movl ${bits}, %r10d")
+                    e.emit("movd %r10d, %xmm0")
+                e.float_store("xmm0", ins.dst)
+
+            case Op.COPY:
+                e.float_into(ins.args[0], "xmm0")
+                e.float_store("xmm0", ins.dst)
+
+            case Op.ADD | Op.SUB | Op.MUL | Op.DIV:
+                mnemonic = {Op.ADD: "add", Op.SUB: "sub",
+                            Op.MUL: "mul", Op.DIV: "div"}[op]
+                e.float_into(ins.args[0], "xmm0")
+                e.float_into(ins.args[1], "xmm1")
+                e.emit(f"{mnemonic}{sfx} %xmm1, %xmm0")
+                e.float_store("xmm0", ins.dst)
+
+            case Op.REM:
+                # SSE has no remainder instruction. `a - trunc(a/b)*b` loses
+                # precision once the quotient is large, so this calls libm's
+                # fmod, which is exact -- the link stage adds -lm where libm is
+                # separate. Arguments in xmm0/xmm1 and the result in xmm0 under
+                # both ABIs, so no placement logic is needed.
+                e.float_into(ins.args[0], "xmm0")
+                e.float_into(ins.args[1], "xmm1")
+                if abi.shadow_space:
+                    e.emit(f"subq ${abi.shadow_space}, %rsp")
+                e.emit("call " + ("fmod" if ty is T.F64 else "fmodf"))
+                if abi.shadow_space:
+                    e.emit(f"addq ${abi.shadow_space}, %rsp")
+                e.float_store("xmm0", ins.dst)
+
+            case Op.NEG:
+                # Flip the sign bit rather than subtracting from zero: `0.0 -
+                # x` gives +0.0 for x = +0.0, where Python's `-0.0` is -0.0,
+                # and the difference is observable through division.
+                mask = 1 << (63 if ty is T.F64 else 31)
+                e.float_into(ins.args[0], "xmm0")
+                if ty is T.F64:
+                    e.emit(f"movabsq ${mask}, %r10")
+                    e.emit("movq %r10, %xmm1")
+                    e.emit("xorpd %xmm1, %xmm0")
+                else:
+                    e.emit(f"movl ${mask}, %r10d")
+                    e.emit("movd %r10d, %xmm1")
+                    e.emit("xorps %xmm1, %xmm0")
+                e.float_store("xmm0", ins.dst)
+
+            case Op.EQ | Op.NE:
+                # NaN sets PF, and `nan == nan` is false in Python while
+                # `sete` alone would say true: unordered also sets ZF.
+                e.float_into(ins.args[0], "xmm0")
+                e.float_into(ins.args[1], "xmm1")
+                e.emit(f"{_ucomis(ty)} %xmm1, %xmm0")
+                if op is Op.EQ:
+                    e.emit("sete %r10b")
+                    e.emit("setnp %r11b")
+                    e.emit("andb %r11b, %r10b")
+                else:
+                    e.emit("setne %r10b")
+                    e.emit("setp %r11b")
+                    e.emit("orb %r11b, %r10b")
+                e.emit("movzbq %r10b, %r10")
+                e.store_from("r10", ins.dst)
+
+            case Op.LT | Op.LE | Op.GT | Op.GE:
+                order, setcc = _FLOAT_CMP[op]
+                a, b = ins.args
+                if order == "swap":
+                    a, b = b, a
+                e.float_into(a, "xmm0")
+                e.float_into(b, "xmm1")
+                e.emit(f"{_ucomis(ty)} %xmm1, %xmm0")
+                e.emit(f"{setcc} %r10b")
+                e.emit("movzbq %r10b, %r10")
+                e.store_from("r10", ins.dst)
+
+            case Op.FTOI:
+                # cvtt*, not cvt*: truncation toward zero, which is what C and
+                # Python's int() do. The non-truncating form rounds to nearest
+                # and would make int(2.7) either 2 or 3 depending on the
+                # rounding mode the process happened to be in.
+                src = e.fn.register_type(ins.args[0])
+                e.float_into(ins.args[0], "xmm0")
+                e.emit(f"cvtt{_fsuffix(src)}2si %xmm0, %r10")
+                e.store_from("r10", ins.dst)
+
+            case Op.ITOF:
+                src = e.into_scratch(ins.args[0], "r10")
+                if src != "%r10":
+                    e.emit(f"movq {src}, %r10")
+                e.emit(f"cvtsi2{sfx}q %r10, %xmm0")
+                e.float_store("xmm0", ins.dst)
+
+            case Op.FTOF:
+                src = e.fn.register_type(ins.args[0])
+                e.float_into(ins.args[0], "xmm0")
+                if src is not ty:
+                    e.emit(f"cvt{_fsuffix(src)}2{sfx} %xmm0, %xmm0")
+                e.float_store("xmm0", ins.dst)
+
+            case Op.LOAD:
+                addr = e.into_scratch(ins.args[0], "r11")
+                e.emit(f"{_fmov(ty)} ({addr}), %xmm0")
+                e.float_store("xmm0", ins.dst)
+
+            case Op.STORE:
+                e.float_into(ins.args[0], "xmm0")
+                addr = e.into_scratch(ins.args[1], "r11")
+                e.emit(f"{_fmov(e.fn.register_type(ins.args[0]))} %xmm0, ({addr})")
+
+            case _:
                 raise UnsupportedOperation(
-                    f"{fn.name}: this backend does not implement floating "
-                    f"point ({ins.op.value} on {ins.ty}); use --backend c"
-                )
+                    f"{e.fn.name}: {op.value} on {ty} is not implemented by "
+                    f"this backend; use --backend c")
 
     # ── one instruction ─────────────────────────────────────────────────────
     def _instruction(self, e: _Emitter, ins: Instruction, saved: list[str],
                      abi: ABI, dialect: AsmDialect) -> None:
         op = ins.op
         fn_name = e.fn.name
+
+        # Floating point is a different instruction set on the same machine:
+        # different registers, different mnemonics, different comparison
+        # semantics. Split here rather than adding an `if ty.is_float` inside
+        # each of twenty cases.
+        if self._is_float_op(e, ins):
+            self._float_instruction(e, ins, abi)
+            return
 
         match op:
             case Op.CONST:
@@ -491,21 +907,26 @@ class X86_64Backend(Backend):
                 e.emit(f"addq {off}, %r10")
                 e.store_from("r10", ins.dst)
 
-            case Op.CALL:
-                if len(ins.args) > len(abi.argument_registers):
-                    raise UnsupportedOperation(
-                        f"call to {ins.sym} with {len(ins.args)} arguments "
-                        f"(stack arguments are not implemented)")
-                for i, arg in enumerate(ins.args):
-                    src = e.into_scratch(arg, "r10")
-                    e.emit(f"movq {src}, %{abi.argument_registers[i]}")
-                if abi.shadow_space:
-                    e.emit(f"subq ${abi.shadow_space}, %rsp")
-                e.emit(f"call {self.symbol(ins.sym, dialect)}")
-                if abi.shadow_space:
-                    e.emit(f"addq ${abi.shadow_space}, %rsp")
+            case Op.CALL | Op.CALL_PTR:
+                adjust = self._place_arguments(e, ins, abi,
+                                               skip_first=op is Op.CALL_PTR)
+                if op is Op.CALL:
+                    e.emit(f"call {self.symbol(ins.sym, dialect)}")
+                else:
+                    # The callee address is an ordinary value. Loaded into r11
+                    # -- reserved, so the allocator never put an argument
+                    # there, and it survives the argument moves above.
+                    target = e.into_scratch(ins.args[0], "r11")
+                    if target != "%r11":
+                        e.emit(f"movq {target}, %r11")
+                    e.emit("call *%r11")
+                if adjust:
+                    e.emit(f"addq ${adjust}, %rsp")
                 if ins.dst is not None:
-                    e.store_from("rax", ins.dst)
+                    if e.fn.register_type(ins.dst).is_float:
+                        e.float_store("xmm0", ins.dst)
+                    else:
+                        e.store_from("rax", ins.dst)
 
             case Op.JUMP:
                 e.emit(f"jmp {block_label(fn_name, ins.labels[0])}")
@@ -525,8 +946,11 @@ class X86_64Backend(Backend):
 
             case Op.RET:
                 if ins.args:
-                    src = e.into_scratch(ins.args[0], "r10")
-                    e.emit(f"movq {src}, %rax")
+                    if e.fn.register_type(ins.args[0]).is_float:
+                        e.float_into(ins.args[0], "xmm0")
+                    else:
+                        src = e.into_scratch(ins.args[0], "r10")
+                        e.emit(f"movq {src}, %rax")
                 for i, reg in enumerate(saved):
                     e.emit(f"movq -{e.alloc.frame_size + 8 * (i + 1)}(%rbp), %{reg}")
                 e.emit("movq %rbp, %rsp")

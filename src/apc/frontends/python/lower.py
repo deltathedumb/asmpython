@@ -367,9 +367,7 @@ class Lowerer:
         differ and the division is inexact.
         """
         if ty.is_float:
-            out = self.b.reg(ty)
-            self.b.emit(Instruction(Op.DIV, ty, dst=out, args=[a, b]))
-            return out
+            return self._floor_div_float(a, b, ty)
         q = self.b.reg(ty)
         self.b.emit(Instruction(Op.DIV, ty, dst=q, args=[a, b]))
         out = self.b.reg(ty)
@@ -385,12 +383,72 @@ class Lowerer:
         self.b.switch_to(join)
         return out
 
+    def _floor_div_float(self, a: int, b: int, ty: T.Type) -> int:
+        """Python's `//` on floats: the FLOOR of the quotient, not the quotient.
+
+        `7.5 // 2.0` is 3.0 and `-7.5 // 2.0` is -4.0. Emitting a plain
+        division here gave 3.75 and -3.75 -- an answer close enough to look
+        right in a spot check.
+
+        There is no floor opcode, and adding one would put a Python-shaped
+        operation into a language-neutral IR and owe it to every backend. It
+        is built instead from truncation, exactly as the integer case is built
+        from truncating division:
+
+            q = a / b
+            if |q| < 2^52:            # otherwise q is already integral
+                t = float(int(q))     # truncates toward zero
+                if t > q: t -= 1      # only when q is negative and inexact
+                q = t
+
+        The magnitude guard is not defensive padding: `int(q)` overflows above
+        2^63, and every float at or above 2^52 is already a whole number, so
+        the guard is both necessary and exactly free.
+        """
+        q = self.b.reg(ty)
+        self.b.emit(Instruction(Op.DIV, ty, dst=q, args=[a, b]))
+        out = self.b.reg(ty)
+        self.b.copy(out, q)
+
+        limit = self.b.const(ty, float(1 << 52))
+        neg_limit = self.b.const(ty, -float(1 << 52))
+        small = self.b.reg(T.I1)
+        self.b.emit(Instruction(Op.AND, T.I1, dst=small, args=[
+            self.b.cmp(Op.LT, ty, q, limit),
+            self.b.cmp(Op.GT, ty, q, neg_limit)]))
+
+        trunc_b = self.b.new_block("floorf")
+        fix_b = self.b.new_block("floorfix")
+        join = self.b.new_block("endfloorf")
+        self.b.branch(small, trunc_b, join)
+
+        self.b.switch_to(trunc_b)
+        as_int = self.b.reg(T.I64)
+        self.b.emit(Instruction(Op.FTOI, T.I64, dst=as_int, args=[q]))
+        truncated = self.b.reg(ty)
+        self.b.emit(Instruction(Op.ITOF, ty, dst=truncated, args=[as_int]))
+        self.b.copy(out, truncated)
+        self.b.branch(self.b.cmp(Op.GT, ty, truncated, q), fix_b, join)
+
+        self.b.switch_to(fix_b)
+        lowered = self.b.reg(ty)
+        self.b.emit(Instruction(Op.SUB, ty, dst=lowered,
+                                args=[truncated, self.b.const(ty, 1.0)]))
+        self.b.copy(out, lowered)
+        self.b.jump(join)
+
+        self.b.switch_to(join)
+        return out
+
     def _floor_mod(self, a: int, b: int, ty: T.Type) -> int:
         """Python's `%` takes the sign of the DIVISOR; REM takes the dividend's."""
         r = self.b.reg(ty)
         self.b.emit(Instruction(Op.REM, ty, dst=r, args=[a, b]))
-        if ty.is_float:
-            return r
+        # Floats need the SAME correction. `Op.REM` is C's fmod for them, which
+        # takes the sign of the dividend, and Python takes the sign of the
+        # divisor exactly as it does for ints: `-7.5 % 2.0` is 0.5, not -1.5.
+        # Returning early here for floats was wrong on every negative dividend
+        # and right on every test, because no test used one.
         out = self.b.reg(ty)
         self.b.copy(out, r)
         fix, join = self.b.new_block("floormod"), self.b.new_block("endfloormod")

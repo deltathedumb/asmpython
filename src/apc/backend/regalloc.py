@@ -105,8 +105,20 @@ class Allocation:
 
 
 def allocate(fn: Function, file: RegisterFile,
-             liveness: Liveness | None = None) -> Allocation:
-    """Assign every virtual register a machine register or a frame slot."""
+             liveness: Liveness | None = None, *,
+             on_stack: frozenset[Register] = frozenset()) -> Allocation:
+    """Assign every virtual register a machine register or a frame slot.
+
+    `on_stack` names registers the backend cannot keep in this register file
+    and wants in memory regardless of pressure. That is how a machine with
+    more than one register class is handled without teaching this allocator
+    about classes: x86-64 floats live in SSE registers, which are not in
+    `file.general`, so the backend hands them here and keeps them in slots.
+
+    A backend using this is choosing correctness over speed for those values,
+    which is the right trade to make first -- the alternative is a second
+    allocator that nobody has tested under pressure.
+    """
     liveness = liveness or Liveness.compute(fn)
     intervals = compute_intervals(fn, liveness)
     result = Allocation()
@@ -140,6 +152,10 @@ def allocate(fn: Function, file: RegisterFile,
 
     for iv in intervals:
         release_expired(iv.start)
+
+        if iv.register in on_stack:
+            spill(iv)
+            continue
 
         # A value crossing a call may only live in a callee-saved register.
         pool = free_saved if iv.crosses_call else (free_volatile or free_saved)

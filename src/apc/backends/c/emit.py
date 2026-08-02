@@ -61,6 +61,7 @@ _PRELUDE = """\
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 
 /* The host functions the IR may call. A frontend emits calls to these by
    name; a real target would resolve them from a runtime library. */
@@ -155,6 +156,14 @@ class CBackend(Backend):
                 return f"{d} = (uintptr_t)g_{ins.sym};"
             case Op.FUNC_ADDR:
                 return f"{d} = (uintptr_t)&{ins.sym};"
+
+            case Op.REM if ty.is_float:
+                # C's `%` does not accept doubles at all, so this was a
+                # compile error in the generated source rather than a wrong
+                # answer -- the good version of this bug, and still one no
+                # test had ever triggered.
+                return (f"{d} = {'fmodf' if ty is T.F32 else 'fmod'}"
+                        f"({a[0]}, {a[1]});")
 
             case Op.ADD | Op.SUB | Op.MUL | Op.DIV | Op.REM | Op.AND | Op.OR \
                  | Op.XOR | Op.SHL | Op.SHR:

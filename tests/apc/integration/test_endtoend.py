@@ -217,8 +217,55 @@ FLOAT_PROGRAMS = {
             print(a - b)
             print(a * b)
             print(a / b)
+            print(-a)
             print(2.0 ** 5)
             print(float(3) / 2.0)
+            return 0
+    """,
+    "float_modulo": """
+        def main() -> int:
+            print(7.5 % 2.0)
+            print(-7.5 % 2.0)
+            print(7.5 % -2.0)
+            print(-7.5 % -2.0)
+            print(7.5 // 2.0)
+            print(-7.5 // 2.0)
+            return 0
+    """,
+    "float_comparison": """
+        def main() -> int:
+            a: float = 7.5
+            b: float = 2.0
+            if a > b:
+                print(1)
+            if b < a:
+                print(2)
+            if a == 7.5:
+                print(3)
+            if a != b:
+                print(4)
+            if a >= 7.5:
+                print(5)
+            if b <= 2.0:
+                print(6)
+            if not (a < b):
+                print(7)
+            return 0
+    """,
+    "float_calls": """
+        def scale(x: float, k: float) -> float:
+            return x * k
+
+        def mixed(n: int, x: float) -> float:
+            return float(n) + x
+
+        def interleaved(a: int, b: float, c: int, d: float) -> float:
+            return float(a) + b + float(c) + d
+
+        def main() -> int:
+            print(scale(3.5, 4.0))
+            print(mixed(3, 0.25))
+            print(interleaved(1, 2.5, 3, 4.25))
             return 0
     """,
 }

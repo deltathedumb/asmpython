@@ -61,7 +61,13 @@ class CcToolchain(Toolchain):
                      "objects needs its own toolchain")
 
         output = request.output
-        argv = [cc, *inputs, "-o", str(output), *request.extra_inputs]
+        # libm is a separate library on ELF systems and part of libc
+        # elsewhere. Float remainder compiles to an `fmod` call, so a program
+        # using `%` on floats fails to link without this -- and only that
+        # program, which makes it look like a frontend bug.
+        system_libs = ["-lm"] if request.target.object_format == "elf" else []
+        argv = [cc, *inputs, "-o", str(output), *request.extra_inputs,
+                *system_libs]
         run(request, argv, what="linking")
         if not output.exists():
             raise LinkError(f"{cc} reported success but wrote no {output.name}")
