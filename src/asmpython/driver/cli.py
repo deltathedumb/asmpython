@@ -279,10 +279,87 @@ def _sources(args) -> plugins.Sources:
     )
 
 
+def _confirm_replace(name: str, entry, args) -> bool:
+    """Ask before replacing an installed plugin. True to go ahead.
+
+    `--yes`/`--no` answer it without asking, which is what a script needs.
+    With neither, a NON-INTERACTIVE run refuses rather than prompting: a
+    build that blocks forever on a hidden question is worse than one that
+    stops and says which flag to pass.
+    """
+    if getattr(args, "assume_no", False):
+        return False
+    if getattr(args, "assume_yes", False):
+        return True
+    if not sys.stdin.isatty():
+        print(f"asmpython: {name!r} is already installed "
+              f"({entry.source or 'unknown'}: {entry.origin or '?'})",
+              file=sys.stderr)
+        print("  pass --yes to replace it, or --no to leave it alone",
+              file=sys.stderr)
+        return False
+    print(f"{name!r} is already installed "
+          f"({entry.source or 'unknown'}: {entry.origin or '?'})")
+    for kind, names in (entry.provides or {}).items():
+        if names:
+            print(f"  {kind}: {', '.join(names)}")
+    try:
+        reply = input("replace it? [y/N] ").strip().lower()
+    except EOFError:
+        # isatty() is not a reliable "someone is there": a subprocess inherits
+        # its parent's stdin, so a build runner can look interactive and still
+        # have nothing to read. EOF means no answer, which means no.
+        print("no answer; leaving it alone "
+              "(pass --yes to replace without asking)", file=sys.stderr)
+        return False
+    return reply in ("y", "yes")
+
+
+def cmd_plugin_invalidate(args) -> int:
+    """Re-resolve installed plugins from where they came from."""
+    if getattr(args, "all", False):
+        names = [e.name for e in plugins.installed()]
+        if not names:
+            print("no plugins installed")
+            return 0
+    else:
+        # Comma-separated OR repeated OR a single bare name -- all three are
+        # the same thing to anyone typing it, so all three work.
+        names = [n for chunk in (args.names or []) for n in chunk.split(",") if n]
+        if not names:
+            print("asmpython: name an id, or pass --all", file=sys.stderr)
+            return 2
+    failed = 0
+    for name in names:
+        try:
+            entry = plugins.invalidate([name])[0]
+        except plugins.PluginError as exc:
+            print(f"asmpython: {exc}", file=sys.stderr)
+            failed += 1
+            continue
+        print(f"invalidated {entry.name}  ({entry.source}: {entry.origin})")
+        for kind, provided in (entry.provides or {}).items():
+            if provided:
+                print(f"  {kind:<10} {', '.join(provided)}")
+    return 1 if failed else 0
+
+
 def cmd_plugin_add(args) -> int:
     sources = _sources(args)
+    existing = plugins.store.find(args.name)
+    replace = False
+    if existing is not None:
+        if not _confirm_replace(args.name, existing, args):
+            print("cancelled; nothing changed")
+            return 1
+        replace = True
     try:
-        entry = plugins.install(args.name, sources)
+        entry = plugins.install(args.name, sources, replace=replace)
+    except plugins.AlreadyInstalled:
+        # Only reachable if something installed the same name between the
+        # check above and here.
+        print(f"asmpython: {args.name!r} is already installed", file=sys.stderr)
+        return 2
     except plugins.PluginError as exc:
         print(f"asmpython: {exc}", file=sys.stderr)
         print(f"  searched: {', '.join(sources.enabled()) or 'nothing'}",
@@ -463,7 +540,20 @@ def build_parser() -> argparse.ArgumentParser:
     a = pls.add_parser("add", help="install a plugin and remember it")
     a.add_argument("name")
     where(a)
+    a.add_argument("--yes", "-y", dest="assume_yes", action="store_true",
+                   help="replace an already-installed plugin without asking")
+    a.add_argument("--no", "-n", dest="assume_no", action="store_true",
+                   help="never replace; fail instead")
     a.set_defaults(fn=cmd_plugin_add)
+
+    inv = pls.add_parser(
+        "invalidate",
+        help="re-resolve installed plugins from where they came from")
+    inv.add_argument("names", nargs="*", metavar="ID",
+                     help="plugin ids, comma-separated or repeated")
+    inv.add_argument("--all", action="store_true",
+                     help="every installed plugin")
+    inv.set_defaults(fn=cmd_plugin_invalidate)
 
     rm = pls.add_parser("remove", help="forget an installed plugin")
     rm.add_argument("name")

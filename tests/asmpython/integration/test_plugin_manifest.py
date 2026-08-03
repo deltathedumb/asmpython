@@ -149,9 +149,13 @@ class TestAddIsRemembered:
         assert done.returncode == 2 and "not installed" in done.stderr
 
     def test_adding_twice_does_not_duplicate(self, ws):
-        """Registries refuse a duplicate name, so this would be a crash."""
+        """Registries refuse a duplicate name, so this would be a crash.
+
+        Re-adding now REPLACES rather than adding again, and asks first --
+        `--yes` is the non-interactive answer.
+        """
         run(ws, "plugin", "add", "my_plugin_module")
-        second = run(ws, "plugin", "add", "my_plugin_module")
+        second = run(ws, "plugin", "add", "my_plugin_module", "--yes")
         assert second.returncode == 0, second.stderr
         stored = json.loads((ws / "cfg" / "plugins.json").read_text())
         assert len(stored["plugins"]) == 1
@@ -215,7 +219,12 @@ class TestBrokenPluginsDoNotTrapYou:
         one that fixes it.
         """
         run(ws, "plugin", "add", "my_plugin_module")
+        # Deleting the SOURCE is no longer enough to break it -- that is what
+        # the cache is for -- so the cache has to go too for this to be the
+        # "installed but unloadable" state the warning exists for.
         (ws / "my_plugin_module.py").unlink()
+        import shutil
+        shutil.rmtree(ws / "cfg" / "cache", ignore_errors=True)
         done = run(ws, "backends")
         assert done.returncode == 0, done.stderr
         assert "warning" in done.stderr and "my_plugin_module" in done.stderr
@@ -332,3 +341,109 @@ class TestPatchesArriveThroughAPlugin:
         done = run(ws, "build", "prog.py", "--emit-ir")
         assert done.returncode == 0, done.stderr
         assert not done.stdout.startswith("; patched")
+
+
+class TestAddIsCachedAndReplaceable:
+    """`add` caches, and re-adding an installed id asks first."""
+
+    def test_the_plugin_is_copied_into_a_cache(self, ws):
+        run(ws, "plugin", "add", "my_plugin_module")
+        cached = list((ws / "cfg" / "cache").rglob("*.py"))
+        assert cached, "nothing was cached"
+
+    def test_it_loads_after_the_source_is_deleted(self, ws):
+        """The whole point of caching.
+
+        An install that stops working because the file it came from moved is
+        not an install, it is a bookmark.
+        """
+        run(ws, "plugin", "add", "my_plugin_module")
+        (ws / "my_plugin_module.py").unlink()
+        done = run(ws, "backends")
+        assert done.returncode == 0, done.stderr
+        assert "my-backend" in done.stdout
+
+    def test_re_adding_refuses_when_not_interactive(self, ws):
+        """Refuses rather than PROMPTING with no tty.
+
+        A build that blocks forever on a hidden question is worse than one
+        that stops and names the flag.
+        """
+        run(ws, "plugin", "add", "my_plugin_module")
+        done = run(ws, "plugin", "add", "my_plugin_module")
+        assert done.returncode == 1
+        assert "--yes" in done.stderr
+        assert "cancelled" in done.stdout
+
+    def test_no_declines(self, ws):
+        run(ws, "plugin", "add", "my_plugin_module")
+        done = run(ws, "plugin", "add", "my_plugin_module", "--no")
+        assert done.returncode == 1 and "cancelled" in done.stdout
+
+    def test_yes_replaces(self, ws):
+        run(ws, "plugin", "add", "my_plugin_module")
+        done = run(ws, "plugin", "add", "my_plugin_module", "--yes")
+        assert done.returncode == 0, done.stderr
+        stored = json.loads((ws / "cfg" / "plugins.json").read_text())
+        assert len(stored["plugins"]) == 1
+
+
+class TestInvalidate:
+    def _edit(self, ws):
+        src = ws / "my_plugin_module.py"
+        src.write_text(src.read_text(encoding="utf-8")
+                       .replace('"my-backend"', '"my-backend-v2"'),
+                       encoding="utf-8")
+
+    def test_it_picks_up_an_edited_source(self, ws):
+        run(ws, "plugin", "add", "my_plugin_module")
+        self._edit(ws)
+        # Until invalidated, the CACHED copy is what loads.
+        assert "my-backend-v2" not in run(ws, "backends").stdout
+        done = run(ws, "plugin", "invalidate", "my_plugin_module")
+        assert done.returncode == 0, done.stderr
+        assert "my-backend-v2" in run(ws, "backends").stdout
+
+    @pytest.mark.parametrize("form", [
+        ["my_plugin_module"],                      # bare
+        ["my_plugin_module,second"],               # comma-separated
+        ["my_plugin_module", "second"],            # repeated
+        ["--all"],
+    ])
+    def test_every_input_form(self, ws, form):
+        (ws / "second.py").write_text(textwrap.dedent("""
+            from asmpython.plugins import Plugin, Target
+            plugin = Plugin('second')
+            plugin.targets.append(Target('second-machine', arch='second'))
+            __asmpython_plugin__ = plugin
+        """), encoding="utf-8")
+        run(ws, "plugin", "add", "my_plugin_module")
+        run(ws, "plugin", "add", "second")
+        done = run(ws, "plugin", "invalidate", *form)
+        assert done.returncode == 0, done.stderr
+        assert "invalidated" in done.stdout
+
+    def test_a_vanished_source_is_a_clean_error(self, ws):
+        """Not a traceback -- and the cached copy must survive it.
+
+        `resolve` finds the module in sys.modules if it was already loaded
+        this process, so re-resolving has to drop that record first or a
+        deleted source reports success.
+        """
+        run(ws, "plugin", "add", "my_plugin_module")
+        (ws / "my_plugin_module.py").unlink()
+        done = run(ws, "plugin", "invalidate", "my_plugin_module")
+        assert done.returncode == 1
+        assert "Traceback" not in done.stderr
+        # Still loadable from cache afterwards.
+        assert "my-backend" in run(ws, "backends").stdout
+
+    def test_an_unknown_id_is_reported(self, ws):
+        done = run(ws, "plugin", "invalidate", "nosuch")
+        assert done.returncode == 1
+        assert "not installed" in done.stderr
+
+    def test_invalidate_with_nothing_installed(self, ws):
+        done = run(ws, "plugin", "invalidate", "--all")
+        assert done.returncode == 0
+        assert "no plugins installed" in done.stdout

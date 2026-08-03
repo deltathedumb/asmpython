@@ -151,6 +151,32 @@ asmpython plugin list | remove
 `add` looks in the working directory, then the Python path, then pip --
 `--cwd 1|0`, `--pypath 1|0`, `--pip 1|0`, with pip off unless asked.
 
+### Replacing and refreshing
+
+`plugin add` on a name that is already installed ASKS before replacing it,
+because replacing clears a cached copy that may be the only one left -- the
+origin it came from is not guaranteed to still exist. `--yes` and `--no`
+answer without asking, and a non-interactive run declines rather than
+prompting: a build that blocks forever on a hidden question is worse than one
+that stops and names the flag.
+
+An installed plugin is CACHED and loaded from the cache, not from wherever it
+was found, so an install keeps working when the original file moves or the
+compiler is run from another directory. `origin` stays recorded for exactly
+one purpose:
+
+```bash
+asmpython plugin invalidate mypack           # one id
+asmpython plugin invalidate a,b              # comma-separated
+asmpython plugin invalidate a b              # or repeated
+asmpython plugin invalidate --all
+```
+
+`invalidate` goes back to the origin, re-resolves, and refreshes the cache --
+which is how an edited plugin under development is picked up. If the origin is
+gone it fails and says so, leaving the cached copy in place: a cache that no
+longer matches any real source is exactly the state worth being told about.
+
 Without installing: `--plugin mypack` for one invocation, `ASMPYTHON_PLUGINS`
 for a CI job, or an `asmpython.plugins` entry point if you ship a
 distribution. Declaring a manifest is better than calling `register()` at

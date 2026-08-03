@@ -43,6 +43,7 @@ debug entirely the wrong thing.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
@@ -198,7 +199,10 @@ def load_all(
             # working directory must not later resolve to a same-named
             # package from an index.
             try:
-                _one(entry.name, entry.sources)
+                before = len(_loaded)
+                load_installed(entry)
+                if len(_loaded) != before:
+                    report.loaded.append(entry.name)
             except PluginError as exc:
                 report.failed.append((entry.name, str(exc.cause)))
     for name in names:
@@ -213,8 +217,142 @@ def load_all(
 # ── install / uninstall ───────────────────────────────────────────────────
 
 
+class AlreadyInstalled(Exception):
+    """`install` was called for a name that is already installed.
+
+    Raised rather than silently replacing, because replacing CLEARS a cached
+    plugin the user may have edited or may no longer have the source for. The
+    caller decides -- the CLI asks -- and passes `replace=True` once the
+    answer is yes.
+    """
+
+    def __init__(self, entry: "store.Entry") -> None:
+        super().__init__(f"plugin {entry.name!r} is already installed")
+        self.entry = entry
+
+
+def cache_plugin(name: str, found: Resolution) -> Path:
+    """Copy a resolved plugin into the cache; return the path to import.
+
+    An install loads from the CACHE, not from where it was found, so it keeps
+    working when the original moves, is edited mid-build, or lives in a
+    directory the compiler is no longer run from. `origin` stays in the store
+    for exactly one purpose -- `invalidate` goes back to it deliberately --
+    and nothing else re-reads it.
+
+    A package (`mypack/__init__.py`) is copied whole, a single module as one
+    file, both under `<cache>/<name>/` so removal is one rmtree and cannot
+    strand half a package.
+    """
+    import shutil
+
+    origin = Path(found.origin) if found.origin else None
+    target = store.plugin_cache(name)
+    if origin is None or not origin.exists():
+        # A namespace package or C extension has no single file to copy.
+        # Nothing is cached and the loader falls back to importing by name --
+        # exactly what happened before caching existed.
+        return Path()
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+    target.mkdir(parents=True, exist_ok=True)
+    if origin.name == "__init__.py":
+        shutil.copytree(origin.parent, target / name, dirs_exist_ok=True)
+        return target / name / "__init__.py"
+    dest = target / origin.name
+    shutil.copy2(origin, dest)
+    return dest
+
+
+def _load_cached(name: str, cached: str):
+    """Import a plugin from its cached copy, by path."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(name, cached)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load cached plugin from {cached}")
+    module = importlib.util.module_from_spec(spec)
+    # Registered before execution so a package's own submodule imports resolve
+    # through sys.modules rather than re-executing the module.
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
+def load_installed(entry: store.Entry) -> Plugin | None:
+    """Load one installed plugin, preferring its cached copy."""
+    if entry.name in _loaded:
+        return None
+    if entry.cached and Path(entry.cached).exists():
+        try:
+            module = _load_cached(entry.name, entry.cached)
+        except Exception as exc:                   # noqa: BLE001 -- reported
+            raise PluginError(entry.name, exc) from exc
+        _loaded.add(entry.name)
+        plugin = manifest_of(module)
+        if plugin is not None:
+            try:
+                plugin.register_all()
+            except Exception as exc:               # noqa: BLE001 -- reported
+                _loaded.discard(entry.name)
+                raise PluginError(entry.name, exc) from exc
+        return plugin
+    # No cache -- an older install, or a plugin with no single file to copy.
+    # Resolve it the way it was added.
+    return load(entry.name, entry.sources)
+
+
+def invalidate(names: list[str] | tuple[str, ...]) -> list[store.Entry]:
+    """Re-resolve each named plugin from its ORIGIN and refresh its cache.
+
+    The one operation that goes back to where a plugin came from. It is how an
+    edited plugin under development is picked up, and it fails loudly when the
+    origin is gone -- which is the useful answer, because a cached copy that no
+    longer matches any real source is exactly the state worth being told about.
+    """
+    refreshed: list[store.Entry] = []
+    for name in names:
+        entry = store.find(name)
+        if entry is None:
+            raise PluginError(name, LookupError("not installed"))
+        # Re-resolving has to read DISK, and a plugin loaded earlier this
+        # process is already in sys.modules under its own name -- so an
+        # ordinary import would hand back the cached copy and report success
+        # for a source that no longer exists. Drop both records first.
+        sys.modules.pop(name, None)
+        _loaded.discard(name)
+        try:
+            found = resolve(name, entry.sources)
+        except Exception as exc:                   # noqa: BLE001 -- reported
+            raise PluginError(name, exc) from exc
+        try:
+            cached = cache_plugin(name, found)
+        except OSError as exc:
+            # The module resolved but its file could not be copied: it was
+            # deleted or moved between the two steps, or is unreadable. That
+            # is the same failure as "no longer valid" and reads better said
+            # that way than as a copy error.
+            raise PluginError(
+                name, FileNotFoundError(
+                    f"resolved to {found.origin or '?'}, which cannot be "
+                    f"read back")) from exc
+        plugin = manifest_of(found.module)
+        entry.origin = found.origin
+        entry.source = found.source
+        entry.cached = "" if cached == Path() else str(cached)
+        entry.provides = plugin.contents() if plugin is not None else {}
+        store.add(entry)
+        refreshed.append(entry)
+    return refreshed
+
+
 def install(
-    name: str, sources: Sources | None = None, root: Path | None = None
+    name: str, sources: Sources | None = None, root: Path | None = None,
+    *, replace: bool = False,
 ) -> store.Entry:
     """Resolve, load, and remember. What `asmpython plugin add` does.
 
@@ -223,6 +361,12 @@ def install(
     of asmpython -- including `plugin remove` -- would fail on loading it.
     """
     sources = sources or Sources()
+    existing = store.find(name)
+    if existing is not None and not replace:
+        # The caller has to say so. Replacing clears a cached copy that may be
+        # the only remaining copy -- the origin it was installed from is not
+        # guaranteed to still exist.
+        raise AlreadyInstalled(existing)
     try:
         found = resolve(name, sources, root)
     except Exception as exc:
@@ -244,11 +388,19 @@ def install(
         _loaded.discard(name)
         raise PluginError(name, exc) from exc
 
+    # Clear the old cache only once the new plugin has RESOLVED and
+    # REGISTERED. Doing it earlier would leave a name installed with no
+    # loadable copy whenever the replacement turned out to be broken.
+    if existing is not None:
+        store.clear_cache(name)
+    cached = cache_plugin(name, found)
+
     entry = store.Entry(
         name=name,
         sources=sources,
         origin=found.origin,
         source=found.source,
+        cached="" if cached == Path() else str(cached),
         provides=provides,
     )
     store.add(entry)
@@ -257,6 +409,7 @@ def install(
 
 def uninstall(name: str) -> bool:
     """Forget a plugin. True if it was installed."""
+    store.clear_cache(name)
     return store.remove(name)
 
 

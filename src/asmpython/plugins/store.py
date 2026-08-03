@@ -35,6 +35,10 @@ class Entry:
     sources: Sources = field(default_factory=Sources)
     origin: str = ""
     source: str = ""
+    #: Path inside the cache that this plugin is actually LOADED from. The
+    #: origin above is where it came from and is only consulted again by
+    #: `invalidate`.
+    cached: str = ""
     #: What it registered when it was added, so `plugin list` can say without
     #: importing anything.
     provides: dict[str, list[str]] = field(default_factory=dict)
@@ -54,6 +58,7 @@ class Entry:
                             pip=raw.get("pip", False)),
             origin=d.get("origin", ""),
             source=d.get("source", ""),
+            cached=d.get("cached", ""),
             provides=d.get("provides", {}),
         )
 
@@ -71,6 +76,32 @@ def config_dir() -> Path:
 
 def config_file() -> Path:
     return config_dir() / "plugins.json"
+
+
+def cache_dir() -> Path:
+    """Where installed plugins are COPIED to and loaded from.
+
+    A plugin is cached rather than loaded from wherever it was found, so that
+    an install keeps working when the original file moves, is edited mid-build,
+    or sits in a directory the compiler is no longer run from. The stored
+    `origin` is not forgotten -- `invalidate` goes back to it deliberately --
+    but nothing else re-reads it.
+    """
+    return config_dir() / "cache"
+
+
+def plugin_cache(name: str) -> Path:
+    return cache_dir() / name
+
+
+def clear_cache(name: str) -> bool:
+    """Remove a plugin's cached copy. True if there was one."""
+    import shutil
+    target = plugin_cache(name)
+    if not target.exists():
+        return False
+    shutil.rmtree(target, ignore_errors=True)
+    return not target.exists()
 
 
 def read() -> list[Entry]:
