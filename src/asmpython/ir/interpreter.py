@@ -125,12 +125,26 @@ class Interpreter:
         if name == "print_int":
             self._emit(f"{int(args[0])}\n")
             return None
-        if name == "pow":
+        if name in ("pow", "powf"):
             # libm's, matching what a compiled binary links against and what
             # CPython's `**` calls. Python's float ** is this function; a
             # reimplementation here would disagree in the last bit.
             import math
             return math.pow(float(args[0]), float(args[1]))
+        if name in ("fmod", "fmodf"):
+            # The same arrangement as `pow`, for the same reason. Every
+            # backend lowers a float REM to a call here rather than to an
+            # instruction -- there is no float remainder in the ISA and
+            # computing it from a division loses precision once the quotient
+            # is large -- so a module that came back FROM one of them calls
+            # `fmod` where the IR it was built from used the opcode.
+            #
+            # `_arith` already answers REM with `math.fmod`, so binding the
+            # symbol to the same function is what keeps those two paths
+            # agreeing. Without it, IR that round-trips through a backend
+            # traps here on a program the original ran.
+            import math
+            return math.fmod(float(args[0]), float(args[1]))
         if name == "print_float":
             # Six decimals: C's `%f`, which is what the runtime the compiled
             # paths link against prints. NOT Python's repr -- `32.0` there,
