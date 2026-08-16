@@ -36,6 +36,21 @@ class Trap(Exception):
     """The program did something undefined: divide by zero, bad address, ..."""
 
 
+class _Exited(Exception):
+    """`plat_exit` was called. Carries the status; caught only by `run`.
+
+    An exception rather than a return, because the floor's contract is that
+    `plat_exit` DOES NOT RETURN -- and the honest way to not return from a
+    tree-walking interpreter is to unwind every frame at once. Returning a
+    sentinel and checking for it at each call site is the version that works
+    until one call site forgets.
+    """
+
+    def __init__(self, status: int) -> None:
+        super().__init__(status)
+        self.status = status
+
+
 @dataclass
 class Frame:
     func: Function
@@ -107,6 +122,12 @@ class Interpreter:
         #: statically typed program never makes one, and because the module
         #: imports this one back for `Trap`.
         self.objects = None
+        #: Bytes `plat_write` received that do not yet form whole characters,
+        #: per descriptor. See `_plat_write`.
+        self._plat_pending: dict[int, bytes] = {}
+        #: The status `plat_exit` was called with, or None if it never was.
+        #: A host uses this to end the way a compiled program would.
+        self.exit_status: int | None = None
         for g in module.globals:
             addr = self.mem.alloc(max(1, g.size))
             if g.data:
@@ -131,6 +152,23 @@ class Interpreter:
             result = self.objects.call(name, args)
             if result is not NOT_MINE:
                 return result
+        # THE PLATFORM FLOOR (`link/platform.py`). The three functions a
+        # backend must supply that are not IR, implemented here so the IR
+        # interpreter runs the same runtime a backend runs -- which is the
+        # whole point of docs/INERT-RUNTIME.md and what the corpus checks by
+        # comparing this path against the C one.
+        if name == "plat_write":
+            return self._plat_write(int(args[0]), int(args[1]), int(args[2]))
+        if name == "plat_exit":
+            raise _Exited(int(args[0]) & 0xFF)
+        if name == "plat_heap":
+            n = int(args[0])
+            if n <= 0:
+                return 0
+            try:
+                return self.mem.alloc(n)
+            except Trap:
+                return 0            # null, by contract -- not a crash
         if name == "putchar":
             self._emit(chr(int(args[0]) & 0xFF))
             return 0
@@ -199,12 +237,61 @@ class Interpreter:
         else:
             self.out.write(s)
 
+    def _plat_write(self, fd: int, addr: int, n: int) -> int:
+        """`plat_write(fd, buf, n)`. Returns bytes written, or -1.
+
+        THE OUTPUT HERE IS TEXT AND THE CONTRACT IS BYTES, so a multi-byte
+        character split across two calls has to survive the split. It will
+        happen: a runtime that formats into a fixed buffer and flushes when it
+        is full has no idea where the character boundaries are. So incomplete
+        trailing bytes are HELD until the next call rather than replaced, and
+        only a sequence that is still invalid once it is complete becomes U+FFFD.
+        """
+        if n < 0:
+            return -1
+        if n == 0:
+            return 0
+        try:
+            self.mem._check(addr, n)
+        except Trap:
+            return -1               # a bad address is a failed write, not a crash
+        pending = self._plat_pending.get(fd, b"") + bytes(
+            self.mem.buf[addr:addr + n])
+        # Split off any incomplete sequence at the end. A UTF-8 lead byte says
+        # how many continuations follow, so at most three bytes are ever held.
+        cut = len(pending)
+        for back in range(1, min(4, len(pending)) + 1):
+            b = pending[-back]
+            if b < 0x80:
+                break
+            if b >= 0xC0:           # a lead byte
+                need = (2 if b < 0xE0 else 3 if b < 0xF0 else 4)
+                if back < need:
+                    cut = len(pending) - back
+                break
+        self._plat_pending[fd] = pending[cut:]
+        text = pending[:cut].decode("utf-8", errors="replace")
+        if fd == 2:
+            import sys
+            sys.stderr.write(text)
+        else:
+            self._emit(text)
+        return n
+
     # ── execution ───────────────────────────────────────────────────────────
     def run(self, entry: str = "main", args: list | None = None):
         fn = self.module.function(entry)
         if fn is None:
             raise Trap(f"no function named {entry!r}")
-        return self._call(fn, args or [])
+        try:
+            return self._call(fn, args or [])
+        except _Exited as done:
+            # `plat_exit` unwound every frame. The status is RECORDED as well
+            # as returned, because a caller cannot otherwise tell it apart
+            # from an ordinary `return 7` -- and the two mean different things
+            # to whoever is hosting the interpreter. `driver/cli.py` reads it.
+            self.exit_status = done.status
+            return done.status
 
     def _call(self, fn: Function, args: list):
         if fn.external:

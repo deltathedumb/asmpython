@@ -27,6 +27,7 @@ from .modules import importable, member, resolve
 from ...diagnostics import (DiagnosticSink, SourceFile, Span, error,
                             warning)
 from ...ir import types as T
+from ...link.platform import FLOOR as _FLOOR
 
 #: `object.<dunder>` -- the DEFAULT implementations, and the runtime call each
 #: one is. A class that overrides a dunder reaches its default this way, which
@@ -163,8 +164,27 @@ MEMORY_INTRINSICS = {"alloca": 1, "load": 2, "store": 3, "offset": 2,
 _INTRINSIC_RESULT = {"alloca": PTR, "load": None, "store": NONE,
                      "offset": PTR, "sizeof": INT}
 
+#: THE PLATFORM FLOOR, callable from the static path. Three functions -- emit
+#: bytes, stop, get memory -- and everything else a runtime needs is code that
+#: has not been written in this subset yet. See `link/platform.py` for the
+#: contracts and `docs/INERT-RUNTIME.md` for why the number is three.
+#:
+#: Ordinary calls, not intrinsics: each lowers to `Op.CALL` of an external
+#: symbol, which is what makes them the ONE thing a backend still has to
+#: supply. They are reachable by name without an import because the set is
+#: CLOSED by design -- a fourth would be a change to the contract every backend
+#: implements, and it should read like one rather than appear as an import.
+#:
+#: READ OUT OF `link/platform.py`, which is where the contracts are written and
+#: where the C implementation sits. A hand-kept second copy of a signature list
+#: drifted three times in one afternoon when `_OBJECT_RUNTIME` was one; the
+#: fix there was to parse the definitions, and the fix here is to have one list.
 BY_NAME = {"int": INT, "float": FLOAT, "bool": BOOL, "None": NONE,
            "object": OBJ, **MACHINE}
+
+PLATFORM = {name: (tuple(BY_NAME[a] for a in args),
+                   NONE if ret == "void" else BY_NAME[ret])
+            for name, (args, ret) in _FLOOR.items()}
 
 #: What the module's top-level statements are called internally. Not a legal
 #: Python identifier, so it can never collide with a user function -- including
@@ -3679,6 +3699,30 @@ class Analyzer:
                 "the element size where it is written")
         return PTR
 
+    def _platform_call(self, name: str, node: ast.Call) -> SemType:
+        """`plat_write`, `plat_exit`, `plat_heap` -- the whole platform floor.
+
+        Checked exactly as a call to a declared function is, because that is
+        what it is: the signature comes from `link/platform.py` instead of from
+        a `def` in this module, and nothing else about it is special.
+        """
+        params, ret = PLATFORM[name]
+        if len(node.args) != len(params):
+            self.sink.report(
+                error("E0053", f"{name}() takes {len(params)} argument(s), "
+                               f"got {len(node.args)}")
+                .at(self._span(node))
+                .note("it is the platform floor -- see link/platform.py for "
+                      "what each argument means"))
+            for a in node.args:
+                self._expr(a)
+            return ret
+        for arg, want in zip(node.args, params):
+            got = self._expr(arg)
+            self._check_assignable(got, want, arg,
+                                   what=f"argument to {name}()", value=arg)
+        return ret
+
     def _type_arg(self, node, name: str) -> SemType:
         """The type argument of `load`/`store`/`sizeof`, read as a TYPE.
 
@@ -3852,6 +3896,8 @@ class Analyzer:
             return self._machine_conversion(name, node)
         if name in MEMORY_INTRINSICS and name not in self.functions:
             return self._memory_intrinsic(name, node)
+        if name in PLATFORM and name not in self.functions:
+            return self._platform_call(name, node)
         info = self.functions.get(name)
         if info is None:
             if name in _NEEDS_A_COMPILER:

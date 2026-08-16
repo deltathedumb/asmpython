@@ -20,6 +20,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# THE PLATFORM FLOOR is defined next door and travels with the host functions
+# rather than beside them: everything that emits or links this C needs both,
+# and a second wiring point is a second place to forget one. They are separate
+# MODULES because they are separate ideas -- `put_bool` knows how Python spells
+# a true value and `plat_write` knows nothing at all -- and stage 6 of
+# docs/INERT-RUNTIME.md deletes the first group and keeps the second.
+from .platform import NAMES as _FLOOR_NAMES, c_source as _floor_c
+
 #: The host functions `frontends/python` emits calls to, as C source.
 #:
 #: ONE definition with TWO consumers: `write_runtime` below, which writes it to
@@ -274,11 +282,12 @@ HOST_NAMES = (
     "put_int", "put_float", "put_bool", "put_none",
     "print_int", "print_float", "print_str",
     "py_pow_int",
-)
+) + _FLOOR_NAMES
 
 
 def host_functions(*, static: bool = False,
-                   strptr: str = "const char *") -> str:
+                   strptr: str = "const char *",
+                   ptr: str = "void *") -> str:
     """`HOST_FUNCTIONS` with its substitutions made.
 
     `py_repr_double` is always `static`: it is an implementation detail of the
@@ -290,6 +299,10 @@ def host_functions(*, static: bool = False,
     text = HOST_FUNCTIONS.replace("@POW@", POW_INT_C).replace("@STRPTR@", strptr)
     text = text.replace("@STATIC@void py_repr_double",
                         "static void py_repr_double")
+    # THE FLOOR FIRST. Nothing above it may depend on it yet, but everything
+    # eventually will -- stage 6 replaces the writers with subset code that
+    # calls `plat_write` -- and C wants a definition in scope before a use.
+    text = _floor_c(static=static, ptr=ptr) + "\n" + text
     return text.replace("@STATIC@", "static " if static else "")
 
 

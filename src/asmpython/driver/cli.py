@@ -136,13 +136,24 @@ def cmd_run(args) -> int:
             return 1
         module = result.module
 
+    interp = Interpreter(module)
     try:
-        value = Interpreter(module).run(args.entry, [int(a) for a in args.args])
+        value = interp.run(args.entry, [int(a) for a in args.args])
     except Trap as trap:
         print(f"trap: {trap}", file=sys.stderr)
         return 70
     if args.print_result and value is not None:
         print(f"-> {value}")
+    # `plat_exit(n)` ENDS THE PROCESS with n, and a compiled binary really
+    # does. Reporting 0 here would make the interpreter the one path where a
+    # program's own exit status is invisible -- and this interpreter is the
+    # oracle every backend is measured against.
+    #
+    # NOT the entry's return value, which also becomes a compiled program's
+    # exit status and does NOT become this one's. That divergence predates the
+    # floor and changing it is a separate decision.
+    if interp.exit_status is not None:
+        return interp.exit_status & 0xFF
     return 0
 
 

@@ -64,18 +64,13 @@ from ...ir import types as T
 from ...ir.module import Function, Instruction, Module
 from ...ir.opcodes import Op
 from . import version
-from .classfile import ACC_PUBLIC, ACC_STATIC, ClassBuilder, ClassFileLimit, \
-    ITEM_DOUBLE, ITEM_FLOAT, ITEM_INTEGER, ITEM_LONG, MAX_METHOD_BYTES, \
-    MethodBuilder
+from .classfile import ACC_FINAL, ACC_PUBLIC, ACC_STATIC, ACC_SUPER, \
+    ClassBuilder, ClassFileLimit, ITEM_DOUBLE, ITEM_FLOAT, ITEM_INTEGER, \
+    ITEM_LONG, MAX_METHOD_BYTES, MethodBuilder
 from .classpath import ClassFileError, ClassPath, parse_parameters
 from .interop import Interop
-from .runtime import MEM, MEM_DESC, SP, SP_DESC, Runtime, objects_init
-
-#: Bytes of `alloca` space. The IR frees an alloca when its function returns,
-#: which this backend implements by restoring a saved stack pointer -- so this
-#: is a high-water mark for live frames, not a total, and a megabyte is deep
-#: recursion over sizeable frames.
-STACK_BYTES = 1 << 20
+from .runtime import (BRK, BRK_DESC, HEAP_BYTES, MEM, MEM_DESC, SP, SP_DESC,
+                      STACK_BYTES, Runtime, objects_init)
 
 #: Address 0 stays unused so that a null pointer dereference is an index into
 #: nothing rather than a read of the first global.
@@ -324,6 +319,7 @@ class _Emitter:
         self._layout_globals()
         self.cls.field(MEM, MEM_DESC)
         self.cls.field(SP, SP_DESC)
+        self.cls.field(BRK, BRK_DESC)
 
         for fn in self.module.defined_functions():
             _emit_function(self, fn)
@@ -508,7 +504,17 @@ class _Emitter:
             offset = (offset + align - 1) // align * align
             self.addresses[g.name] = offset
             offset += max(g.size, len(g.data or b""), 1)
-        self.mem_size = ((offset + ALIGN - 1) // ALIGN * ALIGN) + STACK_BYTES
+        # THE HEAP SITS BETWEEN the globals and the alloca stack, and only when
+        # something asks for it: `plat_heap` is the only way to reach it, so a
+        # program that never calls it should not carry four megabytes of array
+        # it can never address. Read off the IR rather than off `Runtime.wanted`
+        # because the layout is decided before any function body is emitted.
+        self.heap_start = (offset + ALIGN - 1) // ALIGN * ALIGN
+        wants_heap = any(ins.sym == "plat_heap"
+                         for f in self.module.functions for b in f.blocks
+                         for ins in b.instructions)
+        self.mem_size = (self.heap_start
+                         + (HEAP_BYTES if wants_heap else 0) + STACK_BYTES)
 
     def _clinit(self) -> None:
         """Allocate memory, load the globals into it, and set the stack top."""
@@ -530,6 +536,13 @@ class _Emitter:
         # immediately.
         m.push_long(self.mem_size)
         m.putstatic(self.owner, SP, SP_DESC)
+        # The heap bump pointer starts just above the globals and grows the
+        # other way. Always initialised even when nothing calls `plat_heap`:
+        # a field that exists but holds zero is a pointer into the reserved
+        # first eight bytes, and a conditional `<clinit>` is how a
+        # NoSuchFieldError gets written.
+        m.push_long(self.heap_start)
+        m.putstatic(self.owner, BRK, BRK_DESC)
         if self.rt.wanted("$reg") or self.rt.wanted("$deref"):
             objects_init(self.rt, m)                 # ends in `return`
             return

@@ -84,7 +84,8 @@ from ...link.runtime import (  # noqa: E402
 )
 
 _PRELUDE = (_PRELUDE_TEMPLATE
-            .replace("@HOST@", _host_functions(static=True, strptr="uintptr_t"))
+            .replace("@HOST@", _host_functions(static=True, strptr="uintptr_t",
+                                               ptr="uintptr_t"))
             .replace("@OBJECTS@", _objects_c(static=True)))
 
 #: Host functions defined by the prelude above. Any OTHER external the module

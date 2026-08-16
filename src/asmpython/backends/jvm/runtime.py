@@ -28,6 +28,10 @@ from __future__ import annotations
 
 from .classfile import ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC, ClassBuilder, \
     ITEM_DOUBLE, ITEM_INTEGER, ITEM_LONG, MethodBuilder
+# The floor's NAMES only. What each does is written in bytecode below, and the
+# contracts are in `link/platform.py` -- one list, so a fourth function cannot
+# be satisfied here without being declared there.
+from ...link.platform import FLOOR as _FLOOR
 
 #: Where the IR's memory lives, and its descriptor.
 MEM = "$mem"
@@ -36,6 +40,26 @@ MEM_DESC = "[B"
 #: address; it indexes an array, so the low 31 bits are all that is ever used.
 SP = "$sp"
 SP_DESC = "J"
+#: The heap bump pointer, for `plat_heap`. Grows UP from just above the
+#: globals, towards the alloca stack growing down from the top -- so the two
+#: can only meet after the whole array is used rather than immediately.
+BRK = "$brk"
+BRK_DESC = "J"
+
+#: How much of `$mem` sits between the globals and the alloca stack, available
+#: to `plat_heap`. Zero unless a program actually calls it; see
+#: `emit._layout_globals`.
+HEAP_BYTES = 1 << 22
+
+#: Bytes of `alloca` space. The IR frees an alloca when its function returns,
+#: which this backend implements by restoring a saved stack pointer -- so this
+#: is a high-water mark for live frames, not a total, and a megabyte is deep
+#: recursion over sizeable frames.
+#:
+#: HERE RATHER THAN IN `emit.py` because `plat_heap` needs it too: the heap
+#: stops where the stack's reserve begins, and the two numbers have to be the
+#: same number. `emit.py` imports it.
+STACK_BYTES = 1 << 20
 
 _STRING = "java/lang/String"
 _SB = "java/lang/StringBuilder"
@@ -315,6 +339,161 @@ def _put_none(rt: Runtime, m: MethodBuilder) -> None:
     m.push_string("None")
     m.invoke("virtual", _PRINTSTREAM, "print", f"(L{_STRING};)V")
     m.op("return")
+
+
+# ── the platform floor ──────────────────────────────────────────────────────
+# THREE FUNCTIONS, and `link/platform.py` holds the contracts. Everything above
+# this line in this file is a PYTHON operation a backend should not have to
+# know -- `put_bool` knows how Python spells a true value -- and everything
+# below it knows nothing about any language. Stage 6 of docs/INERT-RUNTIME.md
+# deletes the first group and keeps this one.
+
+def _plat_write(rt: Runtime, m: MethodBuilder) -> None:
+    """`plat_write(fd, buf, n)` -> bytes written, or -1.
+
+    `PrintStream.write(byte[], int, int)` writes the RAW BYTES, which is what
+    the contract says and what makes this work for UTF-8: `print(char)` would
+    re-encode, so a runtime emitting UTF-8 a buffer at a time would produce
+    mojibake for everything above 127. The same reason `putchar` above uses
+    `write(int)`.
+
+    The explicit `flush` matches the C's `fflush`. Without it the interleaving
+    of stdout and stderr depends on whether output is going to a terminal or a
+    pipe, and a differential test against another backend sees the lines
+    arrive in a different order.
+    """
+    m.max_locals = 7
+    m.frame_locals = [ITEM_LONG, ITEM_LONG, ITEM_LONG, _obj(_PRINTSTREAM)]
+    # THE STREAM IS STORED BEFORE THE FIRST BRANCH, not where it is chosen.
+    # One stack map describes every label in a method, so a local it mentions
+    # must be live at every branch TARGET -- and `bad` is reached from the
+    # checks below. Assigning it later verified as "top is not assignable to
+    # PrintStream", which names the slot rather than the jump that skipped it.
+    _stdout(m)
+    m.store("a", 6)
+    # A BAD ADDRESS IS A FAILED WRITE, NOT A CRASH: the contract says -1, and
+    # an out-of-range length would otherwise be an
+    # ArrayIndexOutOfBoundsException -- which reaches the user as a Java stack
+    # trace naming a method they never wrote.
+    m.load("l", 4)                                      # n < 0
+    m.push_long(0)
+    m.op("lcmp")
+    m.jump("iflt", "bad")
+    m.load("l", 2)                                      # buf < 0
+    m.push_long(0)
+    m.op("lcmp")
+    m.jump("iflt", "bad")
+    m.load("l", 2)                                      # buf + n > mem.length
+    m.load("l", 4)
+    m.op("ladd")
+    m.getstatic(rt.owner, MEM, MEM_DESC)
+    m.op("arraylength")
+    m.op("i2l")
+    m.op("lcmp")
+    m.jump("ifgt", "bad")
+
+    # THE STREAM GOES IN A LOCAL rather than staying on the stack across the
+    # branch: a label needs a stack map, and the builder writes one for an
+    # EMPTY stack. Every jump target here is reached with nothing on it.
+    m.load("l", 0)                                      # fd == 2 -> stderr
+    m.push_long(2)
+    m.op("lcmp")
+    m.jump("ifne", "have")
+    m.getstatic("java/lang/System", "err", f"L{_PRINTSTREAM};")
+    m.store("a", 6)
+    m.mark("have")
+
+    m.load("a", 6)
+    m.getstatic(rt.owner, MEM, MEM_DESC)
+    m.load("l", 2)
+    m.op("l2i")
+    m.load("l", 4)
+    m.op("l2i")
+    m.invoke("virtual", _PRINTSTREAM, "write", "([BII)V")
+    m.load("a", 6)
+    m.invoke("virtual", _PRINTSTREAM, "flush", "()V")
+    m.load("l", 4)
+    m.op("lreturn")
+
+    m.mark("bad")
+    m.push_long(-1)
+    m.op("lreturn")
+
+
+def _plat_exit(rt: Runtime, m: MethodBuilder) -> None:
+    """`plat_exit(code)`, which does not return.
+
+    `System.exit` really does not return, so the contract is met exactly here
+    -- but the `return` after it is still emitted, because the verifier
+    requires every path out of a method to end in one and it cannot see that
+    `System.exit` never comes back.
+    """
+    m.max_locals = 2
+    _stdout(m)
+    m.invoke("virtual", _PRINTSTREAM, "flush", "()V")
+    m.load("l", 0)
+    m.op("l2i")
+    m.invoke("static", "java/lang/System", "exit", "(I)V")
+    m.op("return")
+
+
+def _plat_heap(rt: Runtime, m: MethodBuilder) -> None:
+    """`plat_heap(n)` -> a fresh region of n bytes, or null.
+
+    A bump pointer into the same `byte[]` everything else lives in, between
+    the globals and the alloca stack -- which is why the contract says regions
+    need not be CONTIGUOUS but says nothing about them being separate
+    allocations: here they happen to be adjacent, and an allocator that
+    assumed that would break on the C backend, where each one is a `malloc`.
+
+    Eight-byte aligned, because the caller will store an i64 at the base and
+    the IR's loads and stores do not promise anything about unaligned access.
+    """
+    m.max_locals = 6
+    m.frame_locals = [ITEM_LONG, ITEM_LONG, ITEM_LONG]
+    # BOTH LOCALS LIVE BEFORE THE FIRST BRANCH, for the reason spelled out in
+    # `_plat_write`: one stack map covers every label, so a slot it names must
+    # hold a long at each jump target and `null` is reached from the test below.
+    m.push_long(0)
+    m.store("l", 2)
+    m.push_long(0)
+    m.store("l", 4)
+
+    m.load("l", 0)
+    m.push_long(0)
+    m.op("lcmp")
+    m.jump("ifle", "null")
+
+    m.load("l", 0)                                      # want = align8(n)
+    m.push_long(7)
+    m.op("ladd")
+    m.push_long(-8)
+    m.op("land")
+    m.store("l", 2)
+    m.getstatic(rt.owner, BRK, BRK_DESC)                # at = $brk
+    m.store("l", 4)
+
+    m.load("l", 4)                                      # at + want > the
+    m.load("l", 2)                                      # alloca stack's floor?
+    m.op("ladd")
+    m.getstatic(rt.owner, MEM, MEM_DESC)
+    m.op("arraylength")
+    m.op("i2l")
+    m.push_long(STACK_BYTES)
+    m.op("lsub")
+    m.op("lcmp")
+    m.jump("ifgt", "null")
+
+    m.load("l", 4)
+    m.load("l", 2)
+    m.op("ladd")
+    m.putstatic(rt.owner, BRK, BRK_DESC)
+    m.load("l", 4)
+    m.op("lreturn")
+
+    m.mark("null")
+    m.push_long(0)
+    m.op("lreturn")
 
 
 def _putchar(rt: Runtime, m: MethodBuilder) -> None:
@@ -1118,6 +1297,9 @@ _METHODS: dict[str, tuple[str, object, tuple[str, ...]]] = {
     "print_float": ("(D)V", _print_float, ("$repr",)),
     "print_str":   ("(J)V", _print_str, ()),
     "putchar":     ("(J)J", _putchar, ()),
+    "plat_write":  ("(JJJ)J", _plat_write, ()),
+    "plat_exit":   ("(J)V", _plat_exit, ()),
+    "plat_heap":   ("(J)J", _plat_heap, ()),
     "$two_sum":    ("(DD)D", _two_sum, ()),
     "$two_prod":   ("(DD)D", _two_prod, ()),
     "$dd_mul":     ("(DDDD)D", _dd_mul, ("$two_prod", "$two_sum")),
@@ -1134,6 +1316,6 @@ _METHODS: dict[str, tuple[str, object, tuple[str, ...]]] = {
 _HOST_NAMES = frozenset({
     "put_int", "print_int", "put_bool", "put_none", "put_float",
     "print_float", "print_str", "putchar", "py_pow_int",
-})
+}) | set(_FLOOR)
 
 HOST_NAMES = _HOST_NAMES

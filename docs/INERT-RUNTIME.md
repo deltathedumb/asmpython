@@ -153,9 +153,11 @@ until a stage replaces a piece of it and the corpus agrees.
    cell and reads it back, checked through the IR verifier and the IR
    interpreter. Cheap -- no backend, no gcc.
    `tests/asmpython/unit/test_machine_subset.py`, 31 tests, ~1 second.
-2. **The floor.** Define the platform interface and implement it for the C
-   backend (trivially, over libc) and the JVM backend (over `byte[]` and
-   `System.out`). PROVED BY: a program that prints, on both backends.
+2. **The floor.** ***DONE*** -- see "What stage 2 landed" below. Define the
+   platform interface and implement it for the C backend (trivially, over libc)
+   and the JVM backend (over `byte[]` and `System.out`).
+   PROVED BY: a program that prints, on both backends.
+   `tests/asmpython/integration/test_platform_floor.py`.
 3. **One real kind, end to end.** Port the smallest complete object kind -- the
    integer cell and its arithmetic -- to the subset. Keep the C version and run
    BOTH. PROVED BY: the multi-path corpus, which already compares CPython, the
@@ -248,6 +250,81 @@ what stage 1 had to prove; they are needed to dispatch on one, which is stage
 3's first requirement. Nor is `alloca` with a computed size -- frame storage is
 laid out before the function runs, and a runtime size is the allocator's job,
 which is stage 4.
+
+## What stage 2 landed
+
+The floor is three functions, and the number is now enforced by a test rather
+than asserted by this document.
+
+    plat_write(fd, buf, n) -> i64      bytes written, or -1
+    plat_exit(code)                    does not return
+    plat_heap(n) -> ptr                n more bytes, or null
+
+`link/platform.py` holds the contracts and the C implementation; the JVM's is
+bytecode in `backends/jvm/runtime.py` over the `byte[]` it already had; the IR
+interpreter's is in `Interpreter._host`. **One list, three implementations** --
+a fourth function cannot be satisfied by a backend without being declared in
+the contract, which is checked.
+
+They are callable from the subset by name, as ordinary external calls. Not
+intrinsics: each is `Op.CALL` of a symbol, which is exactly what makes them the
+one thing a backend still has to supply. And a program that does not ask does
+not pay -- the declarations are dropped when nothing calls them, so a program
+that only does arithmetic acquires no dependency on the platform at all.
+
+### Why the floor is this and not the five functions next to it
+
+The frontend already required five: `put_int`, `put_float`, `put_bool`,
+`put_none`, `putchar`. They are the counter-example that sets the rule.
+`put_bool` knows that Python spells a true value `True`; `put_float` knows
+Python's float repr is the shortest decimal that reads back. Those are LANGUAGE
+facts, so every backend that implements them owes the language -- and a floor
+stops being three functions the moment one of them knows what a bool is.
+Nothing in this floor knows what a Python value is. `plat_write` takes bytes.
+
+### The proof, and why it is that program
+
+A program that formats a signed 64-bit integer to decimal and writes the bytes,
+**with no `put_int` anywhere in it**, producing identical output under the IR
+interpreter, the C backend and the JVM backend.
+
+That is the smallest thing that is undeniably runtime work rather than a smoke
+test: it needs memory it can index, arithmetic at a fixed width, a loop whose
+trip count depends on the value, and a way to emit bytes. And `put_int` is
+precisely what every backend has to implement today, so writing it once in the
+subset is the shape every later stage takes.
+
+`plat_exit` is tested for the half of its contract a status check does not
+reach: the program writes, exits 7, and writes again -- and the second write
+must not happen on any of the three paths.
+
+### What it cost to find out
+
+* **`//` and `%` floor even at a machine width**, because the subset is Python.
+  `-1234 // 10` is -124 and `-1 // 10` is -1, so a digit loop written on the
+  negative side never terminates -- it ran the index off the front of the
+  buffer and faulted. The fix is to work in `u64`, where both operands are
+  non-negative, the floor correction is dead code, and `0 - m` gives the
+  magnitude of -9223372036854775808 too. This is the subset being RIGHT and
+  the program being wrong, and it is the first evidence that writing a runtime
+  in Python-with-widths is different from writing it in C.
+* **One stack map covers every label in a JVM method**, so a local it names has
+  to be live at every branch TARGET. Choosing the output stream after the
+  bounds checks verified as "top is not assignable to PrintStream", which names
+  the slot rather than the jump that skipped it.
+* **`asmpython run` reported 0 whatever the program did.** `plat_exit(7)` now
+  ends it with 7, as every compiled path already did. NOT FIXED, and worth
+  knowing: the entry's RETURN value also becomes a compiled program's exit
+  status and still does not become the interpreter's. That divergence predates
+  this work.
+
+### What the JVM backend can now do that it could not
+
+`backends/jvm/emit.py` says in its own words that it cannot compile dynamic
+Python because the object runtime is C and nothing in a class file can call it.
+It still cannot. But it now runs a program that does real runtime work --
+formats a number, asks for heap, writes bytes -- with nothing outside the IR
+except three methods it has. That is the entire bet of this document, executing.
 
 ## Constraints carried in
 

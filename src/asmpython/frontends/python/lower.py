@@ -36,7 +36,7 @@ from ...ir.module import Global, Instruction, Linkage
 from ...ir.opcodes import Op
 from .analysis import (
     BOOL, ENTRY_NAME, FLOAT, INT, MACHINE, MEMORY_INTRINSICS, NONE, OBJ,
-    FunctionInfo, SemType,
+    PLATFORM, FunctionInfo, SemType,
     TO_IR, sem_type,
     const_int, int_literal, span_of,
 )
@@ -99,6 +99,12 @@ _OBJECT_RUNTIME = {
     name: ([_IR_TYPE_BY_NAME[a] for a in args], _IR_TYPE_BY_NAME[ret])
     for name, (args, ret) in object_signatures().items()
 }
+
+#: The platform floor, as IR signatures. Declared alongside `_RUNTIME` and
+#: dropped in `run()` if nothing calls it, so a program that never asks the
+#: platform for anything acquires no dependency on it.
+_PLATFORM_IR = {name: ([TO_IR[a] for a in args], TO_IR[ret])
+                for name, (args, ret) in PLATFORM.items()}
 
 #: `int(x)`/`float(x)`/`bool(x)`. Lowered as coercions, not calls -- there is
 #: nothing to call, and emitting a call would make every backend depend on a
@@ -266,7 +272,8 @@ class Lowerer(DynamicLowering):
                 fn.registers[i] = ty
             self.module.functions.append(fn)
 
-        for name, (params, ret) in {**_RUNTIME, **_OBJECT_RUNTIME}.items():
+        for name, (params, ret) in {**_RUNTIME, **_PLATFORM_IR,
+                                    **_OBJECT_RUNTIME}.items():
             fn = Function(name, ret, external=True, linkage=Linkage.IMPORT)
             for i, ty in enumerate(params):
                 fn.params.append(i)
@@ -307,7 +314,8 @@ class Lowerer(DynamicLowering):
                   for ins in b.instructions if ins.op is Op.CALL}
         self.module.functions = [
             f for f in self.module.functions
-            if not (f.external and (f.name in _RUNTIME or f.name in _OBJECT_RUNTIME)
+            if not (f.external and (f.name in _RUNTIME or f.name in _PLATFORM_IR
+                                    or f.name in _OBJECT_RUNTIME)
                     and f.name not in called)]
         return self.module
 
@@ -1035,6 +1043,13 @@ class Lowerer(DynamicLowering):
 
         if name in MEMORY_INTRINSICS and name not in self.infos:
             return self._memory(name, node)
+
+        if name in PLATFORM and name not in self.infos:
+            params, ret = PLATFORM[name]
+            args = [self._coerce(self._expr(a), self._type_of(a), want)
+                    for a, want in zip(node.args, params)]
+            result = self.b.call(TO_IR[ret], name, args)
+            return result if result is not None else self.b.const(T.I64, 0)
 
         info = self.infos[name]
         params, ret = info.signature
