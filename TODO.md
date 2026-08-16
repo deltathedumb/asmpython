@@ -72,7 +72,18 @@ case. CPython passes 100% of them, so any divergence is asmpython's bug.
 | with PEP 560's `__mro_entries__` and the TypedDict key sets | 1637/1668 |
 | with a class able to EXTEND A BUILTIN, and `del obj[k]` dispatching `__delitem__` at all | 1639/1668 |
 | with `except*`, t-strings, an exception class that may have a BODY, a class body that is a BLOCK, `__anext__` on a class, the asyncio TASK LAYER (`create_task`, `cancel`, `wait_for`, `TaskGroup`) and a bundled `unicodedata` | 1648/1668 |
-| `results/asmpython.json` — with PEP 657: a traceback that names a frame, a frame that names a code object, and `co_positions()` -- recorded per statement, and only for a program that asks | **1649**/1668 |
+| with PEP 657: a traceback that names a frame, a frame that names a code object, and `co_positions()` -- recorded per statement, and only for a program that asks | 1649/1668 |
+| with `compile()`, `eval()` and `exec()` -- a Python lexer, parser, validator and tree-walker written as BUNDLED PYTHON and spliced into any program that names one | **1668**/1668 |
+
+**FULL CONFORMANCE. 1668/1668 on spec+cpython**, measured `--shim asmpython
+-j 2` over 1679 cases. The nine remaining divergences are all impl tier and
+none is counted: small-int caching, string interning (twice), the recursion
+limit, PEP 709's frameless comprehensions, `__length_hint__`, and weak
+references (three). Every one of them is a statement about how CPython is
+BUILT rather than about what Python means, which is what the impl tier is for.
+
+The goal this file opens with is met. What follows is what the score does not
+measure, which is now the whole of the remaining work.
 
 **EVERY REMAINING FAILURE CALLS `compile()`, `eval()` OR `exec()`.** Nineteen
 cases, verified by reading each one rather than by inferring it from the
@@ -94,6 +105,33 @@ back 409 against a tree measuring 888 either side of it.
 them in sequence and produces failures that are not in the code -- see
 "Concurrent runs make the suite lie" below. `src/` is snapshotted, so a
 measurement is safe from edits; it is not safe from another measurement.
+
+## The embedded interpreter is half a Python
+
+`compile()`, `eval()` and `exec()` are answered by bundled Python spliced into
+any program that names one, and the nineteen conformance cases that drove that
+work all ask the same question: is this source well-formed. `_pyvalidate`
+answers it and `test_bundled_compile.py` holds 87 probes against CPython's own
+`compile` to keep it honest.
+
+NONE OF THAT MEASURES WHETHER IT RUNS A PROGRAM CORRECTLY. `_pyrun` is 537
+lines of tree walk against a language this suite spends 1668 cases on, and it
+had never been pointed at them. Pointing the same oracle at it:
+
+    --shim embedded_host       871/1668   (52.2%)
+    --shim asmpython          1668/1668  (100.0%)
+
+So the interpreter a produced binary carries implements about HALF of what the
+compiler around it does. That is not a regression and nothing depended on it
+being more -- `eval` exists for the one case that calls it -- but it is a
+number that did not exist before, and it is the gap to close if `exec` is meant
+to be usable rather than present.
+
+The two embedded shims differ in where the bundled modules run: `embedded_host`
+imports them under CPython, `embedded` compiles them into a binary. A case that
+passes on the host and fails in a binary is a bug in the COMPILER's handling of
+the interpreter's own source -- which makes the pair a three-paths-must-agree
+check one level up from the corpus.
 
 ## What the score does not measure
 
@@ -929,6 +967,8 @@ using it.
 |  |  |
 | --- | --- |
 | `conformance/harness.py` | the score. Slow — a compile and link per case. |
+| `conformance/harness.py --shim embedded_host` | the same suite through the EMBEDDED interpreter (`_pyrun`), on the host. 0.1s a case. **871/1668** as of this measurement. |
+| `conformance/harness.py --shim embedded --merge 32` | the embedded interpreter inside a produced binary -- what actually ships. Expensive; merge mode is what makes it affordable at all. |
 | `conformance/harness.py --merge N` | N cases compiled into ONE program. Sees what a case-per-process run cannot -- state the runtime keeps for the length of one program -- and pays one `gcc` per batch instead of one per case. |
 | `conformance/try.py` | one case or one snippet, want vs got, with the compiler's own stderr. |
 | `tools/objects_diff.py` | the object runtime against CPython, ~137k generated cases. No compiler involved, so a failure is the runtime's and can be nothing else. |

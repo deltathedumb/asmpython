@@ -156,12 +156,35 @@ unknown group is a hard error rather than an empty selection — zero cases scor
 
 `selftest.py` takes the same groups positionally: `python selftest.py pep`.
 
-There are two shims and they play different roles. `cpython` is the **oracle** —
+There are four shims and they play different roles. `cpython` is the **oracle** —
 it is what `regen.py` derives expectations from and what `selftest.py` checks
 the suite against. `asmpython` is the **subject**. Everything else in the tree
 is implementation-neutral, which is not an aspiration toward portability but the
 property that keeps the oracle honest: a suite that knew about asmpython could
 be bent, however unintentionally, toward what asmpython already does.
+
+The other two point the same oracle at the **embedded** interpreter — `_pylex`,
+`_pyparse`, `_pyvalidate` and `_pyrun`, the Python-in-Python compiler and tree
+walker that `bundled.py` splices into any program naming `compile`, `eval` or
+`exec`. It was written to answer nineteen cases that ask whether source is
+well-formed, and until now that was all it was measured on: agreement with
+CPython about which programs are VALID says nothing about whether it RUNS them
+correctly.
+
+| shim | what runs the case | cost |
+| --- | --- | --- |
+| `embedded` | a native binary holding the spliced interpreter — what ships | a compile per batch; **use `--merge`** |
+| `embedded_host` | the same bundled modules, imported under CPython | ~0.1s per case |
+
+`embedded_host` is the loop to develop `_pyrun` inside; `embedded` is the
+checkpoint. THEY CAN DISAGREE, and a disagreement is its own finding: the
+bundled modules are compiled by asmpython in one and interpreted by CPython in
+the other, so a case that passes on the host and fails in a binary is a bug in
+the compiler's handling of the interpreter's source rather than in the
+interpreter. That is the corpus's three-paths-must-agree argument, one level up.
+
+Neither rewrites a case. The source goes in verbatim and `exec` runs it in a
+fresh namespace, which is what a module scope is.
 
 A shim is small — given a case file, produce its stdout:
 
