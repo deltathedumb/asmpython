@@ -216,10 +216,20 @@ def _object_runtime() -> dict:
     not something anyone arrives at by accident.
     """
     from ...link.objects import signatures
+    from ...link.objects_ir import SPLIT
     out = {}
     for name, (args, ret) in signatures().items():
-        out[name] = (tuple(BY_NAME[a] for a in args),
-                     NONE if ret == "void" else BY_NAME[ret])
+        sig = (tuple(BY_NAME[a] for a in args),
+               NONE if ret == "void" else BY_NAME[ret])
+        out[name] = sig
+        if name in SPLIT:
+            # THE OTHER HALF OF A SPLIT FUNCTION. `apy_add`'s C body is
+            # renamed `apy_add_slow` and the ported fast path calls it for
+            # every kind it does not handle -- so the name has to be callable,
+            # and it has the same signature because it IS the same function.
+            # Derived rather than parsed: the rename happens in
+            # `objects_c(split=...)`, long after this list is read.
+            out[name + "_slow"] = sig
     return out
 
 

@@ -75,20 +75,15 @@ def apy_small_slot(i: i64) -> ptr:
 def apy_int_alloc(value: i64) -> ptr:
     """One int cell, tagged and filled. Never shared.
 
-    `plat_heap` rather than the C's `apy_alloc`, which is `static` and not
-    linkable -- and rather than anything cleverer, because this is the shape
-    every later kind takes and the shape has to stand on the floor.
-
-    NOT ZEROED beyond what is written. The C's allocator memsets the whole
-    union because an exception carries three fields most of them never set;
-    an int has one field and this writes it, so there is nothing uninitialised
-    that anything reads. The kind is what decides which union member is live,
-    and the kind is written first.
+    Through `apy_obj_alloc` (`arena.py`) rather than `plat_heap` directly, so
+    that every object in a program -- the C runtime's and this file's alike --
+    comes from one allocator. It was `plat_heap` when this was the only ported
+    kind, which was a malloc per integer and hit the platform floor on every
+    allocation.
     """
-    cell: ptr = plat_heap(apy_obj_size())
+    cell: ptr = apy_obj_alloc(apy_int_kind())
     if not cell:
         return cell
-    store(i32, i32(apy_int_kind()), offset(cell, apy_kind_offset()))
     store(i64, value, offset(cell, apy_payload_offset()))
     return cell
 

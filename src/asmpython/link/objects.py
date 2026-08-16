@@ -665,17 +665,31 @@ static apy_obj apy_notimpl_cell = { APY_NOTIMPL_K, { 0 } };
 static apy_obj apy_true_cell = { APY_BOOL_K, { 1 } };
 static apy_obj apy_false_cell = { APY_BOOL_K, { 0 } };
 
+/* THE ONLY PLACE OBJECTS COME FROM, split in two so that the allocation
+   itself can be ported to the machine subset -- see `link/objects_ir.py` and
+   stage 4 of docs/INERT-RUNTIME.md. `apy_cell_new` is the allocation and
+   nothing else; the wrapper keeps the out-of-memory policy, because stopping
+   the program is a decision rather than a way of getting memory, and a
+   replacement allocator should not have to agree with it to be substituted. */
+APY_API apy_value apy_obj_alloc(int64_t kind);
+
 static apy_obj *apy_alloc(int kind) {
-    apy_obj *o = (apy_obj *)malloc(sizeof(apy_obj));
+    apy_obj *o = (apy_obj *)apy_obj_alloc((int64_t)kind);
     if (!o) { fputs("asmpython: out of memory\n", stderr); exit(1); }
-    o->kind = kind;
+    return o;
+}
+
+APY_API apy_value apy_obj_alloc(int64_t kind) {
+    apy_obj *o = (apy_obj *)malloc(sizeof(apy_obj));
+    if (!o) return 0;
+    o->kind = (int)kind;
     /* ZEROED, not merely tagged. An exception carries `context`, `cause` and
        `notes` that most of them never set, and every one of the four places
        that builds one would otherwise have to remember all three -- which is
        the kind of thing that gets remembered in three places and forgotten in
        the fourth, where it reads uninitialised memory as a value. */
     memset(&o->v, 0, sizeof o->v);
-    return o;
+    return V(o);
 }
 
 APY_API apy_value apy_none(void) { return V(&apy_none_cell); }
@@ -15550,7 +15564,58 @@ def signatures() -> dict:
     return out
 
 
-def objects_c(*, static: bool = False, omit: tuple[str, ...] = ()) -> str:
+def split_c(text: str, names: tuple[str, ...], suffix: str = "_slow") -> str:
+    """Rename a function's DEFINITION, leaving its name to something else.
+
+    THE SHAPE EVERY PORTED KIND TAKES. `apy_add` is polymorphic over eighteen
+    kinds, so it cannot be ported whole without porting all of them -- but its
+    integer case is four instructions and is most of what a program does. So
+    the subset defines `apy_add`, handles the case it knows, and hands
+    everything else to what used to be here:
+
+        APY_API apy_value apy_add(apy_value, apy_value);        <- IR
+        APY_API apy_value apy_add_slow(apy_value a, apy_value b) { ...the C... }
+
+    Only the DEFINITION is renamed. Every existing call inside the runtime --
+    and there are many -- keeps saying `apy_add` and so reaches the fast path,
+    which is the point: the port has to speed up the C's own work, not only
+    the frontend's calls.
+
+    Recursion still works and still means the right thing: a body that calls
+    `apy_add` reaches the fast path, which falls back here if it must.
+    """
+    for name in names:
+        at, line_start = _definition_of(text, name)
+        open_brace = text.index("{", at)
+        signature = text[line_start:open_brace].rstrip()
+        # The declaration for the IR half goes ABOVE, so every later caller
+        # has one in scope no matter where it sits.
+        renamed = signature.replace(f" {name}(", f" {name}{suffix}(", 1)
+        text = (text[:line_start] + signature + ";\n" + renamed
+                + text[open_brace:])
+    return text
+
+
+def _definition_of(text: str, name: str) -> tuple[int, int]:
+    """Where `name`'s APY_API definition starts: (name offset, line start)."""
+    at = -1
+    while True:
+        at = text.find(f" {name}(", at + 1)
+        if at < 0:
+            raise KeyError(f"{name} is not defined in the object runtime")
+        line_start = text.rfind("\n", 0, at) + 1
+        # `APY_API`, the macro, is what marks a PUBLIC definition -- the token
+        # `@APY_API@` is only its expansion at the `#define`.
+        if text.startswith("APY_API ", line_start):
+            semicolon = text.find(";", at)
+            brace = text.find("{", at)
+            if brace >= 0 and (semicolon < 0 or brace < semicolon):
+                return at, line_start
+    raise KeyError(f"{name} is declared but not defined")
+
+
+def objects_c(*, static: bool = False, omit: tuple[str, ...] = (),
+              split: tuple[str, ...] = ()) -> str:
     """The object runtime's C source, with its storage class chosen.
 
     `static` for the C backend, whose output is one self-contained translation
@@ -15560,8 +15625,14 @@ def objects_c(*, static: bool = False, omit: tuple[str, ...] = ()) -> str:
     `omit` names functions that are DEFINED IN IR INSTEAD -- the ported half of
     `docs/INERT-RUNTIME.md`. Keeping both definitions is a duplicate symbol at
     link time, so the C one gives way; see `_declare_only`.
+
+    `split` names functions the IR takes the FRONT of: the C body is renamed
+    `<name>_slow` and the IR defines `<name>`, which handles what it knows and
+    calls back for the rest. See `split_c`.
     """
     text = _WITH_TABLE
+    if split:
+        text = split_c(text, split)
     if omit:
         text = _declare_only(text, omit)
     return text.replace(_API_TOKEN, "static" if static else "")
@@ -15583,21 +15654,13 @@ def _declare_only(text: str, names: tuple[str, ...]) -> str:
     this list.
     """
     for name in names:
-        at = -1
-        while True:
-            at = text.find(f" {name}(", at + 1)
-            if at < 0:
-                raise KeyError(f"{name} is not defined in the object runtime")
-            line_start = text.rfind("\n", 0, at) + 1
-            # `APY_API`, the macro, is what marks a PUBLIC definition -- the
-            # token `@APY_API@` is only its expansion at the `#define`. A
-            # `static` helper with the same suffix in its name must not match.
-            if text.startswith("APY_API ", line_start):
-                break
-        open_brace = text.find("{", at)
-        semicolon = text.find(";", at)
-        if open_brace < 0 or (0 <= semicolon < open_brace):
-            raise KeyError(f"{name} is declared but not defined; nothing to omit")
+        # THROUGH `_definition_of`, which walks PAST a forward declaration.
+        # `apy_cell_new` has one -- it must, because the `apy_alloc` wrapper
+        # above it calls it -- and the older search here stopped at the first
+        # `APY_API` line bearing the name and reported "declared but not
+        # defined; nothing to omit" about a function defined thirty lines down.
+        at, _ = _definition_of(text, name)
+        open_brace = text.index("{", at)
         depth, i = 0, open_brace
         while i < len(text):
             if text[i] == "{":

@@ -907,6 +907,28 @@ def _apy_from_int(h, a):
     return h._int(int(a[0]))
 
 
+def _apy_obj_alloc(h, a):
+    """`apy_obj_alloc(kind)` -- the C runtime's allocation hook.
+
+    IT HAS NO HONEST ANSWER HERE, and refusing is the honest answer. The C
+    hands back a 152-byte cell whose payload the caller then writes through a
+    pointer; this host has no cells and no pointers, only handles into a Python
+    list, so there is nothing to return that the caller could write into.
+
+    Nothing reaches it. `apy_alloc` is `static` C and never enters the IR, and
+    the ported runtime that calls this is not run by the interpreter at all
+    (see `Interpreter._call`: the host owns every `apy_*` it claims). The
+    binding exists because every exported symbol must have one -- a compiled
+    program can call what `asmpython run` cannot, and a MISSING binding fails
+    as `unknown host function`, which says nothing about why.
+    """
+    raise _Trap(
+        "apy_obj_alloc: the interpreter allocates objects as host values, not "
+        "as cells, so there is no address to hand back. This is the ported "
+        "allocator's entry point (runtime/arena.py) and the interpreter runs "
+        "the host object runtime instead -- see Interpreter._call.")
+
+
 def _apy_from_float(h, a):
     return h._new(float(a[0]))
 

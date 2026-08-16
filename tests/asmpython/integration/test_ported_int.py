@@ -130,16 +130,20 @@ class TestTheSwitchIsCoherent:
         sys.path.insert(0, str(SRC))
         try:
             from asmpython.link.objects import objects_c
-            from asmpython.link.objects_ir import PORTED
-            text = objects_c(omit=PORTED)
+            from asmpython.link.objects_ir import REPLACES
+            replaced = tuple(sorted(n for ns in REPLACES.values() for n in ns))
+            text = objects_c(omit=replaced)
         finally:
             del sys.path[0]
-        for name in PORTED:
-            defs = [l for l in text.splitlines()
-                    if l.startswith("APY_API") and f" {name}(" in l]
-            assert len(defs) == 1, (name, defs)
-            assert defs[0].rstrip().endswith("*/"), defs[0]
-            assert "{" not in defs[0], f"{name} still has a body: {defs[0]}"
+        for name in replaced:
+            heads = [l for l in text.splitlines()
+                     if l.startswith("APY_API") and f" {name}(" in l]
+            # A FORWARD DECLARATION MAY ALSO EXIST and is not a definition:
+            # `apy_obj_alloc` has one, because the `apy_alloc` wrapper above it
+            # calls it. What must be gone is the BODY.
+            assert heads, name
+            assert not [l for l in heads if l.rstrip().endswith("{")],                 f"{name} still has a C body: {heads}"
+            assert any(l.rstrip().endswith("*/") for l in heads), heads
 
     def test_the_runtime_source_compiles_on_the_static_path(self):
         """It must emit no `apy_*` it did not name, and no object at all.
@@ -157,8 +161,14 @@ class TestTheSwitchIsCoherent:
             del sys.path[0]
         defined = {f.name for f in module.functions if not f.external}
         assert "apy_from_int" in defined and "apy_as_int" in defined
+        # THE FLOOR, and the `_slow` halves of the split functions -- which
+        # are the C, deliberately, and the only `apy_*` a ported file may
+        # reach that it does not define. Anything else here would mean the
+        # runtime had grown a dependency nobody declared.
         external = {f.name for f in module.functions if f.external}
-        assert external <= {"plat_heap", "plat_write", "plat_exit"}, external
+        from asmpython.link.objects_ir import SPLIT
+        assert external <= ({"plat_heap", "plat_write", "plat_exit"}
+                            | {n + "_slow" for n in SPLIT}), external
 
 
 class TestItBehavesLikeCPython:
@@ -235,6 +245,158 @@ class TestNothingElsePays:
         assert re.search(r"func apy_from_int\([^)]*\) -> ptr \{", text), \
             "apy_from_int is not defined in the spliced IR"
         assert "apy_small_ir" in text, "the small-int cache global is missing"
+
+
+class TestTheArithmeticSplit:
+    """Stage 3's other half: a fast path in IR over a C remainder.
+
+    `apy_add` is polymorphic over eighteen kinds, so it cannot be ported whole
+    without porting all of them. The subset defines it, answers int x int, and
+    calls `apy_add_slow` -- the C body under a new name -- for everything else.
+    THIS IS THE SHAPE EVERY REMAINING KIND TAKES, so it is tested for the two
+    ways it can go wrong: answering a case it should have declined, and
+    declining one it should have answered.
+    """
+
+    @harness.needs("gcc")
+    def test_the_fast_path_and_the_fallback_agree_with_cpython(self, tmp_path):
+        """Each line crosses the boundary somewhere.
+
+        The overflow lines are the ones that matter: Python's integers are
+        arbitrary precision, so an overflow is not an error but a promotion to
+        the big-integer path -- which is entirely in the C. A fast path that
+        answered them would be wrong by a factor of 2**64.
+        """
+        program = """\
+            print(2 + 3, 10 - 4, 6 * 7)
+            print(9223372036854775807 + 1)
+            print(-9223372036854775808 - 1)
+            print(-9223372036854775808 - 0)
+            print(3037000500 * 3037000500)
+            print(True + True, 1.5 + 2, "a" + "b", [1] + [2])
+            print((2 ** 70) + 1, (2 ** 70) * 3)
+            print((-5) - (-5), 0 - (-9223372036854775808))
+        """
+        got = build_and_run(tmp_path, write(tmp_path, program))
+        assert got.returncode == 0, got.stderr
+        assert got.stdout.split("\n")[:8] == [
+            "5 6 42",
+            "9223372036854775808",
+            "-9223372036854775809",
+            "-9223372036854775808",
+            "9223372037000250000",
+            "2 3.5 ab [1, 2]",
+            "1180591620717411303425 3541774862152233910272",
+            "0 9223372036854775808",
+        ], got.stdout
+
+    def test_the_c_keeps_its_body_under_the_new_name(self):
+        """A split is not an omission: the body is what the fast path calls.
+        Confusing the two is a link error naming `apy_add_slow`."""
+        sys.path.insert(0, str(SRC))
+        try:
+            from asmpython.link.objects import objects_c
+            from asmpython.link.objects_ir import SPLIT
+            text = objects_c(split=SPLIT)
+        finally:
+            del sys.path[0]
+        for name in SPLIT:
+            heads = [l for l in text.splitlines() if l.startswith("APY_API")
+                     and (f" {name}(" in l or f" {name}_slow(" in l)]
+            declared = [l for l in heads if l.rstrip().endswith(";")]
+            defined = [l for l in heads if l.rstrip().endswith("{")]
+            assert any(f" {name}(" in l for l in declared), (name, heads)
+            assert [l for l in defined if f" {name}_slow(" in l], (name, heads)
+            assert not [l for l in defined if f" {name}(" in l], \
+                f"{name} still has a C body: {defined}"
+
+    def test_a_split_name_is_never_also_omitted(self):
+        """The two lists ask the C for opposite things."""
+        sys.path.insert(0, str(SRC))
+        try:
+            from asmpython.link.objects_ir import PORTED, SPLIT, REPLACES
+            replaced = {n for names in REPLACES.values() for n in names}
+            assert not (replaced & set(SPLIT)), replaced & set(SPLIT)
+            assert set(SPLIT) <= set(PORTED)
+        finally:
+            del sys.path[0]
+
+
+class TestTheArena:
+    """Stage 4: one allocator, in the subset, over the floor.
+
+    `apy_alloc` in the C is now a wrapper around `apy_obj_alloc`, which this
+    port defines -- so every object in a compiled program, the C runtime's and
+    the ported code's alike, comes from a bump pointer in the machine subset
+    rather than from a `malloc` per cell.
+
+    A BUMP ALLOCATOR IS ONLY CORRECT BECAUSE NOTHING FREES A CELL. That was
+    checked rather than assumed: all 51 `free()` calls in the C release
+    buffers, never an `apy_obj`. If that ever stops being true, this is where
+    it breaks, and the test below is what notices.
+    """
+
+    @harness.needs("gcc")
+    def test_it_survives_tens_of_thousands_of_objects(self, tmp_path):
+        """Past one chunk, so the refill path runs and the abandoned tail of
+        the previous chunk is exercised. 27,000 cells is several megabytes."""
+        program = """\
+            xs = []
+            for i in range(20000):
+                xs.append(i * 7 + 1)
+            print(len(xs), xs[0], xs[-1], sum(xs))
+            d = {}
+            for i in range(5000):
+                d[i] = str(i) + "!"
+            print(len(d), d[4999])
+            class P:
+                def __init__(self, n):
+                    self.n = n
+            print(sum(P(i).n for i in range(2000)))
+        """
+        got = build_and_run(tmp_path, write(tmp_path, program))
+        assert got.returncode == 0, got.stderr
+        assert got.stdout.split("\n")[:3] == [
+            "20000 1 139994 1399950000", "5000 4999!", "1999000"], got.stdout
+
+    @harness.needs("gcc")
+    def test_cells_do_not_overlap(self, tmp_path):
+        """The failure a bump allocator has: handing the same bytes out twice.
+
+        Held simultaneously and compared at the end, so an overlap shows as a
+        value that changed without being assigned -- which no amount of
+        sequential allocation would reveal.
+        """
+        program = """\
+            cells = [[i, i * 3] for i in range(4000)]
+            bad = 0
+            for i in range(4000):
+                if cells[i][0] != i or cells[i][1] != i * 3:
+                    bad = bad + 1
+            print(bad)
+        """
+        got = build_and_run(tmp_path, write(tmp_path, program))
+        assert got.returncode == 0, got.stderr
+        assert got.stdout.strip() == "0", got.stdout
+
+    def test_the_allocator_asks_the_floor_and_nothing_else(self):
+        """It stands on stage 2 and on nothing that is not there.
+
+        An allocator that reached for anything else would be the point at
+        which "three functions per backend" stopped being true.
+        """
+        sys.path.insert(0, str(SRC))
+        try:
+            from asmpython.link import objects_ir
+            module = objects_ir.compile_runtime()
+        finally:
+            del sys.path[0]
+        external = {f.name for f in module.functions if f.external}
+        assert external <= {"plat_heap", "plat_write", "plat_exit",
+                            "apy_add_slow", "apy_sub_slow", "apy_mul_slow"}, \
+            external
+        assert "apy_obj_alloc" in {f.name for f in module.functions
+                                   if not f.external}
 
 
 class TestTheCRuntimeIsStillSupported:
@@ -344,8 +506,14 @@ class TestTheCRuntimeIsStillSupported:
                 "the backend said it defines this one"
             assert "apy_as_int" in defined, \
                 "the rest of the runtime should still arrive"
-            # And the C is then asked to stand aside for exactly that rest.
-            assert objects_ir.omitted_by(module) == ("apy_as_int",)
+            # And the C is asked to stand aside for exactly that rest -- the
+            # REPLACED names only. A SPLIT name appears in neither list here:
+            # its body stays, under the other name, because the ported half
+            # calls it.
+            omitted = objects_ir.omitted_by(module)
+            assert "apy_from_int" not in omitted, omitted
+            assert "apy_as_int" in omitted, omitted
+            assert set(omitted).isdisjoint(objects_ir.SPLIT), omitted
         finally:
             del sys.path[0]
 

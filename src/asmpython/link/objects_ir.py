@@ -67,16 +67,34 @@ SOURCE_DIR = Path(__file__).resolve().parent.parent / "runtime"
 #: Only the names listed here are `#if`d out of the C, and a name listed here
 #: that the module does not define is caught by `check()`.
 REPLACES: dict[str, tuple[str, ...]] = {
+    "arena.py": ("apy_obj_alloc",),
     "int_cell.py": ("apy_from_int", "apy_as_int"),
 }
 
+#: The C functions a ported module takes the FRONT of, per source file.
+#:
+#: Different from `REPLACES` in exactly one way and it is the important one:
+#: the C body is not dropped, it is renamed `<name>_slow` and the ported code
+#: calls it for everything it does not handle. `apy_add` is polymorphic over
+#: eighteen kinds and its integer case is four instructions, so a port that had
+#: to be total could not begin. See `link/objects.split_c`.
+SPLITS: dict[str, tuple[str, ...]] = {
+    "int_arith.py": ("apy_add", "apy_sub", "apy_mul"),
+}
+
 #: Every C symbol currently provided by IR instead. What `objects_c()` guards.
-PORTED = tuple(sorted(n for names in REPLACES.values() for n in names))
+PORTED = tuple(sorted(
+    [n for names in REPLACES.values() for n in names]
+    + [n for names in SPLITS.values() for n in names]))
+
+#: Every C symbol that keeps its body under a new name.
+SPLIT = tuple(sorted(n for names in SPLITS.values() for n in names))
 
 
 def sources() -> list[Path]:
     """The runtime modules, in a stable order."""
-    return [SOURCE_DIR / name for name in sorted(REPLACES)]
+    return [SOURCE_DIR / name
+            for name in sorted(set(REPLACES) | set(SPLITS))]
 
 
 def compile_runtime(sink=None):
@@ -91,17 +109,36 @@ def compile_runtime(sink=None):
     from ..ir.module import Module
 
     own = sink if sink is not None else DiagnosticSink()
-    merged = Module(name="asmpython_runtime")
     frontend = PythonFrontend()
-    for path in sources():
-        source = SourceFile(path.read_text(encoding="utf-8"), path)
-        module = frontend.compile(source, own, library=True)
-        if module is None:
-            raise RuntimeError(
-                f"the shipped runtime module {path.name} did not compile:\n"
-                + "\n".join(f"  {d.code}: {d.message}" for d in own.diagnostics))
-        _merge(merged, module)
-    return merged
+    # ONE COMPILATION UNIT, not one per file. The runtime is a single library
+    # and its pieces call each other -- `int_arith.py` reads the cell layout
+    # `int_cell.py` defines -- and the static path resolves a call against the
+    # functions of the module being compiled. Compiling separately made every
+    # cross-file call `call to unknown function`, and the obvious fix
+    # (duplicate the helpers) made the merge refuse two definitions of
+    # `apy_obj_size`, which is the same problem wearing a different error.
+    #
+    # The files stay separate because they are separate SUBJECTS, and the
+    # order is `sources()`'s so a build is reproducible.
+    text = "\n\n".join(
+        f"# ── {path.name} " + "─" * 40 + "\n"
+        + path.read_text(encoding="utf-8")
+        for path in sources())
+    module = frontend.compile(
+        SourceFile(text, SOURCE_DIR / "<runtime>"), own, library=True)
+    if module is None:
+        raise RuntimeError(
+            "the shipped object runtime did not compile:\n"
+            + "\n".join(f"  {d.code}: {d.message}" for d in own.diagnostics))
+    # A RUNTIME FILE CALLING ANOTHER'S FUNCTION gets it declared as an external
+    # too: the frontend declares the whole `apy_*` runtime and keeps whatever
+    # is called. So `apy_from_int` arrives both DECLARED and DEFINED, which is
+    # one name and two functions -- rejected by the verifier, after the splice,
+    # against the symbol rather than against this.
+    defined = {f.name for f in module.functions if not f.external}
+    module.functions = [f for f in module.functions
+                        if not (f.external and f.name in defined)]
+    return module
 
 
 def _merge(into, module) -> None:
@@ -175,7 +212,21 @@ def omitted_by(module) -> tuple[str, ...]:
     if module is None:
         return ()
     have = {f.name for f in module.functions if not f.external}
-    return tuple(n for n in PORTED if n in have)
+    return tuple(n for n in PORTED if n in have and n not in SPLIT)
+
+
+def split_by(module) -> tuple[str, ...]:
+    """The SPLIT names this module supplies a front half for.
+
+    Separate from `omitted_by` because the two ask the C for opposite things:
+    omit drops the body, split keeps it under another name. A function in both
+    lists would be a body renamed and then deleted, which is a link error
+    naming `apy_add_slow`.
+    """
+    if module is None:
+        return ()
+    have = {f.name for f in module.functions if not f.external}
+    return tuple(n for n in SPLIT if n in have)
 
 
 def splice(module, sink=None, *, provided=frozenset(), enabled: bool = True) -> None:
@@ -231,7 +282,7 @@ def check() -> list[str]:
     problems: list[str] = []
     module = compile_runtime()
     defined = {f.name for f in module.functions if not f.external}
-    for source, names in REPLACES.items():
+    for source, names in list(REPLACES.items()) + list(SPLITS.items()):
         for name in names:
             if name not in defined:
                 problems.append(

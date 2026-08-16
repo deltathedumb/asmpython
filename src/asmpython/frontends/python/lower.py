@@ -94,10 +94,14 @@ JAVA_STRING = "jvm$str"
 #:
 #: Declarations nothing calls are dropped in `run()`, so declaring all of them
 #: costs nothing in the output.
-_IR_TYPE_BY_NAME = {"ptr": T.PTR, "i64": T.I64, "f64": T.F64, "void": T.VOID}
+#: DERIVED FROM ANALYSIS'S TABLE, not parsed again. Analysis adds the `_slow`
+#: half of every split function (see `_object_runtime`), and a second parse
+#: here did not -- so a call the analyser accepted was lowered with nothing
+#: declaring it, and the verifier said `call to unknown function
+#: 'apy_mul_slow'` about a name the frontend had just type-checked.
 _OBJECT_RUNTIME = {
-    name: ([_IR_TYPE_BY_NAME[a] for a in args], _IR_TYPE_BY_NAME[ret])
-    for name, (args, ret) in object_signatures().items()
+    name: ([TO_IR[a] for a in args], TO_IR[ret])
+    for name, (args, ret) in OBJECT_RUNTIME.items()
 }
 
 #: The platform floor, as IR signatures. Declared alongside `_RUNTIME` and

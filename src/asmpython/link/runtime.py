@@ -351,9 +351,10 @@ def runtime_c(*, entry: str = ENTRY_SYMBOL, module=None) -> str:
     `py_repr_double` and `py_pow_int`, and C wants a definition in scope.
     """
     from .objects import objects_c
-    from .objects_ir import omitted_by
+    from .objects_ir import omitted_by, split_by
     return (RUNTIME_C.replace("@HOST@", host_functions())
-            .replace("@OBJECTS@", objects_c(omit=omitted_by(module)))
+            .replace("@OBJECTS@", objects_c(omit=omitted_by(module),
+                                            split=split_by(module)))
             .replace(_ENTRY_TOKEN, entry))
 
 

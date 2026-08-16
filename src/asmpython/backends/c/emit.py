@@ -82,7 +82,9 @@ from ...link.objects import (  # noqa: E402
 # The `apy_*` the C no longer defines because the IR does. See
 # `link/objects_ir.py`; the prelude keeps a declaration for each so the
 # runtime's own hundred-odd callers still have one in scope.
-from ...link.objects_ir import omitted_by as _omitted_by  # noqa: E402
+from ...link.objects_ir import (  # noqa: E402
+    omitted_by as _omitted_by, split_by as _split_by,
+)
 from ...link.runtime import (  # noqa: E402
     HOST_NAMES as _HOST_NAMES, host_functions as _host_functions,
 )
@@ -102,7 +104,8 @@ def _prelude(module) -> str:
     return (_PRELUDE_TEMPLATE
             .replace("@HOST@", _HOST_C)
             .replace("@OBJECTS@",
-                     _objects_c(static=True, omit=_omitted_by(module))))
+                     _objects_c(static=True, omit=_omitted_by(module),
+                                split=_split_by(module))))
 
 #: Host functions defined by the prelude above. Any OTHER external the module
 #: declares gets an `extern` declaration generated from its IR signature --
@@ -114,7 +117,14 @@ def _prelude(module) -> str:
 #: host function in one place cannot leave this set behind -- a name missing
 #: here gets BOTH an `extern` declaration and the prelude's `static` definition,
 #: which is a C error about conflicting linkage.
-_PROVIDED = set(_HOST_NAMES) | set(_OBJECT_NAMES) | {"putchar"}
+#:
+#: THE `_slow` HALVES COUNT TOO. A split function's C body is renamed
+#: `apy_add_slow` and defined by the same prelude, but the name is not in the
+#: runtime's own list -- that list is parsed from the C before the rename -- so
+#: without this it gets an `extern` declaration beside a `static` definition,
+#: which is the conflicting-linkage error this comment describes.
+_PROVIDED = (set(_HOST_NAMES) | set(_OBJECT_NAMES) | {"putchar"}
+             | {n + "_slow" for n in _OBJECT_NAMES})
 
 
 class CBackend(Backend):
