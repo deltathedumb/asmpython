@@ -60,9 +60,21 @@ def java(jar: Path, *args: str) -> subprocess.CompletedProcess:
 
 
 def interpret(source: Path) -> str:
-    """What the program means, according to the reference implementation."""
+    """What the program means, according to the reference implementation.
+
+    A NON-ZERO STATUS IS NOT A FAILURE HERE. `asmpython run` reports the
+    entry's return value as the process exit code, exactly as every compiled
+    backend does -- so a program ending `return 45` exits 45, and asserting 0
+    would reject the reference implementation for being right. It did: this
+    read `assert r.returncode == 0` and started failing the moment the
+    interpreter stopped discarding the status.
+
+    What still has to be zero is the COMPILER's own trouble, which is a
+    different thing arriving on a different channel. A trap prints `trap:` and
+    a diagnostic prints `error[`, and neither is a program's answer.
+    """
     r = run_cli("run", str(source))
-    assert r.returncode == 0, r.stderr
+    assert "trap:" not in r.stderr and "error[" not in r.stderr, r.stderr
     return r.stdout
 
 

@@ -66,6 +66,8 @@ def _options(args) -> Options:
         max_errors=getattr(args, "max_errors", 100),
         warnings_are_errors=getattr(args, "werror", False),
         object_runtime=getattr(args, "object_runtime", "ir"),
+        import_paths=tuple(Path(p) for p in
+                           (getattr(args, "import_path", None) or ())),
     )
 
 
@@ -543,6 +545,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="command", required=True)
 
     def source_args(p):
+        p.add_argument("--import-path", action="append", metavar="DIR",
+                       help="where to find the program's own modules; the "
+                            "source's own directory is always searched")
         p.add_argument("source")
         p.add_argument("--frontend")
         p.add_argument("--max-errors", type=int, default=100)

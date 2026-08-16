@@ -23,6 +23,7 @@ from ...frontend import Frontend, register
 from ...ir import Module
 from .analysis import Analyzer, span_of
 from .bundled import splice
+from .imports import splice as user_splice
 from .lower import Lowerer
 
 
@@ -165,6 +166,11 @@ class PythonFrontend(Frontend):
         # about what they cost is reported from here, where the source still
         # says what the programmer wrote.
         _warn_about_runtime_compilation(tree, source, sink)
+        # THE PROGRAM'S OWN MODULES FIRST, then the bundled standard library.
+        # A spliced user module may `import functools`, and after the first
+        # pass that statement is an ordinary one in the merged tree for the
+        # second to resolve. The other order leaves it unspliced.
+        tree = user_splice(tree, source.path)
         tree = splice(tree)
         # PEP 3151: `IOError` and `EnvironmentError` ARE `OSError` -- the same
         # object in CPython, not subclasses of it. Rewriting the name here is

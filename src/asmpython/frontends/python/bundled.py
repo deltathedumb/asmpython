@@ -38,12 +38,12 @@ def available() -> set[str]:
     return {p.stem for p in _HERE.glob("*.py")}
 
 
-def _mangled(module: str, name: str) -> str:
+def _mangled(module: str, name: str, prefix: str = None) -> str:
     # THE DOT GOES. `collections.abc` is one bundled module with a dot in its
     # name, and the rest of the frontend reads a dot in a key as "nested
     # inside" -- so a name carrying one is not a module-level definition to
     # anything downstream.
-    return f"{_MANGLE}{module.replace('.', '_')}_{name}"
+    return f"{prefix or _MANGLE}{module.replace('.', '_')}_{name}"
 
 
 #: The builtins that need a compiler at run time, and the bundled module
@@ -152,7 +152,14 @@ class _Rename(ast.NodeTransformer):
     def __init__(self, module: str, defined: set[str],
                  borrowed: dict | None = None,
                  imported: dict | None = None,
-                 members: dict | None = None) -> None:
+                 members: dict | None = None,
+                 prefix: str | None = None) -> None:
+        #: WHOSE NAMESPACE THE MANGLED NAMES LIVE IN. `imports.py` reuses this
+        #: transformer for a program's own modules and must not mint names
+        #: under the bundled prefix -- `bundled.splice` refuses a tree that
+        #: already contains one, on the grounds that a program writing the
+        #: reserved spelling would otherwise have its own name replaced.
+        self.prefix = prefix
         self.module = module
         self.defined = defined
         #: What this module imported FROM ANOTHER BUNDLED ONE, already
@@ -174,7 +181,7 @@ class _Rename(ast.NodeTransformer):
         if node.id in self.shadowed:
             return node
         if node.id in self.defined:
-            node.id = _mangled(self.module, node.id)
+            node.id = _mangled(self.module, node.id, self.prefix)
         elif node.id in self.borrowed:
             node.id = self.borrowed[node.id]
         return node
@@ -187,7 +194,7 @@ class _Rename(ast.NodeTransformer):
         self.generic_visit(node)
         self.shadowed = outer
         if node.name in self.defined and node.name not in self.shadowed:
-            node.name = _mangled(self.module, node.name)
+            node.name = _mangled(self.module, node.name, self.prefix)
         return node
 
     visit_AsyncFunctionDef = visit_FunctionDef
@@ -201,7 +208,7 @@ class _Rename(ast.NodeTransformer):
             module = self.imported[node.value.id]
             if node.attr in self.members.get(module, ()):
                 return ast.copy_location(
-                    ast.Name(id=_mangled(module, node.attr), ctx=node.ctx),
+                    ast.Name(id=_mangled(module, node.attr, self.prefix), ctx=node.ctx),
                     node)
         return node
 
@@ -230,7 +237,7 @@ class _Rename(ast.NodeTransformer):
         for one, name in zip(methods, kept):
             one.name = name
         if node.name in self.defined and node.name not in self.shadowed:
-            node.name = _mangled(self.module, node.name)
+            node.name = _mangled(self.module, node.name, self.prefix)
         return node
 
 
@@ -243,7 +250,10 @@ class _Rewrite(ast.NodeTransformer):
     """
 
     def __init__(self, imported: dict[str, str], members: dict[str, set],
-                 names: dict[str, str], redirects: bool = False) -> None:
+                 names: dict[str, str], redirects: bool = False,
+                 prefix: str | None = None) -> None:
+        #: See `_Rename.prefix`.
+        self.prefix = prefix
         #: Whether the program ASSIGNS to `sys.stdout`. See `visit_Name`.
         self.redirects = redirects
         #: local name -> module, for `import functools` and `import x as y`
@@ -281,7 +291,7 @@ class _Rewrite(ast.NodeTransformer):
         # appears at all.
         module = _RUNTIME_COMPILER.get(node.id)
         if module is not None and node.id in self.members.get(module, ()):
-            node.id = _mangled(module, node.id)
+            node.id = _mangled(module, node.id, self.prefix)
         return node
 
     def visit_Attribute(self, node: ast.Attribute):
@@ -290,7 +300,7 @@ class _Rewrite(ast.NodeTransformer):
             module = self.imported[node.value.id]
             if node.attr in self.members[module]:
                 return ast.copy_location(
-                    ast.Name(id=_mangled(module, node.attr), ctx=node.ctx),
+                    ast.Name(id=_mangled(module, node.attr, self.prefix), ctx=node.ctx),
                     node)
         return node
 

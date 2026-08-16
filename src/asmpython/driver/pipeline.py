@@ -81,6 +81,9 @@ class Options:
     #: not for making it unavailable. `Backend.object_runtime` is the same
     #: choice at the granularity of one function.
     object_runtime: str = "ir"
+    #: Extra directories to resolve the program's own imports against. The
+    #: source's own directory is always searched and is not listed here.
+    import_paths: tuple[Path, ...] = ()
 
     @property
     def effective_passes(self) -> tuple[str, ...]:
@@ -156,6 +159,12 @@ def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
         if selected is None:
             return Result()
     _publish_backend_modules(selected)
+    # WHERE THE PROGRAM'S OWN MODULES LIVE. The source's own directory first,
+    # so `import helpers` beside `prog.py` works with no flag at all, then
+    # whatever `--import-path` added. Republished every compilation, so two in
+    # one process cannot see each other's paths.
+    from ..frontends.python import imports as py_imports
+    py_imports.use((opts.source.parent,) + tuple(opts.import_paths))
 
     fe = (frontend_registry.get(opts.frontend) if opts.frontend
           else frontend_registry.for_path(opts.source))
