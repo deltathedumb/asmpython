@@ -19,7 +19,7 @@ import subprocess
 import sys
 from io import StringIO
 
-import pytest
+from tests import harness
 
 from asmpython import target as target_registry
 from asmpython.backend import get as get_backend, load_builtin
@@ -118,11 +118,11 @@ class TestItParsesAndVerifies:
         assert interpret(parse_module(SIMPLE_IR)) == 42
 
 
-@pytest.mark.skipif(not HAS_CC, reason="no C compiler available")
+@harness.skip_if(not HAS_CC, reason="no C compiler available")
 class TestBackendsSurviveHostileNames:
     """Functions and blocks named after C keywords."""
 
-    @pytest.mark.parametrize("backend", ["c", "x86-64"])
+    @harness.cases("backend", ["c", "x86-64"])
     def test_it_compiles_and_returns_the_right_value(self, backend, tmp_path):
         module = parse_module(KEYWORD_IR)
         verify(module)

@@ -17,7 +17,7 @@ import subprocess
 import sys
 import textwrap
 
-import pytest
+from tests import harness
 
 from asmpython.backends.x86_64.emit import (
     MICROSOFT_X64, SYSTEM_V, X86_64Backend, _emit_parallel_moves,
@@ -268,7 +268,7 @@ class TestArgumentPlacement:
         assert places[8].on_stack and places[8].is_float
 
 
-@pytest.mark.skipif(not HAS_CC, reason="no C compiler available")
+@harness.skip_if(not HAS_CC, reason="no C compiler available")
 class TestCompiledCallsAgree:
     """Compile it, run it, compare with CPython."""
 
@@ -289,8 +289,11 @@ class TestCompiledCallsAgree:
 
     def cpython(self, src: str) -> list[str]:
         out: list[str] = []
-        ns = {"print": lambda *a: out.append(
-            " ".join(f"{x:f}" if isinstance(x, float) else str(x) for x in a))}
+        # `str`, not a float special case: the runtime prints Python's repr
+        # now, so the oracle and the subject agree without compensation. The
+        # old `{x:f}` also rounded to six decimals, which is enough to hide an
+        # ABI bug that misplaces the low bits of a double.
+        ns = {"print": lambda *a: out.append(" ".join(str(x) for x in a))}
         exec(compile(textwrap.dedent(src).strip() + "\n", "<t>", "exec"), ns)
         ns["main"]()
         return out
@@ -327,8 +330,8 @@ class TestCompiledCallsAgree:
             return 0
     """
 
-    @pytest.mark.parametrize("name", ["MANY_ARGS", "MIXED", "REVERSED"])
-    @pytest.mark.parametrize("backend", ["c", "x86-64"])
+    @harness.cases("name", ["MANY_ARGS", "MIXED", "REVERSED"])
+    @harness.cases("backend", ["c", "x86-64"])
     def test_matches_cpython(self, name, backend, tmp_path):
         src = getattr(self, name)
         assert self.run_program(src, tmp_path, backend) == self.cpython(src)

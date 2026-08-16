@@ -25,7 +25,7 @@ import sys
 import textwrap
 from pathlib import Path
 
-import pytest
+from tests import harness
 
 ROOT = Path(__file__).resolve().parents[3]
 SRC = ROOT / "src"
@@ -67,7 +67,7 @@ __asmpython_plugin__ = plugin
 PROGRAM = "def main() -> int:\n    print(1)\n    return 0\n"
 
 
-@pytest.fixture
+@harness.fixture
 def ws(tmp_path: Path) -> Path:
     (tmp_path / "my_plugin_module.py").write_text(textwrap.dedent(PLUGIN),
                                                   encoding="utf-8")
@@ -404,7 +404,7 @@ class TestInvalidate:
         assert done.returncode == 0, done.stderr
         assert "my-backend-v2" in run(ws, "backends").stdout
 
-    @pytest.mark.parametrize("form", [
+    @harness.cases("form", [
         ["my_plugin_module"],                      # bare
         ["my_plugin_module,second"],               # comma-separated
         ["my_plugin_module", "second"],            # repeated

@@ -35,7 +35,7 @@ import sys
 from io import StringIO
 from pathlib import Path
 
-import pytest
+from tests import harness
 
 from asmpython import target as target_registry
 from asmpython.diagnostics import DiagnosticSink
@@ -545,8 +545,15 @@ class ProgramGenerator:
 
 
 def render(value) -> str:
-    """Format a printed value the way the runtime does. Only floats differ."""
-    return f"{value:f}" if isinstance(value, float) else str(value)
+    """Format a printed value the way the runtime does.
+
+    Which is `str`, because the runtime prints Python's float repr now. It used
+    to print C's `%f` and this compensated for it -- and in doing so it hid the
+    property this file exists to check: `%f` rounds to six decimals, so two
+    doubles differing in the twelfth digit rendered identically and every
+    differential run agreed by accident.
+    """
+    return str(value)
 
 
 def cpython_output(src: str) -> list[str]:
@@ -606,29 +613,29 @@ def compiled_output(src: str, tmp_path: Path, backend: str) -> list[str]:
 SEEDS = list(range(40))
 
 
-@pytest.mark.parametrize("seed", SEEDS)
+@harness.cases("seed", SEEDS)
 def test_interpreter_matches_cpython(seed, tmp_path):
     src = ProgramGenerator(seed).program()
     assert interpreter_output(src, tmp_path, False) == cpython_output(src), src
 
 
-@pytest.mark.parametrize("seed", SEEDS)
+@harness.cases("seed", SEEDS)
 def test_optimised_matches_cpython(seed, tmp_path):
     """A pass that changes meaning shows up here and nowhere else."""
     src = ProgramGenerator(seed).program()
     assert interpreter_output(src, tmp_path, True) == cpython_output(src), src
 
 
-@pytest.mark.skipif(not HAS_CC, reason="no C compiler available")
-@pytest.mark.parametrize("seed", SEEDS[:20])
-@pytest.mark.parametrize("backend", ["c", "x86-64"])
+@harness.needs("cc")
+@harness.cases("seed", SEEDS[:20])
+@harness.cases("backend", ["c", "x86-64"])
 def test_compiled_matches_cpython(seed, backend, tmp_path):
     src = ProgramGenerator(seed).program()
     assert compiled_output(src, tmp_path, backend) == cpython_output(src), src
 
 
-@pytest.mark.skipif(not aarch64.AVAILABLE, reason=aarch64.REASON)
-@pytest.mark.parametrize("seed", SEEDS[:20])
+@harness.skip_if(not aarch64.AVAILABLE, reason=aarch64.REASON)
+@harness.cases("seed", SEEDS[:20])
 def test_aarch64_matches_cpython(seed, tmp_path):
     """The same generated corpus, on a machine that is not this one.
 
@@ -651,8 +658,8 @@ def _pass_names() -> list[str]:
     return sorted(available())
 
 
-@pytest.mark.parametrize("pass_name", _pass_names())
-@pytest.mark.parametrize("seed", SEEDS[:12])
+@harness.cases("pass_name", _pass_names())
+@harness.cases("seed", SEEDS[:12])
 def test_each_pass_alone_preserves_meaning(pass_name, seed, tmp_path):
     """One pass at a time, not just the pipeline.
 

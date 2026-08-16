@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import random
 
-import pytest
+from tests import harness
 
 from asmpython.diagnostics import DiagnosticSink
 from asmpython.driver import Options, compile_source
@@ -69,7 +69,7 @@ class TestTheIRParserOnlyRaisesParseError:
     turned up would have left the next one, so the guard is per LINE.
     """
 
-    @pytest.mark.parametrize("seed", range(6))
+    @harness.cases("seed", range(6))
     def test_mutations_never_raise_anything_else(self, seed):
         rng = random.Random(seed)
         for _ in range(500):
@@ -79,11 +79,11 @@ class TestTheIRParserOnlyRaisesParseError:
             except ParseError:
                 pass
             except Exception as exc:                       # noqa: BLE001
-                pytest.fail(f"{type(exc).__name__}: {exc}\n--- input ---\n"
+                harness.fail(f"{type(exc).__name__}: {exc}\n--- input ---\n"
                             f"{text}")
 
     def test_a_parse_error_names_the_line(self):
-        with pytest.raises(ParseError) as exc:
+        with harness.raises(ParseError) as exc:
             parse_module("module m\n\nfunc f() -> i64 {\nentry:\n"
                          "    %0 = i64.frobnicate %1\n    ret %0\n}\n")
         assert "line 5" in str(exc.value)
@@ -95,7 +95,7 @@ class TestTheIRParserOnlyRaisesParseError:
             except ParseError:
                 pass
             except Exception as exc:                       # noqa: BLE001
-                pytest.fail(f"truncating at {cut} raised "
+                harness.fail(f"truncating at {cut} raised "
                             f"{type(exc).__name__}: {exc}")
 
     def test_a_valid_module_still_parses_completely(self):
@@ -150,7 +150,7 @@ class TestDeepExpressions:
         result, sink = self.compile_text(self.chain(100), tmp_path)
         assert result.ok, [d.message for d in sink.diagnostics]
 
-    @pytest.mark.parametrize("terms", [2000, 5000])
+    @harness.cases("terms", [2000, 5000])
     def test_an_enormous_chain_is_a_diagnostic(self, terms, tmp_path):
         result, sink = self.compile_text(self.chain(terms), tmp_path)
         assert not result.ok

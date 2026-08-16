@@ -37,13 +37,14 @@ class PythonFrontend(Frontend):
             sink.report(self._syntax_error(source, exc))
             return None
 
-        functions = Analyzer(source, sink).run(tree)
+        analyzer = Analyzer(source, sink)
+        functions = analyzer.run(tree)
         if sink.failed:
             # Lowering assumes analysis succeeded. Running it anyway would
             # produce IR that fails the verifier, and the user would see an
             # internal-error report on top of the real diagnostics.
             return None
-        return Lowerer(functions, source).run()
+        return Lowerer(functions, source, analyzer).run()
 
     @staticmethod
     def _syntax_error(source: SourceFile, exc: SyntaxError):

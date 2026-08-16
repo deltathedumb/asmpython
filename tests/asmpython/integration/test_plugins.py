@@ -20,7 +20,7 @@ import sys
 import textwrap
 from pathlib import Path
 
-import pytest
+from tests import harness
 
 ROOT = Path(__file__).resolve().parents[3]
 SRC = ROOT / "src"
@@ -70,7 +70,7 @@ reg_link(ReportToolchain())
 PROGRAM = "def main() -> int:\n    print(1 + 1)\n    return 0\n"
 
 
-@pytest.fixture
+@harness.fixture
 def workspace(tmp_path: Path) -> Path:
     (tmp_path / "mypack.py").write_text(textwrap.dedent(PLUGIN),
                                         encoding="utf-8")

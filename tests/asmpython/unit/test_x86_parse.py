@@ -8,7 +8,7 @@ one, and nothing notices until the lifter emits wrong code.
 """
 from __future__ import annotations
 
-import pytest
+from tests import harness
 
 from asmpython.diagnostics import DiagnosticSink, SourceFile
 from asmpython.frontends.x86.parse import parse, split_args, strip_comment
@@ -58,7 +58,7 @@ class TestTheLineIsNotTheStatement:
 class TestSeparatorsAreWhitespace:
     """GCC uses a tab, asmpython a space, and the assembler neither cares."""
 
-    @pytest.mark.parametrize("gap", [" ", "\t", "  \t "])
+    @harness.cases("gap", [" ", "\t", "  \t "])
     def test_either_separates_the_mnemonic(self, gap):
         ins = one(f"movq{gap}%rax, %rbx")
         assert ins.mnemonic == "movq"
@@ -126,7 +126,7 @@ class TestOperands:
 class TestItRefusesWhatItCannotRead:
     """A diagnostic, never a traceback -- assembly is user input here."""
 
-    @pytest.mark.parametrize("text,code", [
+    @harness.cases("text,code", [
         ("movq %rax, %nonsense", "E0700"),
         ("movq -8(%rbp, %rax, 3), %rax", "E0704"),
         ("movq -8(%rbp,%rax,8,1), %rax", "E0705"),

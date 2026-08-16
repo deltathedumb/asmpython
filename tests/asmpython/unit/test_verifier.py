@@ -10,7 +10,7 @@ the wrong reason is a verifier that will accept the real bug tomorrow.
 """
 from __future__ import annotations
 
-import pytest
+from tests import harness
 
 from asmpython.ir import Builder, Function, Global, Module, types as T, verify
 from asmpython.ir.module import Block, Instruction
@@ -30,7 +30,7 @@ def one_block(*instructions: Instruction, ret: T.Type = T.VOID,
 
 
 def problems_of(m: Module) -> list[str]:
-    with pytest.raises(VerifyError) as exc:
+    with harness.raises(VerifyError) as exc:
         verify(m)
     return exc.value.problems
 
@@ -274,6 +274,6 @@ class TestReporting:
 
     def test_report_is_readable(self):
         m = one_block(Instruction(Op.JUMP, T.VOID, labels=["nowhere"]))
-        with pytest.raises(VerifyError) as exc:
+        with harness.raises(VerifyError) as exc:
             verify(m)
         assert "nowhere" in exc.value.report()

@@ -8,7 +8,7 @@ and compare, rather than asserting on instruction counts.
 """
 from __future__ import annotations
 
-import pytest
+from tests import harness
 
 from asmpython.ir import Builder, Function, Module, types as T, verify
 from asmpython.ir.interpreter import run
@@ -221,7 +221,7 @@ class TestPassManager:
             def run(self, module):
                 return False
 
-        with pytest.raises(ValueError, match="unknown tag"):
+        with harness.raises(ValueError, match="unknown tag"):
             register(Bad())
 
     def test_verify_each_names_the_offending_pass(self):
@@ -238,7 +238,7 @@ class TestPassManager:
         register(Breaker())
         m, _ = module_with(lambda b, f: b.ret(b.const(T.I64, 1)))
         from asmpython.ir.verifier import VerifyError
-        with pytest.raises(VerifyError, match="_breaker"):
+        with harness.raises(VerifyError, match="_breaker"):
             PassManager([get("_breaker")], verify_each=True).run(m)
 
     def test_reaches_a_fixed_point(self):
@@ -266,7 +266,7 @@ class TestRegistry:
             assert name in available()
 
     def test_unknown_pass_lists_the_alternatives(self):
-        with pytest.raises(SystemExit, match="constfold"):
+        with harness.raises(SystemExit, match="constfold"):
             get("nope")
 
     def test_every_declared_tag_is_known(self):

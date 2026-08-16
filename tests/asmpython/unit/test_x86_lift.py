@@ -27,7 +27,7 @@ generated corpus through backend and lifter and compares what they print.
 """
 from __future__ import annotations
 
-import pytest
+from tests import harness
 
 from asmpython.diagnostics import DiagnosticSink, SourceFile
 from asmpython.frontends.x86.lift import (
@@ -108,18 +108,18 @@ class TestTheFrameIsNotComputed:
         assert run_one(body, [5]) == 5
 
     def test_rsp_as_a_value_is_a_diagnostic_not_a_keyerror(self):
-        with pytest.raises(LiftError) as exc:
+        with harness.raises(LiftError) as exc:
             lift_one(PROLOGUE + "\tmovq %rsp, %rax\n" + EPILOGUE)
         assert "%rsp" in exc.value.message
 
     def test_reading_above_rbp_is_refused(self):
         """16(%rbp) is the caller's frame, which a lifted function has none of."""
-        with pytest.raises(LiftError) as exc:
+        with harness.raises(LiftError) as exc:
             lift_one(PROLOGUE + "\tmovq 24(%rbp), %rax\n" + EPILOGUE)
         assert "caller" in exc.value.message
 
     def test_the_outgoing_argument_area_is_refused(self):
-        with pytest.raises(LiftError) as exc:
+        with harness.raises(LiftError) as exc:
             lift_one(PROLOGUE + "\tsubq $16, %rsp\n"
                      "\tmovq %rdi, 0(%rsp)\n" + EPILOGUE)
         assert "outgoing-argument" in exc.value.message
@@ -169,14 +169,14 @@ class TestFlagsSurviveTheInstructionThatReadsThem:
         assert run_one(body, [1.0, 2.0]) == 0
 
     def test_an_arithmetic_instruction_still_invalidates(self):
-        with pytest.raises(LiftError) as exc:
+        with harness.raises(LiftError) as exc:
             lift_one(PROLOGUE + "\tcmpq $1, %rdi\n"
                      "\taddq $1, %rsi\n\tsetl %al\n" + EPILOGUE)
         assert "no comparison reaches it" in exc.value.message
 
     def test_a_label_invalidates(self):
         """A join has no single predecessor, so nothing recorded is true."""
-        with pytest.raises(LiftError) as exc:
+        with harness.raises(LiftError) as exc:
             lift_one(PROLOGUE + "\tcmpq $1, %rdi\n"
                      ".Ljoin:\n\tsetl %al\n" + EPILOGUE)
         assert "no comparison reaches it" in exc.value.message
@@ -203,7 +203,7 @@ class TestParityIsAboutNaN:
         assert run_one(body, [nan, nan]) == 0
 
     def test_parity_on_an_integer_compare_is_refused(self):
-        with pytest.raises(LiftError) as exc:
+        with harness.raises(LiftError) as exc:
             lift_one(PROLOGUE + "\tcmpq %rsi, %rdi\n\tsetp %al\n" + EPILOGUE)
         assert "floating-point" in exc.value.message
 
@@ -236,7 +236,7 @@ class TestTheSuffixIsNotAlwaysAWidth:
     table and reported as "not lifted" -- for an instruction that is.
     """
 
-    @pytest.mark.parametrize("body,expect", [
+    @harness.cases("body,expect", [
         ("\tmovq $10, %rax\n\tsub $3, %rax\n", 7),
         ("\tmovq $10, %rax\n\tsubq $3, %rax\n", 7),
         ("\tmovq $3, %rax\n\tshl $2, %rax\n", 12),
@@ -412,7 +412,7 @@ mix:
 \tret
 """
 
-    @pytest.mark.parametrize("abi,int0,flt", [
+    @harness.cases("abi,int0,flt", [
         ("sysv", "%rdi", "%xmm0"),
         ("win64", "%rcx", "%xmm1"),
     ])
@@ -491,6 +491,6 @@ class TestWidthsAreModelled:
         assert run_one(body) == 261
 
     def test_a_high_byte_register_is_refused(self):
-        with pytest.raises(LiftError) as exc:
+        with harness.raises(LiftError) as exc:
             lift_one(PROLOGUE + "\tmovb $1, %ah\n" + EPILOGUE)
         assert "8-15" in exc.value.message

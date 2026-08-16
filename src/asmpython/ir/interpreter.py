@@ -102,6 +102,11 @@ class Interpreter:
         self.globals: dict[str, int] = {}
         self.steps = 0
         self.max_steps = 50_000_000
+        #: The dynamic object runtime's state -- the handle table and the
+        #: error flag -- created on the first `apy_*` call. Lazy because a
+        #: statically typed program never makes one, and because the module
+        #: imports this one back for `Trap`.
+        self.objects = None
         for g in module.globals:
             addr = self.mem.alloc(max(1, g.size))
             if g.data:
@@ -113,6 +118,19 @@ class Interpreter:
     # frontend calls a named function and the host provides it, exactly as a
     # real target would resolve it in a runtime library.
     def _host(self, name: str, args: list) -> int | float | None:
+        # The dynamic object runtime first, because it is now most of what a
+        # compiled program calls. It lives in its own module -- it is as big
+        # as this file and it is one subject, the meaning of a Python VALUE,
+        # rather than the meaning of an opcode. `NOT_MINE` keeps the fallthrough
+        # explicit: a name it does not claim reaches the bindings below and,
+        # failing those, the trap at the end.
+        if name.startswith("apy_"):
+            from .objects_host import NOT_MINE, ObjectHost
+            if self.objects is None:
+                self.objects = ObjectHost(self)
+            result = self.objects.call(name, args)
+            if result is not NOT_MINE:
+                return result
         if name == "putchar":
             self._emit(chr(int(args[0]) & 0xFF))
             return 0
@@ -120,11 +138,23 @@ class Interpreter:
             self._emit(str(int(args[0])))
             return None
         if name == "put_float":
-            self._emit(f"{float(args[0]):f}")
+            self._emit(repr(float(args[0])))
+            return None
+        if name == "put_bool":
+            self._emit("True" if int(args[0]) else "False")
+            return None
+        if name == "put_none":
+            self._emit("None")
             return None
         if name == "print_int":
             self._emit(f"{int(args[0])}\n")
             return None
+        if name == "py_pow_int":
+            # Python's own `**`, which is the oracle every path is measured
+            # against. The compiled runtime reaches the same answer the hard
+            # way (double-double squaring, because the platform's libm `pow` is
+            # a ulp off here); this is the same answer, cheaply.
+            return float(args[0]) ** int(args[1])
         if name in ("pow", "powf"):
             # libm's, matching what a compiled binary links against and what
             # CPython's `**` calls. Python's float ** is this function; a
@@ -146,14 +176,15 @@ class Interpreter:
             import math
             return math.fmod(float(args[0]), float(args[1]))
         if name == "print_float":
-            # Six decimals: C's `%f`, which is what the runtime the compiled
-            # paths link against prints. NOT Python's repr -- `32.0` there,
-            # `32.000000` here. The divergence is deliberate and documented,
-            # and it belongs in exactly one place: if this formatted like
-            # Python, the interpreter and every compiled binary would disagree
-            # on the same program, which is the one thing the reference
-            # implementation must never do.
-            self._emit(f"{float(args[0]):f}\n")
+            # Python's repr, which is what the runtime the compiled paths link
+            # against now prints too (`link/runtime.py`'s `py_repr_double`).
+            # This used to be C's `%f` -- `32.000000` for `32.0` -- and the
+            # comment here recorded that divergence as deliberate. It was, and
+            # it also meant every float a compiled program printed disagreed
+            # with CPython, which is precisely what the conformance suite
+            # measures. What must never differ is THIS and a compiled binary,
+            # so the two moved together.
+            self._emit(repr(float(args[0])) + "\n")
             return None
         if name == "print_str":
             addr = int(args[0])

@@ -5,7 +5,7 @@ asserts an invariant a backend is permitted to assume.
 """
 from __future__ import annotations
 
-import pytest
+from tests import harness
 
 from asmpython.diagnostics import SourceFile
 from asmpython.ir import Builder, Function, Global, Module, types as T, verify
@@ -17,7 +17,7 @@ from asmpython.ir.printer import parse_module, print_module
 
 # ── types ───────────────────────────────────────────────────────────────────
 class TestTypes:
-    @pytest.mark.parametrize("name,bits,size", [
+    @harness.cases("name,bits,size", [
         ("i1", 1, 1), ("i8", 8, 1), ("i32", 32, 4), ("i64", 64, 8),
         ("u8", 8, 1), ("f32", 32, 4), ("f64", 64, 8), ("ptr", 64, 8),
     ])
@@ -31,11 +31,11 @@ class TestTypes:
         assert not T.F64.is_signed and not T.PTR.is_signed
 
     def test_void_has_no_width(self):
-        with pytest.raises(ValueError):
+        with harness.raises(ValueError):
             _ = T.VOID.bits
 
     def test_unknown_type_names_the_alternatives(self):
-        with pytest.raises(ValueError, match="i64"):
+        with harness.raises(ValueError, match="i64"):
             T.parse("int32")
 
     def test_types_are_interned(self):
@@ -117,7 +117,7 @@ class TestModule:
 
     def test_unknown_register_raises_with_context(self):
         _, f = build_sum()
-        with pytest.raises(KeyError, match="never declared"):
+        with harness.raises(KeyError, match="never declared"):
             f.register_type(9999)
 
     def test_call_is_effectful_but_arithmetic_is_not(self):
@@ -142,7 +142,7 @@ class TestBuilder:
         b = Builder(f)
         b.switch_to(b.new_block("entry"))
         b.ret()
-        with pytest.raises(RuntimeError, match="already ends"):
+        with harness.raises(RuntimeError, match="already ends"):
             b.ret()
 
     def test_spans_are_sticky(self):

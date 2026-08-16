@@ -275,6 +275,24 @@ def _check_reads_after_writes(fn: Function, out: list[str]) -> None:
             if s in index:
                 preds[index[s]].append(i)
 
+    # Reachability first, and an UNREACHABLE predecessor is then skipped
+    # entirely rather than intersected in. Control never arrives from one, so
+    # it can say nothing about what is available -- and treating it as though
+    # it made nothing available poisons every join it feeds. That is a false
+    # positive with a real cause: a frontend emits an exception-dispatch block
+    # for a `try` whose body turns out to contain nothing that can raise, and
+    # the dispatch has no predecessors while its handlers still merge back into
+    # the normal path. The program was correct; the verifier rejected it.
+    reachable = {0} if fn.blocks else set()
+    frontier = [0] if fn.blocks else []
+    while frontier:
+        i = frontier.pop()
+        for s in fn.blocks[i].successors:
+            j = index.get(s)
+            if j is not None and j not in reachable:
+                reachable.add(j)
+                frontier.append(j)
+
     params = set(fn.params)
     # Start optimistic everywhere but the entry, so loops converge downward.
     all_regs = set(fn.registers)
@@ -286,12 +304,16 @@ def _check_reads_after_writes(fn: Function, out: list[str]) -> None:
     for _ in range(len(fn.blocks) + 2):
         changed = False
         for i, blk in enumerate(fn.blocks):
+            live_preds = [p for p in preds[i] if p in reachable]
             if i == 0:
                 cur = set(params)
-            elif preds[i]:
-                cur = set.intersection(*(avail_out[p] for p in preds[i]))
+            elif live_preds:
+                cur = set.intersection(*(avail_out[p] for p in live_preds))
             else:
-                cur = set(params)   # unreachable: do not report cascading noise
+                # No reachable predecessor. The block cannot run, so nothing
+                # it reads can be read at run time; start it optimistic so it
+                # reports nothing and poisons nothing downstream.
+                cur = set(all_regs)
             if cur != avail_in[i]:
                 avail_in[i] = cur
                 changed = True
@@ -307,6 +329,8 @@ def _check_reads_after_writes(fn: Function, out: list[str]) -> None:
 
     reported: set[tuple[str, int]] = set()
     for i, blk in enumerate(fn.blocks):
+        if i not in reachable:
+            continue        # cannot run; a read in it is not a read
         live = set(avail_in[i])
         for ins in blk.instructions:
             for a in ins.args:

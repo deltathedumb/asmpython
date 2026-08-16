@@ -24,7 +24,7 @@ import subprocess
 import sys
 from io import StringIO
 
-import pytest
+from tests import harness
 
 from asmpython import target as target_registry
 from asmpython.backend import get as get_backend, load_builtin
@@ -169,7 +169,7 @@ def build_and_run(text: str, backend: str, tmp_path) -> int:
     return subprocess.run([str(exe)], capture_output=True).returncode
 
 
-@pytest.mark.parametrize("name", sorted(CASES))
+@harness.cases("name", sorted(CASES))
 class TestEveryPathAgrees:
     def test_it_parses_and_round_trips(self, name):
         text, _ = CASES[name]
@@ -181,8 +181,8 @@ class TestEveryPathAgrees:
         text, expected = CASES[name]
         assert interpret(text) == expected
 
-    @pytest.mark.skipif(not HAS_CC, reason="no C compiler available")
-    @pytest.mark.parametrize("backend", ["c", "x86-64"])
+    @harness.skip_if(not HAS_CC, reason="no C compiler available")
+    @harness.cases("backend", ["c", "x86-64"])
     def test_the_backends_agree_with_it(self, name, backend, tmp_path):
         text, expected = CASES[name]
         # NOT `expected & 0xFF`: Windows keeps the full 32-bit exit code while
@@ -279,14 +279,14 @@ class TestNarrowIntegerWidths:
     sign-extended back, not merely masked.
     """
 
-    @pytest.mark.parametrize("name", sorted(NARROW))
+    @harness.cases("name", sorted(NARROW))
     def test_the_interpreter_is_the_reference(self, name):
         text, expected = NARROW[name]
         assert interpret(text) == expected
 
-    @pytest.mark.skipif(not HAS_CC, reason="no C compiler available")
-    @pytest.mark.parametrize("name", sorted(NARROW))
-    @pytest.mark.parametrize("backend", ["c", "x86-64"])
+    @harness.skip_if(not HAS_CC, reason="no C compiler available")
+    @harness.cases("name", sorted(NARROW))
+    @harness.cases("backend", ["c", "x86-64"])
     def test_the_backends_agree(self, name, backend, tmp_path):
         text, expected = NARROW[name]
         # An exit code carries 32 bits on Windows and 8 on POSIX, so the
@@ -393,27 +393,27 @@ def run_source(src: str, tmp_path, backend: str | None) -> list[str]:
 
 
 class TestRecursionAndPressure:
-    @pytest.mark.parametrize("name", sorted(PROGRAMS))
+    @harness.cases("name", sorted(PROGRAMS))
     def test_the_interpreter_matches_cpython(self, name, tmp_path):
         import textwrap
         src = textwrap.dedent(PROGRAMS[name]).strip() + "\n"
         assert run_source(src, tmp_path, None) == cpython_value(src)
 
-    @pytest.mark.skipif(not HAS_CC, reason="no C compiler available")
-    @pytest.mark.parametrize("name", sorted(PROGRAMS))
-    @pytest.mark.parametrize("backend", ["c", "x86-64"])
+    @harness.skip_if(not HAS_CC, reason="no C compiler available")
+    @harness.cases("name", sorted(PROGRAMS))
+    @harness.cases("backend", ["c", "x86-64"])
     def test_the_backends_match_cpython(self, name, backend, tmp_path):
         import textwrap
         src = textwrap.dedent(PROGRAMS[name]).strip() + "\n"
         assert run_source(src, tmp_path, backend) == cpython_value(src)
 
-    @pytest.mark.parametrize("count", [8, 24, 40])
+    @harness.cases("count", [8, 24, 40])
     def test_pressure_in_the_interpreter(self, count, tmp_path):
         src = pressure_program(count)
         assert run_source(src, tmp_path, None) == cpython_value(src)
 
-    @pytest.mark.skipif(not HAS_CC, reason="no C compiler available")
-    @pytest.mark.parametrize("count", [24, 40])
+    @harness.skip_if(not HAS_CC, reason="no C compiler available")
+    @harness.cases("count", [24, 40])
     def test_pressure_compiled(self, count, tmp_path):
         """Forty live values against twelve allocatable registers."""
         src = pressure_program(count)

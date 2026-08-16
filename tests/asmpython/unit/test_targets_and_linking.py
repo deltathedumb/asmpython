@@ -17,7 +17,7 @@ import subprocess
 import sys
 import textwrap
 
-import pytest
+from tests import harness
 
 from asmpython import link as link_registry
 from asmpython import target as target_registry
@@ -54,7 +54,7 @@ class TestTargetRegistry:
         assert target_registry.get("linux").name == "x86_64-linux"
 
     def test_unknown_target_lists_what_exists(self):
-        with pytest.raises(LookupError) as exc:
+        with harness.raises(LookupError) as exc:
             target_registry.get("vax-bsd")
         assert "x86_64-linux" in str(exc.value)
 
@@ -117,7 +117,7 @@ class TestAbiComesFromTheTarget:
     def test_an_unknown_abi_is_refused_not_guessed(self):
         from asmpython.backends.x86_64.emit import UnsupportedOperation, abi_for
         exotic = Target("m68k-amiga", arch="m68k", os="amiga", abi="m68k-sysv")
-        with pytest.raises(UnsupportedOperation) as exc:
+        with harness.raises(UnsupportedOperation) as exc:
             abi_for(exotic)
         assert "m68k-sysv" in str(exc.value)
 
@@ -127,7 +127,7 @@ class TestToolchainRegistry:
         assert {"cc", "none"} <= set(link_registry.available())
 
     def test_unknown_toolchain_lists_what_exists(self):
-        with pytest.raises(LookupError) as exc:
+        with harness.raises(LookupError) as exc:
             link_registry.get("magic")
         assert "cc" in str(exc.value)
 
@@ -167,7 +167,7 @@ class TestRuntime:
         assert not link_registry.needs_runtime(result.module)
 
 
-@pytest.mark.skipif(not HAS_CC, reason="no C compiler available")
+@harness.skip_if(not HAS_CC, reason="no C compiler available")
 class TestBuildsSomethingThatRuns:
     """The test the whole link stage exists for."""
 
@@ -216,16 +216,25 @@ class TestBuildsSomethingThatRuns:
                 link_registry.find_tool(("definitely-not-a-real-tool-xyz",),
                                         what="assembler")
         link_registry.register(Absent())
-        src = tmp_path / "p.py"
-        src.write_text(PROGRAM, encoding="utf-8")
-        sink = DiagnosticSink()
-        result = compile_source(Options(source=src, output=tmp_path / "p.exe",
-                                        link=True, toolchain="absent-test",
-                                        workdir=tmp_path / "w"), sink)
-        assert not result.ok
-        d = next(d for d in sink.diagnostics if d.code == "E9104")
-        assert "assembler" in d.message
-        assert d.notes, "the diagnostic should say what was looked for"
+        try:
+            src = tmp_path / "p.py"
+            src.write_text(PROGRAM, encoding="utf-8")
+            sink = DiagnosticSink()
+            result = compile_source(
+                Options(source=src, output=tmp_path / "p.exe", link=True,
+                        toolchain="absent-test", workdir=tmp_path / "w"), sink)
+            assert not result.ok
+            d = next(d for d in sink.diagnostics if d.code == "E9104")
+            assert "assembler" in d.message
+            assert d.notes, "the diagnostic should say what was looked for"
+        finally:
+            # UNREGISTERED AGAIN. The registry is process-wide, so a toolchain
+            # left in it is visible to every test that runs afterwards in the
+            # same worker -- and `test_the_documented_toolchains_are_the
+            # _shipped_ones` compares the registry against the documentation
+            # and fails on a stranger. That failure depends on the order the
+            # two happened to run in, which is the worst kind to debug.
+            link_registry.unregister("absent-test")
 
     def test_the_commands_run_are_reported(self, tmp_path):
         """When a build fails the exact invocation is the first thing wanted,

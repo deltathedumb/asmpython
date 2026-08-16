@@ -13,7 +13,7 @@ duplicated copy of the liveness analysis drifted until one backend produced
 """
 from __future__ import annotations
 
-import pytest
+from tests import harness
 
 from asmpython.backend import (
     InRegister, InSlot, Liveness, RegisterFile, allocate, compute_intervals,
@@ -123,7 +123,7 @@ class TestLiveness:
 
 
 class TestAllocation:
-    @pytest.mark.parametrize("count", [1, 2, 3, 4, 8, 16])
+    @harness.cases("count", [1, 2, 3, 4, 8, 16])
     def test_no_conflicts_at_any_register_count(self, count):
         """The property that fails silently. Checked from one register upward."""
         _, f = loop_function()

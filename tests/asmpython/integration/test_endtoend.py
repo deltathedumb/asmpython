@@ -25,7 +25,7 @@ import textwrap
 from io import StringIO
 from pathlib import Path
 
-import pytest
+from tests import harness
 
 from asmpython.diagnostics import DiagnosticSink, SourceFile
 from asmpython.driver import Options, compile_source
@@ -42,17 +42,14 @@ _HOST_TARGET_NAME = ("x86_64-windows" if sys.platform == "win32"
                      else "x86_64-linux")
 
 #: The runtime the frontend's `print` calls resolve against, plus an entry
-#: point. A frontend chooses its own runtime; the IR has no I/O opcodes.
-_RUNTIME_C = (
-    "#include <stdio.h>\n"
-    "#include <stdint.h>\n"
-    'void put_int(int64_t v)    { printf("%lld", (long long)v); }\n'
-    'void put_float(double v)   { printf("%f", v); }\n'
-    'void print_int(int64_t v)  { printf("%lld\\n", (long long)v); }\n'
-    'void print_float(double v) { printf("%f\\n", v); }\n'
-    "extern int64_t main_ir(void);\n"
-    "int main(void) { return (int)main_ir(); }\n"
-)
+#: point. Taken from the shipped runtime rather than written out again: a test
+#: with its own copy stops testing the runtime and starts testing the copy, and
+#: this one did -- it kept printing floats with `%f` after the real runtime
+#: moved to Python's repr, so every float program "failed" against an oracle
+#: that agreed with nothing.
+def _runtime_c(entry: str) -> str:
+    from asmpython.link.runtime import runtime_c
+    return runtime_c(entry=entry)
 
 PROGRAMS = {
     "arithmetic": """
@@ -351,9 +348,13 @@ FLOAT_PROGRAMS = {
 def _render(value) -> str:
     """Format one printed value the way the runtime does.
 
-    Only floats differ: the runtime uses C's `%f`. Everything else is str().
+    Which is now exactly the way CPython does -- so this is `str`, and the
+    function is kept only so that the next divergence has an obvious place to
+    be recorded. It used to special-case floats, because the runtime printed
+    them with C's `%f` (`32.000000` for `32.0`); the runtime prints Python's
+    repr now, and a test that still compensated would assert the old bug.
     """
-    return f"{value:f}" if isinstance(value, float) else str(value)
+    return str(value)
 
 
 def cpython_output(src: str) -> tuple[list[str], int]:
@@ -361,7 +362,12 @@ def cpython_output(src: str) -> tuple[list[str], int]:
     namespace: dict = {
         "print": lambda *a: captured.append(" ".join(_render(x) for x in a))}
     exec(compile(src, "<test>", "exec"), namespace)
-    return captured, namespace["main"]()
+    # A program with top-level statements IS the program, and its exit code is
+    # 0 -- the `def main() -> int:` convention is one shape, not the only one,
+    # and every dynamic program below is written as an ordinary script. The
+    # frontend makes the same choice: see `Analyzer._entry`.
+    main = namespace.get("main")
+    return captured, main() if callable(main) else 0
 
 
 def compile_module(src: str, tmp_path: Path, optimise: bool):
@@ -379,10 +385,262 @@ def interpret(module) -> tuple[list[str], int]:
     return out.getvalue().split("\n")[:-1] if out.getvalue() else [], value
 
 
-ALL_PROGRAMS = {**PROGRAMS, **FLOAT_PROGRAMS}
+#: Programs on the DYNAMIC path: no annotations, every value a runtime object.
+#: They are here rather than only in conformance/ because this file is the one
+#: place all four paths are compared on the same source -- and until classes
+#: existed the frontend could compile almost nothing that looked like ordinary
+#: Python, so the dynamic path was end-to-end tested by nothing.
+#:
+#: Each one is chosen for a specific way the four could disagree, not for
+#: coverage of syntax.
+DYNAMIC_PROGRAMS = {
+    # An instance is a new kind in the runtime, and the C, the interpreter's
+    # handle table and the optimiser's view of an opaque pointer all have to
+    # treat it the same way.
+    "class_basics": """
+        class Point:
+            def __init__(self, x, y):
+                self.x = x
+                self.y = y
+            def norm2(self):
+                return self.x * self.x + self.y * self.y
+            def __repr__(self):
+                return "Point(" + repr(self.x) + ", " + repr(self.y) + ")"
+
+        p = Point(3, 4)
+        print(p.x, p.y)
+        print(p.norm2())
+        print(p)
+        print(type(p).__name__)
+        print(isinstance(p, Point))
+    """,
+    # `super()` resolves against the DEFINING class, which is baked in at
+    # compile time. A backend that lost that constant would recurse forever
+    # rather than print a wrong answer.
+    "class_inheritance": """
+        class Animal:
+            kind = "animal"
+            def __init__(self, name):
+                self.name = name
+            def speak(self):
+                return "..."
+            def describe(self):
+                return self.name + " says " + self.speak()
+
+        class Dog(Animal):
+            def __init__(self, name, tricks):
+                super().__init__(name)
+                self.tricks = tricks
+            def speak(self):
+                return "woof"
+
+        d = Dog("rex", 3)
+        print(d.describe())
+        print(d.kind, d.tricks)
+        print(isinstance(d, Dog), isinstance(d, Animal))
+    """,
+    # Every dunder hook, including `[Vec(1)] == [Vec(1)]` -- which only works
+    # if equality dispatches from INSIDE the container comparison rather than
+    # at the top-level `==`.
+    "class_dunders": """
+        class Vec:
+            def __init__(self, x):
+                self.x = x
+            def __add__(self, o):
+                return Vec(self.x + o.x)
+            def __radd__(self, o):
+                return Vec(self.x + o)
+            def __eq__(self, o):
+                return self.x == o.x
+            def __repr__(self):
+                return "Vec(" + repr(self.x) + ")"
+            def __len__(self):
+                return self.x
+            def __getitem__(self, i):
+                return self.x * i
+            def __bool__(self):
+                return self.x != 0
+
+        a = Vec(2)
+        print(a + Vec(5), 10 + a)
+        print(a == Vec(2), a == Vec(3))
+        print(len(Vec(5)), Vec(5)[3])
+        print(bool(Vec(0)), bool(Vec(1)))
+        print([Vec(1)] == [Vec(1)])
+    """,
+    # THE closure test. Two closures over one variable must see each other's
+    # writes, so what they capture is the BOX. A by-value capture passes every
+    # other program here and fails this one.
+    "closure_cell_is_shared": """
+        def make():
+            n = 0
+            def bump():
+                nonlocal n
+                n = n + 1
+                return n
+            def read():
+                return n
+            return bump, read
+
+        bump, read = make()
+        print(read())
+        bump()
+        bump()
+        print(read())
+
+        def counter():
+            total = 0
+            def add(n):
+                nonlocal total
+                total = total + n
+                return total
+            return add
+
+        c1 = counter()
+        c2 = counter()
+        print(c1(5), c1(3), c2(100))
+    """,
+    # A capture two levels down, which the middle function never mentions --
+    # it still has to receive the box in order to pass it on.
+    "closure_through_two_levels": """
+        def outer(a):
+            def mid():
+                def inner():
+                    return a * 2
+                return inner()
+            return mid()
+
+        print(outer(21))
+
+        def fact(n):
+            if n <= 1:
+                return 1
+            return n * fact(n - 1)
+
+        def apply(f, x):
+            return f(x)
+
+        print(apply(fact, 5))
+    """,
+    # A method name that a built-in container also defines. Which one
+    # `x.add(1)` means is a runtime question, and the two answers are emitted
+    # behind a test -- so both arms have to be right in all four paths.
+    "class_method_name_collides_with_builtin": """
+        class Bag:
+            def __init__(self):
+                self.items = []
+            def add(self, x):
+                self.items.append(x)
+                return len(self.items)
+            def __contains__(self, x):
+                return x in self.items
+
+        b = Bag()
+        print(b.add(1), b.add(2))
+        print(2 in b, 9 in b)
+        s = set()
+        s.add(7)
+        print(sorted(s))
+    """,
+    # Defaults live in the function VALUE, because a method is always called
+    # through a value and the caller never sees its signature.
+    "class_default_arguments": """
+        class Box:
+            def __init__(self, v=0):
+                self.v = v
+            def add(self, n=1):
+                self.v = self.v + n
+                return self.v
+
+        b = Box()
+        print(b.v, b.add(), b.add(5))
+        print(Box(7).v)
+    """,
+    # A three-level `super()` chain, which only terminates if each call starts
+    # from the class the method was WRITTEN in rather than from type(self);
+    # plus a method reached as a value, both bound and through the class.
+    "class_super_chain_and_method_values": """
+        class A:
+            def f(self):
+                return "A.f"
+
+        class B(A):
+            def f(self):
+                return "B.f+" + super().f()
+
+        class C(B):
+            def f(self):
+                return "C.f+" + super().f()
+
+        print(C().f())
+        m = C().f
+        print(m())
+        print(A.f(A()))
+
+        class Counter:
+            total = 0
+            def __init__(self):
+                Counter.total = Counter.total + 1
+
+        Counter()
+        Counter()
+        print(Counter.total)
+    """,
+    # A user exception class is a NAME in the runtime's hierarchy rather than
+    # a type object, so `except AppError:` catching a SubError goes through
+    # the same walk that makes `except LookupError:` catch a KeyError.
+    "user_exception_classes": """
+        class AppError(Exception):
+            pass
+
+        class SubError(AppError):
+            pass
+
+        try:
+            raise SubError("boom")
+        except AppError as e:
+            print(type(e).__name__, e)
+            print(isinstance(e, Exception), isinstance(e, AppError))
+
+        def move(v):
+            try:
+                raise SubError(v)
+            except SubError as e:
+                return e.args[0]
+
+        print(move(7))
+    """,
+    # WHERE a default is evaluated. Both halves have to hold at once: the
+    # module-level `def` runs once and shares one list, and the `def` in a loop
+    # runs per iteration and captures that iteration's value.
+    "default_argument_evaluation_point": """
+        def acc(x, xs=[]):
+            xs.append(x)
+            return xs
+
+        print(acc(1))
+        print(acc(2))
+        print(acc(3))
+
+        fs = []
+        for i in range(3):
+            def g(n=i):
+                return n * 10
+            fs.append(g)
+        print([f() for f in fs])
+
+        def star(a, *rest):
+            return a, rest
+
+        h = star
+        print(star(1), star(1, 2, 3), h(9, 8))
+    """,
+}
+
+ALL_PROGRAMS = {**PROGRAMS, **FLOAT_PROGRAMS, **DYNAMIC_PROGRAMS}
 
 
-@pytest.mark.parametrize("name", sorted(ALL_PROGRAMS))
+@harness.cases("name", sorted(ALL_PROGRAMS))
 class TestAgreement:
     def program(self, name: str) -> str:
         return textwrap.dedent(ALL_PROGRAMS[name]).strip() + "\n"
@@ -411,7 +669,7 @@ class TestAgreement:
         got_out, got_value = interpret(parse_module(text))
         assert got_out == want_out and got_value == want_value
 
-    @pytest.mark.skipif(not HAS_CC, reason="no C compiler available")
+    @harness.needs("cc")
     def test_x86_64_backend_matches_cpython(self, name, tmp_path):
         """Assemble the generated assembly and run it.
 
@@ -435,12 +693,12 @@ class TestAgreement:
         try:
             asm = get("x86-64").emit(module, target)["out.s"]
         except UnsupportedOperation as exc:
-            pytest.skip(f"backend does not implement this yet: {exc}")
+            harness.skip(f"backend does not implement this yet: {exc}")
 
         s_file = tmp_path / "out.s"
         s_file.write_bytes(asm)
         rt = tmp_path / "rt.c"
-        rt.write_text(_RUNTIME_C, encoding="utf-8")
+        rt.write_text(_runtime_c("main_ir"), encoding="utf-8")
         exe = tmp_path / "out.exe"
         built = subprocess.run([HAS_CC, str(s_file), str(rt), "-o", str(exe)],
                                capture_output=True, text=True)
@@ -449,7 +707,7 @@ class TestAgreement:
         assert ran.stdout.split("\n")[:-1] == want_out
         assert ran.returncode == (want_value & 0xFF)
 
-    @pytest.mark.skipif(not HAS_CC, reason="no C compiler available")
+    @harness.needs("cc")
     def test_c_backend_matches_cpython(self, name, tmp_path):
         from asmpython.backend import get, load_builtin
         from asmpython.target import get as get_target

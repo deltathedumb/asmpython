@@ -170,15 +170,34 @@ def run(case_path, timeout):
     """-> (stdout, stderr, returncode). returncode None means REFUSED."""
 ```
 
-`shims/asmpython.py` passes `--no-pyinbin-fallback`, and that flag is
-load-bearing: without it the CLI silently interprets a source the native backend
-rejected and exits 0, so a compile refusal is indistinguishable from a pass.
-Scoring an interpreted fallback as native conformance would make the whole
-measurement meaningless.
+`shims/asmpython.py` puts this checkout's `src/` on the path explicitly, and
+that line is load-bearing rather than tidy: a developer machine usually has a
+released `asmpython` installed under the same import name, and `-m asmpython`
+finds THAT unless the checkout is placed ahead of it. The failure is silent and
+expensive — the suite scores a build nobody in the tree can edit, and every fix
+appears to change nothing. `results/asmpython.json` was recorded that way.
+
+Each compile also gets its own `--workdir`. The harness runs cases on threads
+of one process, and the compiler's default intermediate directory is one path
+under the cwd, so eight workers otherwise write over each other — which reports
+as a wrong answer or a refusal for whichever case lost the race, MOVES between
+runs, and reads exactly like a flaky implementation bug.
 
 ---
 
 ## Triaging a result
+
+`try.py` runs ONE case and shows both sides:
+
+```
+python conformance/try.py numeric/int/pow-with-modulus   # a case, want vs got
+python conformance/try.py -e "print(2 ** 100)"           # an ad-hoc snippet
+```
+
+`harness.py --filter` tells you a case failed; this prints the compiler's own
+stderr, which is where a refusal explains itself, and diffs want against got
+line by line. It is a developer tool and knows nothing the harness does not —
+it loads the same shim.
 
 Most of `cases/` is four cross-products, each varying one thing:
 

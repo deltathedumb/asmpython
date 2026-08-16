@@ -95,6 +95,20 @@ class Result:
         return self.module is not None
 
 
+def _publish_backend_modules(be) -> None:
+    """Tell the Python frontend what the selected backend makes importable.
+
+    Reaching into the frontend from here rather than having the frontend ask
+    for a backend: the frontend is one of several and none of them should know
+    the backend registry exists. What travels is a table, not a dependency.
+    """
+    try:
+        from asmpython.frontends.python import modules as py_modules
+    except ImportError:                     # the frontend is not installed
+        return
+    py_modules.use_backend(be.name if be else "", getattr(be, "modules", {}))
+
+
 def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
     """Run the pipeline. Errors go to `sink`; `Result.ok` says whether to write."""
     frontend_registry.load_builtin()
@@ -105,6 +119,16 @@ def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
     except OSError as exc:
         sink.report(error("E9100", f"cannot read {opts.source}: {exc.strerror}"))
         return Result()
+
+    # WHICH BACKEND IS COMPILING decides which names are importable, so it is
+    # published BEFORE the frontend runs -- a backend for a board can offer
+    # the board, and `import hw` has to resolve while the source is analysed
+    # rather than when the artifacts are emitted. Republished every compile,
+    # so two in one process do not see each other's backends.
+    # Looked up through `available()` rather than `get()`: an unknown backend
+    # is reported below, with the rest of the options checked, and `get` exits
+    # the process rather than raising.
+    _publish_backend_modules(backend_registry.available().get(opts.backend))
 
     fe = (frontend_registry.get(opts.frontend) if opts.frontend
           else frontend_registry.for_path(opts.source))

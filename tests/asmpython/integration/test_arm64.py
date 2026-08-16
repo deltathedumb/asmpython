@@ -21,12 +21,15 @@ to ignore is worse than a smaller green one.
 """
 from __future__ import annotations
 
+import math
+import random
 import shutil
+import struct
 import subprocess
 import textwrap
 from pathlib import Path
 
-import pytest
+from tests import harness
 
 from asmpython import target as target_registry
 from asmpython.diagnostics import DiagnosticSink
@@ -34,7 +37,11 @@ from asmpython.driver import Options, compile_source
 
 from . import aarch64
 
-pytestmark = pytest.mark.skipif(not aarch64.AVAILABLE, reason=aarch64.REASON)
+#: Applied per test rather than as a module `pytestmark`, because the float
+#: formatter below is ordinary C with no AArch64 in it and runs on the host.
+#: Under a module-wide skip it ran only for whoever had a cross toolchain
+#: installed -- and it is the check that the runtime prints Python's numbers.
+needs_aarch64 = harness.skip_if(not aarch64.AVAILABLE, aarch64.REASON)
 
 
 def build_and_run(src: str, tmp_path: Path, *, optimise: bool = False) -> list[str]:
@@ -55,9 +62,15 @@ def build_and_run(src: str, tmp_path: Path, *, optimise: bool = False) -> list[s
 
 
 def cpython_lines(src: str) -> list[str]:
+    """What CPython prints for the same program.
+
+    Plain `str`, with no special case for floats. This used to render them
+    with `f"{x:f}"` to match a runtime that printed C's six decimals -- which
+    meant the comparison hid the disagreement instead of finding it, and
+    `print(7.5 / 2.0)` passed while the backend printed `3.750000`.
+    """
     out: list[str] = []
-    ns = {"print": lambda *a: out.append(
-        " ".join(f"{x:f}" if isinstance(x, float) else str(x) for x in a))}
+    ns = {"print": lambda *a: out.append(" ".join(str(x) for x in a))}
     exec(compile(textwrap.dedent(src).strip() + "\n", "<t>", "exec"), ns)
     ns["main"]()
     return out
@@ -161,19 +174,22 @@ PROGRAMS = {
 }
 
 
-@pytest.mark.parametrize("name", sorted(PROGRAMS))
+@needs_aarch64
+@harness.cases("name", sorted(PROGRAMS))
 def test_matches_cpython(name, tmp_path):
     src = PROGRAMS[name]
     assert build_and_run(src, tmp_path) == cpython_lines(src), src
 
 
-@pytest.mark.parametrize("name", ["arithmetic", "control_flow", "floats",
+@needs_aarch64
+@harness.cases("name", ["arithmetic", "control_flow", "floats",
                                   "many_arguments"])
 def test_matches_cpython_optimised(name, tmp_path):
     src = PROGRAMS[name]
     assert build_and_run(src, tmp_path, optimise=True) == cpython_lines(src)
 
 
+@needs_aarch64
 class TestTheHardParts:
     """Each of these is somewhere a previous backend was silently wrong."""
 
@@ -250,73 +266,295 @@ entry:
         assert build_and_run(src, tmp_path) == cpython_lines(src)
 
 
+def _float_corpus() -> list[float]:
+    """The doubles the bare-metal formatter is held to.
+
+    Chosen rather than sampled, because uniformly random bit patterns are
+    almost all enormous or minuscule and would never once exercise the fixed
+    notation that ordinary programs print. Each group below is a place a float
+    formatter is known to go wrong:
+    """
+    seen: dict[bytes, float] = {}
+
+    def add(value: float) -> None:
+        seen.setdefault(struct.pack("<d", value), value)
+
+    for value in (0.0, -0.0, math.inf, -math.inf, math.nan, -math.nan):
+        add(value)
+    # Every power of ten in range, where the shortest digit string is a single
+    # digit and the decimal exponent is one step from a notation boundary.
+    for power in range(-323, 309):
+        add(float(f"1e{power}"))
+        add(-float(f"1e{power}"))
+    # Every binade, plus the value just off each one: `mf == 0` is the case
+    # where the gap below a double is half the gap above it, and a formatter
+    # that treats the interval as symmetric prints one digit too many there.
+    for power in range(-1074, 1024):
+        add(math.ldexp(1.0, power))
+        add(math.nextafter(math.ldexp(1.0, power), math.inf))
+        add(math.nextafter(math.ldexp(1.0, power), 0.0))
+    # The subnormals, whose exact decimal runs to 751 significant digits.
+    for i in range(1, 2000):
+        add(struct.unpack("<d", struct.pack("<Q", i))[0])
+    # Values needing all seventeen digits, and the notation boundary itself:
+    # 1e16 is the first value Python writes in exponent form, and `%g` would
+    # switch somewhere else entirely.
+    for value in (12345678901234567.0, 1.2345678901234568e+16, 9007199254740993.0,
+                  1e16, 9999999999999998.0, 1e15, 1e-4, 1e-5, 0.0001, 0.00001,
+                  1.7976931348623157e308, 2.2250738585072014e-308, 5e-324,
+                  0.1, 0.2, 0.3, 1 / 3, 2 / 3, 1e22, 1e23):
+        add(value)
+        add(-value)
+    # The ties. A decimal exactly between two doubles reads back as the one
+    # with an even mantissa, and both ends of that rule are here.
+    for i in range(1, 400):
+        add(i / 2.0)
+        add(i / 4.0)
+        add(1.0 + i * 2.0 ** -52)
+        add(float(i))
+        add(float(i) / 10.0)
+
+    rng = random.Random(20260806)
+    while len(seen) < 200_000:
+        add(struct.unpack("<d", struct.pack("<Q", rng.getrandbits(64)))[0])
+    return list(seen.values())
+
+
+def _bits(value: float) -> int:
+    return struct.unpack("<Q", struct.pack("<d", value))[0]
+
+
+def _run_host_runtime(tmp_path: Path, main_c: str, lines: list[str]) -> list[str]:
+    """Build the bare-metal runtime FOR THE HOST, feed it `lines`, return its
+    output lines.
+
+    The runtime's arithmetic and formatting are ordinary C with no AArch64 in
+    them, so running them here rather than under QEMU turns a wrong digit into
+    a two-second unit failure instead of something only whoever has a cross
+    toolchain installed ever sees.
+
+    Values travel as hexadecimal bit patterns in a file, in and out. Bits
+    rather than decimal text because the point is to compare against CPython
+    exactly, and a decimal round-trip through the C library is the very thing
+    under test; a file rather than argv because there are hundreds of
+    thousands of them.
+    """
+    host_cc = shutil.which("gcc") or shutil.which("cc")
+    if not host_cc:
+        harness.skip("no host C compiler")
+
+    # `runtime_c()`, not the raw `RUNTIME_C`: the template carries a `@POW@`
+    # placeholder for the source it shares with the hosted runtime, and the
+    # raw text does not compile.
+    from asmpython.link.baremetal import runtime_c, UART_ADDRESS
+    runtime = runtime_c() % {"uart": UART_ADDRESS}
+    # There is no UART on this machine; the write becomes a buffer write. The
+    # buffer lives HERE, with the putchar that fills it, rather than in each
+    # main.c -- a test that only calls arithmetic still links this putchar and
+    # would otherwise have to declare a buffer it never uses.
+    uart_putchar = ("int putchar(int c) { *UART = (unsigned int)"
+                    "(unsigned char)c; return c; }")
+    assert uart_putchar in runtime, (
+        "the runtime's putchar is not where this expects it; a substitution "
+        "that silently matches nothing leaves the UART write in place and "
+        "these tests then fail at link with no hint of why")
+    runtime = runtime.replace(
+        uart_putchar,
+        "static char captured[64]; static int captured_n;\n"
+        "int putchar(int c) { captured[captured_n++] = (char)c; return c; }\n"
+        "const char *captured_output(void) {\n"
+        "    captured[captured_n] = 0; captured_n = 0; return captured; }")
+    (tmp_path / "rt.c").write_text(runtime, encoding="utf-8")
+    (tmp_path / "main.c").write_text(main_c, encoding="utf-8")
+
+    exe = tmp_path / "hostrt.exe"
+    # `-ffreestanding -fno-builtin` IS THE TEST, not a detail of it. Names like
+    # `fmod` and `pow` are GCC builtins: given a hosted compile it will fold
+    # them at compile time or emit a call that binds to libm, and the runtime's
+    # own definition -- the thing under test -- is never reached. Measured, by
+    # putting the old inexact `fmod` back and running the corpus below: 0 of
+    # 100,000 pairs disagreed with libm without these flags and 46,262 with
+    # them. A test that green-lights the implementation it is meant to check is
+    # worse than no test, and this one did.
+    #
+    # `-ffreestanding` also happens to be what `BareMetalToolchain.link` really
+    # passes, so this compiles the runtime the way the runtime is compiled.
+    built = subprocess.run(
+        [host_cc, "-O2", "-ffreestanding", "-fno-builtin", "-o", str(exe),
+         str(tmp_path / "rt.c"), str(tmp_path / "main.c")],
+        capture_output=True, text=True)
+    assert built.returncode == 0, built.stderr
+
+    (tmp_path / "in.txt").write_text("".join(l + "\n" for l in lines),
+                                     encoding="ascii")
+    ran = subprocess.run(
+        [str(exe), str(tmp_path / "in.txt"), str(tmp_path / "out.txt")],
+        capture_output=True, text=True)
+    assert ran.returncode == 0, ran.stderr
+    got = (tmp_path / "out.txt").read_text(encoding="ascii").split("\n")[:-1]
+    assert len(got) == len(lines), f"{len(lines)} in, {len(got)} out"
+    return got
+
+
 class TestTheFloatFormatter:
     """The runtime formats floats itself, so the formatter is under test too.
 
     Newlib is in the toolchain and would give a real `printf`, but it faults:
     its `snprintf` takes an alignment fault at EL1 as soon as malloc hands it
-    a block. Sixty lines whose output can be checked directly beat chasing
+    a block. A formatter whose output can be checked directly beats chasing
     that, and this is the check.
     """
 
-    def test_the_float_formatter_matches_printf(self, tmp_path):
-        """Compiled for the HOST and compared against its printf, over the
-        ties that a naive round-half-up gets wrong."""
-        host_cc = shutil.which("gcc") or shutil.which("cc")
-        if not host_cc:
-            pytest.skip("no host C compiler")
+    def test_the_float_formatter_matches_repr(self, tmp_path):
+        """Compared against CPython's `repr`.
 
-        from asmpython.link.baremetal import RUNTIME_C, UART_ADDRESS
-        runtime = RUNTIME_C % {"uart": UART_ADDRESS}
-        # Only the formatter is wanted; the UART write becomes a buffer write.
-        runtime = runtime.replace(
-            "int putchar(int c) { *UART = (unsigned int)(unsigned char)c; "
-            "return c; }",
-            "extern char out[]; extern int outn;\n"
-            "int putchar(int c) { out[outn++] = (char)c; return c; }")
-        (tmp_path / "rt.c").write_text(runtime, encoding="utf-8")
-        (tmp_path / "main.c").write_text(r"""
+        Against `repr` and not against `printf`, because `repr` is what the
+        other four execution paths print and printf cannot produce it: this
+        used to assert agreement with `printf("%f")`, which is the six-decimal
+        behaviour that made the AArch64 backend disagree with all of them.
+
+        The values are chosen HERE and passed in as bit patterns, so what the
+        formatter is measured against is `repr` itself and not a C
+        reimplementation of Python's rules -- which would only prove that two
+        reimplementations made the same mistake.
+        """
+        values = _float_corpus()
+        assert len(values) >= 200_000
+        got = _run_host_runtime(tmp_path, r"""
 #include <stdio.h>
-#include <string.h>
-#include <stdint.h>
-char out[64]; int outn;
 void put_float(double);
-static uint64_t s = 88172645463325252ULL;
-static uint64_t rnd(void){ s^=s<<13; s^=s>>7; s^=s<<17; return s; }
-int main(void) {
-    double fixed[] = {0.0, -0.0, 0.5, 1.5, 2.5, 3.75, -3.75, 0.0000005,
-                      0.0000015, 99.9999995, 1.0/3.0, 1e6, 123456.789, -0.1};
-    long bad = 0, n = 0;
-    char theirs[64];
-    for (size_t i = 0; i < sizeof fixed / sizeof *fixed; i++) {
-        outn = 0; put_float(fixed[i]); out[outn] = 0;
-        snprintf(theirs, sizeof theirs, "%f", fixed[i]);
-        n++; if (strcmp(out, theirs)) { bad++;
-            if (bad < 5) printf("MISMATCH %.17g mine=%s printf=%s\n",
-                                fixed[i], out, theirs); }
+const char *captured_output(void);
+int main(int argc, char **argv) {
+    FILE *in = fopen(argv[1], "r"), *dest = fopen(argv[2], "w");
+    if (!in || !dest) return 2;
+    unsigned long long bits;
+    while (fscanf(in, "%llx", &bits) == 1) {
+        union { unsigned long long u; double d; } x;
+        x.u = bits;
+        put_float(x.d);
+        fprintf(dest, "%s\n", captured_output());
     }
-    for (long i = 0; i < 50000; i++) {
-        double v = (double)(int64_t)(rnd() % 2000001 - 1000000)
-                 / (double)(1 + rnd() % 10000);
-        outn = 0; put_float(v); out[outn] = 0;
-        snprintf(theirs, sizeof theirs, "%f", v);
-        n++; if (strcmp(out, theirs)) { bad++;
-            if (bad < 5) printf("MISMATCH %.17g mine=%s printf=%s\n",
-                                v, out, theirs); }
-    }
-    printf("%ld compared, %ld bad\n", n, bad);
-    return bad != 0;
+    return fclose(dest) != 0;
 }
-""", encoding="utf-8")
-        exe = tmp_path / "fmt.exe"
-        built = subprocess.run(
-            [host_cc, "-O2", "-o", str(exe), str(tmp_path / "rt.c"),
-             str(tmp_path / "main.c")],
-            capture_output=True, text=True)
-        assert built.returncode == 0, built.stderr
-        ran = subprocess.run([str(exe)], capture_output=True, text=True)
-        assert ran.returncode == 0, ran.stdout
-        assert "0 bad" in ran.stdout, ran.stdout
+""", ["%016x" % _bits(v) for v in values])
+
+        # Reported in bulk with the first few named. One mismatch is a bug and
+        # a thousand is the same bug, but which values they are says which.
+        bad = [(v, mine) for v, mine in zip(values, got) if mine != repr(v)]
+        assert not bad, (
+            f"{len(bad)} of {len(values)} disagree with repr; first: "
+            + "; ".join(f"{v!r} (bits {_bits(v):#018x}) formatted as {mine!r}"
+                        for v, mine in bad[:5]))
+
+
+def _fmod_corpus() -> list[tuple[float, float]]:
+    """The (dividend, divisor) pairs the runtime's `fmod` is held to."""
+    pairs: list[tuple[float, float]] = []
+    # The pair that found the inexact implementation: the generated program
+    # for differential seed 15 computes `(-53.7228) % (-1.7785)`, and an
+    # `a - trunc(a/b)*b` remainder is wrong in the 15th digit here.
+    pairs += [(-53.7228, -1.7785), (-7.7786, 11.9616), (61.9250, -17.3664)]
+    # Signs, in every combination, including the zero remainder that has to
+    # keep the DIVIDEND's sign.
+    for a in (6.0, -6.0, 0.0, -0.0, 7.5, -7.5):
+        for b in (3.0, -3.0, 2.0, -2.0):
+            pairs.append((a, b))
+    # Not-a-number, infinity and division by zero, on both sides.
+    for a in (1.0, math.inf, -math.inf, math.nan, 0.0):
+        for b in (0.0, -0.0, math.inf, -math.inf, math.nan, 2.0):
+            pairs.append((a, b))
+    # A subnormal divisor against a normal dividend. This is the case that a
+    # bit-at-a-time remainder gets wrong unless BOTH mantissas are normalised
+    # first: one conditional subtract per bit removes almost nothing from a
+    # dividend 2^1000 times the divisor.
+    tiny = 5e-324
+    for a in (1.0, 2.5, 1e-300, 2.2250738585072014e-308, 1.5e-323):
+        for b in (tiny, 3 * tiny, 1e-320, 4.45e-323):
+            pairs.append((a, b))
+            pairs.append((-a, b))
+    # |a| < |b|, |a| == |b|, and exact multiples, where the answer is a
+    # signed zero or the dividend untouched.
+    for a in (1.0, 1e300, 5e-324, 0.25):
+        pairs += [(a, a), (a, -a), (a, a * 4), (a * 4, a), (a, math.inf)]
+
+    rng = random.Random(4062026)
+
+    def draw() -> float:
+        # Three buckets, deliberately. Uniformly random bit patterns alone are
+        # almost all astronomically large or small, so `%` between two of them
+        # leaves by the `|a| < |b|` line without ever reaching the division;
+        # and they are subnormal only about once in 2,000, which is not often
+        # enough to rely on for the case that has already been wrong once.
+        roll = rng.random()
+        if roll < 0.4:
+            return struct.unpack("<d", struct.pack("<Q", rng.getrandbits(64)))[0]
+        if roll < 0.8:
+            return rng.uniform(-1000.0, 1000.0) * 10.0 ** rng.randint(-8, 8)
+        tiny = struct.unpack("<d", struct.pack(
+            "<Q", rng.getrandbits(rng.randint(1, 53))))[0]
+        return -tiny if rng.random() < 0.5 else tiny
+
+    while len(pairs) < 100_000:
+        pairs.append((draw(), draw()))
+    return pairs
+
+
+class TestTheFloatRemainder:
+    """`fmod` is the runtime's, not libm's, so it is under test too.
+
+    Every other execution path -- CPython, the IR interpreter, the C backend,
+    the x86-64 backend -- ends up in libm's exact `fmod`. This one has no libm
+    to call, so it is the only place where `%` can quietly compute a different
+    number, and this is what stops it.
+    """
+
+    def test_the_float_remainder_matches_libm(self, tmp_path):
+        """Compared bit for bit against `math.fmod`, which is libm's.
+
+        Bit for bit and not `==`, because the whole failure mode is a result
+        one ulp or so away from the right one -- which compares unequal and
+        prints identically under any format short of `repr`.
+        """
+        pairs = _fmod_corpus()
+        got = _run_host_runtime(tmp_path, r"""
+#include <stdio.h>
+double fmod(double, double);
+int main(int argc, char **argv) {
+    FILE *in = fopen(argv[1], "r"), *dest = fopen(argv[2], "w");
+    if (!in || !dest) return 2;
+    unsigned long long ab, bb;
+    while (fscanf(in, "%llx %llx", &ab, &bb) == 2) {
+        union { unsigned long long u; double d; } a, b, r;
+        a.u = ab; b.u = bb;
+        r.d = fmod(a.d, b.d);
+        fprintf(dest, "%016llx\n", r.u);
+    }
+    return fclose(dest) != 0;
+}
+""", ["%016x %016x" % (_bits(a), _bits(b)) for a, b in pairs])
+
+        bad = []
+        for (a, b), mine in zip(pairs, got):
+            mine_f = struct.unpack("<d", struct.pack("<Q", int(mine, 16)))[0]
+            try:
+                want = math.fmod(a, b)
+            except ValueError:
+                # `fmod(inf, y)` and `fmod(x, 0)` are domain errors to Python
+                # but plain NaN results to C, so only NaN-ness is asserted.
+                # The frontend never reaches them: `x % 0` raises before the
+                # call and no generated program produces an infinity.
+                if not math.isnan(mine_f):
+                    bad.append((a, b, mine_f, "a NaN"))
+                continue
+            if math.isnan(want):
+                if not math.isnan(mine_f):
+                    bad.append((a, b, mine_f, "a NaN"))
+            elif _bits(mine_f) != _bits(want):
+                bad.append((a, b, mine_f, repr(want)))
+        assert not bad, (
+            f"{len(bad)} of {len(pairs)} disagree with libm; first: "
+            + "; ".join(f"fmod({a!r}, {b!r}) gave {mine!r}, wanted {want}"
+                        for a, b, mine, want in bad[:5]))
 
 
 # The fuzzer's generated programs used to run here too, on twelve seeds. They

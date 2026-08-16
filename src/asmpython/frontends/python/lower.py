@@ -32,11 +32,15 @@ import ast
 
 from ...diagnostics import SourceFile, Span
 from ...ir import Builder, Function, Module, types as T
-from ...ir.module import Instruction, Linkage
+from ...ir.module import Global, Instruction, Linkage
 from ...ir.opcodes import Op
 from .analysis import (
-    BOOL, FLOAT, INT, NONE, FunctionInfo, SemType, TO_IR, int_literal, span_of,
+    BOOL, ENTRY_NAME, FLOAT, INT, NONE, OBJ, FunctionInfo, SemType, TO_IR,
+    int_literal, span_of,
 )
+from ...link.objects import signatures as object_signatures
+from .dynamic import DynamicLowering
+from .methods import DYN_METHOD_TABLE
 
 _CMP_OPS = {
     ast.Eq: Op.EQ, ast.NotEq: Op.NE, ast.Lt: Op.LT,
@@ -46,12 +50,6 @@ _CMP_OPS = {
 #: Runtime functions the frontend may call. A frontend decides its own runtime;
 #: the IR has no I/O opcodes, so printing is a call like any other.
 #:
-#: `pow` is libm's, and is here for the same reason `print_int` is: the IR has
-#: no opcode for it. It is NOT an implementation detail that could be expanded
-#: inline -- CPython's float `**` calls this exact function, and expanding
-#: `x ** 3` to `x * (x * x)` rounds twice where pow rounds once. The results
-#: differ in the last bit, which surfaces several multiplications later as a
-#: differing printed digit.
 #: `put_*` write a value with NO newline, and `putchar` supplies the space
 #: between arguments and the newline at the end. Python's `print(1, 2)` is one
 #: line reading `1 2`, and `print()` is an empty line; a runtime whose only
@@ -60,11 +58,40 @@ _CMP_OPS = {
 _RUNTIME = {
     "put_int": ([T.I64], T.VOID),
     "put_float": ([T.F64], T.VOID),
+    #: `bool` and `None` are integers to the machine and distinct types to
+    #: Python. Printing them through `put_int` is not a wrong value, it is a
+    #: wrong RENDERING -- `True` came out as `1` and `None` as `0` -- and the
+    #: only place that distinction still exists at this point is the static
+    #: type, so the choice of writer has to be made here.
+    "put_bool": ([T.I64], T.VOID),
+    "put_none": ([], T.VOID),
     "putchar": ([T.I64], T.I64),
-    "pow": ([T.F64, T.F64], T.F64),
+    #: `x ** n` for a non-negative integral n. NOT libm's `pow`: mingw's is a
+    #: ulp off where CPython's is correctly rounded, so every float `**` in a
+    #: compiled program printed a different last digit. See `py_pow_int` in
+    #: link/runtime.py.
+    "py_pow_int": ([T.F64, T.I64], T.F64),
 }
 
 _SPACE, _NEWLINE = 32, 10
+
+#: The object runtime, as IR signatures -- READ OUT OF THE C, not listed here.
+#:
+#: The frontend must declare each runtime symbol it calls with the right
+#: signature, and a hand-kept list drifted three separate times in one
+#: afternoon. Each time the same way: a symbol added to the runtime, not added
+#: here, and the failure surfacing as `call to unknown function` from the IR
+#: verifier or as a link error -- neither of which names the list that was not
+#: updated. `signatures()` parses the definitions instead, so the two cannot
+#: disagree.
+#:
+#: Declarations nothing calls are dropped in `run()`, so declaring all of them
+#: costs nothing in the output.
+_IR_TYPE_BY_NAME = {"ptr": T.PTR, "i64": T.I64, "f64": T.F64, "void": T.VOID}
+_OBJECT_RUNTIME = {
+    name: ([_IR_TYPE_BY_NAME[a] for a in args], _IR_TYPE_BY_NAME[ret])
+    for name, (args, ret) in object_signatures().items()
+}
 
 #: `int(x)`/`float(x)`/`bool(x)`. Lowered as coercions, not calls -- there is
 #: nothing to call, and emitting a call would make every backend depend on a
@@ -72,26 +99,141 @@ _SPACE, _NEWLINE = 32, 10
 _CONVERSIONS = {"int": INT, "float": FLOAT, "bool": BOOL}
 
 
-class Lowerer:
+def _is_plain_symbol(name: str) -> bool:
+    """Whether a function's KEY can be its IR symbol unchanged.
+
+    Module-level `def`s keep their bare name, which is what every existing
+    test and every reader expects to find in the IR. Anything nested has a key
+    built from its qualified name and needs sanitising.
+    """
+    return name.isidentifier()
+
+
+class Lowerer(DynamicLowering):
     def __init__(self, functions: dict[str, FunctionInfo],
-                 source: "SourceFile") -> None:
+                 source: "SourceFile", analyzer=None) -> None:
         self.infos = functions
         self.source = source
+        #: What the `class` statements bound, and the two node-id indexes that
+        #: get from a statement back to what analysis registered for it.
+        self.classes = getattr(analyzer, "classes", {})
+        self.class_of_node = getattr(analyzer, "class_of_node", {})
+        self.def_keys = getattr(analyzer, "def_of_node", {})
+        self.exc_classes = getattr(analyzer, "exc_classes", {})
         source_name = source.path.stem if source.path else "module"
+        #: The IR symbol per Python function name. The entry point is called
+        #: `main` in the IR -- backends rename that to `ENTRY_SYMBOL` and the C
+        #: runtime calls it -- so when the module's top-level statements are
+        #: the entry, a user function also spelled `main` has to move aside.
+        #: Emitting both under one name is two definitions of the entry symbol,
+        #: which surfaces as a C compiler error about a function nobody wrote.
+        #:
+        #: A nested `def` or a method has a key no C identifier can be
+        #: (`outer.<locals>.inner`, `Point.move`), so it is sanitised and made
+        #: unique -- the SYMBOL must be unique, and two classes may each have a
+        #: `move`.
+        self.symbols = {name: name for name in functions}
+        taken = {n for n in functions if _is_plain_symbol(n)}
+        for name in functions:
+            # ENTRY_NAME is `<module>`, which is not an identifier either --
+            # but it has its own symbol, assigned below, and sanitising it
+            # here would rename the entry point to `pyf___module_` and leave
+            # the program with no `main`.
+            if _is_plain_symbol(name) or name == ENTRY_NAME:
+                continue
+            base = "pyf_" + "".join(
+                c if c.isalnum() or c == "_" else "_" for c in name)
+            candidate, n = base, 1
+            while candidate in taken:
+                n += 1
+                candidate = f"{base}_{n}"
+            taken.add(candidate)
+            self.symbols[name] = candidate
+        if ENTRY_NAME in functions:
+            self.symbols[ENTRY_NAME] = "main"
+            if "main" in functions:
+                self.symbols["main"] = "py_main"
+        #: Interned string literal data, keyed by the bytes. See
+        #: `DynamicLowering._dyn_str_literal` for why identity matters.
+        self._strings: dict[bytes, str] = {}
+        #: Bytes literals, interned by content like the str ones.
+        self._bytes: dict[bytes, str] = {}
+        #: Builtin name -> the symbol of the thunk that wraps it, for builtins
+        #: used as VALUES. One per builtin per module, emitted on first use.
+        self._builtin_thunks: dict[str, str] = {}
+        self._pending_thunks: list = []
+        #: Runtime symbols wrapped as callable values -- `math.sqrt`. Same
+        #: shape as the builtin thunks, with an arity that is not always one.
+        self._native_thunks: dict[str, str] = {}
+        self._pending_natives: list = []
+        #: While lowering a generator's STEP function: the register holding
+        #: the generator, and the slot each local lives in. Reads and writes of
+        #: a local go through the object rather than a register, because a
+        #: register does not survive the return a `yield` compiles to.
+        self._gen: tuple | None = None
+        #: Comprehension targets, standing in for their enclosing binding
+        #: while the comprehension runs -- see `_dyn_comprehension`.
+        self._shadow: dict[str, int] = {}
+        #: `import math` twice binds the SAME namespace, so a module is built
+        #: once per program: `import math as m` then `math is m` is True.
+        self._modules: dict[str, int] = {}
+        #: Module-level names, as IR globals. One pointer-sized cell each,
+        #: zero-initialised -- and zero is not a valid runtime value, so
+        #: "never assigned" is distinguishable from "assigned None", which is
+        #: what makes a read before assignment a NameError rather than a
+        #: silent None. See `_dyn_global_read`.
+        entry = functions.get(ENTRY_NAME)
+        self.module_names = (
+            set(entry.locals) | getattr(analyzer, "module_names", set())
+            if entry is not None else set())
         self.module = Module(name=source_name)
         self.module.metadata["frontend"] = "python"
         self.module.metadata["source"] = source.name
 
+    def default_symbol(self, info, index: int) -> str:
+        """The cell holding one default value of one function.
+
+        Built from the IR SYMBOL, not from the Python name: a method's key is
+        `Point.__init__`, and `gd_Point.__init___0` is not an identifier any C
+        compiler or assembler will accept.
+        """
+        return f"gd_{self.symbols[info.name]}_{index}"
+
+    def global_symbol(self, name: str) -> str:
+        """The IR global backing a module-level Python name.
+
+        Prefixed, because a module-level `main` or `print` would otherwise
+        collide with a function symbol in the same namespace.
+        """
+        return "gv_" + name
+
     def run(self) -> Module:
-        for name, (params, ret) in _RUNTIME.items():
+        for name, (params, ret) in {**_RUNTIME, **_OBJECT_RUNTIME}.items():
             fn = Function(name, ret, external=True, linkage=Linkage.IMPORT)
             for i, ty in enumerate(params):
                 fn.params.append(i)
                 fn.registers[i] = ty
             self.module.functions.append(fn)
 
+        for name in sorted(self.module_names):
+            self.module.globals.append(
+                Global(name=self.global_symbol(name), size=8))
+        # One cell per default value. They are evaluated ONCE, in the entry,
+        # not at each call -- `def f(xs=[])` shares a single list across every
+        # call that omits the argument, and a program that appends to it sees
+        # the growth. Evaluating at the call site would give a fresh list each
+        # time, which reads as more sensible and is a different language.
+        for info in self.infos.values():
+            for i in range(len(info.defaults)):
+                self.module.globals.append(
+                    Global(name=self.default_symbol(info, i), size=8))
+
         for info in self.infos.values():
             self.module.functions.append(self._function(info))
+        # AFTER the real functions: using a builtin as a value is what creates
+        # the need for a thunk, and that is discovered while lowering them.
+        self._dyn_emit_thunks()
+        self._dyn_emit_natives()
 
         # Drop runtime declarations nothing called. A module that declares an
         # import it never uses is not merely untidy: the link stage decides
@@ -103,23 +245,60 @@ class Lowerer:
                   for ins in b.instructions if ins.op is Op.CALL}
         self.module.functions = [
             f for f in self.module.functions
-            if not (f.external and f.name in _RUNTIME and f.name not in called)]
+            if not (f.external and (f.name in _RUNTIME or f.name in _OBJECT_RUNTIME)
+                    and f.name not in called)]
         return self.module
 
     # ── one function ────────────────────────────────────────────────────────
     def _function(self, info: FunctionInfo) -> Function:
-        fn = Function(info.name, TO_IR[info.ret],
-                      linkage=Linkage.EXPORT if info.name == "main"
-                      else Linkage.INTERNAL)
+        is_entry = (info.name == ENTRY_NAME
+                    or (ENTRY_NAME not in self.infos and info.name == "main"))
+        fn = Function(self.symbols[info.name], TO_IR[info.ret],
+                      linkage=Linkage.EXPORT if is_entry else Linkage.INTERNAL)
         self.info, self.fn = info, fn
         self.b = Builder(fn)
         #: (continue-target, break-target) per enclosing loop. `continue` in a
         #: `for` must reach the increment, not the test, so the two targets
         #: differ and both are recorded rather than recomputed.
         self.loops: list[tuple[int, int]] = []
+        #: `finally` bodies enclosing the statement being
+        #: lowered. A `return` runs them before it returns.
+        self.finallys: list = []
+        #: The block an exception should jump to, innermost last. Empty means
+        #: no `try` is open and an error ends the process.
+        self.handlers: list[str] = []
 
+        # THE CLOSURE ENVIRONMENT, first and before every declared parameter.
+        # It is the function OBJECT the call came through, which is the only
+        # thing that knows which boxes this particular closure captured: two
+        # values made by two calls to one enclosing `def` share their code and
+        # differ in their cells. Every dynamic function has one even when it
+        # captures nothing, because `apy_call` reaches functions it cannot see
+        # the definition of and a convention that varied per function would
+        # have to be recorded in the value and checked on every call.
+        if info.takes_env:
+            self.env = fn.new_register(T.PTR)
+            fn.params.append(self.env)
+        else:
+            self.env = None
         for sym in info.params:
             reg = fn.new_register(TO_IR[sym.type])
+            fn.params.append(reg)
+            sym.register = reg
+        if info.vararg:
+            # `*rest` takes a real argument slot -- the caller builds the tuple
+            # -- but it is not in `params`, because the arity checks count
+            # those and `*rest` accepts any number.
+            sym = info.locals[info.vararg]
+            reg = fn.new_register(T.PTR)
+            fn.params.append(reg)
+            sym.register = reg
+        if info.kwarg:
+            # `**kw` is LAST, after `*rest`, and its slot is always filled --
+            # the caller passes an empty dict when the call named nothing, so
+            # the body can read it without a test.
+            sym = info.locals[info.kwarg]
+            reg = fn.new_register(T.PTR)
             fn.params.append(reg)
             sym.register = reg
 
@@ -127,14 +306,59 @@ class Lowerer:
         # Every local gets its register up front, so an assignment inside a
         # branch writes the same register the join reads. Allocating lazily is
         # what would need phis.
-        for sym in info.locals.values():
-            if sym.register is None:
+        #
+        # A name the module owns is skipped: its storage is a global, so that
+        # a function can reach it. Giving it a register too would make the
+        # entry write one copy and every function read another.
+        owned = self.module_names if is_entry else info.module_writes
+        for name, sym in info.locals.items():
+            if sym.register is None and name not in owned:
                 sym.register = self.b.reg(TO_IR[sym.type])
+        # A local the analysis could not prove starts as a NULL, which is the
+        # runtime's "no value" and never a legitimate one -- so a read can
+        # tell "not assigned yet" from "assigned None". Only those: a proved
+        # local stays a plain register with no initialiser and no check.
+        for name in info.maybe_unbound:
+            sym = info.locals.get(name)
+            if sym is not None and sym.register is not None \
+                    and name not in owned:
+                self.b.emit(Instruction(Op.COPY, TO_IR[sym.type],
+                                        dst=sym.register,
+                                        args=[self.b.const(TO_IR[sym.type],
+                                                           0)]))
 
-        self._stmts(info.node.body)
+        # Defaults are evaluated where the `def` runs, which for every `def`
+        # here is module level -- so the entry evaluates all of them, once,
+        # before anything else. See `_dyn_init_defaults`.
+        if is_entry:
+            # Every module-level `def` becomes a value here, which is also
+            # where its defaults are evaluated -- a module-level `def` is
+            # lifted out of the entry's body by analysis, so there is no
+            # statement of its own for either to happen at.
+            self._dyn_init_module_defs()
+
+        if info.is_generator:
+            # A GENERATOR IS TWO FUNCTIONS. This one is the constructor: it
+            # allocates the object, stores the arguments into its frame, and
+            # returns having run none of the body. The step function is
+            # emitted alongside and holds the body.
+            self._dyn_generator(info, fn)
+        elif info.dynamic:
+            self._dyn_open_cells()
+            self._dyn_stmts(info.node.body)
+        else:
+            self._stmts(info.node.body)
 
         if self.b.current.terminator is None:
-            if info.ret is NONE:
+            if info.dynamic and not is_entry:
+                # Falling off the end of a Python function returns None, and
+                # None is a VALUE. A zero pointer is not: the runtime reserves
+                # it for "an error was set", so returning it here made every
+                # function without an explicit `return` hand its caller a null
+                # that the next operation reported as a failure -- with the
+                # message of whatever had failed last, or none at all.
+                self.b.ret(self.b.call(T.PTR, "apy_none", []))
+            elif info.ret is NONE:
                 self.b.ret()
             else:
                 self.b.ret(self.b.const(TO_IR[info.ret], 0))
@@ -382,8 +606,8 @@ class Lowerer:
         runtime test: it is the constant 1.
         """
         if ty.is_float:
-            return self.b.call(ty, "pow",
-                               [base, self.b.const(ty, float(exponent))])
+            return self.b.call(ty, "py_pow_int",
+                               [base, self.b.const(T.I64, exponent)])
         if exponent == 0:
             return self.b.const(ty, 1.0 if ty.is_float else 1)
         if exponent == 1:
@@ -658,9 +882,23 @@ class Lowerer:
                     self.b.call(T.I64, "putchar",
                                 [self.b.const(T.I64, _SPACE)])
                 ty = self._type_of(arg)
+                if ty is NONE:
+                    # `print(None)` has nothing to pass: None's IR type is
+                    # void, so there is no value for a writer to take. The
+                    # expression is still evaluated for its side effects -- a
+                    # call returning None is the common shape -- but the
+                    # literal `None` is not, because `_expr` has no case for a
+                    # constant of a type that occupies no register.
+                    if not isinstance(arg, ast.Constant):
+                        self._expr(arg)
+                    self.b.call(T.VOID, "put_none", [])
+                    continue
                 value = self._expr(arg)
                 if ty is FLOAT:
                     self.b.call(T.VOID, "put_float", [value])
+                elif ty is BOOL:
+                    self.b.call(T.VOID, "put_bool",
+                                [self._coerce(value, ty, INT)])
                 else:
                     self.b.call(T.VOID, "put_int",
                                 [self._coerce(value, ty, INT)])
@@ -676,7 +914,7 @@ class Lowerer:
         params, ret = info.signature
         args = [self._coerce(self._expr(a), self._type_of(a), want)
                 for a, want in zip(node.args, params)]
-        result = self.b.call(TO_IR[ret], name, args)
+        result = self.b.call(TO_IR[ret], self.symbols[name], args)
         return result if result is not None else self.b.const(T.I64, 0)
 
     # ── helpers ─────────────────────────────────────────────────────────────

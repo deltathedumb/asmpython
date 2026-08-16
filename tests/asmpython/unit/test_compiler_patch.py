@@ -7,13 +7,13 @@ without those is a fork with extra steps.
 """
 from __future__ import annotations
 
-import pytest
+from tests import harness
 
 from asmpython.plugins import CompilerPatch, PatchError
 from asmpython.plugins import patch as patch_module
 
 
-@pytest.fixture(autouse=True)
+@harness.fixture(autouse=True)
 def clean():
     """No patch survives a test. Every one of these edits global state."""
     yield
@@ -56,12 +56,12 @@ class TestTheFourKinds:
         assert target_function(1) == 30            # (1*2 + 1) * 10
 
     def test_giving_no_action_is_refused(self):
-        with pytest.raises(PatchError, match="does nothing"):
+        with harness.raises(PatchError, match="does nothing"):
             CompilerPatch(HERE)
 
     def test_giving_two_actions_is_refused(self):
         """Otherwise the order they run in is a detail of this class."""
-        with pytest.raises(PatchError, match="pick one"):
+        with harness.raises(PatchError, match="pick one"):
             CompilerPatch(HERE, replace=print, wrap=print)
 
 
@@ -88,7 +88,7 @@ class TestItCanBeUndone:
 
 
 class TestWhatItRefuses:
-    @pytest.mark.parametrize("target", [
+    @harness.cases("target", [
         "asmpython.plugins.patch.apply_all",
         "asmpython.plugins.patch.CompilerPatch.check",
         "asmpython.plugins.store.write",
@@ -101,16 +101,16 @@ class TestWhatItRefuses:
         advisory, and one that can rewrite the plugin store can reinstall
         itself after `plugin remove`.
         """
-        with pytest.raises(PatchError, match="sealed"):
+        with harness.raises(PatchError, match="sealed"):
             CompilerPatch(target, replace=print).apply()
 
-    @pytest.mark.parametrize("target", [
+    @harness.cases("target", [
         "asmpython.ir.verifier.verify",
         "asmpython.backend.base.register",
         "asmpython.target.registry.register",
     ])
     def test_guarded_targets_need_force(self, target):
-        with pytest.raises(PatchError, match="guarded"):
+        with harness.raises(PatchError, match="guarded"):
             CompilerPatch(target, replace=print).apply()
 
     def test_force_allows_a_guarded_target(self):
@@ -136,19 +136,19 @@ class TestWhatItRefuses:
 
 class TestBadTargets:
     def test_a_module_is_not_a_target(self):
-        with pytest.raises(PatchError, match="names a module"):
+        with harness.raises(PatchError, match="names a module"):
             CompilerPatch("asmpython.ir.printer", replace=print).apply()
 
     def test_a_missing_attribute_is_reported(self):
-        with pytest.raises(PatchError, match="does not exist"):
+        with harness.raises(PatchError, match="does not exist"):
             CompilerPatch("asmpython.ir.printer.nope", replace=print).apply()
 
     def test_an_unimportable_root_is_reported(self):
-        with pytest.raises(PatchError, match="could be imported"):
+        with harness.raises(PatchError, match="could be imported"):
             CompilerPatch("no_such_package.thing", replace=print).apply()
 
     def test_a_non_callable_is_refused(self):
-        with pytest.raises(PatchError, match="not callable"):
+        with harness.raises(PatchError, match="not callable"):
             CompilerPatch("asmpython.plugins.MANIFEST_ATTR",
                           replace=print).apply()
 
@@ -164,19 +164,19 @@ class TestBadTargets:
 class TestConflicts:
     def test_a_replace_after_anything_is_a_conflict(self):
         CompilerPatch(HERE, wrap=lambda o, x: o(x)).apply()
-        with pytest.raises(PatchError, match="already patched"):
+        with harness.raises(PatchError, match="already patched"):
             patch_module.apply_all([CompilerPatch(HERE, replace=print)])
 
     def test_anything_after_a_replace_is_a_conflict(self):
         CompilerPatch(HERE, replace=lambda x: 1).apply()
-        with pytest.raises(PatchError, match="already patched"):
+        with harness.raises(PatchError, match="already patched"):
             patch_module.apply_all([CompilerPatch(HERE, wrap=lambda o, x: o(x))])
 
     def test_a_failing_batch_leaves_nothing_applied(self):
         """Half a plugin is harder to diagnose than none of it."""
         good = CompilerPatch(HERE, wrap=lambda o, x: o(x) + 1)
         bad = CompilerPatch("asmpython.plugins.store.write", replace=print)
-        with pytest.raises(PatchError):
+        with harness.raises(PatchError):
             patch_module.apply_all([good, bad])
         assert not good.applied
         assert target_function(1) == 2

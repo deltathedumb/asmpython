@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import textwrap
 
-import pytest
+from tests import harness
 
 from asmpython.diagnostics import DiagnosticSink
 from asmpython.driver import Options, compile_source
@@ -108,11 +108,33 @@ class TestTheDocumentedDiagnostics:
         text = Path(analysis.__file__).read_text(encoding="utf-8")
         return set(re.findall(r'"(E\d{4})"', text))
 
+    def language_doc(self):
+        """Where `LANGUAGE.md` actually is.
+
+        It moved from `docs/` to `archived/docs/` in the working tree, and this
+        test hardcoded the old path -- so it did not fail loudly, it failed
+        with FileNotFoundError, which reads as an environment problem rather
+        than as "the diagnostics are no longer being checked". They were not,
+        for as long as it took to add nine codes and remove one.
+
+        Both locations are tried so the check survives the reorganisation
+        finishing in either direction; missing from BOTH is a real failure and
+        says so.
+        """
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[3]
+        for candidate in (root / "docs" / "LANGUAGE.md",
+                          root / "archived" / "docs" / "LANGUAGE.md"):
+            if candidate.is_file():
+                return candidate
+        raise AssertionError(
+            "LANGUAGE.md is in neither docs/ nor archived/docs/; the "
+            "diagnostics table has nowhere to be checked against")
+
     def codes_in_docs(self) -> set[str]:
         import re
-        from pathlib import Path
-        docs = Path(__file__).resolve().parents[3] / "docs" / "LANGUAGE.md"
-        return set(re.findall(r"E\d{4}", docs.read_text(encoding="utf-8")))
+        return set(re.findall(
+            r"E\d{4}", self.language_doc().read_text(encoding="utf-8")))
 
     def test_every_emitted_code_is_documented(self):
         missing = self.codes_in_source() - self.codes_in_docs()
@@ -126,7 +148,7 @@ class TestTheDocumentedDiagnostics:
 class TestNothingCrashes:
     """A result or a diagnostic. Never a traceback."""
 
-    @pytest.mark.parametrize("snippet", UNSUPPORTED)
+    @harness.cases("snippet", UNSUPPORTED)
     def test_unsupported_python_is_reported_not_raised(self, snippet, tmp_path):
         src = f"def main() -> int:\n" + textwrap.indent(
             textwrap.dedent(snippet), "    ") + "\n    return 0\n"
@@ -136,7 +158,7 @@ class TestNothingCrashes:
         try:
             result = compile_source(Options(source=path), sink)
         except Exception as exc:                      # noqa: BLE001
-            pytest.fail(f"compiler raised {type(exc).__name__}: {exc}\n"
+            harness.fail(f"compiler raised {type(exc).__name__}: {exc}\n"
                         f"on:\n{src}")
         assert not result.ok or sink.diagnostics, (
             f"accepted silently and produced no diagnostic:\n{src}")
@@ -144,7 +166,7 @@ class TestNothingCrashes:
             assert all(d.code for d in sink.diagnostics), \
                 "every diagnostic needs a code"
 
-    @pytest.mark.parametrize("snippet", UNSUPPORTED)
+    @harness.cases("snippet", UNSUPPORTED)
     def test_at_module_level_too(self, snippet, tmp_path):
         path = tmp_path / "prog.py"
         path.write_text(textwrap.dedent(snippet).strip() + "\n"
@@ -153,7 +175,7 @@ class TestNothingCrashes:
         try:
             compile_source(Options(source=path), sink)
         except Exception as exc:                      # noqa: BLE001
-            pytest.fail(f"compiler raised {type(exc).__name__}: {exc}")
+            harness.fail(f"compiler raised {type(exc).__name__}: {exc}")
 
 
 class TestElse:
@@ -264,7 +286,7 @@ class TestTheEntryPoint:
         """, tmp_path)
         assert "E0008" in codes(sink)
 
-    @pytest.mark.parametrize("returns", ["None", "float", "bool"])
+    @harness.cases("returns", ["None", "float", "bool"])
     def test_the_return_type_is_int(self, returns, tmp_path):
         _, sink = compile_text(f"""
             def main() -> {returns}:
@@ -419,9 +441,9 @@ class TestAugmentedAssignment:
                 print(f)
                 return 0
         """, tmp_path)
-        assert lines == ["3.750000", "15.000000"]
+        assert lines == ["3.75", "15.0"]
 
-    @pytest.mark.parametrize("statement, code", [
+    @harness.cases("statement, code", [
         ("x **= n", "E0043"),          # runtime exponent
         ("x **= -1", "E0044"),         # negative exponent
         ("x @= 2", "E0045"),           # unsupported operator
@@ -505,7 +527,7 @@ class TestPower:
                 print(2.0 ** 5)
                 return 0
         """, tmp_path)
-        assert lines == ["32.000000"]
+        assert lines == ["32.0"]
 
 
 class TestBreakContinue:
@@ -659,7 +681,7 @@ class TestConversions:
                 print(float(3))
                 return 0
         """, tmp_path)
-        assert lines == ["3.000000"]
+        assert lines == ["3.0"]
 
     def test_wrong_arity_is_reported(self, tmp_path):
         _, sink = compile_text("""
@@ -720,7 +742,7 @@ class TestStaticTypingIsVisible:
                 print(a and f)
                 return 0
         """, tmp_path)
-        assert lines == ["0.000000"], "CPython prints 0; the value is equal"
+        assert lines == ["0.0"], "CPython prints 0; the value is equal"
 
     def test_conditional_unifies_to_float(self, tmp_path):
         lines, _ = run_text("""
@@ -729,7 +751,7 @@ class TestStaticTypingIsVisible:
                 print(1 if c > 0 else 2.5)
                 return 0
         """, tmp_path)
-        assert lines == ["1.000000"], "CPython prints 1; the value is equal"
+        assert lines == ["1.0"], "CPython prints 1; the value is equal"
 
     def test_or_unifies_bool_to_int(self, tmp_path):
         lines, _ = run_text("""

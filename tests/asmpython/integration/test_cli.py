@@ -21,7 +21,7 @@ import sys
 import textwrap
 from pathlib import Path
 
-import pytest
+from tests import harness
 
 HAS_CC = shutil.which("gcc") or shutil.which("cc")
 SRC = Path(__file__).resolve().parents[3] / "src"
@@ -55,7 +55,7 @@ def run_cli(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, env=env, cwd=cwd)
 
 
-@pytest.fixture
+@harness.fixture
 def program(tmp_path) -> Path:
     path = tmp_path / "prog.py"
     path.write_text(PROGRAM, encoding="utf-8")
@@ -85,7 +85,7 @@ class TestItRunsAtAll:
                      "--backend", "--workdir"):
             assert flag in r.stdout, f"{flag} missing from `build --help`"
 
-    @pytest.mark.parametrize("command", [
+    @harness.cases("command", [
         "ops", "types", "passes", "backends", "frontends", "targets",
         "toolchains",
     ])
@@ -223,7 +223,7 @@ class TestBuild:
         assert len(spanned) > len(plain)
 
 
-@pytest.mark.skipif(not HAS_CC, reason="no C compiler available")
+@harness.needs("cc")
 class TestBuildProducesAProgram:
     """`-o prog.exe` must produce something that runs.
 

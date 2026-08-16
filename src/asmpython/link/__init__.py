@@ -14,11 +14,13 @@ from __future__ import annotations
 
 from .base import LinkError, LinkRequest, Toolchain, find_tool, run
 from .baremetal import BareMetalToolchain, write_runtime_sources
-from .registry import available, get, load_builtin, register
-from .runtime import ENTRY_SYMBOL, RUNTIME_C, needs_runtime, write_runtime
+from .registry import unregister, available, get, load_builtin, register
+from .runtime import (
+    ENTRY_SYMBOL, RUNTIME_C, needs_runtime, runtime_c, write_runtime,
+)
 
 __all__ = [
-    "BareMetalToolchain", "ENTRY_SYMBOL", "LinkError", "LinkRequest", "RUNTIME_C", "Toolchain",
+    "BareMetalToolchain", "ENTRY_SYMBOL", "runtime_c", "LinkError", "LinkRequest", "RUNTIME_C", "Toolchain",
     "available", "find_tool", "get", "load_builtin", "needs_runtime",
-    "register", "run", "write_runtime", "write_runtime_sources",
+    "register", "unregister", "run", "write_runtime", "write_runtime_sources",
 ]

@@ -1,15 +1,18 @@
 """Shim for asmpython: compile the case to a native binary, then run it.
 
-Deliberately passes --no-pyinbin-fallback. Without it the CLI falls back to
-interpreting a source the native backend REFUSED, prints "pyinbin fallback
-executed successfully", and exits 0 -- so a compile refusal is indistinguishable
-from a pass at the command line. A conformance suite must never score an
-interpreted fallback as native conformance.
+The subject is the compiler in `src/asmpython` -- the 3.14 tree. It is put on
+the path explicitly rather than left to `import asmpython`, because a stale
+copy of the SAME import name sits in site-packages on a normal developer
+machine: without the explicit path the suite silently scores an installed build
+that nobody in this checkout can edit, and every fix reads as having no effect.
+(`archived/legacy/` holds the pre-rewrite compiler. It is archived, it is not
+part of 3.14, and it is deliberately NOT what this measures.)
 
 A refusal is reported as returncode None, which the harness renders REFUSED
 rather than FAIL: "cannot compile this" and "compiles to the wrong answer" are
 both non-conformance, but they are different bugs and lumping them together
-loses the distinction.
+loses the distinction. For a compiler that implements a subset of the language,
+that distinction is most of the signal.
 """
 from __future__ import annotations
 
@@ -26,6 +29,22 @@ from pathlib import Path
 # The compiler lives one directory up from the suite. This is the ONLY
 # implementation-specific path in the project; every other file is portable.
 _ASMPYTHON_ROOT = Path(__file__).resolve().parents[2]
+
+# The compiler package sits under src/, not at the repo root. Putting it on the
+# path explicitly is load-bearing rather than tidy: a normal developer machine
+# has a released `asmpython` in site-packages answering to the same import name,
+# and `-m asmpython` finds THAT unless the checkout is placed ahead of it. The
+# failure is silent and expensive -- every fix appears to change nothing.
+_COMPILER_PATH = _ASMPYTHON_ROOT / "src"
+
+
+def _env() -> dict:
+    env = dict(os.environ)
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        str(_COMPILER_PATH) + (os.pathsep + existing if existing else "")
+    )
+    return env
 
 _IS_WIN = sys.platform == "win32"
 # Windows: build directly into a short path. Smart App Control blocks freshly
@@ -86,6 +105,12 @@ def _remove(path: Path) -> None:
             continue
 
 
+def _remove_tree(path: Path) -> None:
+    """Delete a per-compile workdir. Best effort, like `_remove`."""
+    import shutil
+    shutil.rmtree(path, ignore_errors=True)
+
+
 def _sweep() -> None:
     """Remove anything this process built that `_remove` could not.
 
@@ -95,6 +120,9 @@ def _sweep() -> None:
     and report it as a refusal.
     """
     for leftover in _BUILD.glob(f"*_{_TAG}_*"):
+        if leftover.is_dir():
+            _remove_tree(leftover)
+            continue
         try:
             leftover.unlink()
         except OSError:
@@ -114,13 +142,19 @@ def run(case_path: str, timeout: int):
         stem = re.sub(r"(?i)(update|install|setup|patch)", "case", stem)
     out_bin = _artifact(stem)
 
-    cmd = [sys.executable, "-m", "asmpython", str(case_path),
+    # Each compile gets its OWN workdir. The default is `.asmpython` under the
+    # cwd, and the harness runs cases on threads of one process -- eight workers
+    # would write their intermediates over each other under one name, which
+    # reports as a wrong answer or a refusal for whichever case lost the race
+    # and MOVES between runs, reading exactly like a flaky implementation bug.
+    workdir = _BUILD / f"wd_{_TAG}_{out_bin.stem}"
+    cmd = [sys.executable, "-m", "asmpython", "build", str(case_path),
            "--target", "windows" if _IS_WIN else "linux",
-           "--no-pyinbin-fallback", "-o", str(out_bin)]
+           "--workdir", str(workdir), "-o", str(out_bin)]
     def _compile():
         return subprocess.run(cmd, capture_output=True, text=True,
                               errors="replace", cwd=str(_ASMPYTHON_ROOT),
-                              timeout=timeout)
+                              env=_env(), timeout=timeout)
 
     global _warmed
     try:
@@ -141,11 +175,13 @@ def run(case_path: str, timeout: int):
         # refusals are the single largest bucket when scoring a compiler that
         # implements a subset.
         _remove(out_bin)
+        _remove_tree(workdir)
         return "", (cp.stderr or "") + (cp.stdout or ""), None
     if not out_bin.exists():
-        # Exit 0 with no binary: the fallback ran despite --no-pyinbin-fallback,
-        # or the driver took a path that writes nothing. Either way there is no
-        # native artifact, so there is nothing to score.
+        # Exit 0 with no binary: the driver took a path that writes nothing.
+        # There is no native artifact, so there is nothing to score -- report it
+        # as a refusal rather than as an empty (and therefore failing) run.
+        _remove_tree(workdir)
         return "", (cp.stdout or "") + (cp.stderr or ""), None
 
     flags = {"creationflags": 0x08000000} if _IS_WIN else {}
@@ -156,4 +192,5 @@ def run(case_path: str, timeout: int):
         raise TimeoutError(f"run of {case_path}")
     finally:
         _remove(out_bin)
+        _remove_tree(workdir)
     return rp.stdout, rp.stderr, rp.returncode

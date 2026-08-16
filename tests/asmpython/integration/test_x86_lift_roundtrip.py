@@ -33,7 +33,7 @@ from __future__ import annotations
 import sys
 from io import StringIO
 
-import pytest
+from tests import harness
 
 from asmpython import target as target_registry
 from asmpython.diagnostics import DiagnosticSink, SourceFile
@@ -63,6 +63,13 @@ def host_functions(abi: str) -> dict[str, tuple]:
     lifter for printing nothing.
     """
     first = ABI_INT_ARGS[abi][0]
+    # `py_pow_int(double, int64)`. Win64 numbers its argument registers by
+    # POSITION across both files, so the integer in slot 1 lands in the SECOND
+    # integer register even though it is the first integer; SysV keeps separate
+    # sequences, so it lands in the first. Getting this wrong reads a register
+    # the caller never set, which is the exact failure the docstring above
+    # describes -- silent, and blamed on the lifter.
+    pow_n = ABI_INT_ARGS[abi][1] if abi == "win64" else ABI_INT_ARGS[abi][0]
     return {
         "put_int":     (T.VOID, (first,)),
         "put_float":   (T.VOID, ("xmm0",)),
@@ -71,6 +78,7 @@ def host_functions(abi: str) -> dict[str, tuple]:
         "print_str":   (T.VOID, (first,)),
         "putchar":     (T.I64,  (first,)),
         "pow":         (T.F64,  ("xmm0", "xmm1")),
+        "py_pow_int":  (T.F64,  ("xmm0", pow_n)),
         "fmod":        (T.F64,  ("xmm0", "xmm1")),
     }
 
@@ -127,7 +135,7 @@ DOCUMENTED_LIMITS = (
 
 
 class TestTheRoundTripPreservesMeaning:
-    @pytest.mark.parametrize("seed", SEEDS)
+    @harness.cases("seed", SEEDS)
     def test_lifted_assembly_prints_what_the_ir_printed(self, seed, tmp_path):
         src = ProgramGenerator(seed).program()
         module, assembly = _compile_to_assembly(src, tmp_path)
@@ -137,8 +145,8 @@ class TestTheRoundTripPreservesMeaning:
         if lifted is None:
             if any(limit in message
                    for message in why for limit in DOCUMENTED_LIMITS):
-                pytest.skip(f"documented limit: {why[0]}")
-            pytest.fail(f"seed {seed}: {why}\n{src}")
+                harness.skip(f"documented limit: {why[0]}")
+            harness.fail(f"seed {seed}: {why}\n{src}")
 
         assert verify(lifted) is None, verify(lifted)
         # The backend renames the entry point, because `main` in the object

@@ -53,6 +53,25 @@ class Backend(abc.ABC):
     #: produces either a duplicate-symbol error or an undefined one, both at
     #: link time and both clear.
     self_contained: bool = False
+    #: MODULES THIS BACKEND MAKES IMPORTABLE, as {name: {member: spec}} in the
+    #: shape `frontends/python/modules.py` documents.
+    #:
+    #: A backend targeting a board can offer the board: `import hw` reads a
+    #: pin. Which is fine until two backends, or a backend and the standard
+    #: set, both want the name `json` -- so the rule is:
+    #:
+    #:   * `import <backend>.<name>` ALWAYS reaches this backend's module,
+    #:     collision or not. The prefixed path is not a fallback, it is the
+    #:     real name and it always works.
+    #:   * `import <name>` reaches it only if nothing else already has that
+    #:     name. A pre-existing module WINS, silently and deliberately: a
+    #:     program that said `import json` before a backend grew one of its
+    #:     own must keep meaning what it meant.
+    #:
+    #: So a backend author picks any name they like and the collision resolves
+    #: itself, at the cost of the prefix for the loser -- which is exactly
+    #: where the ambiguity was.
+    modules: dict[str, dict] = {}
 
     @abc.abstractmethod
     def emit(self, module: Module, target: Target) -> dict[str, bytes]:

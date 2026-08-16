@@ -42,7 +42,7 @@ import textwrap
 from dataclasses import fields
 from pathlib import Path
 
-import pytest
+from tests import harness
 
 from asmpython import link as link_registry
 from asmpython import target as target_registry
@@ -51,8 +51,29 @@ from asmpython.driver import Options, compile_source
 from asmpython.target import Target
 
 ROOT = Path(__file__).resolve().parents[3]
-DOCS = ("README.md", "docs/FRONTENDS.md", "docs/BACKENDS.md",
-        "docs/TARGETS.md", "docs/LINKERS.md", "docs/LANGUAGE.md")
+
+
+def _doc(relative: str) -> Path:
+    """Locate one document, wherever the tree currently keeps it.
+
+    `docs/` moved to `archived/docs/` and this module hardcoded the old path,
+    so it stopped COLLECTING -- a FileNotFoundError at import time, which
+    takes the whole file's tests with it and reads as a broken environment
+    rather than as "nothing is checking the documentation any more". It was
+    not checking it for as long as it took to rewrite most of LANGUAGE.md.
+
+    Both locations are accepted so the reorganisation can finish either way.
+    """
+    for base in (ROOT, ROOT / "archived"):
+        candidate = base / relative
+        if candidate.is_file():
+            return candidate
+    return ROOT / relative        # report the canonical path in the failure
+
+
+DOCS = tuple(_doc(name) for name in (
+    "README.md", "docs/FRONTENDS.md", "docs/BACKENDS.md",
+    "docs/TARGETS.md", "docs/LINKERS.md", "docs/LANGUAGE.md"))
 
 def _readers_objects() -> dict:
     """The objects a document says "you have one of these" about.
@@ -115,7 +136,7 @@ def _blocks(path: Path, language: str) -> list[tuple[int, str]]:
 def _all_python_blocks() -> list[tuple[str, int, str]]:
     return [(name, line, body)
             for name in DOCS
-            for line, body in _blocks(ROOT / name, "python")]
+            for line, body in _blocks(name, "python")]
 
 
 def _as_module(source: str) -> str:
@@ -144,9 +165,9 @@ def _as_module(source: str) -> str:
     return source                        # nothing parses; the parse test says so
 
 
-@pytest.mark.parametrize(
+@harness.cases(
     "doc,line,source",
-    [pytest.param(*b, id=f"{b[0]}:{b[1]}") for b in _all_python_blocks()])
+    [harness.param(*b, id=f"{b[0]}:{b[1]}") for b in _all_python_blocks()])
 def test_every_python_example_parses(doc: str, line: int, source: str) -> None:
     """A fragment still has to be syntactically Python.
 
@@ -159,7 +180,7 @@ def test_every_python_example_parses(doc: str, line: int, source: str) -> None:
     try:
         compile(_as_module(source), f"{doc}:{line}", "exec")
     except SyntaxError as exc:
-        pytest.fail(f"{doc}:{line} does not parse as Python: {exc}\n\n{source}")
+        harness.fail(f"{doc}:{line} does not parse as Python: {exc}\n\n{source}")
 
 
 def _undefined_names(source: str) -> set[str]:
@@ -217,11 +238,11 @@ def _sessions() -> dict[str, list[tuple[int, str, bool]]]:
     """
     sessions: dict[str, list[tuple[int, str, bool]]] = {}
     for doc in DOCS:
-        if doc == "docs/LANGUAGE.md":
+        if doc.name == "LANGUAGE.md":
             continue                      # asmpython source, compiled below
         defined = set(_READER)
         blocks = []
-        for line, body in _blocks(ROOT / doc, "python"):
+        for line, body in _blocks(doc, "python"):
             runnable = (_as_module(body) == body
                         and not (_undefined_names(body) - defined))
             if runnable:
@@ -234,7 +255,7 @@ def _sessions() -> dict[str, list[tuple[int, str, bool]]]:
 _SESSIONS = _sessions()
 
 
-@pytest.mark.parametrize(
+@harness.cases(
     "doc", [d for d in sorted(_SESSIONS)
             if any(runnable for _, _, runnable in _SESSIONS[d])])
 def test_every_document_runs_as_a_session(doc: str) -> None:
@@ -255,7 +276,7 @@ def test_every_document_runs_as_a_session(doc: str) -> None:
         except Exception as exc:                    # noqa: BLE001 -- reporting
             if re.search(rf"raise {type(exc).__name__}\b", source):
                 continue                  # the raise IS the example
-            pytest.fail(f"{doc}:{line} raised {type(exc).__name__}: "
+            harness.fail(f"{doc}:{line} raised {type(exc).__name__}: "
                         f"{exc}\n\n{source}")
         executed += 1
     assert executed, f"no example in {doc} was executed"
@@ -286,7 +307,7 @@ def test_the_documented_target_fields_are_the_actual_fields() -> None:
     """
     documented = re.search(
         r"```python\nTarget\((.*?)\)\n```",
-        (ROOT / "docs/TARGETS.md").read_text(encoding="utf-8"), re.S)
+        _doc("docs/TARGETS.md").read_text(encoding="utf-8"), re.S)
     assert documented, "TARGETS.md no longer lists the Target fields"
     listed = [n.strip() for n in documented.group(1).replace("\n", " ").split(",")]
     assert listed == [f.name for f in fields(Target)]
@@ -296,14 +317,14 @@ def test_the_documented_toolchains_are_the_shipped_ones() -> None:
     """The table in LINKERS.md names what ships. So does the registry."""
     link_registry.load_builtin()
     table = re.findall(r"^\| `(\w[\w-]*)` \|",
-                       (ROOT / "docs/LINKERS.md").read_text(encoding="utf-8"),
+                       _doc("docs/LINKERS.md").read_text(encoding="utf-8"),
                        re.M)
     assert set(table) == set(link_registry.available()) - {"my-linker"}
 
 
 def test_the_readme_layout_lists_the_real_packages() -> None:
     """The layout block is a map. A package it omits is a package nobody finds."""
-    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    text = _doc("README.md").read_text(encoding="utf-8")
     block = re.search(r"```\nsrc/asmpython/\n(.*?)```", text, re.S)
     assert block, "the README no longer contains a layout block"
     listed = set(re.findall(r"^  (\w+)\(?s?\)?/", block.group(1), re.M))
@@ -317,7 +338,7 @@ def test_the_readme_layout_lists_the_real_packages() -> None:
 
 #: Every backend the README's layout claims exists, and the target each
 #: reaches. The point is that a documented backend can actually be asked for.
-@pytest.mark.parametrize("backend,target", [
+@harness.cases("backend,target", [
     ("c", "c"),
     ("x86-64", "x86_64-linux"),
     ("arm64", "aarch64-none"),
@@ -348,13 +369,13 @@ def _language_examples() -> list[tuple[int, str]]:
     A block showing one statement is describing a rule, not offering a
     program; only the ones defining `main` are compilable on their own.
     """
-    return [(line, body) for line, body in _blocks(ROOT / "docs/LANGUAGE.md",
+    return [(line, body) for line, body in _blocks(_doc("docs/LANGUAGE.md"),
                                                    "python")
             if "def main(" in body]
 
 
-@pytest.mark.parametrize("line,source",
-                         [pytest.param(*b, id=f"LANGUAGE.md:{b[0]}")
+@harness.cases("line,source",
+                         [harness.param(*b, id=f"LANGUAGE.md:{b[0]}")
                           for b in _language_examples()])
 def test_every_language_example_compiles(line: int, source: str,
                                          tmp_path: Path) -> None:
@@ -421,7 +442,7 @@ def _run(source: str, tmp_path: Path) -> tuple[list[str], DiagnosticSink]:
 
 def _value_claims() -> list[tuple[int, str, str]]:
     claims = []
-    for line, body in _blocks(ROOT / "docs/LANGUAGE.md", "python"):
+    for line, body in _blocks(_doc("docs/LANGUAGE.md"), "python"):
         for offset, text in enumerate(body.split("\n")):
             match = _VALUE_CLAIM.match(text)
             if match and not _ERROR_CLAIM.search(text):
@@ -430,9 +451,9 @@ def _value_claims() -> list[tuple[int, str, str]]:
     return claims
 
 
-@pytest.mark.parametrize(
+@harness.cases(
     "line,expr,want",
-    [pytest.param(*c, id=f"LANGUAGE.md:{c[0]}") for c in _value_claims()])
+    [harness.param(*c, id=f"LANGUAGE.md:{c[0]}") for c in _value_claims()])
 def test_every_documented_value_is_the_value(line: int, expr: str, want: str,
                                              tmp_path: Path) -> None:
     """`-7 // 2  # -4, not -3` is an assertion. Treat it as one.
@@ -459,7 +480,7 @@ def test_every_documented_value_is_the_value(line: int, expr: str, want: str,
 
 def _error_claims() -> list[tuple[int, str, str]]:
     claims = []
-    for line, body in _blocks(ROOT / "docs/LANGUAGE.md", "python"):
+    for line, body in _blocks(_doc("docs/LANGUAGE.md"), "python"):
         for offset, text in enumerate(body.split("\n")):
             match = _ERROR_CLAIM.search(text)
             if match:
@@ -471,9 +492,9 @@ def _error_claims() -> list[tuple[int, str, str]]:
     return claims
 
 
-@pytest.mark.parametrize(
+@harness.cases(
     "line,code,source",
-    [pytest.param(*c, id=f"LANGUAGE.md:{c[0]}-{c[1]}") for c in _error_claims()])
+    [harness.param(*c, id=f"LANGUAGE.md:{c[0]}-{c[1]}") for c in _error_claims()])
 def test_every_documented_diagnostic_is_produced(line: int, code: str,
                                                  source: str,
                                                  tmp_path: Path) -> None:
