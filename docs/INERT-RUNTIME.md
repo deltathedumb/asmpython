@@ -339,6 +339,26 @@ except three methods it has. That is the entire bet of this document, executing.
   minutes for three execution paths.
 * What must not regress: **1668/1668** on spec+cpython, the 429-case multi-path
   corpus, and the unit and integration suites.
+* MEASURE A COMMIT, NOT A WORKING TREE. The conformance harness freezes `src/`
+  before it starts (`tests/harness/snapshot.py`), so a run started before an
+  edit scores the tree as it was -- which is the behaviour you want, and is
+  also how a number gets attributed to the wrong work. Stage 2 was measured on
+  a detached worktree at HEAD for that reason, and because the working tree
+  held unrelated uncommitted changes that would otherwise have been in the
+  number.
+
+## Measured
+
+Each stage against the oracle, on a clean checkout of the commit named:
+
+| stage | commit | spec+cpython |
+| --- | --- | --- |
+| 1, the subset | `2f33bbb7` | 1668/1668 (100.0%) |
+| 2, the floor | `26201014` | 1668/1668 (100.0%) |
+
+Stage 2's is the one that had teeth: the floor's C goes into `host_functions()`,
+which every C build and every machine-backend link passes through, so a floor
+that did not compile would have scored 0 rather than slightly less.
 
 ## Traps this work will hit
 
