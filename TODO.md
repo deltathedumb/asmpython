@@ -328,6 +328,52 @@ which answers a str; the same work put an equality body in `apy_add` and made
 `b"a" + "a"` segfault. Both were one line of corpus away from being caught the
 moment they happened.
 
+**A CASE PER PROCESS CANNOT SEE INTERACTION.** Every case gets a fresh process,
+so anything the runtime keeps for the length of one program is fresh in every
+case -- and the five per-host-state bugs above could not have failed here,
+however many cases ran. `--merge N` compiles N cases into ONE program, which is
+where they can.
+
+IT DOES NOT REWRITE THE CASES, because `cases/` is the oracle and a merged
+program built by renaming what a case declares would be testing something the
+suite does not contain. Batches are chosen so renaming is unnecessary.
+
+AND THE RULE FOR CHOOSING THEM IS NOT "DISJOINT NAMES", which is what it looks
+like it should be. A case that passes ALONE never reads a module-level name
+before binding it -- if it did, CPython would raise NameError, and every case
+passes under CPython. Concatenation preserves order, so a neighbour rebinding
+`a` cannot change what a later case computes: the later case binds `a` first.
+
+What that argument does not cover is a case that asks the namespace ABOUT
+ITSELF -- `globals()`, a bare `dir()`, a `try/except NameError` whose whole
+point is whether a name is bound -- or `del`, which is how a case makes a name
+unbound on purpose. There are 28 of those in 1675, and they keep the
+conservative disjoint-names rule among themselves; they never share a batch
+with a free case, because a free case's binding is exactly what one would see.
+
+THE DIFFERENCE IS THE WHOLE MODE. Disjoint names packs 3.4x -- `a`, `b`, `r`,
+`xs` and the 392 cases sharing the `_moved`/`move`/`_original` idiom set that
+ceiling, and raising the batch size past 8 buys nothing against it. The free
+pool packs to whatever size is asked: 23x at 32, 37x at 64.
+
+A MISJUDGEMENT HERE COSTS A RE-RUN AND NOT A WRONG VERDICT, which is what makes
+the permissive rule safe to take. Whatever a batch does not settle is re-run
+case by case, so the worst it can do is spend the time it was saving.
+
+AND A BATCH IS NEVER THE LAST WORD. A marker printed BETWEEN cases splits the
+output into per-case segments, each compared exactly as a solo run compares it,
+and whatever a batch does not settle is re-run alone. A case that then passes is
+reported as a MERGE-ONLY DIVERGENCE -- an interaction bug, and the result this
+mode exists to produce.
+
+THE FIRST VERSION COMPARED THE CONCATENATION instead, and reported three sound
+cases as divergences. The harness rstrips a case's output, so
+`text/str/case-conversions` -- which ends with `print("")` -- has a trailing
+blank its `# expect:` block cannot hold. True and harmless alone; wrong the
+moment another case's output follows, and it failed that case's two batch-mates
+with it. A merged verdict has to be reached the same way a solo one is, or the
+mode invents the bugs it is meant to find.
+
 **Compare against CPython, not against the case.** Nearly every serious finding
 came from running a wider program than the case and diffing the whole output.
 The case tells you one line is wrong; CPython tells you which rule you broke.
@@ -883,6 +929,7 @@ using it.
 |  |  |
 | --- | --- |
 | `conformance/harness.py` | the score. Slow — a compile and link per case. |
+| `conformance/harness.py --merge N` | N cases compiled into ONE program. Sees what a case-per-process run cannot -- state the runtime keeps for the length of one program -- and pays one `gcc` per batch instead of one per case. |
 | `conformance/try.py` | one case or one snippet, want vs got, with the compiler's own stderr. |
 | `tools/objects_diff.py` | the object runtime against CPython, ~137k generated cases. No compiler involved, so a failure is the runtime's and can be nothing else. |
 | `tools/dynamic_diff.py` | random dynamic Python, compiled and diffed against CPython. Covers the LOWERING, which `objects_diff` cannot. |

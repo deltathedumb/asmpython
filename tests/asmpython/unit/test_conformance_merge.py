@@ -88,27 +88,63 @@ class TestModuleNames:
         assert _names("def (:\n") == set()
 
 
-class TestBatches:
-    """Packing: disjoint, bounded, and lossless."""
+class TestObservesNamespace:
+    """Which cases are free to share a name, and which are not."""
 
-    def test_cases_that_share_a_name_never_share_a_batch(self):
+    def _asks(self, source: str) -> bool:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "one.py"
+            path.write_text(source, encoding="utf-8")
+            return conf._observes_namespace(path)
+
+    def test_ordinary_code_is_free(self):
+        """It binds every name it reads -- if it did not, CPython would raise
+        NameError and the case would not pass alone."""
+        assert not self._asks("x = 1\nfor i in range(3): x += i\nprint(x)\n")
+
+    def test_asking_the_namespace_is_not(self):
+        for source in ("print(globals())\n", "print(locals())\n",
+                       "print(vars())\n", "print(dir())\n"):
+            assert self._asks(source), source
+
+    def test_probing_for_an_unbound_name_is_not(self):
+        """The one shape the free-to-merge argument does not cover: a case
+        whose whole point is whether a name is bound."""
+        assert self._asks("try:\n    print(nope)\n"
+                          "except NameError:\n    print('unbound')\n")
+
+    def test_del_is_not(self):
+        """`del` is how a case makes a name unbound on purpose."""
+        assert self._asks("x = 1\ndel x\n")
+
+    def test_a_case_the_oracle_cannot_parse_is_not(self):
+        """Unknown, so treated as observing rather than assumed free."""
+        assert self._asks("def (:\n")
+
+
+class TestBatches:
+    """Packing: two pools, bounded, and lossless."""
+
+    def test_free_cases_pack_regardless_of_the_names_they_share(self):
+        """Both bind `x`, and it does not matter: the second binds it before
+        it reads it, exactly as it did alone."""
         batches, alone = _pack({"a": "x = 1\nprint(x)\n",
                                 "b": "x = 2\nprint(x)\n"}, 8)
         assert alone == []
-        assert [len(b) for b in batches] == [1, 1]
-
-    def test_cases_that_share_nothing_do_share_a_batch(self):
-        batches, _ = _pack({"a": "x = 1\nprint(x)\n",
-                            "b": "y = 2\nprint(y)\n"}, 8)
         assert [len(b) for b in batches] == [2]
 
-    def test_a_collision_falls_back_to_an_earlier_batch(self):
-        """First fit across EVERY open batch, not just the newest. Cases bind
-        `x` and `main` constantly, and packing only into the newest gave
-        batches of one and a half cases -- barely a merge at all."""
+    def test_a_case_that_asks_never_shares_with_one_that_does_not(self):
+        """A free case in an observer's batch is exactly the binding the
+        observer would see."""
         batches, _ = _pack({"a": "x = 1\nprint(x)\n",
-                            "b": "x = 2\nprint(x)\n",
-                            "c": "y = 3\nprint(y)\n"}, 8)
+                            "b": "y = 2\nprint(sorted(globals())[:0], y)\n"},
+                           8)
+        assert sorted(len(b) for b in batches) == [1, 1]
+
+    def test_two_cases_that_ask_share_only_when_their_names_are_disjoint(self):
+        batches, _ = _pack({"a": "x = 1\nprint(len(globals()) > 0)\n",
+                            "b": "x = 2\nprint(len(globals()) > 0)\n",
+                            "c": "y = 3\nprint(len(globals()) > 0)\n"}, 8)
         assert sorted((len(b) for b in batches), reverse=True) == [2, 1]
 
     def test_no_batch_exceeds_the_requested_size(self):

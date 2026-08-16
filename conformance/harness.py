@@ -16,6 +16,7 @@ Exit codes: 0 = every counted case passed; 1 = at least one counted failure.
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib.util
 import json
 import sys
@@ -326,27 +327,81 @@ def _mergeable(case: Case) -> bool:
     return bool(case.expect.strip()) and not case.skip_note
 
 
-def _batches(cases: list, size: int) -> tuple:
-    """Pack cases into batches with pairwise-disjoint module-level names.
+#: Calls that ask WHAT IS BOUND rather than reading a name out of the
+#: namespace, and the errors a case raises to find out.
+_WATCHES = {"globals", "locals", "vars", "dir"}
+_UNBOUND = {"NameError", "UnboundLocalError"}
 
-    FIRST FIT ACROSS EVERY OPEN BATCH, not just the newest. Cases bind `x` and
-    `main` and `f` constantly, so a case that collides with the batch being
-    filled almost always fits an earlier one -- and packing only into the
-    newest gave batches of one and a half cases, which is barely a merge at
-    all. Trying them all turns the same 39 cases into a handful of programs.
 
-    Answers the batches and the cases that could not join one, because a mode
-    that silently dropped what it could not batch would report a faster run
-    over fewer cases.
+def _observes_namespace(path: Path) -> bool:
+    """Whether a case can tell what its neighbours bound.
+
+    THE RULE THAT MAKES MOST CASES FREE TO MERGE: a case that passes ALONE
+    never reads a module-level name before binding it -- if it did, CPython
+    would raise NameError, and every case passes under CPython. Concatenation
+    preserves order, so a neighbour rebinding `a` cannot change what a later
+    case computes: the later case binds `a` before it reads it.
+
+    That argument covers reading a name. It does NOT cover asking the namespace
+    about itself -- `globals()`, a bare `dir()`, a `try/except NameError` whose
+    whole point is whether a name is bound -- and it does not cover `del`,
+    which is how a case makes a name unbound on purpose. Those cases need the
+    namespace they had alone.
+
+    1647 of 1675 mergeable cases are free by this test, which is the difference
+    between packing 3x and packing 25x.
     """
-    batches, alone = [], []
-    #: (cases, names taken). Kept open until full, so a later case can land in
-    #: an earlier one.
-    open_batches: list = []
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except SyntaxError:
+        return True                     # unknown, so treated as observing
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in _WATCHES:
+                return True
+        elif isinstance(node, ast.Name) and node.id in _UNBOUND:
+            return True
+        elif isinstance(node, ast.Delete):
+            return True
+    return False
+
+
+def _batches(cases: list, size: int) -> tuple:
+    """Pack cases into batches. Answers the batches and what runs alone.
+
+    TWO POOLS, because the cases in them are safe for different reasons:
+
+      * A case that does not observe the namespace packs with NO name
+        constraint at all, for the reason `_observes_namespace` gives.
+      * One that DOES keeps the conservative rule -- it may only share a batch
+        with cases whose module-level names are disjoint from its own, so
+        nothing it can see changed. Packed FIRST FIT ACROSS EVERY OPEN BATCH
+        rather than only the newest: cases bind `a` and `xs` and `f`
+        constantly, and packing into the newest alone gave batches of one and a
+        half cases, which is barely a merge.
+
+    The two pools never mix. A free case in an observer's batch is exactly the
+    binding the observer would see.
+
+    AND A MISJUDGEMENT HERE COSTS A RE-RUN, NOT A WRONG VERDICT. Whatever a
+    batch does not settle is re-run case by case, so the worst a too-permissive
+    rule can do is spend the time this mode was saving.
+    """
+    free, watched, alone = [], [], []
     for case in cases:
         if not _mergeable(case):
             alone.append(case)
-            continue
+        elif _observes_namespace(case.path):
+            watched.append(case)
+        else:
+            free.append(case)
+
+    batches = [free[i:i + size] for i in range(0, len(free), size)]
+
+    #: (cases, names taken). Kept open until full, so a later case can land in
+    #: an earlier one.
+    open_batches: list = []
+    for case in watched:
         names = _module_names(case.path)
         if not names and case.path.read_text(encoding="utf-8").strip():
             alone.append(case)          # unparsed by the oracle: never merged
@@ -358,8 +413,7 @@ def _batches(cases: list, size: int) -> tuple:
                 break
         else:
             open_batches.append(([case], set(names)))
-    for held, _ in open_batches:
-        batches.append(held)
+    batches.extend(held for held, _ in open_batches)
     return batches, alone
 
 
