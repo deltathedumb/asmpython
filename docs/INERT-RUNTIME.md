@@ -158,10 +158,12 @@ until a stage replaces a piece of it and the corpus agrees.
    and the JVM backend (over `byte[]` and `System.out`).
    PROVED BY: a program that prints, on both backends.
    `tests/asmpython/integration/test_platform_floor.py`.
-3. **One real kind, end to end.** Port the smallest complete object kind -- the
-   integer cell and its arithmetic -- to the subset. Keep the C version and run
-   BOTH. PROVED BY: the multi-path corpus, which already compares CPython, the
-   IR interpreter and the C backend on 143 programs.
+3. **One real kind, end to end.** ***DONE for construction; arithmetic
+   deferred*** -- see "What stage 3 landed". Port the smallest complete object
+   kind -- the integer cell and its arithmetic -- to the subset. Keep the C
+   version and run BOTH. PROVED BY: the multi-path corpus, which already
+   compares CPython, the IR interpreter and the C backend on 143 programs.
+   `tests/asmpython/integration/test_ported_int.py`, 13 tests.
 4. **The allocator**, in the subset, over the floor's arena. PROVED BY: the
    same corpus, plus a stress program that exercises reuse.
 5. **Kind by kind**, largest surface first: str, list, dict, then classes,
@@ -325,6 +327,90 @@ Python because the object runtime is C and nothing in a class file can call it.
 It still cannot. But it now runs a program that does real runtime work --
 formats a number, asks for heap, writes bytes -- with nothing outside the IR
 except three methods it has. That is the entire bet of this document, executing.
+
+## What stage 3 landed
+
+**The object runtime is no longer entirely C.** `apy_from_int` and `apy_as_int`
+are `src/asmpython/runtime/int_cell.py`, compiled by asmpython's own frontend
+and spliced into every program that builds an object. The C definitions they
+replace become declarations, so the runtime's hundred-odd callers still have
+one in scope and nothing is defined twice.
+
+An int is the right first kind: a tag and a payload, one cache, no ownership
+and no variable-length part -- and the most-called constructor there is, so a
+wrong cell is not a subtle failure. `a = 1; b = 1; a is b` is still True and
+257 is still False; the cache is a `reserve("apy_small_ir", 2096)` sharing
+exactly what CPython shares, boundary included.
+
+### The C runtime is still a supported arrangement
+
+This is the point, not a concession. The reason to write the runtime in IR is
+that a backend should not HAVE to define 229 functions -- which argues for
+making the C unnecessary, not for making it unavailable.
+
+    --object-runtime c        the whole build; nothing spliced
+    Backend.object_runtime    one function, for a backend with its own
+
+They cannot get out of step, because the C omits **exactly what the module
+defines**: no splice is no omission, automatically. Both are tested rather than
+left as a flag nobody exercises, because the ported set grows every stage.
+
+### Three deferrals from stage 1 came due
+
+`reserve(name, bytes)` for named static storage, zeroed, for the whole run --
+the fourth way to get an address, and the one a cache needs. Calls into the
+still-C runtime, typed from `signatures()`, so a half-ported runtime can call
+across the line. And a LIBRARY compile mode: definitions, no entry, everything
+exported.
+
+`func_addr`/`call_ptr` are still deferred. Constructing an object does not need
+them; dispatching on one does, and that is stage 5's first requirement.
+
+### The finding that matters most is negative
+
+The splice was going to fix the IR interpreter for free -- define the function,
+and it runs the same IR the C backend compiles. **It cannot.**
+`ir/objects_host.py` represents an `apy_value` as a HANDLE into a Python-side
+table; the ported code represents one as an ADDRESS. A ported `apy_from_int`
+hands back something every unported function rejects:
+
+    trap: apy_is: 2248 is not a runtime value handle
+
+So the port is **all-or-nothing on the interpreter path**, and stage 6 changes
+shape: `objects_host.py` cannot be retired function by function, only in one
+step, once every kind it claims is ported. `Interpreter._call` states the rule
+and the reason. The compensation is real: the interpreter stays an ORACLE, so
+the corpus compares ported against unported on every program it runs, which is
+a sharper test than having both paths run the same code.
+
+### What it cost
+
+* **A docstring was `unsupported expression: Constant` on the static path.**
+  Lowering skipped bare constants; analysis did not. Pre-existing -- the
+  runtime source is the first static-path code anyone tried to document.
+* **The splice condition was wrong twice.** Narrow (does the program call a
+  ported name) left `apy_from_int` undefined for dynamic programs that never
+  built an integer directly. Broad (does this link the runtime C) fired for
+  anything that merely prints, and 101 tests objected to carrying ten runtime
+  functions and a 2 KB global they never reach. The switch is per-BUILD and
+  reads the module.
+* **Then it inverted to `multiple definition`,** because `test_endtoend.py`
+  assembles its own link and built a runtime without being told what the
+  program supplies -- the same trap that file's header already warns about one
+  level up.
+
+### Two things about the tree, learned here
+
+`tests/runner.py` and its 1,932 cases drive the LEGACY CLI (`asmpython <file>`,
+no subcommand) and score 0/1932 against this tree regardless of any change.
+The live multi-path corpus is `tests/asmpython/integration/test_differential.py`.
+
+An installed third-party plugin can fail a backend from outside the tree. A
+`CompilerPatch` wrapping `Lowerer.run` to declare its own runtime symbols
+declares them for EVERY program -- and because `run` drops unused externals
+inside itself, anything the wrapper appends survives the drop. The C backend
+shrugs; the JVM backend checks every external against what it can define and
+refuses. Worth knowing before reading a JVM failure as a regression.
 
 ## Constraints carried in
 
