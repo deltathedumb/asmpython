@@ -441,10 +441,17 @@ Each stage against the oracle, on a clean checkout of the commit named:
 | --- | --- | --- |
 | 1, the subset | `2f33bbb7` | 1668/1668 (100.0%) |
 | 2, the floor | `26201014` | 1668/1668 (100.0%) |
+| 3, the integer cell | `564c2c77` | 1668/1668 (100.0%) |
 
-Stage 2's is the one that had teeth: the floor's C goes into `host_functions()`,
-which every C build and every machine-backend link passes through, so a floor
-that did not compile would have scored 0 rather than slightly less.
+Stage 2's had teeth because the floor's C goes into `host_functions()`, which
+every C build and every machine-backend link passes through -- a floor that did
+not compile would have scored 0 rather than slightly less.
+
+**Stage 3's is the one that means the most.** `apy_from_int` is the runtime's
+most-called constructor: every integer literal, every loop counter and every
+length in all 1,668 programs goes through it. A suite that passes with it
+ported is a suite in which subset-written code built every integer that was
+compared against CPython.
 
 ## Traps this work will hit
 
