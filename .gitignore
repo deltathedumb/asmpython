@@ -4,6 +4,7 @@
 /.vscode/
 /.idea/
 /.asmpython-pytest-scout/
+/agents/
 *.swp
 
 # ── Python bytecode / caches ────────────────────────────────────────────────
@@ -105,3 +106,16 @@ editors/vscode/**/*.vsix
 editors/vscode/*/package-lock.json
 
 /threads/
+
+# The test runner's frozen copy of `src/`, one directory per run. It exists so
+# `src/` can be edited while a run is in flight -- see tests/harness/snapshot.py
+# -- and is removed when the run ends.
+.harness-src/
+
+# The test runner's record of what passed last time, keyed by a fingerprint of
+# the sources. Local to one checkout -- see tests/harness/cache.py.
+/.asmpython-tests.json
+
+# Working conformance measurements. `asmpython.json` is the recorded state and
+# is tracked; a session produces dozens of these on the way to it.
+conformance/results/new*.json

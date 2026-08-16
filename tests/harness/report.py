@@ -35,13 +35,37 @@ class Result:
     detail: str = ""
 
 
+#: The expression forms safe to evaluate a second time. A CALL is not one:
+#: `assert compiled(src) == expected(src)` would compile and run the program
+#: again, and the second run's answer is not the one that failed -- it can
+#: even agree, which is how this reported "lengths differ: 13 vs 13" about two
+#: lists that were equal.
+_PURE = (ast.Name, ast.Attribute, ast.Subscript, ast.Constant, ast.Tuple,
+         ast.List, ast.Slice, ast.UnaryOp, ast.Starred)
+
+
+def _is_pure(node) -> bool:
+    """Can this be evaluated again without doing anything?
+
+    Conservative on purpose: a diff is a convenience, and there is no version
+    of it worth running the test's side effects twice for. When the answer is
+    no the traceback is printed instead, which is never wrong -- only less
+    helpful.
+    """
+    return all(isinstance(sub, _PURE) or isinstance(sub, ast.expr_context)
+               for sub in ast.walk(node))
+
+
 def _operands(exc: BaseException) -> str:
     """The two sides of a failed `assert a == b`, diffed.
 
     Read out of the FRAME the assertion failed in, which the traceback still
     holds: the names are whatever the source line says, and their values are
-    still bound. Nothing is re-executed -- re-running the expression could
-    have side effects and could just as easily succeed the second time.
+    still bound.
+
+    ONLY SIDE-EFFECT-FREE OPERANDS are read -- see `_is_pure`. Evaluating a
+    call here would run the test's work a second time, and the second answer
+    is not the one that failed.
     """
     tb = exc.__traceback__
     while tb is not None and tb.tb_next is not None:
@@ -60,6 +84,9 @@ def _operands(exc: BaseException) -> str:
     if not isinstance(test, ast.Compare) or len(test.ops) != 1:
         return ""
     if not isinstance(test.ops[0], (ast.Eq, ast.NotEq)):
+        return ""
+
+    if not (_is_pure(test.left) and _is_pure(test.comparators[0])):
         return ""
 
     def value_of(sub):

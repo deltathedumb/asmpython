@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from . import snapshot
 from .api import AUTOUSE, CASES, FIXTURE, NEEDS, SKIP
 
 
@@ -82,8 +83,17 @@ def _expand(target) -> list[dict]:
 
 def _label(value) -> str:
     """A case's name. Short and readable beats exact: the id only has to be
-    unique within one test, and a whole program as an id is unusable."""
+    unique within one test, and a whole program as an id is unusable.
+
+    A NAME IS NEVER SHORTENED, only a value that happens to be text. The
+    corpus keys its cases by identifier -- `format_mini_language_numbers` --
+    and truncating that to 24 characters meant `-k` with the name written in
+    the source selected nothing, while a prefix of it worked. A test you can
+    read in the file has to be one you can run by name.
+    """
     if isinstance(value, str):
+        if value.isidentifier():
+            return value
         text = value if len(value) <= 24 else value[:21] + "..."
         return "".join(c if c.isalnum() or c in "-_." else "_" for c in text)
     if isinstance(value, (int, float, bool)) or value is None:
@@ -124,7 +134,10 @@ def collect(root: Path, targets: list[str] | None = None) -> list[Test]:
     """
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
-    src = root / "src"
+    # THE SNAPSHOT, not `src/` -- see `snapshot`. Inserted in the PARENT,
+    # which is enough for every worker: `multiprocessing` sends the parent's
+    # `sys.path` to each spawned child.
+    src = snapshot.current(root)
     if src.is_dir() and str(src) not in sys.path:
         sys.path.insert(0, str(src))
 

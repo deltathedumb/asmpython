@@ -49,6 +49,13 @@ GUARDS = {
     "cc": lambda: bool(shutil.which("gcc") or shutil.which("cc")),
     "nasm": lambda: bool(shutil.which("nasm")),
     "aarch64": _aarch64_available,
+    #: A JVM to RUN what the jvm backend emits. Building a class file needs
+    #: nothing installed -- the writer and the jar packager are both Python --
+    #: so only the tests that execute one declare this.
+    "java": lambda: bool(shutil.which("java")),
+    #: A COMPILER, not a JVM. Only the Java-interop tests need one, and only to
+    #: build the API they then import -- nothing in asmpython calls javac.
+    "javac": lambda: bool(shutil.which("javac")),
 }
 
 
