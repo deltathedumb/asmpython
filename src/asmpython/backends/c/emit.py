@@ -79,14 +79,30 @@ static int  putchar_(int64_t c) { return putchar((int)c); }
 from ...link.objects import (  # noqa: E402
     OBJECT_NAMES as _OBJECT_NAMES, objects_c as _objects_c,
 )
+# The `apy_*` the C no longer defines because the IR does. See
+# `link/objects_ir.py`; the prelude keeps a declaration for each so the
+# runtime's own hundred-odd callers still have one in scope.
+from ...link.objects_ir import omitted_by as _omitted_by  # noqa: E402
 from ...link.runtime import (  # noqa: E402
     HOST_NAMES as _HOST_NAMES, host_functions as _host_functions,
 )
 
-_PRELUDE = (_PRELUDE_TEMPLATE
-            .replace("@HOST@", _host_functions(static=True, strptr="uintptr_t",
-                                               ptr="uintptr_t"))
-            .replace("@OBJECTS@", _objects_c(static=True)))
+_HOST_C = _host_functions(static=True, strptr="uintptr_t", ptr="uintptr_t")
+
+
+def _prelude(module) -> str:
+    """The prelude for ONE module.
+
+    Per-module rather than a constant because the object runtime's C omits
+    exactly the definitions this module supplies in IR -- see
+    `link/objects_ir.py`. A program with no spliced runtime keeps the C's,
+    which is what stops a program that merely prints from carrying the
+    ported code it never reaches.
+    """
+    return (_PRELUDE_TEMPLATE
+            .replace("@HOST@", _HOST_C)
+            .replace("@OBJECTS@",
+                     _objects_c(static=True, omit=_omitted_by(module))))
 
 #: Host functions defined by the prelude above. Any OTHER external the module
 #: declares gets an `extern` declaration generated from its IR signature --
@@ -128,7 +144,7 @@ class CBackend(Backend):
     }
 
     def emit(self, module: Module, target) -> dict[str, bytes]:
-        out: list[str] = [_PRELUDE]
+        out: list[str] = [_prelude(module)]
 
         for g in module.globals:
             out.append(_global(g))

@@ -88,6 +88,22 @@ class Backend(abc.ABC):
     #: produces either a duplicate-symbol error or an undefined one, both at
     #: link time and both clear.
     self_contained: bool = False
+    #: `apy_*` THIS BACKEND DEFINES ITSELF, and does not want supplied as IR.
+    #:
+    #: Part of the object runtime is now written in asmpython's own machine
+    #: subset and compiled into every program that needs it
+    #: (`link/objects_ir.py`), which is how a backend stops having to define
+    #: 229 functions. THIS IS THE OPT-OUT, and it is not an afterthought: the
+    #: point of that work is to REMOVE an obligation, not to replace it with a
+    #: different one. A backend with its own implementation of a function --
+    #: hand-written, faster, or simply older and trusted -- names it here and
+    #: keeps it, and the splice supplies only what is left.
+    #:
+    #: Empty for every built-in backend, which is what makes the shipped
+    #: arrangement the ported one. `Options.object_runtime = "c"` is the same
+    #: opt-out for a whole BUILD rather than for a backend, and either one
+    #: leaves the C runtime exactly as it was before any of it was ported.
+    object_runtime: frozenset[str] = frozenset()
     #: MODULES THIS BACKEND MAKES IMPORTABLE, as {name: {member: spec}} in the
     #: shape `frontends/python/modules.py` documents.
     #:

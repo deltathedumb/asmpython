@@ -34,6 +34,7 @@ from ..diagnostics import DiagnosticSink, Severity, SourceFile, error
 from ..ir import Module, print_module, verify
 from ..backend.base import BackendUnsupported
 from ..ir.verifier import VerifyError
+from ..link import objects_ir
 from ..passes import PassManager
 
 #: Passes run when the user asks for optimisation but names none.
@@ -70,6 +71,16 @@ class Options:
     time_passes: bool = False
     max_errors: int = 100
     warnings_are_errors: bool = False
+    #: Where the object runtime comes from: `"ir"` compiles the ported part
+    #: from `runtime/*.py` and splices it in; `"c"` uses the hand-written C for
+    #: all of it, exactly as every build did before any of it was ported.
+    #:
+    #: BOTH ARE SUPPORTED ARRANGEMENTS, not a migration and a legacy. The
+    #: reason to write the runtime in IR is that a backend should not HAVE to
+    #: define 229 functions; that is an argument for making the C unnecessary,
+    #: not for making it unavailable. `Backend.object_runtime` is the same
+    #: choice at the granularity of one function.
+    object_runtime: str = "ir"
 
     @property
     def effective_passes(self) -> tuple[str, ...]:
@@ -173,6 +184,22 @@ def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
         return Result()
 
     if not _verify_stage(module, sink, "the frontend"):
+        return Result()
+
+    # THE PART OF THE OBJECT RUNTIME THAT IS IR, merged in before anything
+    # downstream looks at the module. Here rather than in the frontend because
+    # it is not the frontend's: a second frontend producing the same `apy_*`
+    # calls gets the same runtime, which is the whole point of writing it in
+    # IR. And before the passes, so the runtime is optimised with everything
+    # else rather than being the one part that is not.
+    #
+    # A program that does not reach the runtime gets nothing at all -- see
+    # `objects_ir.wants_runtime`.
+    objects_ir.splice(
+        module, sink,
+        provided=getattr(selected, "object_runtime", frozenset()),
+        enabled=opts.object_runtime != "c")
+    if not _verify_stage(module, sink, "the IR runtime splice"):
         return Result()
 
     result = Result(module=module)
@@ -289,7 +316,10 @@ def _link_stage(opts: Options, result: Result, be, target: Target,
 
     runtime_sources: tuple[Path, ...] = ()
     if not be.self_contained and link_registry.needs_runtime(module):
-        runtime_sources = (link_registry.write_runtime(workdir),)
+        # THE MODULE DECIDES which `apy_*` the C still defines: whatever this
+        # program supplies in IR, the C stands aside for. See
+        # `link/objects_ir.omitted_by`.
+        runtime_sources = (link_registry.write_runtime(workdir, module=module),)
 
     request = link_registry.LinkRequest(
         artifacts=result.artifacts, target=target, output=output,

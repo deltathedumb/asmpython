@@ -156,13 +156,23 @@ PTR = MACHINE["ptr"]
 #:
 #: A program that defines its own `def load(...)` keeps it. These are looked up
 #: only after the user's own functions, exactly as `int` is.
+#: `reserve(name, size)` is the odd one out and is here because it is the
+#: fourth way to get an address: `alloca` gives frame storage that dies at the
+#: return, `plat_heap` gives heap the program asked for, a parameter gives
+#: someone else's -- and this gives STATIC storage, zeroed, with a name, for
+#: the whole run.
+#:
+#: A runtime needs it and nothing else here provides it. The small-integer
+#: cache is the motivating case: `a = 1; b = 1; a is b` is True in CPython
+#: because -5..256 are shared cells, and a cache has to outlive every call that
+#: touches it.
 MEMORY_INTRINSICS = {"alloca": 1, "load": 2, "store": 3, "offset": 2,
-                     "sizeof": 1}
+                     "sizeof": 1, "reserve": 2}
 
 #: What each yields when its arity was wrong, so one mistake makes one
 #: diagnostic instead of a cascade about the expression it sits in.
 _INTRINSIC_RESULT = {"alloca": PTR, "load": None, "store": NONE,
-                     "offset": PTR, "sizeof": INT}
+                     "offset": PTR, "sizeof": INT, "reserve": PTR}
 
 #: THE PLATFORM FLOOR, callable from the static path. Three functions -- emit
 #: bytes, stop, get memory -- and everything else a runtime needs is code that
@@ -185,6 +195,38 @@ BY_NAME = {"int": INT, "float": FLOAT, "bool": BOOL, "None": NONE,
 PLATFORM = {name: (tuple(BY_NAME[a] for a in args),
                    NONE if ret == "void" else BY_NAME[ret])
             for name, (args, ret) in _FLOOR.items()}
+
+
+def _object_runtime() -> dict:
+    """The `apy_*` runtime, callable FROM the machine subset.
+
+    THE POINT OF THIS IS TO PORT IT. `docs/INERT-RUNTIME.md` replaces the C
+    object runtime one kind at a time, and a half-ported runtime is one where
+    the ported functions call the ones that are still C -- `apy_add`'s integer
+    path is subset code, and its fallthrough for a str is not, yet. Without a
+    way to call across that line, a port would have to be all-or-nothing.
+
+    THE SIGNATURES ARE READ OUT OF THE C by `link/objects.signatures()`, the
+    same parse the frontend's own declarations come from, so this cannot
+    disagree with what a program links against. `apy_value` is `ptr` there,
+    which is why a runtime function written here takes and returns `ptr`.
+
+    A user program can reach these too. That is not a hole: a program that
+    writes `store(i64, ...)` can already do anything, and the `apy_` prefix is
+    not something anyone arrives at by accident.
+    """
+    from ...link.objects import signatures
+    out = {}
+    for name, (args, ret) in signatures().items():
+        out[name] = (tuple(BY_NAME[a] for a in args),
+                     NONE if ret == "void" else BY_NAME[ret])
+    return out
+
+
+#: Built once. `signatures()` parses 15,560 lines of C and every `Analyzer`
+#: would otherwise repeat it -- which showed up as the frontend taking longer
+#: to start than to compile.
+OBJECT_RUNTIME = _object_runtime()
 
 #: What the module's top-level statements are called internally. Not a legal
 #: Python identifier, so it can never collide with a user function -- including
@@ -868,6 +910,18 @@ def int_literal(node) -> int | None:
     return None
 
 
+def _string_literal(node) -> str | None:
+    """The text of `node` if it is a plain string literal, else None.
+
+    The static path has no string TYPE -- a str is an object and the static
+    path allocates nothing -- so this is not "evaluate an expression", it is
+    "read a name the compiler was given". `reserve` is the only user.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
 def const_int(node, shadowed=frozenset()) -> int | None:
     """An integer the COMPILER knows: a literal, `sizeof(T)`, or arithmetic
     between two of those. None if it is not one.
@@ -1132,9 +1186,14 @@ def _expr_names(node, scope: _Scope) -> None:
 class Analyzer:
     """Resolves names and assigns a type to every expression."""
 
-    def __init__(self, source: SourceFile, sink: DiagnosticSink) -> None:
+    def __init__(self, source: SourceFile, sink: DiagnosticSink, *,
+                 library: bool = False) -> None:
         self.source = source
         self.sink = sink
+        #: Compiling a RUNTIME MODULE rather than a program: definitions only,
+        #: no entry point, and every function exported because the whole point
+        #: of it is to be called from somewhere else.
+        self.library = library
         self.functions: dict[str, FunctionInfo] = {}
         #: Bound name -> the module it names. `import a.b as n` puts `n` here;
         #: `import a.b` puts `a` here mapped to "", meaning "a package root,
@@ -1148,6 +1207,10 @@ class Analyzer:
         #: Every name the module's top level binds. Set by `run`.
         self.module_names: set = set()
         #: One `ClassInfo` per `class` statement, keyed the way `functions` is.
+        #: Named static regions this module asked for, by size. See `_reserve`.
+        #: Lowering turns each into one IR global; the same name twice is one
+        #: region, which is how two functions share a cache.
+        self.reserved: dict[str, int] = {}
         self.classes: dict = {}
         #: User exception class name -> its base's name. Separate from
         #: `classes` because these are NOT type objects: `raise MyError(x)`
@@ -1701,6 +1764,19 @@ class Analyzer:
         naming a function the user never wrote.
         """
         info = self.functions.get("main")
+        # A LIBRARY HAS NO ENTRY and is not supposed to. The object runtime's
+        # ported pieces are definitions and nothing else -- they are called by
+        # a program, not run -- so "nothing to run" is the correct shape rather
+        # than the mistake it usually is. See `link/objects_ir.py`.
+        if self.library:
+            if body:
+                self.sink.report(
+                    error("E0037", "a runtime module has no top level")
+                    .at(self._span(body[0]))
+                    .note("it is compiled into other programs, so a statement "
+                          "here has no moment at which it would run")
+                    .help("put it in a function"))
+            return None
         if body:
             node = ast.Module(body=body, type_ignores=[])
             node.lineno, node.col_offset = getattr(body[0], "lineno", 1), 0
@@ -2069,6 +2145,14 @@ class Analyzer:
         assert info is not None
         self.dynamic = info.dynamic
         match node:
+            case ast.Expr(value=ast.Constant()):
+                # A BARE CONSTANT IS A NO-OP, and the one that matters is a
+                # DOCSTRING. Walking it as an expression reported "unsupported
+                # expression: Constant" for `def f() -> int: """doc"""` on the
+                # static path -- so a statically typed function could not be
+                # documented, and the diagnostic said nothing about why.
+                # Lowering already skips these; analysis did not.
+                pass
             case ast.Expr():
                 self._expr(node.value)
             case ast.Assign(targets=[ast.Name(id=name)]):
@@ -3658,6 +3742,8 @@ class Analyzer:
         if name == "sizeof":
             self._type_arg(node.args[0], name)
             return INT
+        if name == "reserve":
+            return self._reserve(node)
         if name == "alloca":
             # A COMPILE-TIME CONSTANT, because `Op.ALLOCA` carries its size in
             # an immediate: frame storage is laid out before the function runs
@@ -3699,6 +3785,12 @@ class Analyzer:
                 "the element size where it is written")
         return PTR
 
+    def _runtime_call(self, name: str, node: ast.Call) -> SemType:
+        """A call into the `apy_*` object runtime. See `_object_runtime`."""
+        return self._declared_call(name, OBJECT_RUNTIME[name], node,
+                                   "it is part of the object runtime -- see "
+                                   "link/objects.py for what it does")
+
     def _platform_call(self, name: str, node: ast.Call) -> SemType:
         """`plat_write`, `plat_exit`, `plat_heap` -- the whole platform floor.
 
@@ -3706,14 +3798,21 @@ class Analyzer:
         what it is: the signature comes from `link/platform.py` instead of from
         a `def` in this module, and nothing else about it is special.
         """
-        params, ret = PLATFORM[name]
+        return self._declared_call(
+            name, PLATFORM[name], node,
+            "it is the platform floor -- see link/platform.py for what each "
+            "argument means")
+
+    def _declared_call(self, name: str, signature, node: ast.Call,
+                       note: str) -> SemType:
+        """One call to a function declared outside this module."""
+        params, ret = signature
         if len(node.args) != len(params):
             self.sink.report(
                 error("E0053", f"{name}() takes {len(params)} argument(s), "
                                f"got {len(node.args)}")
                 .at(self._span(node))
-                .note("it is the platform floor -- see link/platform.py for "
-                      "what each argument means"))
+                .note(note))
             for a in node.args:
                 self._expr(a)
             return ret
@@ -3722,6 +3821,50 @@ class Analyzer:
             self._check_assignable(got, want, arg,
                                    what=f"argument to {name}()", value=arg)
         return ret
+
+    def _reserve(self, node: ast.Call) -> SemType:
+        """`reserve("name", bytes)` -> the address of named static storage.
+
+        BOTH ARGUMENTS ARE COMPILE-TIME. The name becomes an IR global's
+        symbol, so it cannot be computed; the size becomes that global's, so it
+        cannot either. Being able to write it anywhere -- rather than only in
+        some module-level declaration section -- is what keeps the region's
+        definition next to the code that reads it.
+
+        Two `reserve`s with the same name are the SAME storage, which is the
+        point: two functions share a cache by naming it. With different sizes
+        they are a mistake, and one that would otherwise show up as whichever
+        of them the emitter happened to see second.
+        """
+        text = _string_literal(node.args[0])
+        size = const_int(node.args[1], self.functions)
+        self._expr(node.args[1])
+        if text is None or not text.isidentifier():
+            self.sink.report(
+                error("E0035", "reserve() needs a literal name")
+                .at(self._span(node.args[0]))
+                .note("it becomes the symbol of a global, so it has to be "
+                      "an identifier known at compile time")
+                .help('e.g. reserve("small_ints", 2096)'))
+            return PTR
+        if size is None or size <= 0:
+            self.sink.report(
+                error("E0018", "reserve() needs a positive size the "
+                               "compiler can work out")
+                .at(self._span(node.args[1]),
+                    "not a constant" if size is None else str(size)))
+            return PTR
+        seen = self.reserved.get(text)
+        if seen is not None and seen != size:
+            self.sink.report(
+                error("E0036", f"{text!r} is reserved twice, as {seen} bytes "
+                               f"and as {size}")
+                .at(self._span(node))
+                .note("two reserves of one name are one region, so the sizes "
+                      "have to agree"))
+            return PTR
+        self.reserved[text] = size
+        return PTR
 
     def _type_arg(self, node, name: str) -> SemType:
         """The type argument of `load`/`store`/`sizeof`, read as a TYPE.
@@ -3898,6 +4041,8 @@ class Analyzer:
             return self._memory_intrinsic(name, node)
         if name in PLATFORM and name not in self.functions:
             return self._platform_call(name, node)
+        if name in OBJECT_RUNTIME and name not in self.functions:
+            return self._runtime_call(name, node)
         info = self.functions.get(name)
         if info is None:
             if name in _NEEDS_A_COMPILER:

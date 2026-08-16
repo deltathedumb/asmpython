@@ -15550,11 +15550,65 @@ def signatures() -> dict:
     return out
 
 
-def objects_c(*, static: bool = False) -> str:
+def objects_c(*, static: bool = False, omit: tuple[str, ...] = ()) -> str:
     """The object runtime's C source, with its storage class chosen.
 
     `static` for the C backend, whose output is one self-contained translation
     unit; external for the linked runtime, where the IR's calls have to resolve
     across object files.
+
+    `omit` names functions that are DEFINED IN IR INSTEAD -- the ported half of
+    `docs/INERT-RUNTIME.md`. Keeping both definitions is a duplicate symbol at
+    link time, so the C one gives way; see `_declare_only`.
     """
-    return _WITH_TABLE.replace(_API_TOKEN, "static" if static else "")
+    text = _WITH_TABLE
+    if omit:
+        text = _declare_only(text, omit)
+    return text.replace(_API_TOKEN, "static" if static else "")
+
+
+def _declare_only(text: str, names: tuple[str, ...]) -> str:
+    """Replace each named function's DEFINITION with a declaration.
+
+    Not a deletion. Fifteen thousand lines of C call these, and C wants a
+    declaration in scope before a call -- so removing `apy_from_int` outright
+    makes every caller an implicit declaration returning `int`, which on this
+    ABI reads the wrong register and produces a plausible wrong number rather
+    than an error.
+
+    Brace-matched from the opening `{` rather than pattern-matched to the end,
+    because the bodies are ordinary C with nested blocks and strings. Anything
+    it cannot find is raised rather than skipped: a name silently not omitted
+    is a duplicate symbol at LINK time, which names an object file instead of
+    this list.
+    """
+    for name in names:
+        at = -1
+        while True:
+            at = text.find(f" {name}(", at + 1)
+            if at < 0:
+                raise KeyError(f"{name} is not defined in the object runtime")
+            line_start = text.rfind("\n", 0, at) + 1
+            # `APY_API`, the macro, is what marks a PUBLIC definition -- the
+            # token `@APY_API@` is only its expansion at the `#define`. A
+            # `static` helper with the same suffix in its name must not match.
+            if text.startswith("APY_API ", line_start):
+                break
+        open_brace = text.find("{", at)
+        semicolon = text.find(";", at)
+        if open_brace < 0 or (0 <= semicolon < open_brace):
+            raise KeyError(f"{name} is declared but not defined; nothing to omit")
+        depth, i = 0, open_brace
+        while i < len(text):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        if depth != 0:
+            raise KeyError(f"{name}'s body is not brace-balanced")
+        text = (text[:open_brace] + ";    /* defined in IR: runtime/ */"
+                + text[i + 1:])
+    return text

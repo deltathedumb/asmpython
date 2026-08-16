@@ -338,7 +338,7 @@ _ENTRY_TOKEN = "@ENTRY@"
 from ..backend.base import ENTRY_SYMBOL  # noqa: E402
 
 
-def runtime_c(*, entry: str = ENTRY_SYMBOL) -> str:
+def runtime_c(*, entry: str = ENTRY_SYMBOL, module=None) -> str:
     """The complete linked runtime, ready to compile.
 
     Every consumer goes through this rather than substituting the placeholders
@@ -351,16 +351,19 @@ def runtime_c(*, entry: str = ENTRY_SYMBOL) -> str:
     `py_repr_double` and `py_pow_int`, and C wants a definition in scope.
     """
     from .objects import objects_c
+    from .objects_ir import omitted_by
     return (RUNTIME_C.replace("@HOST@", host_functions())
-            .replace("@OBJECTS@", objects_c())
+            .replace("@OBJECTS@", objects_c(omit=omitted_by(module)))
             .replace(_ENTRY_TOKEN, entry))
 
 
-def write_runtime(directory: Path, *, entry: str = ENTRY_SYMBOL) -> Path:
+def write_runtime(directory: Path, *, entry: str = ENTRY_SYMBOL,
+                  module=None) -> Path:
     """Write the runtime C file into `directory` and return its path."""
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "asmpython_runtime.c"
-    path.write_text(runtime_c(entry=entry), encoding="utf-8")
+    path.write_text(runtime_c(entry=entry, module=module),
+                    encoding="utf-8")
     return path
 
 

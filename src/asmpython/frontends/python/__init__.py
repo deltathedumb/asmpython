@@ -144,7 +144,8 @@ class PythonFrontend(Frontend):
     extensions = (".py",)
     description = "statically-annotated Python subset"
 
-    def compile(self, source: SourceFile, sink: DiagnosticSink) -> Module | None:
+    def compile(self, source: SourceFile, sink: DiagnosticSink, *,
+                library: bool = False) -> Module | None:
         try:
             tree = ast.parse(source.text, filename=source.name)
         except SyntaxError as exc:
@@ -178,14 +179,14 @@ class PythonFrontend(Frontend):
         if stringify:
             _Stringify().visit(tree)
 
-        analyzer = Analyzer(source, sink)
+        analyzer = Analyzer(source, sink, library=library)
         functions = analyzer.run(tree)
         if sink.failed:
             # Lowering assumes analysis succeeded. Running it anyway would
             # produce IR that fails the verifier, and the user would see an
             # internal-error report on top of the real diagnostics.
             return None
-        return Lowerer(functions, source, analyzer).run()
+        return Lowerer(functions, source, analyzer, library=library).run()
 
     @staticmethod
     def _syntax_error(source: SourceFile, exc: SyntaxError):

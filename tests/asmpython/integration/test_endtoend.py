@@ -47,9 +47,22 @@ _HOST_TARGET_NAME = ("x86_64-windows" if sys.platform == "win32"
 #: this one did -- it kept printing floats with `%f` after the real runtime
 #: moved to Python's repr, so every float program "failed" against an oracle
 #: that agreed with nothing.
-def _runtime_c(entry: str) -> str:
+def _runtime_c(entry: str, module=None) -> str:
+    """The shipped runtime, for a link this test builds by hand.
+
+    THE MODULE IS NOT OPTIONAL IN PRACTICE. Part of the object runtime is
+    written in asmpython's own subset and compiled into the program
+    (`link/objects_ir.py`), and the C stands aside for exactly the definitions
+    a given module supplies. A runtime built without being told what the
+    program has is the C's `apy_from_int` next to the IR's:
+
+        multiple definition of `apy_from_int'
+
+    The pipeline passes it; a test assembling its own link has to as well,
+    which is the same trap this file's header already warns about one level up.
+    """
     from asmpython.link.runtime import runtime_c
-    return runtime_c(entry=entry)
+    return runtime_c(entry=entry, module=module)
 
 PROGRAMS = {
     "arithmetic": """
@@ -698,7 +711,7 @@ class TestAgreement:
         s_file = tmp_path / "out.s"
         s_file.write_bytes(asm)
         rt = tmp_path / "rt.c"
-        rt.write_text(_runtime_c("main_ir"), encoding="utf-8")
+        rt.write_text(_runtime_c("main_ir", module), encoding="utf-8")
         exe = tmp_path / "out.exe"
         built = subprocess.run([HAS_CC, str(s_file), str(rt), "-o", str(exe)],
                                capture_output=True, text=True)

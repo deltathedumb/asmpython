@@ -36,7 +36,7 @@ from ...ir.module import Global, Instruction, Linkage
 from ...ir.opcodes import Op
 from .analysis import (
     BOOL, ENTRY_NAME, FLOAT, INT, MACHINE, MEMORY_INTRINSICS, NONE, OBJ,
-    PLATFORM, FunctionInfo, SemType,
+    OBJECT_RUNTIME, PLATFORM, FunctionInfo, SemType,
     TO_IR, sem_type,
     const_int, int_literal, span_of,
 )
@@ -124,11 +124,15 @@ def _is_plain_symbol(name: str) -> bool:
 
 class Lowerer(DynamicLowering):
     def __init__(self, functions: dict[str, FunctionInfo],
-                 source: "SourceFile", analyzer=None) -> None:
+                 source: "SourceFile", analyzer=None, *,
+                 library: bool = False) -> None:
         self.infos = functions
+        self.library = library
         #: Java string literal -> the global holding its UTF-8 bytes. One
         #: global per distinct literal, so `setName("stone")` twice costs one.
         self.java_strings: dict[str, str] = {}
+        #: `reserve` names already given a global. See `_memory`.
+        self.reserved: set[str] = set()
         self.source = source
         #: What the `class` statements bound, and the two node-id indexes that
         #: get from a statement back to what analysis registered for it.
@@ -323,8 +327,13 @@ class Lowerer(DynamicLowering):
     def _function(self, info: FunctionInfo) -> Function:
         is_entry = (info.name == ENTRY_NAME
                     or (ENTRY_NAME not in self.infos and info.name == "main"))
+        # A RUNTIME MODULE EXPORTS EVERYTHING. Its functions exist to be called
+        # from a program compiled separately -- and for a machine backend that
+        # links against the C object runtime, `apy_from_int` has to be a real
+        # global symbol or the C's callers cannot reach it.
         fn = Function(self.symbols[info.name], TO_IR[info.ret],
-                      linkage=Linkage.EXPORT if is_entry else Linkage.INTERNAL)
+                      linkage=Linkage.EXPORT if (is_entry or self.library)
+                      else Linkage.INTERNAL)
         self.info, self.fn = info, fn
         self.b = Builder(fn)
         #: (continue-target, break-target) per enclosing loop. `continue` in a
@@ -1044,8 +1053,12 @@ class Lowerer(DynamicLowering):
         if name in MEMORY_INTRINSICS and name not in self.infos:
             return self._memory(name, node)
 
-        if name in PLATFORM and name not in self.infos:
-            params, ret = PLATFORM[name]
+        # The platform floor and the object runtime: both are calls to symbols
+        # declared elsewhere, and neither needs anything the other does not.
+        declared = (PLATFORM.get(name) if name not in self.infos else None) \
+            or (OBJECT_RUNTIME.get(name) if name not in self.infos else None)
+        if declared is not None:
+            params, ret = declared
             args = [self._coerce(self._expr(a), self._type_of(a), want)
                     for a, want in zip(node.args, params)]
             result = self.b.call(TO_IR[ret], name, args)
@@ -1077,6 +1090,20 @@ class Lowerer(DynamicLowering):
             return self.b.const(TO_IR[ty] if ty.is_machine else T.I64, size)
         if name == "alloca":
             return self.b.alloca(const_int(node.args[0], self.infos))
+        if name == "reserve":
+            # ONE GLOBAL PER NAME, zeroed. Recorded here rather than declared
+            # up front because analysis already checked that two reserves of a
+            # name agree about the size, so the first one to be lowered decides
+            # and the rest are the same region.
+            symbol = node.args[0].value
+            if symbol not in self.reserved:
+                self.reserved.add(symbol)
+                self.module.globals.append(Global(
+                    name=symbol, size=const_int(node.args[1], self.infos)))
+            out = self.b.reg(T.PTR)
+            self.b.emit(Instruction(Op.GLOBAL_ADDR, T.PTR, dst=out,
+                                    sym=symbol))
+            return out
         if name == "load":
             return self.b.load(TO_IR[self._type_arg(node.args[0])],
                                self._expr(node.args[1]))

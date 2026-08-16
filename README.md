@@ -28,6 +28,8 @@ src/asmpython/
   backend(s)/    IR -> artifacts      (c; x86-64; arm64; jvm)
   target(s)/     the platforms        (x86_64-*, aarch64-*, c, jvm)
   link/          artifacts -> program (cc; jar; baremetal; none)
+  runtime/       the object runtime, in asmpython's own machine subset --
+                 compiled into every program that needs it, not imported
   plugins/       third-party registrations: manifest, resolution, install
   driver/        options, pipeline, command line
 ```

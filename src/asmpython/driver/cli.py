@@ -65,6 +65,7 @@ def _options(args) -> Options:
         time_passes=getattr(args, "time_passes", False),
         max_errors=getattr(args, "max_errors", 100),
         warnings_are_errors=getattr(args, "werror", False),
+        object_runtime=getattr(args, "object_runtime", "ir"),
     )
 
 
@@ -543,6 +544,16 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--verify-each", action="store_true",
                        help="verify after every pass; names the pass that broke it")
         p.add_argument("--time-passes", action="store_true")
+        # WHERE THE OBJECT RUNTIME COMES FROM. Part of it is written in
+        # asmpython's own machine subset and compiled in (`link/objects_ir.py`);
+        # `c` uses the hand-written C for all of it, as every build did before
+        # any of it was ported. Both are supported: the reason to write it in
+        # IR is that a backend should not HAVE to define 229 functions, which
+        # is an argument for making the C unnecessary rather than unavailable.
+        p.add_argument("--object-runtime", choices=("ir", "c"), default="ir",
+                       help="ir: compile the ported runtime from source and "
+                            "splice it in (default); c: use the C runtime for "
+                            "all of it")
 
     b = sub.add_parser("build", help="compile to backend artifacts")
     source_args(b)

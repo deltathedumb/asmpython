@@ -237,6 +237,11 @@ class Interpreter:
         else:
             self.out.write(s)
 
+    def _objects_own(self, name: str) -> bool:
+        """Whether the host object runtime implements `name`. See `_call`."""
+        from .objects_host import _TABLE
+        return name in _TABLE
+
     def _plat_write(self, fd: int, addr: int, n: int) -> int:
         """`plat_write(fd, buf, n)`. Returns bytes written, or -1.
 
@@ -295,6 +300,25 @@ class Interpreter:
 
     def _call(self, fn: Function, args: list):
         if fn.external:
+            return self._host(fn.name, args)
+        if fn.name.startswith("apy_") and self._objects_own(fn.name):
+            # THE HOST OBJECT RUNTIME OWNS EVERY `apy_*` NAME IT CLAIMS, even
+            # when the module also DEFINES one -- which it now can, because
+            # part of the runtime is compiled from `runtime/*.py` and spliced
+            # in (`link/objects_ir.py`).
+            #
+            # The two cannot be mixed, and this is the reason rather than a
+            # preference: `objects_host.py` represents an `apy_value` as a
+            # HANDLE into a Python-side table, and the ported code represents
+            # it as an ADDRESS in this interpreter's flat memory. A ported
+            # `apy_from_int` therefore hands back something every unported
+            # function rejects -- observed as `apy_is: 2248 is not a runtime
+            # value handle`, which names neither runtime.
+            #
+            # So the port is NOT incremental on this path. The interpreter
+            # keeps the host runtime until enough is ported to switch all at
+            # once, and until then it is the ORACLE the compiled paths are
+            # measured against, which is what the corpus is for.
             return self._host(fn.name, args)
         fr = Frame(fn, frame_base=self.mem.brk)
         for reg, val in zip(fn.params, args):

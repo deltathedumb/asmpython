@@ -1,15 +1,15 @@
 # The Python frontend
 
 `frontends/python` compiles Python. Programs that compile run the same under
-CPython — that is the test suite's actual definition, and CPython is the oracle
+CPython â€” that is the test suite's actual definition, and CPython is the oracle
 for every one of them.
 
 There are TWO PATHS, and which one a function takes is decided by its
 annotations:
 
 * **Statically typed.** A function whose every parameter is annotated with
-  `int`, `float`, `bool` or `None` keeps machine representations — an `int` is
-  a 64-bit register, a `float` an xmm register — and nothing is allocated.
+  `int`, `float`, `bool` or `None` keeps machine representations â€” an `int` is
+  a 64-bit register, a `float` an xmm register â€” and nothing is allocated.
 * **Dynamic.** The module's top-level statements, any function with an
   unannotated or `object`-annotated parameter. Every value is a runtime object
   carrying its own type, and every operation is a call into the object runtime
@@ -22,7 +22,7 @@ what stops a value's representation depending on the slot it was stored in.
 
 ## What runs
 
-The module's top-level statements, exactly as in Python — a file is a script,
+The module's top-level statements, exactly as in Python â€” a file is a script,
 and running it runs what is written at the top level.
 
 ```python
@@ -49,7 +49,7 @@ def main() -> int:
 ```
 
 `bool` widens to `int` and `int` to `float`, as Python's numeric tower does.
-**Nothing narrows implicitly** — losing precision silently is how a program
+**Nothing narrows implicitly** â€” losing precision silently is how a program
 computes the wrong answer without ever failing:
 
 ```python
@@ -64,10 +64,10 @@ lowered to several instructions, once, here.
 
 | | Python | the machine | 
 |---|---|---|
-| `//` | floors toward −∞ | truncates toward zero |
+| `//` | floors toward âˆ’âˆž | truncates toward zero |
 | `%` | takes the divisor's sign | takes the dividend's |
-| `and`/`or` | yield an **operand**, and short-circuit | — |
-| `a < b < c` | evaluates `b` once | — |
+| `and`/`or` | yield an **operand**, and short-circuit | â€” |
+| `a < b < c` | evaluates `b` once | â€” |
 
 ```python
 -7 // 2    # -4, not -3
@@ -113,7 +113,7 @@ dynamic one. Iteration is BY INDEX -- there is no iterator protocol, so the
 length is read once before the first pass and a body that appends to the
 sequence it is walking will differ from CPython.
 
-`range` in a `for` header takes 1–3 arguments and lowers to a counter loop with
+`range` in a `for` header takes 1â€“3 arguments and lowers to a counter loop with
 no allocation. **A three-argument `range` needs a literal step**,
 because the step's sign decides whether the loop test is `<` or `>`:
 
@@ -125,7 +125,7 @@ for i in range(5, 0, s):    # error[E0028]: step must be a literal
 ```
 
 Accepting a runtime step would mean picking one comparison and being silently
-wrong about the other — every descending loop running zero times and reporting
+wrong about the other â€” every descending loop running zero times and reporting
 success.
 
 ## A name must be assigned on every path
@@ -149,7 +149,7 @@ print(x)            # every path here assigned x
 ```
 
 A loop body may run zero times, so neither the loop variable nor anything the
-body assigns counts as assigned afterwards — `for i in range(0): pass` then
+body assigns counts as assigned afterwards â€” `for i in range(0): pass` then
 `print(i)` is an error here and an `UnboundLocalError` in Python.
 
 ## Expressions
@@ -172,9 +172,9 @@ and it gets it wrong loudly, with a `NameError`.
 branch.
 
 `print` takes any number of arguments, separates them with a space and ends
-with a newline, as Python does — `print()` is an empty line.
+with a newline, as Python does â€” `print()` is an empty line.
 
-Augmented assignment (`+=`, `//=`, `**=`, `<<=`, …) is checked as the
+Augmented assignment (`+=`, `//=`, `**=`, `<<=`, â€¦) is checked as the
 operation it stands for, so every rule below applies to it too.
 
 `**` needs a **non-negative integer literal** exponent:
@@ -185,11 +185,11 @@ x ** n      # error[E0043]: needs a literal integer exponent
 x ** -1     # error[E0044]: negative exponents are float-valued
 ```
 
-Python's `**` is not one operation — `2 ** 10` is an int, `2 ** -1` is the
+Python's `**` is not one operation â€” `2 ** 10` is an int, `2 ** -1` is the
 float `0.5`. A statically typed expression cannot be both, and a runtime
 exponent would force a guess.
 
-`int()`, `float()` and `bool()` are conversions, not calls — they lower to a
+`int()`, `float()` and `bool()` are conversions, not calls â€” they lower to a
 coercion or to nothing. `bool(x)` is `x != 0`; a narrowing cast would make
 `bool(2)` false. A program that defines its own function with one of these
 names shadows the conversion.
@@ -251,7 +251,7 @@ Integers are arbitrary precision.
 
 Comprehensions, f-strings, default arguments, keyword arguments and `*args`
 ARE supported on the dynamic path. Default values are evaluated ONCE, where
-the `def` runs, so `def f(xs=[])` shares one list across calls — which is
+the `def` runs, so `def f(xs=[])` shares one list across calls â€” which is
 Python's behaviour and the thing an implementation is most tempted to
 "fix".
 
@@ -262,7 +262,7 @@ length once, so a loop that appends to the sequence it is walking differs from
 CPython.
 
 Each produces a diagnostic with a code. **The compiler never raises on Python
-it does not support** — a result or a diagnostic, never a traceback. That is
+it does not support** â€” a result or a diagnostic, never a traceback. That is
 enforced by a test that feeds 42 unsupported constructs at the whole pipeline.
 
 ## Where static typing shows
@@ -278,21 +278,21 @@ converted:
 True or 2           # Python: True     here: 1
 ```
 
-The values are equal — `0 == 0.0` and `True == 1` — and only the type, and so
+The values are equal â€” `0 == 0.0` and `True == 1` â€” and only the type, and so
 the printed form, differs. That is what "every expression has one static type"
 means, and the alternative is carrying a tag at runtime.
 
 **On the dynamic path all three print what CPython prints**, because there the
 value does carry a tag and `and` really does yield an operand. So the same
 source can print `0` at module level and `0.0` inside a fully annotated
-function — which is a genuine wart, and the honest description of it is that
+function â€” which is a genuine wart, and the honest description of it is that
 the static path is a subset with its own rules rather than an optimisation of
 the dynamic one.
 
 ## Floats print exactly as CPython prints them
 
 `print` of a float is the shortest decimal string that reads back as the same
-double, with Python's choice of fixed or exponent notation — not C's `%f`, and
+double, with Python's choice of fixed or exponent notation â€” not C's `%f`, and
 not `%g` either, whose notation threshold moves with the digit count and
 disagrees for values like `12345678901234567.0`.
 
@@ -360,6 +360,9 @@ The full set the frontend can emit:
 | `E0032` | a name used before it is assigned on every path |
 | `E0033` | a `ptr` made from something that is not an integer address |
 | `E0034` | a `ptr` converted to something that is not 64 bits wide |
+| `E0035` | `reserve()` without a literal name |
+| `E0036` | one `reserve()` name given two different sizes |
+| `E0037` | a top-level statement in a runtime module, which never runs |
 | `E0040` | an unsupported expression |
 | `E0041` | an operator applied to non-numbers |
 | `E0042` | a bitwise operator applied to a float |
