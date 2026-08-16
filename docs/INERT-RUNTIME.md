@@ -14,6 +14,35 @@ Exactly one does. `backends/jvm/emit.py:49` says so in its own words:
 So the JVM backend compiles annotated Python and refuses the language. Done is:
 `--backend jvm` runs the conformance suite.
 
+## Where this stands
+
+**Stages 1 to 4 are done and measured. Stages 5 and 6 are not started.**
+
+| | | |
+| --- | --- | --- |
+| 1 | the machine subset | widths and memory in the static path |
+| 2 | the platform floor | **3 functions**, down from 5, and none language-aware |
+| 3 | the integer cell | construction, and arithmetic as a split |
+| 4 | the allocator | every object in a program, from one arena in the subset |
+| 5 | kind by kind | **not started** -- read "What stage 5 has to solve first" |
+| 6 | delete the C | not started; and see the note on `objects_host.py` below |
+
+Each stage is recorded below in a "What stage N landed" section, including what
+it could NOT do, which twice turned out to be the more useful half.
+
+**The headline number has moved for the subset and not yet for the language.**
+A backend compiling the statically typed subset owes three functions instead of
+five, and none of the three knows what a Python value is. A backend compiling
+DYNAMIC Python still owes 229 minus the six now written in IR -- the mechanism
+to move the rest exists, is measured, and is the whole of stage 5.
+
+**What the C runtime is now: still supported, no longer required.** That
+distinction is the point of the whole exercise. `--object-runtime c` uses the
+hand-written C for all of it, exactly as every build did before any of this,
+and `Backend.object_runtime` is the same choice one function at a time. Both
+are tested, because an untested opt-out stops working the first time the ported
+set grows -- and it grows every stage from here.
+
 ## What exists now, and how many times
 
 | | lines | language | consumed by |
@@ -96,25 +125,45 @@ circularity that kills the obvious version of "write it in Python". A runtime
 written in the STATIC subset needs nothing but the machine, so there is no
 floor to stand on that is not already there.
 
-What has to be added to the static path:
+What has to be added to the static path, and what became of each:
 
-* the machine types as annotations -- `i8 i16 i32 i64 u8 u16 u32 u64 f32 f64
-  ptr`, which the IR already has and `analysis.BY_NAME` does not expose
-* memory intrinsics lowering straight to IR ops: `load`, `store`, `offset`,
-  `alloca`, and `sizeof`-style constants
-* `func_addr`/`call_ptr` for the dispatch tables the runtime uses (18
-  function-pointer types in the C today)
-* module-level mutable storage -- `global_addr` exists in the IR; the static
-  path does not surface it
+* **DONE** (stage 1) the machine types as annotations -- `i8 i16 i32 i64 u8 u16
+  u32 u64 f32 f64 ptr`, which the IR already has and `analysis.BY_NAME` did not
+  expose
+* **DONE** (stage 1) memory intrinsics lowering straight to IR ops: `load`,
+  `store`, `offset`, `alloca`, and `sizeof`-style constants
+* **NOT YET** `func_addr`/`call_ptr` for the dispatch tables the runtime uses
+  (18 function-pointer types in the C today). Deferred three times, honestly
+  each time: laying out an object does not need them and dispatching on one
+  does, so they land before classes and generators and after the kinds that
+  dispatch on a tag.
+* **DONE** (stage 3) module-level mutable storage. `global_addr` existed in the
+  IR; the static path now surfaces it as `reserve(name, bytes)` -- static,
+  zeroed, for the whole run, which is what a cache needs and what `alloca`, a
+  parameter and `plat_heap` between them could not give.
 
-None of it is new IR. All of it is surfacing IR the backends already lower.
+None of it is new IR. All of it is surfacing IR the backends already lower --
+which held: not one opcode was added for any of stages 1 to 4.
 
-### And it deletes `objects_host.py`
+### And it deletes `objects_host.py` -- but not the way this said
 
-This is the argument that decides it. If the runtime is IR, the IR interpreter
+This was the argument that decided it. If the runtime is IR, the IR interpreter
 runs THE SAME RUNTIME the C backend runs. `ir/objects_host.py`'s 8,583 lines
 stop existing, and every drift class listed above becomes structurally
 impossible rather than something a corpus has to keep catching.
+
+**The conclusion holds and the schedule does not, and stage 3 is where that was
+found.** The sentence above quietly assumes the deletion is incremental -- port
+a function, the interpreter picks it up, the host copy of that function stops
+being reached. It is not. `objects_host.py` represents an `apy_value` as a
+HANDLE into a Python-side table and the ported code represents one as an
+ADDRESS, so the two cannot be mixed at all: a ported `apy_from_int` hands back
+something every unported function rejects.
+
+So `objects_host.py` goes in ONE STEP, at stage 6, once every kind it claims is
+ported -- and until then the interpreter keeps it and is the ORACLE the compiled
+paths are measured against. That is a better arrangement than the one intended
+here, and it was not designed; see "What stage 3 landed".
 
 ## The platform floor
 
@@ -383,7 +432,7 @@ and the reason. The compensation is real: the interpreter stays an ORACLE, so
 the corpus compares ported against unported on every program it runs, which is
 a sharper test than having both paths run the same code.
 
-### What it cost
+### What stage 3 cost
 
 * **A docstring was `unsupported expression: Constant` on the static path.**
   Lowering skipped bare constants; analysis did not. Pre-existing -- the
@@ -412,26 +461,56 @@ inside itself, anything the wrapper appends survives the drop. The C backend
 shrugs; the JVM backend checks every external against what it can define and
 refuses. Worth knowing before reading a JVM failure as a regression.
 
-## Constraints carried in
+## What stages 3b and 4 landed
 
-* `conformance/cases/` is never edited. It is the oracle.
-* `archived/legacy/` is not touched. It is not part of 3.14.
-* `python -m tests.harness`, not pytest.
-* Never two heavy measurements at once -- they produce failures that are not in
-  the code. See TODO.md, "Concurrent runs make the suite lie".
-* A conformance measurement is a CHECKPOINT, not a check. Work in the cheap
-  loops: the IR interpreter needs no C compiler at all (~2s), a frontend-only
-  `compile_source(...).ok` is a tenth of a second, and the corpus is ~2.5
-  minutes for three execution paths.
-* What must not regress: **1668/1668** on spec+cpython, the 429-case multi-path
-  corpus, and the unit and integration suites.
-* MEASURE A COMMIT, NOT A WORKING TREE. The conformance harness freezes `src/`
-  before it starts (`tests/harness/snapshot.py`), so a run started before an
-  edit scores the tree as it was -- which is the behaviour you want, and is
-  also how a number gets attributed to the wrong work. Stage 2 was measured on
-  a detached worktree at HEAD for that reason, and because the working tree
-  held unrelated uncommitted changes that would otherwise have been in the
-  number.
+### The split, which is how every remaining kind arrives
+
+`apy_add` is polymorphic over eighteen kinds, so porting it whole means porting
+all of them -- the all-or-nothing this document exists to avoid. So the C body
+is RENAMED and the name is left to the IR (`link/objects.split_c`):
+
+    APY_API apy_value apy_add(apy_value, apy_value);            <- IR
+    APY_API apy_value apy_add_slow(apy_value a, apy_value b){   <- the C
+
+The subset answers `int x int` and hands back everything else. **Only the
+definition is renamed**, so the runtime's own hundred-odd `apy_add(...)` calls
+enter the fast path too -- a port that accelerated only the frontend's calls
+would leave most of the work where it was.
+
+A FAST PATH MAY DECLINE; IT MAY NOT ANSWER WRONGLY. Overflow is exact for add
+and sub. For mul it is deliberately conservative: the exact test divides the
+product back, and division here is PYTHON's, which floors, so it would be wrong
+for negative operands in a way that shows on only some of them. Two 32-bit
+operands cannot overflow a 64-bit product, which is a test with no division in
+it and no signedness to get wrong.
+
+### One allocator, and why a bump pointer is enough
+
+`apy_alloc` in the C is now a four-line wrapper around `apy_obj_alloc`, which
+`runtime/arena.py` defines -- so **every object in a compiled program**, the C
+runtime's and the ported code's alike, comes from one place. A `malloc` per
+cell became a pointer increment, and the platform floor is hit once per
+megabyte rather than once per integer, which is what stage 2's three-function
+claim needed to survive contact with real programs.
+
+**It is only correct because nothing frees a cell, and that was checked.** Of
+the 51 `free()` calls in the C runtime, every one releases a BUFFER -- a list's
+item array, a formatting scratch, a split's parts -- and not one releases an
+`apy_obj`. A test says so and is what notices if it stops being true.
+
+### What stages 3b and 4 cost
+
+* **`apy_cell_new` was already taken** -- it is the CLOSURE-CELL constructor --
+  and a blanket rename hit both, reproducing the collision under a new name.
+  Renamed only the three occurrences the split introduced, each identified by
+  its signature rather than by its name.
+* **`_declare_only` stopped at a forward declaration** and reported "declared
+  but not defined" about a function defined thirty lines below.
+* **Two signature tables had drifted.** Lowering parsed the C itself instead of
+  reading analysis's table, so a call the analyser accepted was lowered with
+  nothing declaring it: `call to unknown function 'apy_mul_slow'`.
+* **The runtime had to become ONE compilation unit**, because its files call
+  each other and per-file compilation made every cross-file call unknown.
 
 ## Measured
 
@@ -458,6 +537,27 @@ And stage 4 widens that from integers to everything: `apy_alloc` is the only
 place objects come from, so a full-marks run means **every object in all 1,668
 programs** was handed out by the arena in `runtime/arena.py`, and every integer
 `+`, `-` and `*` entered the subset's fast path before reaching any C.
+
+## Constraints carried in
+
+* `conformance/cases/` is never edited. It is the oracle.
+* `archived/legacy/` is not touched. It is not part of 3.14.
+* `python -m tests.harness`, not pytest.
+* Never two heavy measurements at once -- they produce failures that are not in
+  the code. See TODO.md, "Concurrent runs make the suite lie".
+* A conformance measurement is a CHECKPOINT, not a check. Work in the cheap
+  loops: the IR interpreter needs no C compiler at all (~2s), a frontend-only
+  `compile_source(...).ok` is a tenth of a second, and the corpus is ~2.5
+  minutes for three execution paths.
+* What must not regress: **1668/1668** on spec+cpython, the 429-case multi-path
+  corpus, and the unit and integration suites.
+* MEASURE A COMMIT, NOT A WORKING TREE. The conformance harness freezes `src/`
+  before it starts (`tests/harness/snapshot.py`), so a run started before an
+  edit scores the tree as it was -- which is the behaviour you want, and is
+  also how a number gets attributed to the wrong work. Stage 2 was measured on
+  a detached worktree at HEAD for that reason, and because the working tree
+  held unrelated uncommitted changes that would otherwise have been in the
+  number.
 
 ## What stage 5 has to solve first, and it is not a kind
 
