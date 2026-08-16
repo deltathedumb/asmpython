@@ -73,6 +73,11 @@ nasm*.txt
 # matters for files not already tracked; .gitignore does not affect those.)
 !/tests/cases/*.py
 !/tests/cases_fail/*.py
+# AND A CHANGELOG, which is the same trap and cost the same way: the root
+# `CHANGELOG.md` predates the rule and is tracked, so nothing looked wrong,
+# while `archived/docs/CHANGELOG.md` -- 395 lines of it -- could not be added
+# by any `git add` and reported nothing when one was tried.
+!**/CHANGELOG.md
 
 # Unit test artifacts
 hi.txt
