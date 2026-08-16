@@ -15,9 +15,10 @@ asmpython = "asmpython.driver.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.pytest.ini_options]
-testpaths = ["tests/asmpython"]
-pythonpath = ["src"]
+# The suite runs through `python -m tests.harness` -- see
+# `tests/harness/README.md` for why this project has a runner of its own. The
+# short version: its failures are diffs between four execution paths, and it
+# is subprocess-bound enough to parallelise almost linearly.
 
 [tool.ruff]
 line-length = 88

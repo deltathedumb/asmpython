@@ -8,6 +8,7 @@ another.
 asmpython build prog.py                   # -> prog.exe, ready to run
 asmpython build prog.py -O                # optimise first
 asmpython build prog.py --backend x86-64 --target x86_64-linux
+asmpython build prog.py --backend jvm --java-version 21   # -> prog.jar
 asmpython build prog.py --emit            # artifacts only; do not link
 asmpython build prog.py --emit-ir         # stop at the IR and read it
 asmpython run prog.py                     # execute in the reference interpreter
@@ -24,9 +25,9 @@ src/asmpython/
                  parser, interpreter
   passes/        pass manager with invariant checking, and transforms
   frontend(s)/   source -> IR         (python: an annotated subset)
-  backend(s)/    IR -> artifacts      (c; x86-64; arm64)
-  target(s)/     the platforms        (x86_64-*, aarch64-*, c)
-  link/          artifacts -> program (cc; baremetal; none)
+  backend(s)/    IR -> artifacts      (c; x86-64; arm64; jvm)
+  target(s)/     the platforms        (x86_64-*, aarch64-*, c, jvm)
+  link/          artifacts -> program (cc; jar; baremetal; none)
   plugins/       third-party registrations: manifest, resolution, install
   driver/        options, pipeline, command line
 ```
@@ -150,7 +151,7 @@ accepts, and the four places Python and the machine disagree.
 ## Running the tests
 
 ```
-python -m pytest tests/asmpython -q
+python -m tests.harness
 ```
 
 The C and x86-64 stages need a C compiler on PATH, and the AArch64 stage needs
