@@ -35,7 +35,16 @@ _ASMPYTHON_ROOT = Path(__file__).resolve().parents[2]
 # has a released `asmpython` in site-packages answering to the same import name,
 # and `-m asmpython` finds THAT unless the checkout is placed ahead of it. The
 # failure is silent and expensive -- every fix appears to change nothing.
-_COMPILER_PATH = _ASMPYTHON_ROOT / "src"
+# THE TREE THIS RUN IS MEASURING. A conformance run starts a fresh process per
+# case, so every case re-imports the compiler from disk -- which means editing
+# `src/` during a run produces a score describing a tree that never existed.
+# One such measurement has already been thrown away here.
+#
+# `ASMPYTHON_SRC`, when the harness has published it, names a frozen copy taken
+# before the run began; see tests/harness/snapshot.py. Falls back to `src/` so
+# the shim still works when it is run by hand.
+_COMPILER_PATH = Path(os.environ.get("ASMPYTHON_SRC")
+                      or (_ASMPYTHON_ROOT / "src"))
 
 
 def _env() -> dict:
@@ -186,8 +195,15 @@ def run(case_path: str, timeout: int):
 
     flags = {"creationflags": 0x08000000} if _IS_WIN else {}
     try:
+        # UTF-8, NOT THE LOCALE ENCODING. A str is stored as UTF-8 by this
+        # runtime and the compiled program writes those bytes straight out;
+        # decoding them as cp1252 turned every non-ASCII character into
+        # mojibake and `errors="replace"` hid that behind a replacement
+        # character. Every case printing a non-ASCII character failed, and the
+        # compiler was producing exactly the right bytes.
         rp = subprocess.run([str(out_bin)], capture_output=True, text=True,
-                            errors="replace", timeout=timeout, **flags)
+                            encoding="utf-8", errors="replace",
+                            timeout=timeout, **flags)
     except subprocess.TimeoutExpired:
         raise TimeoutError(f"run of {case_path}")
     finally:

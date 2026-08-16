@@ -16,6 +16,13 @@ So do not read two snapshots as a trend. Diff them:
 python conformance/compare.py results/asmpython.json after.json
 ```
 
+`asmpython.json` is the CURRENT recorded state and `rewrite_zero_baseline.json`
+the historical zero; both are tracked. A working measurement written under any
+other name is scratch -- `new*.json` is ignored by git for exactly that reason,
+because a session produces dozens of them and only the promoted one matters.
+Promote by copying over `asmpython.json`, and only after `compare.py` shows no
+surviving regressions.
+
 `compare.py` reports per case, separating REGRESSED (was passing, now failing)
 from NEW (never passed, because the case did not exist). Only the first is a
 problem, and only the first sets a nonzero exit status. A raw score cannot tell

@@ -27,7 +27,7 @@
     },
     "aliasing/self-referential-repr": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "aliasing/tuple-holding-mutable": {
@@ -37,57 +37,57 @@
     },
     "async/async-comprehension-forms": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "async/async-generator-with-return-and-break": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "async/await-order-is-deterministic": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "async/await-outside-async-is-a-syntax-error": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "async/cancellation-raises-cancellederror": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "async/coroutine-is-not-a-generator": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "async/coroutine-not-awaited-is-not-run": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "cpython"
     },
     "async/exception-propagates-out-of-run": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "async/gather-preserves-order": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "async/task-group-collects-results": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "async/wait-for-timeout": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "boundary/equality-survives-a-boundary": {
@@ -157,12 +157,12 @@
     },
     "datamodel/async-context-manager": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/async-iterator-protocol": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/bitwise-dunders": {
@@ -172,37 +172,37 @@
     },
     "datamodel/callable-and-bound-methods": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/class-getitem-hook": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/copy-hooks": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/descriptor-delete-and-class-access": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/descriptor-precedence-over-instance-dict": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/dir-hook": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/full-arithmetic-dunder-set": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/getattribute-intercepts-everything": {
@@ -212,7 +212,7 @@
     },
     "datamodel/hash-and-eq-contract": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/index-protocol-for-slicing": {
@@ -227,7 +227,7 @@
     },
     "datamodel/instancecheck-and-subclasscheck": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/length-hint-is-advisory": {
@@ -237,12 +237,12 @@
     },
     "datamodel/match-args-for-positional-patterns": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/metaclass-controls-creation": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/method-objects-are-created-per-access": {
@@ -252,7 +252,7 @@
     },
     "datamodel/module-level-getattr": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/ne-defaults-to-not-eq": {
@@ -262,7 +262,7 @@
     },
     "datamodel/numeric-conversion-dunders": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/reflected-comparison-on-mixed-types": {
@@ -272,7 +272,7 @@
     },
     "datamodel/reversed-hook": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/rich-comparison-set": {
@@ -282,27 +282,27 @@
     },
     "datamodel/setattr-and-delattr-hooks": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/setitem-delitem-and-missing": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/slice-object-is-passed-through": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/slots-blocks-dict-and-inherits": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/staticmethod-classmethod-descriptors": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "datamodel/unary-dunders": {
@@ -352,12 +352,12 @@
     },
     "evaluation-order/slice-bounds-then-value": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "exceptions/args-and-str-of-exception": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "exceptions/assertion-with-tuple-is-always-true": {
@@ -372,7 +372,7 @@
     },
     "exceptions/builtin-exception-types-by-operation": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "exceptions/context-is-chained": {
@@ -382,12 +382,12 @@
     },
     "exceptions/custom-exception-hierarchy": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "exceptions/custom-exception-with-init": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "exceptions/else-runs-only-without-exception": {
@@ -402,7 +402,7 @@
     },
     "exceptions/exception-group-split": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "exceptions/exception-inside-exit": {
@@ -417,7 +417,7 @@
     },
     "exceptions/exceptiongroup-nesting-and-subgroup": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "exceptions/finally-overrides-pending-return": {
@@ -442,7 +442,7 @@
     },
     "exceptions/hierarchy-catching-order": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "exceptions/message-text": {
@@ -452,7 +452,7 @@
     },
     "exceptions/nested-exception-groups-flatten": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "exceptions/notes-are-attached": {
@@ -477,7 +477,7 @@
     },
     "exceptions/reraise-preserves-type": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "exceptions/stopiteration-does-not-escape-for": {
@@ -492,7 +492,7 @@
     },
     "exceptions/type-raised-by-builtin-ops": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "expressions/attribute-reference-chains": {
@@ -502,12 +502,12 @@
     },
     "expressions/await-in-expression-position": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "expressions/call-with-every-argument-kind": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "expressions/conditional-expression-precedence": {
@@ -517,12 +517,12 @@
     },
     "expressions/display-forms-are-distinct": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "expressions/generator-expression-scoping": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "expressions/lambda-forms": {
@@ -537,12 +537,12 @@
     },
     "expressions/starred-in-calls-and-displays": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "expressions/subscription-and-slicing-objects": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "expressions/unary-and-not-precedence": {
@@ -557,7 +557,7 @@
     },
     "expressions/yield-is-an-expression": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "functions/abs-and-pow-types": {
@@ -567,7 +567,7 @@
     },
     "functions/callable-and-type-checks": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "functions/closure-captures-variable-not-value": {
@@ -592,7 +592,7 @@
     },
     "functions/default-uses-definition-time-value": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "functions/enumerate-zip-map-are-iterators": {
@@ -607,32 +607,32 @@
     },
     "functions/function-attributes": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "functions/functools-cached-property": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "functions/functools-lru-cache": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "functions/functools-reduce-and-total-ordering": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "functions/functools-wraps-preserves-metadata": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "functions/getattr-setattr-delattr-builtins": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "functions/inner-function-sees-later-binding": {
@@ -642,7 +642,7 @@
     },
     "functions/isinstance-with-unions": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "functions/iter-with-sentinel": {
@@ -652,7 +652,7 @@
     },
     "functions/keyword-only-and-positional-only": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "functions/min-max-forms": {
@@ -677,17 +677,17 @@
     },
     "functions/recursion-limit-is-enforced": {
       "counted": false,
-      "status": "REFUSED",
+      "status": "FAIL",
       "tier": "impl"
     },
     "functions/repr-vs-ascii": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "functions/return-none-implicitly": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "functions/sorted-multi-key": {
@@ -702,7 +702,7 @@
     },
     "functions/sum-and-start": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "functions/zip-strict-and-uneven": {
@@ -4107,7 +4107,7 @@
     },
     "generated/conversion/enumerate-list/set-int": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/conversion/enumerate-list/str": {
@@ -4227,7 +4227,7 @@
     },
     "generated/conversion/iter-next/set-int": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/conversion/iter-next/str": {
@@ -4287,7 +4287,7 @@
     },
     "generated/conversion/join-repr/set-int": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/conversion/join-repr/str": {
@@ -4407,7 +4407,7 @@
     },
     "generated/conversion/list/set-int": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/conversion/list/str": {
@@ -4467,7 +4467,7 @@
     },
     "generated/conversion/reversed-list/set-int": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/conversion/reversed-list/str": {
@@ -4647,7 +4647,7 @@
     },
     "generated/conversion/tuple/set-int": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/conversion/tuple/str": {
@@ -4707,7 +4707,7 @@
     },
     "generated/conversion/unpack-star/set-int": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/conversion/unpack-star/str": {
@@ -5652,7 +5652,7 @@
     },
     "generated/operator/mod/str-dict": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "generated/operator/mod/str-int": {
@@ -6247,12 +6247,12 @@
     },
     "identity/id-is-stable-while-alive": {
       "counted": false,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "impl"
     },
     "identity/id-of-distinct-objects": {
       "counted": false,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "impl"
     },
     "identity/none-is-not-zero": {
@@ -6262,7 +6262,7 @@
     },
     "identity/none-true-false-are-singletons": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "identity/small-int-caching": {
@@ -6277,12 +6277,12 @@
     },
     "iteration/any-all-short-circuit": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "iteration/dict-resize-during-iteration-raises": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "iteration/enumerate-and-reversed": {
@@ -6297,22 +6297,22 @@
     },
     "iteration/generator-as-context-manager": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "iteration/generator-close-and-return": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "iteration/generator-close-is-idempotent": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "iteration/generator-expression-evaluates-outer-iterable-eagerly": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "iteration/generator-is-lazy": {
@@ -6327,7 +6327,7 @@
     },
     "iteration/generator-send-round-trip": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "iteration/generator-throw-propagates-out": {
@@ -6337,12 +6337,12 @@
     },
     "iteration/iter-requires-an-iterator": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "iteration/iterating-a-non-iterable-raises": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "iteration/iterating-exhausts-once": {
@@ -6357,7 +6357,7 @@
     },
     "iteration/itertools-basic-shapes": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "iteration/list-mutation-during-iteration": {
@@ -6392,7 +6392,7 @@
     },
     "iteration/yield-from-propagates-send-and-return": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "iteration/zip-stops-at-shortest": {
@@ -6407,12 +6407,12 @@
     },
     "lexical/identifiers-allow-unicode": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "lexical/indentation-rules": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "lexical/keywords-and-soft-keywords": {
@@ -6432,7 +6432,7 @@
     },
     "lexical/operators-and-delimiters": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "lexical/semicolons-and-compound-lines": {
@@ -6447,7 +6447,7 @@
     },
     "mapping/chainmap-lookup-order": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "mapping/comprehension-later-key-wins": {
@@ -6457,7 +6457,7 @@
     },
     "mapping/defaultdict-and-counter": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "mapping/dict-mixed-value-kinds": {
@@ -6482,7 +6482,7 @@
     },
     "mapping/fromkeys-and-copy": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "mapping/get-setdefault-and-missing": {
@@ -6492,12 +6492,12 @@
     },
     "mapping/items-values-keys-views": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "mapping/namedtuple-behaviour": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "mapping/nested-mutation-visible": {
@@ -6517,67 +6517,67 @@
     },
     "mapping/update-and-pop": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "mapping/views-reflect-mutation": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "match/as-patterns-and-nesting": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "match/binding-happens-only-on-match": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "match/builtin-class-patterns": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "match/capture-and-guard": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "match/class-patterns-with-keywords": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "match/literal-and-wildcard": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "match/mapping-patterns": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "match/no-case-matches-falls-through": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "match/sequence-patterns": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "match/value-patterns-use-dotted-names": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "numeric/complex/arithmetic-and-parts": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "numeric/complex/no-ordering": {
@@ -6612,7 +6612,7 @@
     },
     "numeric/float/methods": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "numeric/float/negative-zero": {
@@ -6642,7 +6642,7 @@
     },
     "numeric/fractions-are-exact": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "numeric/int-float-equality-and-hash": {
@@ -6687,7 +6687,7 @@
     },
     "numeric/int/methods-and-conversions": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "numeric/int/negative-shift-and-bitops": {
@@ -6727,12 +6727,12 @@
     },
     "objects/abc-register-virtual-subclass": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "objects/abstract-base-class-cannot-instantiate": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "objects/bool-dunder-precedes-len": {
@@ -6752,7 +6752,7 @@
     },
     "objects/class-body-executes-once": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "objects/class-hierarchy-attribute-lookup": {
@@ -6762,12 +6762,12 @@
     },
     "objects/classmethod-and-staticmethod": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "objects/collections-abc-protocols": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "objects/comparison-fallback-to-identity": {
@@ -6797,7 +6797,7 @@
     },
     "objects/eq-without-hash-is-unhashable": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "objects/equality-and-inequality-defaults": {
@@ -6812,17 +6812,17 @@
     },
     "objects/init-subclass-hook": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "objects/init-subclass-receives-kwargs": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "objects/init-vs-new-order": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "objects/instance-dict-is-writable": {
@@ -6842,17 +6842,17 @@
     },
     "objects/metaclass-prepare-returns-mapping": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "objects/mro-and-super-diamond": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "objects/multiple-inheritance-attribute-order": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "objects/object-default-methods": {
@@ -6867,17 +6867,17 @@
     },
     "objects/property-get-and-set": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "objects/property-inherited-and-overridden": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "objects/property-with-deleter": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "objects/repr-vs-str-fallback": {
@@ -6887,12 +6887,12 @@
     },
     "objects/slots-and-class-attribute-conflict": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "objects/slots-rejects-new-attribute": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "objects/str-and-format-dunders": {
@@ -6957,7 +6957,7 @@
     },
     "operators/notimplemented-falls-back": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "operators/power-precedence-and-unary": {
@@ -7012,12 +7012,12 @@
     },
     "pep/0236-future-statement/feature-flags": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0237-unifying-long-integers/one-int-type": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0238-changing-division/true-and-floor": {
@@ -7027,7 +7027,7 @@
     },
     "pep/0252-descriptor-protocol/get-set-delete": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0255-generators/basic-yield": {
@@ -7037,7 +7037,7 @@
     },
     "pep/0260-simplify-xrange/range-is-lazy": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0274-dict-comprehensions/forms": {
@@ -7052,7 +7052,7 @@
     },
     "pep/0285-bool-type/bool-is-an-int-subclass": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0289-generator-expressions/genexp-basics": {
@@ -7062,7 +7062,7 @@
     },
     "pep/0289-generator-expressions/laziness-and-scoping": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0308-conditional-expressions/is-an-expression": {
@@ -7072,22 +7072,22 @@
     },
     "pep/0309-partial-application/functools-partial": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0318-decorators/stacking-order": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0322-reverse-iteration/reversed-builtin": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0327-decimal/exact-decimal-arithmetic": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0341-unified-try/except-and-finally-together": {
@@ -7097,7 +7097,7 @@
     },
     "pep/0342-generator-send/close-and-throw-round-out-the-protocol": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0342-generator-send/send-and-return": {
@@ -7112,7 +7112,7 @@
     },
     "pep/0352-exception-hierarchy/baseexception-root": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0357-index-method/index-drives-sequence-ops": {
@@ -7122,12 +7122,12 @@
     },
     "pep/0362-signature-object/inspect-signature": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0372-ordered-dict/ordereddict-vs-dict": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0378-thousands-separator/format-comma-and-underscore": {
@@ -7137,12 +7137,12 @@
     },
     "pep/0380-yield-from/delegation": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0393-flexible-string/len-is-codepoints": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0409-suppress-context/raise-from-none": {
@@ -7152,47 +7152,47 @@
     },
     "pep/0414-explicit-unicode-literal/u-prefix-is-accepted": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0421-sys-implementation/implementation-metadata": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0428-pathlib/pure-path-operations": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0435-enum/enum-semantics": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0443-singledispatch/generic-functions": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0448-unpacking-generalizations/call-and-literal": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0450-statistics/basic-statistics": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0461-bytes-formatting/percent-on-bytes": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0465-matrix-multiplication/matmul-dunder": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0468-kwargs-order/preserved-in-kwargs": {
@@ -7202,12 +7202,12 @@
     },
     "pep/0479-stopiteration-in-generator/becomes-runtimeerror": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0484-type-hints/runtime-introspection": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0485-isclose/math-isclose": {
@@ -7217,12 +7217,12 @@
     },
     "pep/0487-set-name/descriptor-informed-of-name": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0492-async-await/coroutine-runs": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0495-local-time-disambiguation/datetime-fold": {
@@ -7247,67 +7247,67 @@
     },
     "pep/0519-fspath/os-pathlike": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0520-class-attribute-order/definition-order-preserved": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0525-async-generators/async-for": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0526-variable-annotations/runtime-behaviour": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0530-async-comprehensions/comprehension-with-async-for": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0544-protocols/structural-subtyping": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0553-breakpoint/builtin-and-hook": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0557-dataclasses/generated-methods": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0560-class-getitem/mro-entries-and-class-getitem": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0563-postponed-annotations/future-import-stringifies": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0565-deprecation-warning-in-main/default-filters": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0567-contextvars/context-local-state": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0570-positional-only-parameters/slash-marker": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0572-assignment-expressions/walrus": {
@@ -7317,7 +7317,7 @@
     },
     "pep/0578-audit-hooks/addaudithook-observes-events": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0584-dict-union/operators": {
@@ -7327,52 +7327,52 @@
     },
     "pep/0585-builtin-generics/subscript-at-runtime": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0586-literal-types/literal-at-runtime": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0589-typeddict/typeddict-is-a-dict": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0591-final/final-is-runtime-inert": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0593-annotated/annotated-carries-metadata": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0594-dead-batteries/removed-modules-are-gone": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "cpython"
     },
     "pep/0604-union-types/pipe-operator": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0612-paramspec/paramspec-at-runtime": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0613-type-alias/typealias-annotation": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0614-relaxed-decorators/arbitrary-expressions": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0615-zoneinfo/iana-timezones": {
@@ -7397,102 +7397,102 @@
     },
     "pep/0634-pattern-matching/literal-and-capture": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0646-variadic-generics/typevartuple": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0647-typeguard/typeguard-is-a-bool-at-runtime": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0649-deferred-annotations/annotations-are-lazy": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0654-exception-groups/except-star": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0655-required-notrequired/partial-typeddict": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0657-fine-grained-error-locations/traceback-carries-column-info": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0667-locals-semantics/locals-is-an-independent-snapshot": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0669-low-impact-monitoring/sys-monitoring-api": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0673-self-type/self-annotation": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0675-literal-string/runtime-is-just-typing": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0680-tomllib/parse-toml": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0681-dataclass-transform/marker-is-inert-at-runtime": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0682-signed-zero-format/z-suppresses-negative-zero": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0688-buffer-protocol/buffer-dunder": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0692-typeddict-kwargs/unpack-in-signature": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0695-type-params/generic-function-typeparams": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0695-type-params/type-alias-and-generic": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0696-typeparam-defaults/default-type-parameter": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0698-override-decorator/override-is-inert": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0701-fstring-grammar/nested-quotes-and-backslash": {
@@ -7502,72 +7502,72 @@
     },
     "pep/0702-deprecated/warns-on-use": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0705-readonly-typeddict/readonly-key-metadata": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0709-inlined-comprehensions/comprehension-has-no-separate-frame": {
       "counted": false,
-      "status": "REFUSED",
+      "status": "FAIL",
       "tier": "impl"
     },
     "pep/0742-typeis/typeis-at-runtime": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0749-implementing-pep-649/annotationlib-formats": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0750-template-strings/t-string-structure": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0758-except-without-parens/unparenthesized-exception-group": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/0765-control-flow-in-finally/return-in-finally-warns": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "FAIL",
       "tier": "spec"
     },
     "pep/3105-print-function/print-is-a-function": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/3106-dict-views/keys-values-items-are-views": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/3107-function-annotations/annotations-dict": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/3110-exception-handling/except-as-and-scope": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/3112-bytes-literals/bytes-are-not-str": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/3113-no-tuple-parameter-unpacking/rejected": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/3114-next-method/next-builtin-and-dunder": {
@@ -7577,27 +7577,27 @@
     },
     "pep/3115-metaclass-prepare/namespace-hook": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/3116-io-stack/print-writes-to-stdout": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/3119-abstract-base-classes/abc-machinery": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/3120-utf8-source-encoding/source-is-utf8-by-default": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/3127-integer-literal-syntax/octal-and-binary-forms": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/3129-class-decorators/applied-to-class": {
@@ -7607,7 +7607,7 @@
     },
     "pep/3131-non-ascii-identifiers/unicode-names": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/3132-extended-unpacking/starred-targets": {
@@ -7622,22 +7622,22 @@
     },
     "pep/3138-repr-of-non-ascii/repr-keeps-printable-characters": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/3141-numeric-tower/numbers-registration": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/3151-os-io-exception-hierarchy/oserror-subsumes-the-old-names": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "pep/3155-qualified-name/qualname": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "quirks/adjacent-string-literals-concatenate": {
@@ -7672,7 +7672,7 @@
     },
     "quirks/class-body-invisible-to-comprehension": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "quirks/comparison-of-unordered-types-raises": {
@@ -7682,7 +7682,7 @@
     },
     "quirks/conditional-import-of-name-not-needed": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "quirks/default-str-of-container-uses-repr": {
@@ -7697,7 +7697,7 @@
     },
     "quirks/dict-key-insertion-vs-update": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "quirks/empty-container-truthiness-vs-none": {
@@ -7707,12 +7707,12 @@
     },
     "quirks/empty-return-vs-no-return": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "quirks/except-target-is-deleted": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "quirks/exception-in-comprehension-propagates": {
@@ -7732,7 +7732,7 @@
     },
     "quirks/generator-is-consumed-once": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "quirks/hash-of-equal-values-matches": {
@@ -7752,7 +7752,7 @@
     },
     "quirks/int-of-string-with-base-prefix": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "quirks/integer-division-rounds-toward-negative-infinity": {
@@ -7777,7 +7777,7 @@
     },
     "quirks/mro-conflict-is-rejected": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "quirks/multiplying-nested-list-shares-rows": {
@@ -7797,7 +7797,7 @@
     },
     "quirks/nan-is-not-equal-to-itself": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "quirks/nested-function-defaults-and-closures": {
@@ -7807,22 +7807,22 @@
     },
     "quirks/nested-function-redefinition": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "cpython"
     },
     "quirks/print-sep-end-and-multiple-args": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "quirks/return-in-finally-discards-exception": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "cpython"
     },
     "quirks/shadowing-a-builtin": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "cpython"
     },
     "quirks/single-element-tuple-in-call": {
@@ -7857,12 +7857,12 @@
     },
     "quirks/tuple-unpacking-arity-errors": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "quirks/type-three-argument-form": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "quirks/unbound-local-from-later-assignment": {
@@ -7872,7 +7872,7 @@
     },
     "quirks/zero-argument-super-needs-class-cell": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "scoping/class-scope-is-not-a-closure": {
@@ -7887,12 +7887,12 @@
     },
     "scoping/global-declared-inside-nested": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "scoping/locals-and-globals-builtins": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "scoping/nested-function-lookup-order": {
@@ -7907,7 +7907,7 @@
     },
     "sequence/deque-behaviour": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "sequence/list/copy-is-shallow": {
@@ -7952,7 +7952,7 @@
     },
     "sequence/list/slice-assignment-and-del": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "sequence/list/slice-semantics": {
@@ -7972,7 +7972,7 @@
     },
     "sequence/range-attributes-and-equality": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "sequence/range-semantics": {
@@ -8057,7 +8057,7 @@
     },
     "statements/annotated-assignment": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "statements/assert-raises-assertionerror": {
@@ -8072,7 +8072,7 @@
     },
     "statements/chained-assignment-order": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "statements/conditional-expression": {
@@ -8082,17 +8082,17 @@
     },
     "statements/contextlib-contextmanager": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "statements/contextlib-suppress-and-exitstack": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "statements/del-forms": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "statements/del-unbinds-name": {
@@ -8112,7 +8112,7 @@
     },
     "statements/module-dunder-attributes": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "statements/multiple-context-managers-and-parens": {
@@ -8137,7 +8137,7 @@
     },
     "statements/type-statement": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "statements/while-else": {
@@ -8152,67 +8152,67 @@
     },
     "syntax/break-continue-outside-loop": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "syntax/decorator-and-class-forms": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "syntax/duplicate-and-reserved-names": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "syntax/f-string-and-literal-errors": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "syntax/invalid-assignment-targets": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "syntax/match-is-a-soft-keyword": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "syntax/nonlocal-and-global-rules": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "syntax/return-yield-outside-function": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "syntax/starred-and-parameter-rules": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "syntax/walrus-restrictions": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "text/bytes/bytearray-is-mutable": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "text/bytes/decode-errors": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "text/bytes/hex-and-fromhex": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "text/bytes/literal-and-indexing": {
@@ -8222,12 +8222,12 @@
     },
     "text/bytes/memoryview-basics": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "text/bytes/methods-mirror-str": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "text/format/fstring-nesting-and-specs": {
@@ -8237,17 +8237,17 @@
     },
     "text/format/nested-and-auto-numbering": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "text/format/numeric-presentation-types": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "text/format/width-precision-and-fill": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "text/str/all-split-forms": {
@@ -8267,7 +8267,7 @@
     },
     "text/str/case-conversions": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "text/str/comparison-is-lexicographic": {
@@ -8277,7 +8277,7 @@
     },
     "text/str/count-and-overlap": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "text/str/encode-decode-roundtrip": {
@@ -8287,7 +8287,7 @@
     },
     "text/str/encodings-roundtrip": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     },
     "text/str/escapes-and-raw": {
@@ -8297,7 +8297,7 @@
     },
     "text/str/expandtabs-and-translate": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "text/str/find-replace-count": {
@@ -8312,7 +8312,7 @@
     },
     "text/str/format-spec-alignment-and-sign": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "text/str/format-spec-basics": {
@@ -8337,7 +8337,7 @@
     },
     "text/str/is-predicates-complete": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "text/str/justify-and-pad": {
@@ -8357,7 +8357,7 @@
     },
     "text/str/ord-chr-boundaries": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "text/str/partition-and-splitlines": {
@@ -8367,7 +8367,7 @@
     },
     "text/str/percent-formatting": {
       "counted": true,
-      "status": "FAIL",
+      "status": "PASS",
       "tier": "spec"
     },
     "text/str/predicates": {
@@ -8392,12 +8392,12 @@
     },
     "text/str/unicode-normalization": {
       "counted": true,
-      "status": "REFUSED",
+      "status": "PASS",
       "tier": "spec"
     }
   },
   "counted": 1668,
-  "passed": 1389,
+  "passed": 1665,
   "shim": "asmpython",
   "tiers": [
     "spec",

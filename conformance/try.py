@@ -48,7 +48,12 @@ def main() -> int:
         path = _HERE / "cases" / (args.case + ".py")
         if not path.exists():
             raise SystemExit(f"no such case: {path}")
-        want = harness.parse_case(path).expect.splitlines()
+        # NORMALISED THE WAY THE HARNESS DOES IT, or this disagrees with the
+        # score about what passed. A program ending in `print("")` prints a
+        # trailing blank line that no `# expect:` block can hold; the harness
+        # rstrips both sides, and without that here this reported a spurious
+        # missing line and sent me looking for a bug that was not there.
+        want = harness._normalize(harness.parse_case(path).expect).splitlines()
 
     try:
         out, err, rc = shim.run(str(path), args.timeout)
@@ -63,7 +68,7 @@ def main() -> int:
     if err.strip():
         print("=== stderr ===")
         print(err.strip()[-4000:])
-    got = out.splitlines()
+    got = harness._normalize(out).splitlines()
     if want is None:
         print("=== stdout ===")
         print("\n".join(got))

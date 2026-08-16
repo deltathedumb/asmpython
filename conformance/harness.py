@@ -23,6 +23,7 @@ from concurrent.futures import (
     ProcessPoolExecutor, ThreadPoolExecutor, as_completed,
 )
 from dataclasses import dataclass, field
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -251,6 +252,172 @@ def run_case(case: Case, shim, timeout: int, paranoid: bool) -> Result:
     return Result(case, "PASS")
 
 
+# --- merge mode -------------------------------------------------------------
+#
+# WHY IT EXISTS. Two things a case-per-process run cannot see:
+#
+#   * INTERACTION. Every case gets a fresh process, so anything the runtime
+#     keeps for the length of one program is fresh too. A table that should be
+#     per-run and is not, a name two cases both bind, a bundled module spliced
+#     twice -- none of it can fail here, and all of it can fail in a real
+#     program. Three bugs of exactly that shape were found by hand in one
+#     session; this is the mode that would have found them.
+#   * COST. A compile emits the whole object runtime -- three quarters of a
+#     megabyte of C -- and `gcc` recompiles it per case. Forty cases in one
+#     program is one such compile instead of forty.
+#
+# WHAT IT DOES NOT DO IS REWRITE THE CASES. `cases/` is the oracle, and a
+# merged program built by renaming what a case declares would be testing
+# something the suite does not contain. Batches are chosen so that renaming is
+# unnecessary: cases whose module-level names are DISJOINT can be concatenated
+# and each still means exactly what it meant alone.
+#
+# AND A BATCH IS NEVER THE LAST WORD. Its expected output is the concatenation
+# of its cases' own expectations, so a mismatch says the batch failed and not
+# which case -- so every failing batch is re-run case by case. A case that then
+# passes ALONE is the interesting result: it is a divergence that only appears
+# when programs share a process, which is the thing this mode is for.
+
+
+def _module_names(path: Path) -> set:
+    """Every name a case binds at MODULE level, or declares `global`.
+
+    What two cases may not share if they are to be concatenated. Read off the
+    tree rather than the text, because `del`, a `for` target and an `import x
+    as y` all bind and none of them looks like an assignment.
+    """
+    import ast
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except SyntaxError:
+        # A case the ORACLE cannot parse is one this cannot reason about, so
+        # it is never merged. `_batches` reads an empty set as "unmergeable".
+        return set()
+    out = set()
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            out.add(stmt.name)
+        elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            for alias in stmt.names:
+                out.add(alias.asname or alias.name.split(".")[0])
+        else:
+            for node in ast.walk(stmt):
+                if isinstance(node, ast.Name) and isinstance(node.ctx,
+                                                             ast.Store):
+                    out.add(node.id)
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                       ast.ClassDef)):
+                    out.add(node.name)
+    # A `global x` anywhere binds `x` at module level, however deep it is.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Global):
+            out.update(node.names)
+    return out
+
+
+def _mergeable(case: Case) -> bool:
+    """Whether a case may go in a batch at all.
+
+    A case with NO EXPECTED OUTPUT contributes nothing to compare against, and
+    one the oracle cannot parse cannot be reasoned about. Neither is a failure;
+    both simply run alone.
+    """
+    return bool(case.expect.strip()) and not case.skip_note
+
+
+def _batches(cases: list, size: int) -> tuple:
+    """Pack cases into batches with pairwise-disjoint module-level names.
+
+    FIRST FIT ACROSS EVERY OPEN BATCH, not just the newest. Cases bind `x` and
+    `main` and `f` constantly, so a case that collides with the batch being
+    filled almost always fits an earlier one -- and packing only into the
+    newest gave batches of one and a half cases, which is barely a merge at
+    all. Trying them all turns the same 39 cases into a handful of programs.
+
+    Answers the batches and the cases that could not join one, because a mode
+    that silently dropped what it could not batch would report a faster run
+    over fewer cases.
+    """
+    batches, alone = [], []
+    #: (cases, names taken). Kept open until full, so a later case can land in
+    #: an earlier one.
+    open_batches: list = []
+    for case in cases:
+        if not _mergeable(case):
+            alone.append(case)
+            continue
+        names = _module_names(case.path)
+        if not names and case.path.read_text(encoding="utf-8").strip():
+            alone.append(case)          # unparsed by the oracle: never merged
+            continue
+        for held, taken in open_batches:
+            if len(held) < size and not (names & taken):
+                held.append(case)
+                taken |= names
+                break
+        else:
+            open_batches.append(([case], set(names)))
+    for held, _ in open_batches:
+        batches.append(held)
+    return batches, alone
+
+
+#: Printed between two cases in a merged program, so the output can be split
+#: back into the segments a case-per-process run would have produced.
+#:
+#: A MARKER AND NOT A CONCATENATED EXPECTATION. The harness rstrips a case's
+#: output before comparing, so a case ending in `print("")` has a trailing
+#: blank line its `# expect:` block cannot hold -- true and harmless alone,
+#: and wrong the moment another case's output follows it. Comparing segment by
+#: segment applies the same rstrip in the same place, which is what makes a
+#: merged verdict mean what a solo one means.
+#:
+#: NOT AN EDIT TO ANY CASE: it is a statement BETWEEN two of them, in the same
+#: category as the `# --- <id>` comment that separates them.
+_BOUNDARY = "@@asmpy-case-boundary@@"
+
+
+def run_batch(batch: list, shim, timeout: int, work: Path) -> list:
+    """Compile and run one batch. Answers a Result per case.
+
+    A batch answers PASS for each case it settles and BATCH for all of them
+    otherwise -- BATCH is not a verdict, it is "ask again one at a time", and
+    the caller does.
+    """
+    merged = work / ("merged_" + str(abs(hash(batch[0].id)) % 10 ** 8)
+                     + ".py")
+    pieces = []
+    for case in batch:
+        pieces.append("# --- " + case.id + "\n"
+                      + case.path.read_text(encoding="utf-8").rstrip("\n"))
+        pieces.append("print(%r)" % _BOUNDARY)
+    merged.write_text("\n".join(pieces) + "\n", encoding="utf-8")
+    try:
+        out, err, code = shim.run(str(merged), timeout)
+    except TimeoutError:
+        return [Result(c, "TIMEOUT", "batch exceeded " + str(timeout) + "s")
+                for c in batch]
+    except Exception as exc:
+        return [Result(c, "ERROR", "shim raised: " + repr(exc)) for c in batch]
+    if code != 0:
+        # A REFUSAL OR A CRASH poisons everything after it, so nothing here is
+        # settled and every case goes back to the queue.
+        return [Result(c, "BATCH", (err or "").strip()[:300]) for c in batch]
+    segments = out.split(_BOUNDARY + "\n")
+    if len(segments) < len(batch):
+        # A case stopped early, so the boundaries do not line up and no
+        # segment can be trusted to belong to the case it looks like.
+        return [Result(c, "BATCH", "output ended early") for c in batch]
+    out_results = []
+    for case, segment in zip(batch, segments):
+        if _normalize(segment) == _normalize(case.expect):
+            out_results.append(Result(case, "PASS"))
+        else:
+            out_results.append(Result(case, "BATCH", "differs in a batch"))
+    return out_results
+
+
 #: Marks used in the matrix view. Deliberately single-character so a wide grid
 #: still fits, and deliberately distinct for REFUSED: "cannot compile this" and
 #: "compiles to the wrong answer" are both non-conformance but different bugs,
@@ -382,11 +549,39 @@ def main(argv: list[str] | None = None) -> int:
                          "compiling saturates the cores and subprocess.run "
                          "releases the GIL anyway -- but the balance shifts "
                          "with core count.")
+    ap.add_argument("--merge", type=int, default=0, metavar="N",
+                    help="compile up to N cases into ONE program and run them "
+                         "together. Catches what a case-per-process run "
+                         "cannot -- state the runtime keeps for the length of "
+                         "one program, names two cases share -- and costs one "
+                         "compile per batch instead of one per case. A failing "
+                         "batch is re-run case by case, so nothing is lost.")
     ap.add_argument("--matrix", action="store_true",
                     help="collapse generated cross-products into a grid")
     ap.add_argument("--json", metavar="PATH",
                     help="write the full per-case result as JSON")
+    ap.add_argument("--live-src", action="store_true",
+                    help="compile from src/ directly instead of a snapshot; "
+                         "editing src/ mid-run then makes the score describe "
+                         "a tree that never existed")
     args = ap.parse_args(argv)
+
+    # A FROZEN COPY OF THE COMPILER, taken before the first case runs. This
+    # matters more here than anywhere: a conformance run starts a fresh
+    # process per case, so every case re-imports from disk, and a run takes
+    # minutes. Editing `src/` in the middle mixes two compilers into one
+    # score -- which has already cost a discarded measurement.
+    frozen = None
+    if not args.live_src and args.shim == "asmpython":
+        import atexit
+        import os
+        root = Path(__file__).resolve().parents[1]
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from tests.harness import snapshot as _snap
+        frozen = _snap.take(root, f"conf-{os.getpid()}")
+        _snap.publish(frozen)
+        atexit.register(_snap.discard, frozen)
 
     tiers = tuple(t.strip() for t in args.tier.split(",") if t.strip())
     for t in tiers:
@@ -423,6 +618,33 @@ def main(argv: list[str] | None = None) -> int:
     print(f"conformance: {len(cases)} case(s), shim={args.shim}, "
           f"tiers={','.join(tiers)}, {args.jobs} {how}")
     results: list[Result] = []
+    _batched_ids: set = set()
+
+    if args.merge > 1:
+        # MERGED FIRST, THEN WHAT IT COULD NOT SETTLE. A batch answers PASS
+        # for all its cases or BATCH for all of them; the second is not a
+        # verdict, it is "ask again one at a time", and the loop below does.
+        batches, alone = _batches(cases, args.merge)
+        merged_ok, unresolved = [], list(alone)
+        #: Which cases a batch held and could not settle -- the population a
+        #: merge-only divergence can come from.
+        _batched_ids = set()
+        work = Path(tempfile.mkdtemp(prefix="merged"))
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            futs = [pool.submit(run_batch, b, shim, args.timeout * 4, work)
+                    for b in batches]
+            for fut in as_completed(futs):
+                for r in fut.result():
+                    if r.status == "PASS":
+                        merged_ok.append(r)
+                    else:
+                        unresolved.append(r.case)
+                        _batched_ids.add(r.case.id)
+        results.extend(merged_ok)
+        cases = [c for c in unresolved if isinstance(c, Case)]
+        print(f"  merged: {len(batches)} batch(es), "
+              f"{len(merged_ok)} case(s) settled, {len(cases)} to re-run "
+              f"alone", flush=True)
 
     if use_processes:
         # Run ONE case here first. An implementation shim may build a shared
@@ -447,6 +669,24 @@ def main(argv: list[str] | None = None) -> int:
                 results.append(fut.result())
 
     results.sort(key=lambda r: r.case.id)
+    if args.merge > 1:
+        # THE INTERESTING RESULT. A case that failed in a batch and passes
+        # alone did not fail because of itself: something the runtime keeps
+        # for the length of one program, or a name a neighbour bound, changed
+        # its answer. That is exactly what merge mode exists to surface, and
+        # it would otherwise be invisible -- the re-run says PASS and the
+        # score never moves.
+        merged_only = [r.case.id for r in results
+                       if r.status == "PASS" and r.case.id in _batched_ids]
+        if merged_only:
+            print("")
+            print("MERGE-ONLY DIVERGENCE: " + str(len(merged_only))
+                  + " case(s) failed in a batch and pass alone.")
+            for one in merged_only[:20]:
+                print("   ", one)
+            print("  These are INTERACTION bugs, not case failures. "
+                  "The score below counts them as passes, which is "
+                  "what they are on their own.")
     counted = [r for r in results if r.counted]
     passed = [r for r in counted if r.ok]
     impl = [r for r in results if not r.counted]
