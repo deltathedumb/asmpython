@@ -442,6 +442,7 @@ Each stage against the oracle, on a clean checkout of the commit named:
 | 1, the subset | `2f33bbb7` | 1668/1668 (100.0%) |
 | 2, the floor | `26201014` | 1668/1668 (100.0%) |
 | 3, the integer cell | `564c2c77` | 1668/1668 (100.0%) |
+| 3b + 4, arithmetic and the allocator | `ec4fb7a1` | 1668/1668 (100.0%) |
 
 Stage 2's had teeth because the floor's C goes into `host_functions()`, which
 every C build and every machine-backend link passes through -- a floor that did
@@ -452,6 +453,35 @@ most-called constructor: every integer literal, every loop counter and every
 length in all 1,668 programs goes through it. A suite that passes with it
 ported is a suite in which subset-written code built every integer that was
 compared against CPython.
+
+And stage 4 widens that from integers to everything: `apy_alloc` is the only
+place objects come from, so a full-marks run means **every object in all 1,668
+programs** was handed out by the arena in `runtime/arena.py`, and every integer
+`+`, `-` and `*` entered the subset's fast path before reaching any C.
+
+## What stage 5 has to solve first, and it is not a kind
+
+The document's order is "kind by kind, largest surface first: str, list, dict".
+Two prerequisites are hidden inside that and are cheaper to name here than to
+discover halfway through one.
+
+**The allocator does not survive `list`.** Stage 4's arena is correct because
+cells are immortal -- checked, not assumed. A string's bytes are immortal too,
+so `str` needs nothing new. A LIST'S ITEMS ARE NOT: `v.q.items` is `realloc`d
+on every growth and is the one allocation in the runtime that is genuinely
+freed. A bump pointer cannot resize or reclaim, so `list` forces size classes
+and a free list -- which is a stage, not a kind.
+
+**`func_addr`/`call_ptr` are still deferred**, three times now and honestly
+each time: laying out an object does not need them, dispatching on one does.
+`str` dispatches on a kind tag and does not need them either. Classes,
+generators and every dunder lookup do, so they land before those and after the
+kinds that are tag-dispatched.
+
+So the order that follows from what the code can actually do:
+
+    str  ->  the allocator upgrade  ->  list, dict  ->  func_addr/call_ptr
+         ->  classes, exceptions, generators
 
 ## Traps this work will hit
 
