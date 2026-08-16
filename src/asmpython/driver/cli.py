@@ -145,16 +145,28 @@ def cmd_run(args) -> int:
         return 70
     if args.print_result and value is not None:
         print(f"-> {value}")
-    # `plat_exit(n)` ENDS THE PROCESS with n, and a compiled binary really
-    # does. Reporting 0 here would make the interpreter the one path where a
-    # program's own exit status is invisible -- and this interpreter is the
-    # oracle every backend is measured against.
+    # THE PROGRAM'S EXIT STATUS IS THE PROGRAM'S, on this path as on every
+    # other. Two ways to set one and both are honoured:
     #
-    # NOT the entry's return value, which also becomes a compiled program's
-    # exit status and does NOT become this one's. That divergence predates the
-    # floor and changing it is a separate decision.
+    #   plat_exit(n)   ends the process, and a compiled binary really does
+    #   return n       from the entry, which `link/runtime.py` turns into
+    #                  `int main(void) { return (int)ir_main(); }`
+    #
+    # The second used to be dropped here, so `def main() -> int: return 7`
+    # exited 7 under every compiled backend and 0 under `asmpython run`. That
+    # is the frontend's own documented rule -- E0009 says the return value
+    # BECOMES the process exit code -- disagreeing with the interpreter that
+    # is the oracle for every backend, which makes it a defect in the
+    # reference rather than a quirk of it.
+    #
+    # ONLY FOR THE DEFAULT ENTRY. `--entry other_function` runs something that
+    # is not a program, and its result is an answer rather than a status:
+    # `asmpython run --entry fib prog.py 30` should not exit 88 because
+    # fib(30) ends in those bits. `--print-result` is how you read that.
     if interp.exit_status is not None:
         return interp.exit_status & 0xFF
+    if args.entry == "main" and isinstance(value, int):
+        return value & 0xFF
     return 0
 
 

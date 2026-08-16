@@ -175,6 +175,42 @@ class TestRun:
         assert r.returncode == 0, r.stderr
         assert "20" in r.stdout
 
+    def test_the_entry_s_return_value_is_the_exit_status(self, tmp_path):
+        """The frontend's own rule, honoured on the path that defines it.
+
+        `E0009`'s note says the entry's return value BECOMES the process exit
+        code, and `link/runtime.py` makes that true for every compiled
+        backend: `int main(void) { return (int)ir_main(); }`. This path used
+        to report 0 regardless, so `return 7` exited 7 when compiled and 0
+        when interpreted -- the oracle every backend is measured against
+        disagreeing with all of them about a documented behaviour, which is a
+        defect in the reference rather than a quirk of it.
+        """
+        path = tmp_path / "seven.py"
+        path.write_text("def main() -> int:\n    return 7\n", encoding="utf-8")
+        assert run_cli("run", str(path)).returncode == 7
+
+    def test_an_entry_override_is_an_answer_not_a_status(self, tmp_path):
+        """`--entry` runs something that is not a program.
+
+        Its result is a VALUE -- `--entry fib prog.py 30` is a question -- and
+        turning it into an exit status would report 40 for 832040, because
+        that is what the low eight bits happen to be. Only the default entry
+        is a program.
+        """
+        path = tmp_path / "fib.py"
+        path.write_text(
+            "def fib(n: int) -> int:\n"
+            "    if n < 2:\n"
+            "        return n\n"
+            "    return fib(n - 1) + fib(n - 2)\n"
+            "\n"
+            "def main() -> int:\n"
+            "    return 0\n", encoding="utf-8")
+        r = run_cli("run", str(path), "--entry", "fib", "30", "--print-result")
+        assert r.returncode == 0, r.stderr
+        assert "832040" in r.stdout
+
     def test_invalid_ir_is_reported_not_raised(self, tmp_path):
         bad = tmp_path / "bad.ir"
         bad.write_text("func i64 @main() {\nentry:\n  ret\n}\n", encoding="utf-8")
