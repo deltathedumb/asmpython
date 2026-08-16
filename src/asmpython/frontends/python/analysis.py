@@ -21,11 +21,12 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass, field
 
+from . import modules
 from .modules import importable, member, resolve
 
-from ...diagnostics import DiagnosticSink, SourceFile, Span, error
+from ...diagnostics import (DiagnosticSink, SourceFile, Span, error,
+                            warning)
 from ...ir import types as T
-MODULE_DUNDERS = {"__name__": "__main__", "__doc__": None, "__package__": ""}
 
 #: `object.<dunder>` -- the DEFAULT implementations, and the runtime call each
 #: one is. A class that overrides a dunder reaches its default this way, which
@@ -51,7 +52,14 @@ OBJECT_DEFAULTS = {
 
 #: Names that are VALUES without being assigned. `Ellipsis` is the spelling
 #: `...` also has, and both are the one singleton cell.
-_SINGLETON_NAMES = frozenset({"Ellipsis"})
+_SINGLETON_NAMES = frozenset({"Ellipsis", "NotImplemented"})
+
+#: THE TWO NODES A `def` CAN BE. Named because the distinction almost never
+#: matters -- an `async def` binds a name, takes parameters and has a body
+#: exactly as a `def` does, and the one place it differs is what calling it
+#: builds. Every filter that reached for `ast.FunctionDef` alone silently
+#: dropped every `async def` in the module.
+_DEF_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
 
 #: The frontend's own view of a type. Distinct from `ir.types` on purpose:
 #: `bool` and `int` are different here and both lower to integers, and ERROR
@@ -105,16 +113,68 @@ ENTRY_NAME = "<module>"
 #: on purpose: every entry is a thing the object runtime actually implements,
 #: and a name accepted here that lowering cannot emit is a crash rather than a
 #: diagnostic.
+#: The builtin CLASSES that are values in their own right. `object` is what
+#: `object.__new__(cls)` names and `type` is a metaclass's base; neither is a
+#: kind the way `int` is, so neither travels as text.
+_CLASS_VALUES = frozenset({"object", "type"})
+
+#: The builtins that would need A COMPILER INSIDE THE PRODUCED BINARY.
+#:
+#: Refused with a message that says so, in call position AND as a value: a
+#: program that merely names one has to hear the real reason rather than
+#: `name 'eval' is not defined`, which is a false statement about Python.
+#:
+#: This is the one deliberate limitation that costs conformance cases -- 19 of
+#: them, all calling `compile()` on a bad program and expecting a SyntaxError
+#: -- so it is refused loudly and TESTED, rather than left to become a quiet
+#: wrong answer the day somebody half-implements one of them.
+_NEEDS_A_COMPILER = frozenset({"compile", "eval", "exec"})
+
+#: The builtin kinds a class may extend. `class D(dict)` gives every instance
+#: a real dict of its own for everything the body does not write, which is
+#: what makes a subclass with only `__missing__` in it behave.
+_BUILTIN_BASES = frozenset({"dict", "list", "set", "tuple", "str"})
+
 _DYN_BUILTINS = {
-    "print": None, "int": None, "float": 1, "bool": 1, "str": 1, "repr": 1,
-    "len": 1, "type": 1, "list": 1, "tuple": 1,
+    # `None` WHERE THE COUNT VARIES. `list()`, `tuple()`, `str()` and
+    # `float()` are all legal with no argument -- they answer the empty or
+    # zero value of their type, which is how `defaultdict(list)` builds one --
+    # and requiring exactly one rejected a program CPython accepts.
+    "print": None, "int": None, "float": None, "str": None,
+    "repr": 1, "len": 1, "list": None, "tuple": None, "bool": None,
+    # `type(x)` asks, `type(name, bases, ns)` MAKES -- the three-argument
+    # form is the `class` statement written out, and builds the same
+    # object a metaclass's `super().__new__` does.
+    "type": None,
     "sorted": 1, "min": None, "max": None, "sum": None, "reversed": 1,
     "enumerate": None, "zip": None, "range": None, "abs": 1, "round": None,
     "isinstance": 2, "set": None, "frozenset": None, "complex": None,
     "ord": 1, "chr": 1, "ascii": 1, "bin": 1, "hex": 1, "oct": 1, "hash": 1,
     "callable": 1, "all": 1, "any": 1, "divmod": 2, "pow": None,
+    "id": 1,
+    # `__import__(name)` -- a DYNAMIC import, which this compiler
+    # cannot perform. It answers an ImportError either way, which is
+    # what a program guarding an optional import already handles.
+    "__import__": None,
+    # `object()` -- a bare instance, which is what a program uses as a
+    # UNIQUE SENTINEL: nothing else compares equal to it.
+    "object": 0,
+    # The runtime descriptors. Written as decorators nearly always, which is
+    # an ordinary one-argument call by the time it reaches here.
+    "property": 1, "classmethod": 1, "staticmethod": 1,
+    # `slice(stop)`, `slice(start, stop)`, `slice(start, stop, step)`.
+    "slice": None,
+    # `dir(x)` -- the names it answers to, sorted. `dir()` with no argument
+    # is the names IN SCOPE, which is `sorted(locals())`.
+    "dir": None,
+    # PEP 654: `ExceptionGroup(msg, [excs])`.
+    "ExceptionGroup": 2, "BaseExceptionGroup": 2,
     "hasattr": 2, "getattr": None, "iter": None, "next": None,
     "dict": None, "bytes": None,
+    # `bytearray()`, `bytearray(5)`, `bytearray(b"ab")`.
+    "bytearray": None, "memoryview": 1,
+    # A SNAPSHOT of the names in scope, built at the call site.
+    "locals": 0, "globals": 0,
     "issubclass": 2, "vars": 1, "setattr": 3, "delattr": 2,
     "map": 2, "filter": 2, "format": None,
 }
@@ -151,11 +211,17 @@ _BUILTIN_KEYWORDS = {
 _VALUE_BUILTINS = frozenset({
     "repr", "str", "len", "int", "float", "bool", "abs", "hash",
     "list", "tuple", "set", "frozenset", "sorted", "reversed", "sum", "min",
-    "max", "ascii", "ord", "chr", "bin", "hex", "oct",
+    "max", "ascii", "ord", "chr", "bin", "hex", "oct", "id", "complex",
     # These three take any number of arguments. Their thunk declares `*rest`
     # and hands the tuple to one runtime call, which is why they can be
     # values even though the one-argument thunk shape does not fit them.
     "print", "dict", "bytes",
+    # THE RUNTIME DESCRIPTORS, which are written `@property` far more often
+    # than `property(f)`. A bare decorator is a NAME USED AS A VALUE, so
+    # without these three here every `@staticmethod` was refused as a builtin
+    # that cannot be one. Lowering recognises the decorator form and emits the
+    # wrapping directly -- see `_dyn_decorated`.
+    "property", "classmethod", "staticmethod",
 })
 
 #: Module attributes every Python file has without writing them, and what
@@ -163,8 +229,18 @@ _VALUE_BUILTINS = frozenset({
 #: is `"__main__"` -- which is what makes the `if __name__ == "__main__":`
 #: guard at the bottom of a script take its branch, and that guard is in
 #: enough real programs that not having it meant refusing them.
-MODULE_DUNDERS = {"__name__": "__main__", "__doc__": None, "__package__": ""}
+MODULE_DUNDERS = {
+    "__name__": "__main__", "__doc__": None, "__package__": "",
+    #: The SOURCE PATH, filled in by lowering -- the one dunder whose value is
+    #: not a constant of every compilation. A program reads it to find files
+    #: beside itself, and its absence was a NameError.
+    "__file__": "",
+}
 _MODULE_DUNDERS = frozenset(MODULE_DUNDERS)
+#: `__builtins__` is a name every module has and no module assigns, like
+#: the dunders above -- but it holds an OBJECT rather than a constant, so
+#: lowering builds it rather than reading a value from here.
+_BUILTINS_NAME = "__builtins__"
 
 #: Builtin type names, and the constructors reachable through them --
 #: `dict.fromkeys`, `int.from_bytes`. Not unbound methods: there is no
@@ -174,14 +250,41 @@ _BUILTIN_TYPE_NAMES = frozenset({"dict", "int", "bytes", "str", "list",
 _TYPE_STATIC_NAMES = frozenset({"fromkeys", "from_bytes", "fromhex"})
 
 _EXC_NAMES = frozenset({
+    # The WARNING categories are exceptions like any other: `Warning`
+    # inherits `Exception`, and a program both raises them and asks
+    # `issubclass(DeprecationWarning, Warning)`.
+    "Warning", "UserWarning", "DeprecationWarning",
+    "PendingDeprecationWarning", "SyntaxWarning", "RuntimeWarning",
+    "FutureWarning", "ImportWarning", "UnicodeWarning",
+    "BytesWarning", "ResourceWarning", "EncodingWarning",
     "BaseException", "Exception", "SystemExit", "KeyboardInterrupt",
     "GeneratorExit", "ArithmeticError", "ZeroDivisionError", "OverflowError",
     "FloatingPointError", "LookupError", "IndexError", "KeyError",
     "NameError", "UnboundLocalError", "AttributeError", "TypeError",
-    "ValueError", "UnicodeError", "RuntimeError", "NotImplementedError",
+    "ValueError", "UnicodeError", "UnicodeDecodeError",
+    "UnicodeEncodeError", "UnicodeTranslateError",
+    "RuntimeError", "NotImplementedError",
     "RecursionError", "AssertionError", "ImportError", "ModuleNotFoundError",
     "OSError", "FileNotFoundError", "StopIteration", "StopAsyncIteration",
+    # PEP 3151. `IOError` and `EnvironmentError` ARE `OSError` -- the same
+    # object -- and the errno-specific ones are real classes under it.
+    "IOError", "EnvironmentError", "PermissionError", "IsADirectoryError",
+    "NotADirectoryError", "FileExistsError", "InterruptedError",
+    "BlockingIOError", "ChildProcessError", "ProcessLookupError",
+    "ConnectionError", "BrokenPipeError", "ConnectionAbortedError",
+    "ConnectionRefusedError", "ConnectionResetError", "TimeoutError",
     "MemoryError", "EOFError",
+    # WHAT `compile()` RAISES. `IndentationError` and `TabError` are
+    # SUBCLASSES of SyntaxError, and a program catches each by name -- which
+    # is the whole of what the `syntax/*` cases do.
+    "SyntaxError", "IndentationError", "TabError",
+    # `asyncio`. `CancelledError` inherits BaseException and not Exception,
+    # since 3.8: `except Exception:` inside a task must not swallow the
+    # cancellation the loop just delivered.
+    "CancelledError", "InvalidStateError",
+    # PEP 654. `BaseExceptionGroup` catches groups of BaseExceptions;
+    # `ExceptionGroup` is the narrower one every ordinary program means.
+    "ExceptionGroup", "BaseExceptionGroup",
 })
 
 
@@ -199,6 +302,19 @@ def _import_names(node) -> list:
         else:
             out.append(alias.asname or alias.name.split(".")[0])
     return out
+
+
+def _members_of(table):
+    """Every member spec in a module table, however it is stored.
+
+    A backend's table may be lazy -- the JVM backend builds a package's
+    contents only when something looks inside -- so this asks for values
+    rather than assuming a plain dict.
+    """
+    try:
+        return list(table.values()) if hasattr(table, "values")             else [table[k] for k in table]
+    except Exception:                          # noqa: BLE001 -- best effort
+        return []
 
 
 def _has_yield(node) -> bool:
@@ -219,6 +335,42 @@ def _owns_yield(node) -> bool:
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
         return False
     return any(_owns_yield(child) for child in ast.iter_child_nodes(node))
+
+
+def _pattern_names(pat) -> list:
+    """Every name a `case` pattern BINDS, in the order it binds them.
+
+    A pattern is a mix of tests and bindings and the two are not separable by
+    node type: `case Point(x, y)` tests the class and binds two names, while
+    `case Point(0, y)` tests one of them instead. What decides is POSITION --
+    a bare `Name` in a pattern is a capture, the same `Name` under
+    `MatchValue` is a value to compare against.
+    """
+    if pat is None:
+        return []
+    if isinstance(pat, ast.MatchAs):
+        # `case [x] as whole` binds `whole` AND whatever the inner pattern
+        # binds. A bare `case name` is a MatchAs with no pattern, and `case _`
+        # is one with no name -- the wildcard, which binds nothing.
+        inner = _pattern_names(pat.pattern)
+        return inner + ([pat.name] if pat.name else [])
+    if isinstance(pat, ast.MatchStar):
+        return [pat.name] if pat.name else []
+    if isinstance(pat, ast.MatchOr):
+        # Every alternative must bind the SAME names -- Python requires it --
+        # so the first is representative and duplicates would only be noise.
+        return _pattern_names(pat.patterns[0]) if pat.patterns else []
+    if isinstance(pat, ast.MatchSequence):
+        return [n for sub in pat.patterns for n in _pattern_names(sub)]
+    if isinstance(pat, ast.MatchMapping):
+        out = [n for sub in pat.patterns for n in _pattern_names(sub)]
+        return out + ([pat.rest] if pat.rest else [])
+    if isinstance(pat, ast.MatchClass):
+        out = [n for sub in pat.patterns for n in _pattern_names(sub)]
+        return out + [n for sub in pat.kwd_patterns
+                      for n in _pattern_names(sub)]
+    # MatchValue and MatchSingleton test; they bind nothing.
+    return []
 
 
 def _target_names(node) -> list:
@@ -259,12 +411,49 @@ def _declared_global(body: list) -> set:
     return found
 
 
+def _stored_names(node) -> set:
+    """Every name a statement BINDS, however deeply.
+
+    A class body's general statements are the ones that bind through control
+    flow, so there is no one target to read: `try: x = f() / except E: x = 0`
+    binds `x` twice in two branches, and an `import json` binds `json`. The
+    walk is over the whole statement because that is where the bindings are.
+    """
+    out = set()
+    for one in ast.walk(node):
+        if isinstance(one, ast.Name) and isinstance(one.ctx, ast.Store):
+            out.add(one.id)
+        elif isinstance(one, (ast.FunctionDef, ast.AsyncFunctionDef,
+                              ast.ClassDef)):
+            out.add(one.name)
+        elif isinstance(one, ast.alias):
+            out.add(one.asname or one.name.split(".")[0])
+        elif isinstance(one, ast.ExceptHandler) and one.name:
+            out.add(one.name)
+    return out
+
+
+def _one_handler_name(node) -> str:
+    """The exception name ONE `except` clause entry gives.
+
+    A DOTTED NAME ANSWERS ITS LAST PART. `except asyncio.CancelledError:`
+    means the exception called CancelledError -- the hierarchy here is a table
+    of names, so the module qualifying it adds nothing to match on and reading
+    the attribute as an empty name refused the clause outright. A name the
+    table does not know is still refused, one line further on, so this cannot
+    turn an unknown type into a silent catch-all.
+    """
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return getattr(node, "id", "")
+
+
 def _handler_names(node) -> list:
     """The exception names an `except` clause lists. `except (A, B):` is a
     tuple; `except A:` is one name."""
     if isinstance(node, ast.Tuple):
-        return [getattr(e, "id", "") for e in node.elts]
-    return [getattr(node, "id", "")]
+        return [_one_handler_name(e) for e in node.elts]
+    return [_one_handler_name(node)]
 
 
 #: The literal types the object runtime has a kind for. `Ellipsis` is not one
@@ -280,7 +469,49 @@ def _is_docstring(node) -> bool:
 
 #: How each maps into the IR. `bool` becomes i1 so a comparison result and a
 #: `bool` variable are the same thing at the machine level.
-TO_IR = {INT: T.I64, FLOAT: T.F64, BOOL: T.I1, NONE: T.VOID, OBJ: T.PTR}
+#: The prefix a Java handle type carries. A value of one of these types is an
+#: integer standing for an entry in a table the generated class keeps -- see
+#: `backends/jvm/interop.py`. The class is in the NAME so that a diagnostic can
+#: say `com.minecraft.block.Block` rather than "object", and so that a method
+#: call can be resolved against the right class.
+JAVA = "jvm:"
+
+
+def sem_type(name: str) -> SemType:
+    """The SemType for a type NAME, interned.
+
+    `SemType` is compared with `is` in places -- `print` picks its writer that
+    way -- so a fresh `SemType("float")` is not `FLOAT` and a float printed as
+    an integer. Java signatures arrive as names, so they come through here.
+    """
+    return BY_NAME.get(name) or SemType(name)
+
+
+def is_java(ty: SemType) -> bool:
+    return ty.name.startswith(JAVA)
+
+
+def java_class_of(ty: SemType) -> str:
+    """The internal class name behind a handle type."""
+    return ty.name[len(JAVA):]
+
+
+class _IrTypes(dict):
+    """SemType -> IR type, with every Java handle answering `i64`.
+
+    A dict with a fallback rather than a function, because every existing use
+    site indexes it and a handle can reach any of them -- an argument, a
+    return, a local's declared width.
+    """
+
+    def __missing__(self, key):
+        if is_java(key):
+            return T.I64
+        raise KeyError(key)
+
+
+TO_IR = _IrTypes({INT: T.I64, FLOAT: T.F64, BOOL: T.I1, NONE: T.VOID,
+                  OBJ: T.PTR})
 
 
 #: Where a name's value actually lives, which is not the same question as what
@@ -332,6 +563,14 @@ class FunctionInfo:
     #: hashable in a way that survives equality, and analysis and lowering walk
     #: the same tree objects.
     expr_types: dict[int, SemType] = field(default_factory=dict)
+    #: Call node id -> the Java overload it resolved to, as the backend
+    #: published it. Lowering reads this rather than resolving again: two
+    #: resolutions of an overload set are two chances to pick differently.
+    java_calls: dict[int, dict] = field(default_factory=dict)
+    #: Constant node id -> the string literal that has to become a Java
+    #: `String`. Only literals in a Java argument position are here; the
+    #: subset has no string type for them to have anywhere else.
+    java_strings: dict[int, str] = field(default_factory=dict)
     #: True when this function's values are runtime objects rather than
     #: machine words. Set for the module's top-level statements, which have no
     #: annotations at all, and for any function with an unannotated parameter
@@ -343,6 +582,12 @@ class FunctionInfo:
     #: local for the whole body, and every other name falls through to the
     #: module. Recorded per function because the answer depends on the body,
     #: not on the name.
+    #: Whether this function calls `locals()`, which is a READ OF EVERY
+    #: LOCAL and the only expression that is. It matters because a local no
+    #: ordinary read could reach unassigned still has to be absent from the
+    #: mapping rather than present as a null -- so `locals()` is what decides
+    #: a register needs its null initialiser, not the read analysis.
+    reads_all_locals: bool = False
     module_reads: set = field(default_factory=set)
     #: Names this function ASSIGNS at module scope -- those it declared
     #: `global`. Without the declaration an assignment makes a local, even if a
@@ -361,6 +606,20 @@ class FunctionInfo:
     #: functions and every local lives in the generator object. See
     #: `_dyn_generator`.
     is_generator: bool = False
+    #: True for an `async def`. A COROUTINE IS A GENERATOR here -- it needs the
+    #: same frame, the same step function and the same "none of the body runs
+    #: until something drives it" rule -- so `is_generator` is set alongside
+    #: this one and the lowering is shared. What this flag decides is what the
+    #: object CALLS itself: `type(f()).__name__` is 'coroutine', and a program
+    #: that awaits a generator or iterates a coroutine is making an error the
+    #: name is how it finds out about.
+    is_coroutine: bool = False
+    #: True for an `async def` that also contains `yield`. NEITHER a plain
+    #: generator NOR a plain coroutine: it is driven by `async for`, its
+    #: `yield` produces values and its `await` suspends, and CPython names it
+    #: `async_generator`. Told apart from both because a program reads that
+    #: name, and because the two things it does travel the same channel.
+    is_async_generator: bool = False
     #: Local name -> its slot in the generator's frame. Empty for an ordinary
     #: function, whose locals are registers.
     slots: dict = field(default_factory=dict)
@@ -379,6 +638,11 @@ class FunctionInfo:
     #: The mirror image: a position cannot reach them, so positional filling
     #: stops short of them and only a name arrives.
     kwonly: int = 0
+    #: How many of the TRAILING DEFAULTS are the keyword-only ones'.
+    #: Not `kwonly`: one of those may be required, and `def f(a, b=1,
+    #: *args, c)` has one keyword-only parameter and one default that
+    #: is not its.
+    kwdefaults: int = 0
     #: The `**kw` parameter's name, or None. Like `vararg` it is not in
     #: `params`: it takes no argument position, and it is bound to a dict of
     #: whatever keywords the call could not place -- empty when there were
@@ -443,19 +707,55 @@ class ClassInfo:
     node: ast.ClassDef
     name: str
     qualname: str
-    #: The base's name as written, or None. SINGLE INHERITANCE: a second base
-    #: is refused rather than linearised, because a wrong MRO surfaces as one
-    #: method resolving to the wrong body and nothing looks broken.
+    #: The FIRST base's name as written, or None. Everything that asks a
+    #: single question -- `__base__`, a walk up one chain -- reads this.
     base: str | None = None
+    #: Every base, in the order written. The MRO is linearised from these at
+    #: run time, because whether a base itself has bases is a property of a
+    #: value rather than of this statement.
+    bases: list = field(default_factory=list)
+    #: PEP 560: bases written as EXPRESSIONS rather than names. What each one
+    #: contributes is decided by its `__mro_entries__` at run time, so there
+    #: is nothing to record here but the expression.
+    base_exprs: list = field(default_factory=list)
+    #: `class D(dict)` -- the BUILTIN KIND this class extends, by name, or
+    #: None. Not a class, so it cannot go in `bases`.
+    builtin_base: str | None = None
     #: Keys into `Analyzer.functions`, in definition order.
     methods: list = field(default_factory=list)
     #: (name, value expression) per class-level assignment, in order.
     attrs: list = field(default_factory=list)
+    #: Bare expression statements in the body, in order. A class body RUNS,
+    #: and a statement that binds nothing still has its effect.
+    body_exprs: list = field(default_factory=list)
+    #: (name, annotation expression) per annotated class-level name, in order
+    #: -- including one with no value. PEP 649 builds `C.__annotations__` from
+    #: these, lazily, exactly as a function's are built.
+    annotations: list = field(default_factory=list)
     #: The key of the function whose body this `class` statement runs in.
     scope: str = ENTRY_NAME
+    #: True for `class Meta(type):` -- this class is a METACLASS, so
+    #: calling it builds a class rather than an instance and its `__new__`
+    #: reaches `type.__new__` through `super()`.
+    is_meta: bool = False
+    #: The metaclass NAME from `class C(metaclass=Meta)`, or None.
+    metaclass: str | None = None
+    #: `class C(metaclass=Meta, flavour="x")` -- the keywords that are not
+    #: `metaclass`, in order. They reach `__new__`, `__init__` and
+    #: `__init_subclass__` as keyword arguments.
+    class_keywords: list = field(default_factory=list)
     #: True for `class MyError(ValueError):` -- a name in the exception
     #: hierarchy rather than a type object. See `_class_statement`.
     is_exception: bool = False
+    #: STATEMENTS IN THE BODY THAT ARE NOT MEMBERS -- an `if`, a `try`, a
+    #: `for`. A class body is a block that runs, and these are the parts of it
+    #: that bind through control flow rather than in one line.
+    body_stmts: list = field(default_factory=list)
+    #: What those statements BIND. Recorded because the lowering has to route
+    #: their stores into the class namespace: a plain local would make the
+    #: name vanish when the body ended, and the class attribute the source
+    #: plainly writes would never exist.
+    body_stmt_names: set = field(default_factory=set)
 
 
 def int_literal(node) -> int | None:
@@ -580,22 +880,79 @@ def lambda_def(node: ast.Lambda) -> ast.FunctionDef:
     return made
 
 
+def genexp_def(node: ast.GeneratorExp) -> ast.FunctionDef:
+    """The generator `def` a generator expression IS.
+
+    `(f(x) for x in xs if p(x))` is exactly
+
+        def <genexp>(.0):
+            for x in .0:
+                if p(x):
+                    yield f(x)
+
+    called with `xs` already evaluated. Everything the expression form is
+    supposed to do falls out of that shape rather than being arranged
+    separately:
+
+      * it is LAZY, because the body is a generator body;
+      * its target does not leak, because the body is a function;
+      * and the OUTERMOST iterable is evaluated eagerly, because it is an
+        argument -- which is why `(x for x in boom())` raises at the
+        expression and `(x for x in xs if boom())` does not.
+
+    Cached on the node for the reason `lambda_def` is: analysis and lowering
+    must see the same synthetic node, since scope registration keys off its
+    identity.
+    """
+    made = getattr(node, "_asmpython_def", None)
+    if made is not None:
+        return made
+
+    body: list = [ast.Expr(value=ast.Yield(value=node.elt))]
+    for i, gen in enumerate(reversed(node.generators)):
+        for test in reversed(gen.ifs):
+            body = [ast.If(test=test, body=body, orelse=[])]
+        # The FIRST generator's iterable becomes the parameter; the rest are
+        # evaluated inside, which is what makes only the outermost eager.
+        source = (ast.Name(id=".0", ctx=ast.Load())
+                  if i == len(node.generators) - 1 else gen.iter)
+        body = [ast.For(target=gen.target, iter=source, body=body,
+                        orelse=[], type_comment=None)]
+
+    made = ast.FunctionDef(
+        name="<genexp>",
+        args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=".0")],
+                           vararg=None, kwonlyargs=[], kw_defaults=[],
+                           kwarg=None, defaults=[]),
+        body=body, decorator_list=[], returns=None, type_params=[])
+    for sub in ast.walk(made):
+        if not hasattr(sub, "lineno"):
+            ast.copy_location(sub, node)
+    ast.fix_missing_locations(made)
+    node._asmpython_def = made
+    return made
+
+
 def _lambdas_in(node):
-    """Every lambda in an expression, outermost first, without descending into
-    one that is already nested inside another -- that inner one belongs to the
-    outer one's scope and is collected when the outer body is."""
+    """Every lambda or GENERATOR EXPRESSION in an expression, outermost first,
+    without descending into one already nested inside another -- that inner
+    one belongs to the outer one's scope and is collected with its body.
+
+    Both are nested functions written inline, and both need a scope of their
+    own, so one walk finds them and one registration handles them.
+    """
     found = []
 
     def walk(sub):
         if sub is None:
             return
         for child in ast.iter_child_nodes(sub):
-            if isinstance(child, ast.Lambda):
+            if isinstance(child, (ast.Lambda, ast.GeneratorExp)):
                 found.append(child)
             else:
                 walk(child)
 
-    if isinstance(node, ast.Lambda):
+    if isinstance(node, (ast.Lambda, ast.GeneratorExp)):
         return [node]
     walk(node)
     return found
@@ -644,6 +1001,10 @@ class Analyzer:
         self.source = source
         self.sink = sink
         self.functions: dict[str, FunctionInfo] = {}
+        #: Bound name -> the module it names. `import a.b as n` puts `n` here;
+        #: `import a.b` puts `a` here mapped to "", meaning "a package root,
+        #: the module is further along the attribute chain".
+        self.namespaces: dict[str, str] = {}
         self.current: FunctionInfo | None = None
         #: `break`/`continue` are only meaningful inside a loop, and Python
         #: makes that a syntax error. ast.parse does NOT -- it happily parses
@@ -668,6 +1029,13 @@ class Analyzer:
         #: builds a value, so lowering needs to get from the statement back to
         #: the function analysis registered for it.
         self.def_of_node: dict = {}
+        #: Module-level names more than one `def` binds. A call to one of them
+        #: means whichever has RUN, so it cannot be resolved at the call site.
+        self.rebound: set = set()
+        #: Calls whose argument count is provably wrong. Python reports these
+        #: at run time and a program may catch them, so they are lowered as
+        #: value calls and left to the runtime.
+        self.late_arity: set = set()
         #: Keys of every `def` below module level, in registration order --
         #: which is source order, so a method is checked after the class that
         #: owns it exists.
@@ -678,34 +1046,91 @@ class Analyzer:
 
     # ── entry point ─────────────────────────────────────────────────────────
     def run(self, tree: ast.Module) -> dict[str, FunctionInfo]:
-        defs = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
-        body = [n for n in tree.body
-                if not isinstance(n, ast.FunctionDef) and not _is_docstring(n)]
+        # `async def` COUNTS AS A DEF EVERYWHERE HERE. Filtering on
+        # `ast.FunctionDef` alone left every `async def` out of the module's
+        # function table, so a call to one from anywhere reported "call to
+        # unknown function" while the note listed it among the known ones.
+        # NAMESPACES FIRST, before signatures and before any body. A
+        # parameter may be annotated with a Java type, and whether an
+        # annotation is one decides whether the function takes the static path
+        # at all -- so the imports have to be read before the first signature
+        # is built, not merely before the first body.
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    self._remember_namespace(alias)
+
+        defs = [n for n in tree.body if isinstance(n, _DEF_NODES)]
+        # WHETHER THERE IS AN ENTRY AT ALL is decided by the RUNNABLE
+        # statements: a module of pure definitions has none and runs `main`
+        # instead.
+        # An `import` of a BACKEND NAMESPACE is not runnable. It binds a name
+        # the analyser recognises and emits nothing at all -- so a module whose
+        # only top-level statements are those still has no entry, and keeps the
+        # `main`-is-the-program shape. Without this, `import com.minecraft.block`
+        # at the top of a file made the module body the entry, and a module
+        # body is DYNAMIC: the program acquired the whole object runtime for an
+        # import that costs no instructions.
+        runnable = [n for n in tree.body
+                    if not isinstance(n, _DEF_NODES) and not _is_docstring(n)
+                    and not self._is_namespace_import(n)]
+        # WHAT THE ENTRY CONTAINS keeps the `def` STATEMENTS too, in source
+        # order. Their own bodies are analysed separately, through `defs` --
+        # but the statement still has to RUN where it is written, because that
+        # is where Python evaluates the defaults and applies the decorators.
+        # Lifting them out meant `n = 1` / `def f(v=n)` / `n = 99` reached `n`
+        # before the module had bound it, and a decorator naming something the
+        # module assigns did the same.
+        body = ([n for n in tree.body if not _is_docstring(n)]
+                if runnable else [])
 
         # The module's own names, before anything else: a function body may
         # read one, and which names exist at module scope is the question that
         # decides whether an unresolved name is a global or a mistake.
         self.module_names = self._module_names(
-            [n for n in tree.body if not isinstance(n, ast.FunctionDef)])
+            [n for n in tree.body if not isinstance(n, _DEF_NODES)])
+        # PEP 695's type parameters, from the DEFINITIONS TOO. `_module_names`
+        # is given only the non-definition statements -- a `def`'s body binds
+        # its own names, not the module's -- so a `def first[T]` had nowhere
+        # for `T` to live and the annotation thunk read an unknown global.
+        for node in tree.body:
+            for one in getattr(node, "type_params", ()):
+                self.module_names.add(one.name)
 
         # Signatures first, so a function may call one defined later.
         for node in defs:
             if node.name in self.functions:
-                self._error("E0002", f"function {node.name!r} is defined twice",
-                            node)
+                # DEFINED TWICE IS LEGAL AND MEANS REBINDING. The second `def`
+                # replaces the name; the first stays reachable only through
+                # whatever already held it -- `@f.register` over two `def _`s
+                # is the idiom that makes this worth supporting, and refusing
+                # it rejected a program CPython runs. The earlier one is MOVED
+                # ASIDE under its own key so its body is still compiled, and
+                # the bare name is the LAST one, which is what a call written
+                # after both resolves to.
+                first = self.functions[node.name]
+                key, n = node.name, 1
+                while key in self.functions:
+                    n += 1
+                    key = f"{node.name}#{n}"
+                first.name = key
+                self.functions[key] = first
+                self.def_of_node[id(first.node)] = key
+                self.rebound.add(node.name)
             self.functions[node.name] = self._signature(node)
+            self.def_of_node[id(node)] = node.name
 
         # A module-level `def` or `class` BINDS A MODULE NAME, and now that
         # both are values something may read it rather than call it. Added
         # only when there is an entry to initialise the storage: a module of
         # pure definitions runs `main` directly and never executes a `def`
         # statement, so a global there would be permanently unset.
-        if any(not isinstance(n, ast.FunctionDef) and not _is_docstring(n)
+        if any(not isinstance(n, _DEF_NODES) and not _is_docstring(n)
                for n in tree.body):
             self.module_names |= {
                 n.name for n in tree.body
                 if isinstance(n, ast.ClassDef)
-                or (isinstance(n, ast.FunctionDef)
+                or (isinstance(n, _DEF_NODES)
                     and self.functions[n.name].dynamic)}
 
         # Scopes next, and before any body: a closure may capture a name the
@@ -716,7 +1141,11 @@ class Analyzer:
 
         entry = self._entry(body)
         for node in defs:
-            self._body(self.functions[node.name])
+            # THROUGH THE NODE'S OWN KEY, not the bare name: a name defined
+            # twice has the earlier one filed under a suffixed key, and
+            # looking the name up would compile the survivor twice and the
+            # other never.
+            self._body(self.functions[self.def_of_node[id(node)]])
         for key in self._nested_keys:
             self._body(self.functions[key])
         if entry is not None:
@@ -778,8 +1207,10 @@ class Analyzer:
         `_register_nested`, it gets closures and cells for free rather than a
         second mechanism that would have to grow them separately.
         """
-        made = lambda_def(lam)
-        key = self._register_nested(made, scope, "<lambda>")
+        genexp = isinstance(lam, ast.GeneratorExp)
+        made = genexp_def(lam) if genexp else lambda_def(lam)
+        key = self._register_nested(made, scope,
+                                    "<genexp>" if genexp else "<lambda>")
         self.def_of_node[id(lam)] = key
         child = self._new_scope(key, "function", scope, made)
         for a in made.args.args:
@@ -883,15 +1314,17 @@ class Analyzer:
 
     def _register_nested(self, node, scope: _Scope, qual: str) -> str:
         """Give a `def` below module level its own FunctionInfo."""
-        if scope.kind == "module" and node.name in self.functions \
-                and self.functions[node.name].node is node:
-            # A module-level `def`, already registered by `run`. Its key is its
-            # bare name, which is what every existing call site looks up.
-            info = self.functions[node.name]
+        known = self.def_of_node.get(id(node))
+        if scope.kind == "module" and known is not None \
+                and self.functions.get(known) is not None \
+                and self.functions[known].node is node:
+            # A module-level `def`, already registered by `run`. Its key is
+            # its bare name -- or a suffixed one where the module defines that
+            # name twice, in which case `run` has recorded which is which.
+            info = self.functions[known]
             info.qualname = node.name
             info.is_value = info.dynamic
-            self.def_of_node[id(node)] = node.name
-            return node.name
+            return known
 
         owner = scope.key if scope.kind == "class" else None
         parent = scope
@@ -935,23 +1368,77 @@ class Analyzer:
             n += 1
             key = f"{qualname}#{n}"
         base = None
-        if len(node.bases) > 1:
-            self._error("E0071", "only single inheritance is supported", node)
-        elif node.bases:
-            if isinstance(node.bases[0], ast.Name):
-                # `class C(object):` is `class C:` -- every class already has
-                # `object` at the root of its chain, so naming it explicitly
-                # says nothing this runtime does not already do. Writing it is
-                # a Python 2 habit that plenty of code still carries, and
-                # refusing it rejected programs over punctuation.
-                if node.bases[0].id != "object":
-                    base = node.bases[0].id
+        bases: list = []
+        base_exprs: list = []
+        builtin_base = None
+        is_meta = False
+        for i, written in enumerate(node.bases):
+            # PEP 560: `class Box(Generic[T])` has `Generic` as its base, not
+            # the subscript -- `__mro_entries__` on the alias answers the
+            # origin, and for every generic in the standard library that IS
+            # the origin. The type arguments say nothing the runtime keeps.
+            if isinstance(written, ast.Subscript)                     and isinstance(written.value, ast.Name):
+                written = ast.copy_location(written.value, written)
+                node.bases[i] = written
+            if not isinstance(written, ast.Name):
+                # PEP 560: A BASE NEED NOT BE A CLASS. `class C(Fake())` asks
+                # the object for `__mro_entries__`, and what that answers is
+                # what the class actually inherits -- which is how a generic
+                # alias and every library that builds bases at run time work.
+                # Kept as an expression because there is no name to record.
+                # CHECKED WHERE THE STATEMENT IS, not here: this runs during
+                # the scope pass, when the classes it may name are not all
+                # registered yet -- `class C(Fake())` above `class Fake` is
+                # ordinary and was reported as an unknown call.
+                base_exprs.append(written)
+                continue
+            if written.id == "type":
+                # `class Meta(type)` -- A METACLASS. `type` is not a class
+                # defined in this module and never will be; what the base
+                # records is that calling this builds a CLASS.
+                is_meta = True
+                continue
+            # `class C(object):` is `class C:` -- every class already has
+            # `object` at the root of its chain, so naming it explicitly says
+            # nothing this runtime does not already do. Writing it is a Python
+            # 2 habit that plenty of code still carries, and refusing it
+            # rejected programs over punctuation.
+            if written.id == "object":
+                continue
+            if written.id in _BUILTIN_BASES:
+                # `class D(dict)`. The base is a KIND and not a class, so it
+                # is recorded separately: an instance of D carries a real dict
+                # for everything the body does not write, and `isinstance(d,
+                # dict)` answers True because the class says so.
+                builtin_base = written.id
+                continue
+            bases.append(written.id)
+        # `base` IS THE FIRST ONE and stays for everything that asks a single
+        # question -- `__base__`, and the places that walk one chain. The full
+        # list is what the MRO is linearised from.
+        if bases:
+            base = bases[0]
+        metaclass, class_keywords = None, []
+        for kw in node.keywords:
+            if kw.arg is None:
+                self._error("E0090", "`**` in a class statement is not "
+                                     "supported", node)
+            elif kw.arg == "metaclass":
+                if isinstance(kw.value, ast.Name):
+                    metaclass = kw.value.id
+                else:
+                    self._error("E0073", "a metaclass must be a plain name",
+                                node)
             else:
-                self._error("E0072", "a base class must be a plain name", node)
-        if node.keywords:
-            self._error("E0073", "a metaclass or class keyword is not "
-                                 "supported", node)
-        info = ClassInfo(node, node.name, qualname, base, scope=scope.key)
+                # Every other keyword travels to `__new__`, `__init__` and
+                # `__init_subclass__` -- which is the whole of what a class
+                # keyword does.
+                class_keywords.append(kw.arg)
+        info = ClassInfo(node, node.name, qualname, base, bases=bases,
+                         base_exprs=base_exprs, builtin_base=builtin_base,
+                         scope=scope.key, is_meta=is_meta,
+                         metaclass=metaclass,
+                         class_keywords=class_keywords)
         # WHETHER THIS IS AN EXCEPTION CLASS is decided HERE, in the scope
         # pass, and not where the `class` statement is checked. Function
         # bodies are analysed before the module's, so a `def` that says
@@ -1029,6 +1516,18 @@ class Analyzer:
                     found.update(_target_names(sub.target))
                 elif isinstance(sub, ast.ExceptHandler) and sub.name:
                     found.add(sub.name)
+                elif getattr(sub, "type_params", None):
+                    # PEP 695: `def first[T](...)` and `class Box[T]` put `T`
+                    # in scope for the annotations and the body. Bound at
+                    # MODULE level here rather than scoped to the definition,
+                    # which is a stated divergence: writing `T` after the
+                    # `def` is a NameError in CPython and finds the TypeVar
+                    # here. The annotations are the reason -- they are built
+                    # by a thunk that runs later and reads its names as
+                    # globals, so a scope that ended at the `def` would leave
+                    # the thunk with nothing to read.
+                    for one in sub.type_params:
+                        found.add(one.name)
                 elif isinstance(sub, ast.With):
                     # `with a as x:` binds x. A `withitem` is not a statement
                     # or an expression, so neither of the branches above sees
@@ -1130,8 +1629,18 @@ class Analyzer:
             if a is None:
                 return True
             name = getattr(a, "id", None)
+            if getattr(a, "pep563", False):
+                # PEP 563 made this text. The program asked for the annotation
+                # NOT to be evaluated, so it cannot also be the type.
+                return True
             if name is None and isinstance(a, ast.Constant):
                 name = str(a.value)
+            if name is None and self._java_annotation(a) is not None:
+                # A JAVA TYPE is a machine word -- a handle -- so a function
+                # annotated with one stays static. Falling through to the
+                # dynamic path here made every parameter an `object`, which is
+                # a representation the JVM backend has no runtime for.
+                return False
             return name not in BY_NAME or name == "object"
         # A MISSING RETURN ANNOTATION is dynamic too, and this is not a
         # detail: `def f():` has no parameters, so "every parameter is
@@ -1190,7 +1699,14 @@ class Analyzer:
         # deep inside a loop are the same kind of function. It is decided here
         # rather than while checking the body, because a call to it has to
         # know before the body is reached.
-        info.is_generator = dynamic and _has_yield(node)
+        info.is_coroutine = dynamic and isinstance(node, ast.AsyncFunctionDef)
+        # An `async def` is lowered as a generator whether or not it yields:
+        # `await` suspends it, so its locals have to survive the return that
+        # a suspension compiles to, exactly as a `yield`'s do.
+        info.is_generator = dynamic and (_has_yield(node) or info.is_coroutine)
+        # `async def` WITH `yield` is a third thing, and awaiting one is an
+        # error where iterating it is not.
+        info.is_async_generator = info.is_coroutine and _has_yield(node)
         if info.is_generator:
             info.ret = OBJ
         if dynamic:
@@ -1203,13 +1719,46 @@ class Analyzer:
             # None there means REQUIRED rather than "defaults to None". Both
             # kinds end up as trailing defaults, which is the layout the
             # function value already has.
-            info.defaults = list(node.args.defaults) + [
-                d for d in node.args.kw_defaults if d is not None]
+            kwd = [d for d in node.args.kw_defaults if d is not None]
+            info.defaults = list(node.args.defaults) + kwd
+            info.kwdefaults = len(kwd)
             if info.vararg:
                 # `*rest` is an ordinary local holding a tuple. Declared as a
                 # parameter would make the arity checks count it.
                 pass
         return info
+
+    def _no_compiler(self, name: str, at) -> None:
+        """`compile`, `eval` and `exec` -- allowed, and said out loud.
+
+        A WARNING AND NOT AN ERROR. The program gets a real `compile()`: the
+        parser, the validator and the code object are bundled Python, spliced
+        in like any other module -- see `bundled/_pycompile.py`. What it is
+        not is the compiler that built the binary, and the difference is worth
+        a line at the call site rather than a surprise later.
+
+        TWO DIFFERENT WARNINGS, because the costs differ. `compile()` answers
+        whether source is valid Python and stops there. `eval()` and `exec()`
+        RUN it, and running it is interpretation -- everything reached that
+        way is orders of magnitude slower than the native code around it, and
+        that is the part a reader needs told.
+        """
+        said = warning(
+            "W0091", f"{name}() is not recommended in a compiled program")
+        said = said.at(self._span(at))
+        if name == "compile":
+            said = said.note(
+                "it answers whether source is valid Python, through the "
+                "parser bundled into this binary -- not through the compiler "
+                "that built it")
+        else:
+            said = said.note(
+                f"the source {name}() is given is INTERPRETED, not compiled: "
+                f"it runs through the interpreter bundled into this binary "
+                f"and is far slower than the code around it")
+        self.sink.report(said.help(
+            "prefer a function you can call directly, which the compiler can "
+            "see and optimise"))
 
     def _annotation(self, ann, at, what: str) -> SemType:
         if ann is None:
@@ -1218,6 +1767,13 @@ class Analyzer:
                 .at(self._span(at))
                 .help("annotate with int, float, bool or None"))
             return ERROR
+        # A JAVA TYPE, written the way it is imported: `block.Block`. Without
+        # this a handle could be produced and used inside one function and
+        # never leave it, because there was no way to spell the parameter that
+        # would receive it.
+        java = self._java_annotation(ann)
+        if java is not None:
+            return java
         name = getattr(ann, "id", None)
         if name is None and isinstance(ann, ast.Constant):
             name = str(ann.value)
@@ -1228,6 +1784,27 @@ class Analyzer:
                 .note("this frontend understands: " + ", ".join(BY_NAME)))
             return ERROR
         return BY_NAME[name]
+
+    def _java_annotation(self, ann) -> SemType | None:
+        """`block.Block` as a type, or None if this is not one.
+
+        Only the attribute form: a bare `Block` would need the name bound to
+        something, and `import a.b as n` binds `n` rather than what is in it.
+        `from a.b import Block` is the spelling that would bind the bare name,
+        and it is not supported here yet.
+        """
+        if not isinstance(ann, ast.Attribute):
+            return None
+        found = self._namespace_of(ann)
+        if found is None:
+            return None
+        module, path = found
+        if len(path) != 1:
+            return None
+        entry = member(module, path[0])
+        if entry is None or entry[0] != "jclass":
+            return None
+        return sem_type(entry[1]["type"])
 
     # ── bodies ──────────────────────────────────────────────────────────────
     @property
@@ -1252,8 +1829,13 @@ class Analyzer:
                                              if info.params else None,
                                              is_param=True)
         if info.vararg:
+            # `is_param`, like the `**kw` above it: `*rest` ARRIVES IN A
+            # REGISTER from the caller. Without the flag, boxing it for a
+            # closure built the cell from None and threw the tuple away, so a
+            # nested function reading `args` saw None while `kw` worked.
             info.locals[info.vararg] = Symbol(info.vararg, OBJ,
-                                              self._span(info.node))
+                                              self._span(info.node),
+                                              is_param=True)
         scope = self.scope_of.get(info.name)
         if info.dynamic and info.name != ENTRY_NAME:
             declared = (set(scope.globals) if scope is not None
@@ -1366,9 +1948,54 @@ class Analyzer:
                 # questions, and the runtime answers them where CPython does.
                 self._expr(target.value)
                 self._expr(node.value)
+            case ast.Assign(targets=[_, _, *_]) if self.dynamic:
+                # `a = b = value` -- ONE value, bound to each target left to
+                # right. The value is evaluated once, which is what makes
+                # `a = b = []` two names for the same list.
+                self._expr(node.value)
+                for target in node.targets:
+                    match target:
+                        case ast.Name(id=name):
+                            self._bind(name, OBJ, node)
+                            self.assigned.add(name)
+                        case ast.Tuple() | ast.List():
+                            for name in _target_names(target):
+                                self._bind(name, OBJ, node)
+                                self.assigned.add(name)
+                        case ast.Subscript() | ast.Attribute():
+                            self._expr(target.value)
+                        case _:
+                            self._error("E0020",
+                                        "only simple `name = value` "
+                                        "assignment is supported", node)
             case ast.Assign():
                 self._error("E0020", "only simple `name = value` assignment "
                                      "is supported", node)
+            case ast.TypeAlias() if self.dynamic:
+                # PEP 695: `type Alias = list[int]`. The TYPE PARAMETERS ARE
+                # IN SCOPE FOR THE VALUE and nowhere else, so they are bound
+                # here for the walk and dropped after it -- writing `T` after
+                # the statement is a NameError, as it is in CPython.
+                names = {p.name for p in node.type_params}
+                for one in names:
+                    self._bind(one, OBJ, node)
+                    self.assigned.add(one)
+                self._expr(node.value)
+                self._bind(node.name.id, OBJ, node)
+                self.assigned.add(node.name.id)
+            case ast.AnnAssign(target=(ast.Attribute() | ast.Subscript()))                     if self.dynamic:
+                # `self.items: list[T] = []`. THE ANNOTATION IS NOT KEPT --
+                # only a NAME's annotation goes into `__annotations__`, and
+                # CPython does not record one on an attribute either -- so
+                # this is the assignment it also is, and refusing it rejected
+                # ordinary Python over the annotation alone.
+                if isinstance(node.target, ast.Attribute):
+                    self._expr(node.target.value)
+                else:
+                    self._expr(node.target.value)
+                    self._expr(node.target.slice)
+                if node.value is not None:
+                    self._expr(node.value)
             case ast.AnnAssign(target=ast.Name(id=name)) if self.dynamic:
                 # `x: int = 1` inside a dynamic function. The annotation is
                 # not enforced: the value is an object either way, and
@@ -1421,7 +2048,13 @@ class Analyzer:
                                        what=f"assignment to {name!r}")
                 self.assigned.add(name)
             case ast.Return():
-                got = self._expr(node.value) if node.value else NONE
+                # A BARE `return` IN A DYNAMIC FUNCTION yields None AS AN
+                # OBJECT, which is assignable to the `object` a dynamic
+                # function returns. Typing it as the static NONE made
+                # `def f(): return` -- and every early exit written that way
+                # -- a narrowing error for a program CPython runs.
+                got = (self._expr(node.value) if node.value
+                       else (OBJ if self.dynamic else NONE))
                 # In a GENERATOR a `return` does not produce the call's value
                 # -- it ends the iteration -- so there is nothing to check it
                 # against. `return` and `return v` are both legal there, and
@@ -1449,6 +2082,30 @@ class Analyzer:
                 else:
                     self.assigned = then_assigned | else_assigned
                 return then_falls or else_falls
+            case ast.Match() if self.dynamic:
+                self._expr(node.subject)
+                # EVERY CASE BINDS INTO THE ENCLOSING SCOPE, and none of them
+                # is guaranteed to run -- so the names are declared here but
+                # NOT added to `assigned`. A `match` that falls through binds
+                # nothing, and reading a capture afterwards is the
+                # UnboundLocalError CPython raises rather than something to
+                # reject at compile time.
+                before = set(self.assigned)
+                for item in node.cases:
+                    for name in _pattern_names(item.pattern):
+                        self._declare(name, OBJ, node)
+                        self.assigned.add(name)
+                    # The GUARD is checked with the captures in scope: `case n
+                    # if n > 10` reads the name the pattern just bound.
+                    if item.guard is not None:
+                        self._expr(item.guard)
+                    self._value_pattern_names(item.pattern)
+                    self._block(item.body)
+                    self.assigned = set(before)
+                self.assigned = before
+            case ast.Match():
+                self._error("E0088", "`match` needs a dynamic function; this "
+                                     "one is statically typed", node)
             case ast.While():
                 self._expr(node.test)
                 # The body may run zero times, so nothing it assigns is
@@ -1466,6 +2123,29 @@ class Analyzer:
                                          "in an annotated function", node)
                 self._block(node.orelse)
                 self.assigned = before
+            case ast.AsyncFor() if self.current.is_coroutine:
+                # `async for` is the ordinary loop's shape with an awaitable
+                # source, so the same checks apply -- what differs is entirely
+                # in the lowering. Outside a coroutine there is nothing to
+                # suspend, which is why the guard is on the enclosing function
+                # and not on the loop.
+                self._expr(node.iter)
+                before = set(self.assigned)
+                if isinstance(node.target, (ast.Tuple, ast.List)):
+                    for nm in _target_names(node.target):
+                        self._bind(nm, OBJ, node)
+                        self.assigned.add(nm)
+                else:
+                    self._bind(node.target.id, OBJ, node)
+                    self.assigned.add(node.target.id)
+                self.loop_depth += 1
+                self._block(node.body)
+                self.loop_depth -= 1
+                self.assigned = before
+                self._block(node.orelse)
+                self.assigned = before
+            case ast.AsyncFor():
+                self._error("E0087", "`async for` outside async function", node)
             case ast.For(target=(ast.Tuple() | ast.List())) if self.dynamic:
                 self._for_unpack(node)
             case ast.For(target=ast.Name(id=name)):
@@ -1493,10 +2173,11 @@ class Analyzer:
             case ast.Nonlocal():
                 self._error("E0067", "`nonlocal` needs a dynamic function",
                             node)
-            case ast.FunctionDef() if self.dynamic:
-                # A nested `def`. Its body was registered and checked on its
-                # own; what happens HERE is the binding of its name to a
-                # function value, which is an ordinary assignment.
+            case ast.FunctionDef() | ast.AsyncFunctionDef() if self.dynamic:
+                # A nested `def`, or an `async def` -- the same thing here.
+                # Its body was registered and checked on its own; what happens
+                # HERE is the binding of its name to a function value, which
+                # is an ordinary assignment.
                 self._bind(node.name, OBJ, node)
                 self.assigned.add(node.name)
             case ast.ClassDef() if self.dynamic:
@@ -1534,6 +2215,11 @@ class Analyzer:
                     elif isinstance(target, ast.Subscript):
                         self._expr(target.value)
                         self._expr(target.slice)
+                    elif isinstance(target, ast.Attribute) and self.dynamic:
+                        # `del obj.attr` -- the runtime already has
+                        # `apy_delattr`, and a `__delattr__` or a descriptor's
+                        # `__delete__` hangs off it. Only the frontend refused.
+                        self._expr(target.value)
                     else:
                         self._error("E0081",
                                     f"`del` of a "
@@ -1545,8 +2231,16 @@ class Analyzer:
                 self._expr(node.test)
                 if node.msg is not None:
                     self._expr(node.msg)
+            case ast.Import() if not self.dynamic:
+                for alias in node.names:
+                    self._static_import(alias, node)
             case ast.Import() if self.dynamic:
                 for alias in node.names:
+                    # Recorded for the STATIC functions below, whichever path
+                    # this statement itself took: a module-level `import` is
+                    # analysed dynamically because module-level code always is,
+                    # and `main` still has to be able to name what it bound.
+                    self._remember_namespace(alias)
                     if resolve(alias.name) is None:
                         self._error("E0083",
                                     f"no module named {alias.name!r} is "
@@ -1577,19 +2271,21 @@ class Analyzer:
                         bound = alias.asname or alias.name
                         self._bind(bound, OBJ, node)
                         self.assigned.add(bound)
+            case ast.AsyncWith() if self.current.is_coroutine:
+                # The same checks as `with`: the difference is entirely in the
+                # lowering, which awaits each half of the protocol.
+                return self._check_with(node)
+            case ast.AsyncWith():
+                self._error("E0089", "`async with` outside async function",
+                            node)
             case ast.With() if self.dynamic:
-                for item in node.items:
-                    self._expr(item.context_expr)
-                    if item.optional_vars is not None:
-                        if not isinstance(item.optional_vars, ast.Name):
-                            self._error("E0082",
-                                        "`with ... as` needs a plain name",
-                                        node)
-                        else:
-                            self._bind(item.optional_vars.id, OBJ, node)
-                            self.assigned.add(item.optional_vars.id)
-                return self._block(node.body)
-            case ast.Try() if self.dynamic:
+                return self._check_with(node)
+            case ast.Try() | ast.TryStar() if self.dynamic:
+                # `except*` DIVIDES rather than selects, and that
+                # difference is entirely in the lowering: the same
+                # names are bound and the same paths reach past the
+                # statement, so the same definite-assignment
+                # reasoning applies to both.
                 return self._dyn_try(node)
             case ast.Pass():
                 pass
@@ -1597,6 +2293,24 @@ class Analyzer:
                 self._error("E0022",
                             f"unsupported statement: {type(node).__name__}", node)
         return True
+
+    def _check_with(self, node) -> bool:
+        """`with` and `async with` -- the same checks for both.
+
+        What differs between them is entirely in the lowering, which awaits
+        each half of the protocol; the names bound and the expressions checked
+        are identical.
+        """
+        for item in node.items:
+            self._expr(item.context_expr)
+            if item.optional_vars is not None:
+                if not isinstance(item.optional_vars, ast.Name):
+                    self._error("E0082", "`with ... as` needs a plain name",
+                                node)
+                else:
+                    self._bind(item.optional_vars.id, OBJ, node)
+                    self.assigned.add(item.optional_vars.id)
+        return self._block(node.body)
 
     def _class_statement(self, node: ast.ClassDef) -> None:
         """Check a `class` statement where it is WRITTEN.
@@ -1607,36 +2321,43 @@ class Analyzer:
         binds in the enclosing scope.
         """
         info = self.classes[self.class_of_node[id(node)]]
-        if info.base is not None:
-            if info.is_exception:
-                # A user EXCEPTION class. It becomes a name in the runtime's
-                # exception hierarchy rather than a type object -- see
-                # `apy_exc_register` in link/objects.py -- so `except
-                # ValueError:` catches it through the same walk that makes
-                # `except LookupError:` catch a KeyError.
-                #
-                # THE BODY MUST BE EMPTY, because a name in a hierarchy has no
-                # methods and no attributes to put them in. Accepting one and
-                # dropping it silently is the bad half of this trade: the
-                # program would compile and quietly do less than it says.
-                real = [st for st in node.body
-                        if not isinstance(st, ast.Pass)
-                        and not _is_docstring(st)]
-                if real:
-                    self._error("E0075",
-                                f"an exception class may only have an empty "
-                                f"body; {node.name!r} defines "
-                                f"{type(real[0]).__name__}", real[0])
-                self._bind(node.name, OBJ, node)
-                self.assigned.add(node.name)
-                return
-            elif not any(c.name == info.base for c in self.classes.values()):
-                self._error("E0076",
-                            f"base class {info.base!r} is not a class defined "
-                            f"in this module", node)
+        # A USER EXCEPTION CLASS IS BOTH THINGS AT ONCE. Its NAME goes into
+        # the runtime's exception hierarchy -- see `apy_exc_register` in
+        # link/objects.py -- which is what makes `except ValueError:` catch it
+        # through the same walk that makes `except LookupError:` catch a
+        # KeyError. Its BODY builds an ordinary class, because
+        #
+        #     class AppError(Exception):
+        #         def __init__(self, code, message):
+        #             super().__init__(f"{code}: {message}")
+        #             self.code = code
+        #
+        # is how most programs write one, and a name in a table has nowhere to
+        # put an `__init__`. So the checks below are the checks any class gets;
+        # what an exception class skips is only the question of whether its
+        # bases are classes THIS module defines, since its base is a name in
+        # the hierarchy and usually a builtin one.
+        if info.base is not None and not info.is_exception:
+            # EVERY base, not just the first: a second one that names
+            # nothing is the same mistake as a first one that does.
+            known = {c.name for c in self.classes.values()}
+            for one in info.bases:
+                if one not in known:
+                    self._error("E0076",
+                                f"base class {one!r} is not a class "
+                                f"defined in this module", node)
+        # PEP 560's expression bases are checked HERE, where every class the
+        # module defines is registered.
+        for one in info.base_exprs:
+            self._expr(one)
         for stmt in node.body:
             match stmt:
-                case ast.FunctionDef():
+                case ast.FunctionDef() | ast.AsyncFunctionDef():
+                    # `async def` IS A METHOD LIKE ANY OTHER here -- matching
+                    # only `FunctionDef` rejected every class with an
+                    # `__aenter__` or an async method on it, which is most of
+                    # them once a program uses `async with`.
+                    #
                     # The body was registered and is checked on its own; the
                     # DECORATORS are not part of it -- they run where the
                     # class body runs, so an unknown one has to be reported
@@ -1646,19 +2367,41 @@ class Analyzer:
                 case ast.Assign(targets=[ast.Name(id=name)], value=value):
                     self._expr(value)
                     info.attrs.append((name, value))
-                case ast.AnnAssign(target=ast.Name(id=name), value=value) \
-                        if value is not None:
-                    self._expr(value)
-                    info.attrs.append((name, value))
+                case ast.AnnAssign(target=ast.Name(id=name), value=value):
+                    # THE ANNOTATION IS RECORDED whether or not there is a
+                    # value: `a: int` with none declares nothing to bind and
+                    # still appears in `C.__annotations__`, which is the whole
+                    # point of writing it.
+                    if stmt.annotation is not None:
+                        info.annotations.append((name, stmt.annotation))
+                    if value is not None:
+                        self._expr(value)
+                        info.attrs.append((name, value))
+                case ast.Expr() if not _is_docstring(stmt):
+                    # A BARE EXPRESSION IN A CLASS BODY. A class body is a
+                    # block that RUNS, once, where it is written -- `log.append
+                    # ("body")` in one is ordinary Python, and refusing it
+                    # rejected the program over a statement that binds nothing.
+                    self._expr(stmt.value)
+                    info.body_exprs.append(stmt.value)
                 case ast.Pass():
                     pass
                 case _ if _is_docstring(stmt):
                     pass
                 case _:
-                    self._error("E0077",
-                                f"a class body may only contain methods and "
-                                f"attribute assignments, not "
-                                f"{type(stmt).__name__}", stmt)
+                    # A CLASS BODY IS A BLOCK THAT RUNS. `try: import x /
+                    # except ImportError: x = None`, `if TYPE_CHECKING:`, a
+                    # `for` that builds several attributes -- all ordinary
+                    # Python, and refusing them rejected the program over the
+                    # SHAPE of a statement rather than anything it did.
+                    #
+                    # WHAT IT BINDS IS A CLASS ATTRIBUTE, which is why the
+                    # names are recorded: `_dyn_class` routes their stores
+                    # into the class namespace, and a plain local would make
+                    # the name vanish with the body.
+                    info.body_stmts.append(stmt)
+                    info.body_stmt_names |= _stored_names(stmt)
+                    self._block([stmt])
         self._bind(node.name, OBJ, node)
         self.assigned.add(node.name)
 
@@ -1850,6 +2593,29 @@ class Analyzer:
             # and nothing short of a solver relates the two.
             info.maybe_unbound.add(name)
         if sym is None:
+            if info.dynamic:
+                # A NAME NOTHING IN THIS PROGRAM ASSIGNS is a GLOBAL READ, and
+                # a global that was never set raises `NameError` when the read
+                # runs -- which is CPython's rule, and the difference between
+                # refusing a program and running the part of it that works:
+                #
+                #     gen = list(j for j in range(2))
+                #     try:
+                #         print(j)            # NameError, and catchable
+                #     except NameError:
+                #         ...
+                #
+                # `j` is the generator expression's own, so nothing at module
+                # level assigns it -- and CPython still compiles the read.
+                # Reporting here refused a program that CPython runs.
+                # REGISTERED AS MODULE STORAGE, so the read has somewhere to
+                # come from. The cell is zero-initialised and zero is never a
+                # value, so reading one nothing assigned is the NameError
+                # above rather than a crash -- the same mechanism a global
+                # read before its assignment already uses.
+                self.module_names.add(name)
+                self.current.module_reads.add(name)
+                return OBJ
             self.sink.report(
                 error("E0031", f"undefined name {name!r}")
                 .at(self._span(at))
@@ -1969,6 +2735,23 @@ class Analyzer:
                 if node.value is not None:
                     self._expr(node.value)
                 return OBJ
+            case ast.Await() if self.current.is_coroutine:
+                self._expr(node.value)
+                return OBJ
+            case ast.Await():
+                # OUTSIDE an `async def` this is a syntax error in CPython,
+                # and reporting it as one here rather than lowering something
+                # that cannot suspend is the difference between a diagnostic
+                # and a wrong answer.
+                self._error("E0086", "'await' outside async function", node)
+                return ERROR
+            case ast.Slice() if self.dynamic:
+                # A SLICE AS A VALUE -- `c[1:2, 3]` puts one in a tuple. Its
+                # bounds are ordinary expressions and an omitted one is None.
+                for part in (node.lower, node.upper, node.step):
+                    if part is not None:
+                        self._expr(part)
+                return OBJ
             case ast.Name(id=name) if name in _SINGLETON_NAMES:
                 return OBJ
             case ast.Attribute(value=ast.Name(id="object"), attr=attr) \
@@ -1995,6 +2778,13 @@ class Analyzer:
                     self.current.module_reads.add(name)
                     return OBJ
                 if name not in self.current.locals:
+                    if name in _NEEDS_A_COMPILER:
+                        # AS A VALUE TOO, and not only in call position. Left
+                        # to the general path this compiled to a runtime
+                        # `name 'eval' is not defined` -- which says the wrong
+                        # thing about a name Python does define.
+                        self._no_compiler(name, node)
+                        return ERROR
                     if name in _EXC_NAMES or name in self.exc_classes:
                         return OBJ
                     if name in self.functions or name in self.class_names:
@@ -2025,7 +2815,7 @@ class Analyzer:
                         # any other. Only the one-argument builtins qualify:
                         # the thunk's SHAPE is what makes it callable, and a
                         # variadic like `print` has no single shape.
-                        if name in _VALUE_BUILTINS:
+                        if name in _VALUE_BUILTINS or name in _CLASS_VALUES:
                             return OBJ
                         self._error("E0056",
                                     f"{name!r} is a builtin that cannot be "
@@ -2046,6 +2836,18 @@ class Analyzer:
                 for e in elts:
                     self._arg_expr(e)
                 return OBJ
+            case ast.TemplateStr(values=parts):
+                # THE SAME CHECKS AS AN F-STRING: the pieces are expressions
+                # either way, and what differs is only whether the result is
+                # joined. `Interpolation` carries `format_spec` as a nested
+                # f-string exactly as `FormattedValue` does.
+                for part in parts:
+                    if isinstance(part, ast.Constant):
+                        continue
+                    if part.format_spec is not None:
+                        self._expr(part.format_spec)
+                    self._expr(part.value)
+                return OBJ
             case ast.JoinedStr(values=parts):
                 for part in parts:
                     if isinstance(part, ast.Constant):
@@ -2062,15 +2864,22 @@ class Analyzer:
                 for e in elts:
                     self._arg_expr(e)
                 return OBJ
-            case ast.ListComp() | ast.SetComp() | ast.GeneratorExp():
+            case ast.GeneratorExp():
+                # A SCOPE OF ITS OWN, registered alongside the lambdas -- so
+                # only the outermost iterable is typed here, the rest being
+                # inside the synthetic body. See `genexp_def`.
+                self._expr(node.generators[0].iter)
+                return OBJ
+            case ast.ListComp() | ast.SetComp():
                 return self._dyn_comprehension(node, [node.elt])
             case ast.DictComp():
                 return self._dyn_comprehension(node, [node.key, node.value])
             case ast.Dict(keys=keys, values=values):
                 for k, v in zip(keys, values):
                     if k is None:
-                        self._error("E0059", "`**` in a dict display is not "
-                                             "supported yet", node)
+                        # `{**other}` -- the value is a MAPPING spread into
+                        # this one, and there is no key to check.
+                        self._expr(v)
                         continue
                     self._expr(k)
                     self._expr(v)
@@ -2089,7 +2898,7 @@ class Analyzer:
                 return self._dyn_call(node)
             case ast.BinOp():
                 self._expr(node.left); self._expr(node.right)
-                if not isinstance(node.op, self._LOWERABLE_BINOPS):
+                if not isinstance(node.op, self._DYN_BINOPS):
                     self.sink.report(
                         error("E0045",
                               f"operator {_op_symbol(node.op)} is not supported")
@@ -2126,9 +2935,12 @@ class Analyzer:
         declared here before the element expression is checked.
         """
         for gen in node.generators:
-            if gen.is_async:
-                self._error("E0064", "an async comprehension is not supported",
-                            node)
+            if gen.is_async and not self.current.is_coroutine:
+                # Outside a coroutine there is nothing to suspend, which is
+                # what `async for` in a comprehension needs. CPython calls
+                # this a syntax error for the same reason.
+                self._error("E0064", "an async comprehension outside an "
+                                     "async function", node)
             self._expr(gen.iter)
             for name in _target_names(gen.target):
                 self._declare(name, OBJ, node)
@@ -2138,6 +2950,34 @@ class Analyzer:
         for r in results:
             self._expr(r)
         return OBJ
+
+    def _value_pattern_names(self, pat) -> None:
+        """Check the parts of a pattern that are READ rather than bound.
+
+        `case Color.RED` compares against a value and `case Point(x, y)` names
+        a class -- both are ordinary expressions, and an undefined name in one
+        is the same mistake as anywhere else. Walked separately from the
+        binding names because the two are interleaved and only position tells
+        them apart.
+        """
+        if pat is None:
+            return
+        if isinstance(pat, ast.MatchValue):
+            self._expr(pat.value)
+        elif isinstance(pat, ast.MatchClass):
+            self._expr(pat.cls)
+            for sub in list(pat.patterns) + list(pat.kwd_patterns):
+                self._value_pattern_names(sub)
+        elif isinstance(pat, ast.MatchMapping):
+            for key in pat.keys:
+                self._expr(key)
+            for sub in pat.patterns:
+                self._value_pattern_names(sub)
+        elif isinstance(pat, (ast.MatchSequence, ast.MatchOr)):
+            for sub in pat.patterns:
+                self._value_pattern_names(sub)
+        elif isinstance(pat, ast.MatchAs):
+            self._value_pattern_names(pat.pattern)
 
     def _arg_expr(self, arg) -> SemType:
         """Type one call argument, seeing through `*xs`.
@@ -2152,6 +2992,8 @@ class Analyzer:
         return self._expr(arg)
 
     def _dyn_call(self, node: ast.Call) -> SemType:
+        if isinstance(node.func, ast.Name) and node.func.id == "locals"                 and "locals" not in self.current.locals:
+            self.current.reads_all_locals = True
         for kw in node.keywords:
             self._expr(kw.value)
         if isinstance(node.func, ast.Attribute)                 and isinstance(node.func.value, ast.Name)                 and node.func.value.id in _BUILTIN_TYPE_NAMES                 and node.func.attr in _TYPE_STATIC_NAMES                 and node.func.value.id not in self.current.locals:
@@ -2186,18 +3028,34 @@ class Analyzer:
             return OBJ
         name = node.func.id
         if name == "super":
-            if node.args:
-                self._error("E0078", "only the no-argument form of `super()` "
-                                     "is supported", node)
+            # `super(C, self)` IS THE EXPLICIT FORM of the same thing: the
+            # class to start past, and the receiver to bind to. The
+            # no-argument spelling is sugar for exactly this pair, so both go
+            # to one runtime call and only where the two come from differs.
+            if len(node.args) == 2:
+                for a in node.args:
+                    self._arg_expr(a)
+            elif node.args:
+                self._error("E0078", "`super()` takes no arguments or two",
+                            node)
             elif self.current.owner is None:
                 self._error("E0079", "`super()` outside a method", node)
             return OBJ
         for a in node.args[:1] if name == "isinstance" else node.args:
             self._arg_expr(a)
         if name in _EXC_NAMES or name in self.exc_classes:
-            if len(node.args) > 1:
-                self._error("E0061", "an exception takes at most one "
-                                     "argument here", node)
+            # A GROUP TAKES TWO: the message and the exceptions it carries.
+            # Every other exception takes at most one argument, which is what
+            # makes the general rule worth stating -- and why the exception to
+            # it is named rather than left to a count.
+            if name in ("ExceptionGroup", "BaseExceptionGroup"):
+                if len(node.args) != 2:
+                    self._error("E0061", f"{name} takes the message and the "
+                                         f"exceptions it carries", node)
+                return OBJ
+            # EVERY ARGUMENT IS KEPT. `e.args` is a tuple of all of them and
+            # `OSError(errno, strerror)` reads two back by name, so refusing
+            # more than one rejected programs CPython accepts.
             return OBJ
         if name == "isinstance":
             # THE SECOND ARGUMENT IS AN EXPRESSION, and usually a dotted one:
@@ -2246,6 +3104,9 @@ class Analyzer:
                         and name in self.module_names):
                 self._expr(node.func)
                 return OBJ
+            if name in _NEEDS_A_COMPILER:
+                self._no_compiler(name, node)
+                return ERROR
             self.sink.report(
                 error("E0052", f"call to unknown function {name!r}")
                 .at(self._span(node.func))
@@ -2282,6 +3143,14 @@ class Analyzer:
             # own parameters here rejected calls the program makes happily.
             return
         params = [p.name for p in info.params]
+        # A KEYWORD-ONLY PARAMETER CANNOT BE FILLED BY POSITION. Every
+        # parameter was treated as reachable positionally, so
+        # `def b(x, *args, c=3)` called `b(1, 2, c=9)` was rejected as two
+        # values for `c` -- the `2` was counted as having filled it. The
+        # runtime already models the split (see `apy_func_kwonly`); only this
+        # check did not, which is why the error was a refusal rather than a
+        # wrong answer.
+        positional = params[:len(params) - info.kwonly] if info.kwonly             else params
         required = len(params) - len(info.defaults)
         given = list(node.args)
         by_name = {kw.arg: kw for kw in node.keywords if kw.arg}
@@ -2293,28 +3162,52 @@ class Analyzer:
                     .at(self._span(node))
                     .also(self._span_of_def(info), f"{name} is defined here"))
                 return
-            if params.index(kw) < len(given):
+            if kw in positional and positional.index(kw) < len(given):
                 self.sink.report(
                     error("E0069", f"{name}() got multiple values for "
                                    f"argument {kw!r}")
                     .at(self._span(node)))
                 return
-        if info.vararg is None and len(given) > len(params):
+        if info.vararg is None and len(given) > len(positional):
+            self._arity_mismatch(
+                node, info,
+                f"{name}() takes at most {len(positional)} "
+                f"positional argument(s), got {len(given)}", name)
+            return
+        filled = set(positional[:len(given)]) | set(by_name)
+        missing = [p for p in params[:required] if p not in filled]
+        if missing:
+            self._arity_mismatch(
+                node, info,
+                f"{name}() missing {len(missing)} required argument(s): "
+                + ", ".join(repr(m) for m in missing), name)
+
+    def _arity_mismatch(self, node: ast.Call, info: FunctionInfo,
+                        message: str, name: str) -> None:
+        """A call whose argument count cannot be right.
+
+        A REFUSAL FOR A STATIC FUNCTION and a RUNTIME RAISE for a dynamic one.
+        The two differ because Python's answer is a TypeError, which a program
+        may catch -- and one that does could not be compiled at all while this
+        was a compile error. A statically typed function has a fixed machine
+        signature and genuinely cannot be called wrongly, so there the refusal
+        is the only thing that can be produced.
+        """
+        if not info.dynamic:
             self.sink.report(
-                error("E0053", f"{name}() takes at most {len(params)} "
-                               f"positional argument(s), got {len(given)}")
+                error("E0053", message)
                 .at(self._span(node))
                 .also(self._span_of_def(info), f"{name} is defined here"))
             return
-        filled = set(params[:len(given)]) | set(by_name)
-        missing = [p for p in params[:required] if p not in filled]
-        if missing:
-            self.sink.report(
-                error("E0053", f"{name}() missing {len(missing)} required "
-                               f"argument(s): "
-                               + ", ".join(repr(m) for m in missing))
-                .at(self._span(node))
-                .also(self._span_of_def(info), f"{name} is defined here"))
+        self.sink.report(
+            warning("W0053", message + " -- raised at run time")
+            .at(self._span(node))
+            .also(self._span_of_def(info), f"{name} is defined here"))
+        # LOWERING HAS TO KNOW. The direct call path passes the arguments
+        # straight to the symbol, and a count the callee cannot accept is a C
+        # compile error rather than a Python one; routing this call through
+        # the value path is what lets the runtime report it.
+        self.late_arity.add(id(node))
 
     #: Every binary operator this frontend lowers. Checked explicitly, because
     #: the failure mode of NOT checking is a traceback rather than an error:
@@ -2322,9 +3215,18 @@ class Analyzer:
     #: a lowering table that had never heard of them. An operator missing from
     #: this set is refused by the type checker, which is where a user can see
     #: it.
+    #: SHARED BY BOTH PATHS, which is why `@` is not in it. `a @ b` has no
+    #: meaning for a machine word -- it reaches `__matmul__` or nothing -- so
+    #: on the static path it stays unsupported, and putting it here made a
+    #: statically typed `1 @ 2` reach a lowering with no entry for it and
+    #: raise KeyError instead of reporting.
     _LOWERABLE_BINOPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv,
                          ast.Mod, ast.Pow, ast.BitAnd, ast.BitOr, ast.BitXor,
                          ast.LShift, ast.RShift)
+
+    #: The dynamic path additionally has `@`, which is dunder dispatch and
+    #: nothing else.
+    _DYN_BINOPS = _LOWERABLE_BINOPS + (ast.MatMult,)
 
     def _binop(self, node: ast.BinOp) -> SemType:
         left, right = self._expr(node.left), self._expr(node.right)
@@ -2396,11 +3298,101 @@ class Analyzer:
             return ERROR
         return FLOAT if left is FLOAT else INT
 
+
+    # ── importing a namespace ───────────────────────────────────────────────
+    def _static_import(self, alias, node) -> None:
+        """`import a.b.c` and `import a.b.c as n`, on the static path.
+
+        A namespace here is a COMPILE-TIME thing: there is no module object at
+        run time and nothing is emitted for the statement. What it binds is a
+        name the analyser will recognise at the head of an attribute chain --
+        which is enough for `block.Block()` and is all a subset with no first
+        class objects can honestly offer.
+
+        `import a.b.c as n` binds `n` to the module. `import a.b.c` binds `a`,
+        as Python does, and the rest of the chain is read at the use site.
+        """
+        if resolve(alias.name) is None and not self._is_package_root(alias.name):
+            self._error("E0083",
+                        f"no module named {alias.name!r} is available; "
+                        f"there is no import path", node, importable())
+            return
+        self._remember_namespace(alias)
+        self._bind_namespace(alias.asname or alias.name.split(".")[0], node)
+
+    def _remember_namespace(self, alias) -> None:
+        """Record what an `import` makes nameable, for every later function."""
+        if alias.asname:
+            self.namespaces[alias.asname] = alias.name
+        else:
+            self.namespaces.setdefault(alias.name.split(".")[0], "")
+
+    def _is_namespace_import(self, node) -> bool:
+        """True for `import x` where every name is a backend namespace."""
+        if not isinstance(node, ast.Import):
+            return False
+        return all(self._namespace_import(alias) for alias in node.names)
+
+    def _namespace_import(self, alias) -> bool:
+        table = resolve(alias.name)
+        if table is not None:
+            return any(entry[0] == "jclass"
+                       for entry in _members_of(table)) or not len(table)
+        return self._is_package_root(alias.name)
+
+    def _is_package_root(self, dotted: str) -> bool:
+        """True if anything importable starts with this name.
+
+        `import jvm.com.minecraft.block` names a module; `import com.minecraft`
+        may name only a prefix of one, and binding the head is still right --
+        the use site is what decides whether the whole chain resolves.
+        """
+        prefix = dotted + "."
+        return any(name.startswith(prefix) for name in importable())
+
+    def _bind_namespace(self, name: str, node) -> None:
+        """A namespace occupies a name without being a value.
+
+        Recorded as assigned so that reading it is not "used before
+        assignment", and NOT given a type: there is no value, and an
+        expression that tries to use one gets a diagnostic saying so.
+        """
+        self.assigned.add(name)
+
+    def _namespace_of(self, node) -> tuple[str, list[str]] | None:
+        """Split an attribute chain into (module, remaining names).
+
+        `block.Block` with `block` bound to `com.minecraft.block` is
+        (`com.minecraft.block`, ["Block"]). `jvm.com.minecraft.block.Block`,
+        where only the head `jvm` was bound, is the same pair -- found by
+        trying the longest prefix first, because `com.minecraft.block` and
+        `com.minecraft` may both resolve and the longer one is meant.
+        """
+        parts: list[str] = []
+        at = node
+        while isinstance(at, ast.Attribute):
+            parts.append(at.attr)
+            at = at.value
+        if not isinstance(at, ast.Name) or at.id not in self.namespaces:
+            return None
+        parts.reverse()
+        bound = self.namespaces[at.id]
+        if bound:
+            return bound, parts
+        chain = [at.id] + parts
+        for cut in range(len(chain) - 1, 0, -1):
+            candidate = ".".join(chain[:cut])
+            if resolve(candidate) is not None:
+                return candidate, chain[cut:]
+        return None
+
     #: Type conversions. Not "functions" -- they are the only calls whose
     #: result type depends on which one you named rather than on a signature.
     _CONVERSIONS = {"int": INT, "float": FLOAT, "bool": BOOL}
 
     def _call(self, node: ast.Call) -> SemType:
+        if isinstance(node.func, ast.Attribute):
+            return self._java_call(node)
         if not isinstance(node.func, ast.Name):
             self._error("E0050", "only direct calls by name are supported", node)
             return ERROR
@@ -2429,6 +3421,9 @@ class Analyzer:
             return want
         info = self.functions.get(name)
         if info is None:
+            if name in _NEEDS_A_COMPILER:
+                self._no_compiler(name, node)
+                return ERROR
             self.sink.report(
                 error("E0052", f"call to unknown function {name!r}")
                 .at(self._span(node.func))
@@ -2451,6 +3446,148 @@ class Analyzer:
             self._expr(extra)
         return ret
 
+
+    # ── calling Java ────────────────────────────────────────────────────────
+    def _java_call(self, node: ast.Call) -> SemType:
+        """`block.Block()`, `block.Block.count()`, `my_block.setName(x)`.
+
+        Three shapes and one resolution: find the overload set, then pick the
+        overload the arguments fit. The set comes from the backend, which read
+        it out of the class path, so a call that type-checks here names a
+        method that is really there.
+        """
+        found = self._namespace_of(node.func)
+        if found is not None:
+            module, path = found
+            return self._namespace_call(node, module, path)
+
+        # Not a namespace, so the base is a VALUE -- an instance method call.
+        receiver = self._expr(node.func.value)
+        if receiver.is_error:
+            return ERROR
+        if not is_java(receiver):
+            self._error("E0092",
+                        f"only direct calls by name are supported; "
+                        f"{ast.unparse(node.func.value)} is {receiver}", node)
+            return ERROR
+        table = modules.type_of(java_class_of(receiver))
+        if table is None:
+            self._error("E0093", f"nothing is known about {receiver}", node)
+            return ERROR
+        overloads = table["instance"].get(node.func.attr)
+        if not overloads:
+            self._error("E0094",
+                        f"{java_class_of(receiver).replace('/', '.')} has no "
+                        f"method {node.func.attr!r}", node)
+            return ERROR
+        return self._pick(node, overloads, node.func.attr, receiver=True)
+
+    def _namespace_call(self, node, module: str, path: list) -> SemType:
+        if not path:
+            self._error("E0095", f"{module} is a module, not a function", node)
+            return ERROR
+        entry = member(module, path[0])
+        if entry is None:
+            self._error("E0084",
+                        f"module {module!r} has no member {path[0]!r}", node)
+            return ERROR
+        if entry[0] != "jclass":
+            self._error("E0096",
+                        f"{module}.{path[0]} is not a Java type", node)
+            return ERROR
+        table = entry[1]
+        if len(path) == 1:
+            # `block.Block()` -- constructing one.
+            if table["abstract"]:
+                self._error("E0097",
+                            f"{path[0]} is abstract and cannot be "
+                            f"constructed", node)
+                return ERROR
+            if not table["new"]:
+                self._error("E0098",
+                            f"{path[0]} has no public constructor", node)
+                return ERROR
+            return self._pick(node, table["new"], path[0])
+        if len(path) == 2:
+            overloads = table["static"].get(path[1])
+            if not overloads:
+                self._error("E0099",
+                            f"{path[0]} has no static method {path[1]!r}", node)
+                return ERROR
+            return self._pick(node, overloads, f"{path[0]}.{path[1]}")
+        self._error("E0100", f"cannot call {'.'.join(path)}", node)
+        return ERROR
+
+    def _pick(self, node, overloads: list, what: str,
+              receiver: bool = False) -> SemType:
+        """Choose the overload the arguments fit, and record it.
+
+        BY ARITY FIRST, then by whether each argument is assignable. Java
+        resolves overloads by a much larger rule -- widening, boxing,
+        varargs -- and implementing a fraction of it would be worse than
+        implementing an obvious part of it: this picks the first candidate that
+        fits exactly, and says so plainly when none does.
+        """
+        fitting = [o for o in overloads if len(o["params"]) == len(node.args)]
+        if not fitting:
+            counts = sorted({len(o["params"]) for o in overloads})
+            self._error("E0101",
+                        f"{what}() takes {' or '.join(map(str, counts))} "
+                        f"argument(s), got {len(node.args)}", node)
+            for a in node.args:
+                self._expr(a)
+            return ERROR
+
+        types = [self._java_arg(a, fitting[0]["params"][i])
+                 for i, a in enumerate(node.args)]
+        for overload in fitting:
+            if all(self._java_fits(got, want)
+                   for got, want in zip(types, overload["params"])):
+                if self.current is not None:
+                    self.current.java_calls[id(node)] = dict(
+                        overload, receiver=receiver)
+                return sem_type(overload["returns"])
+
+        wanted = " or ".join("(" + ", ".join(o["params"]) + ")"
+                             for o in fitting)
+        self._error("E0102",
+                    f"no overload of {what}() takes "
+                    f"({', '.join(str(t) for t in types)}); it takes {wanted}",
+                    node)
+        return ERROR
+
+    def _java_arg(self, arg, want: str) -> SemType:
+        """One argument to a Java method.
+
+        A STRING LITERAL is special and only here: the subset has no string
+        type, so `"stone"` is not an expression anywhere else in the language.
+        In a `String` parameter it is the only thing that could be meant, and
+        refusing it would leave every `setName` in the world unreachable.
+        """
+        if want == JAVA + "java/lang/String" and isinstance(arg, ast.Constant)                 and isinstance(arg.value, str):
+            if self.current is not None:
+                self.current.java_strings[id(arg)] = arg.value
+                self.current.expr_types[id(arg)] = sem_type(want)
+            return sem_type(want)
+        return self._expr(arg)
+
+    def _java_fits(self, got: SemType, want: str) -> bool:
+        if got.is_error:
+            return True                       # already reported
+        if got.name == want:
+            return True
+        if is_java(got) and is_java(want):
+            # A subclass fills a superclass parameter, and a class fills an
+            # interface it implements. Java's own rule, and the one that makes
+            # an API usable: nearly every method in one takes a base type.
+            table = modules.type_of(java_class_of(got))
+            return bool(table) and java_class_of(want) in table["supers"]
+        if want in ("int", "float", "bool"):
+            # The same widening the language already does between its own
+            # numbers, and nothing more: an `int` fills a `double` parameter.
+            return got.name in ("int", "bool") if want != "float"                 else got.is_numeric
+        return False
+
     # ── type rules ──────────────────────────────────────────────────────────
     def _unify_all(self, types: list[SemType], at) -> SemType:
         real = [t for t in types if not t.is_error]
@@ -2470,6 +3607,11 @@ class Analyzer:
         # does. Nothing narrows implicitly: losing precision silently is how a
         # program computes the wrong answer without ever failing.
         if (want, got) in {(INT, BOOL), (FLOAT, INT), (FLOAT, BOOL)}:
+            return
+        # A subclass where a superclass is wanted, or a class where one of its
+        # interfaces is. Java's rule, and the one that makes an API usable at
+        # all: nearly every method in one is declared over a base type.
+        if is_java(got) and is_java(want) and self._java_fits(got, want.name):
             return
         d = error("E0060", f"{what} has type {got}, expected {want}") \
             .at(self._span(at), str(got))

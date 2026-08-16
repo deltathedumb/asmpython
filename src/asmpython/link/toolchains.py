@@ -1,8 +1,9 @@
 """The toolchains that ship with asmpython.
 
-Both are ordinary registrations. `cc` is the one that produces programs; `none`
-exists so "emit the artifacts and stop" is a toolchain rather than a special
-case threaded through the driver.
+All three are ordinary registrations. `cc` assembles and links through a C
+compiler driver; `jar` packages what a JVM backend emits; `none` exists so
+"emit the artifacts and stop" is a toolchain rather than a special case
+threaded through the driver.
 """
 from __future__ import annotations
 
@@ -79,6 +80,61 @@ class CcToolchain(Toolchain):
         return output
 
 
+class JarToolchain(Toolchain):
+    """Package class files into a jar you can run with `java -jar`.
+
+    No JDK required, and that is the point: a jar is a zip with a manifest, and
+    Python has both. Shelling out to the `jar` tool would make building for the
+    JVM need a JDK installed, when the only thing that genuinely needs one is
+    RUNNING the result.
+
+    The manifest is not written here. The backend emits it as an artifact,
+    because the backend is what knows which class holds the entry point, and a
+    toolchain that reconstructed that would be a second place deciding it.
+    """
+
+    name = "jar"
+    description = "package class files into a runnable jar (no JDK needed)"
+
+    def supports(self, target: Target) -> bool:
+        return target.object_format == "class"
+
+    def link(self, request: LinkRequest) -> Path:
+        import zipfile
+
+        if not any(name.endswith(".class") for name in request.artifacts):
+            raise LinkError(
+                "no class files to package",
+                detail="artifacts: " + (", ".join(request.artifacts) or "(none)"),
+                help="the jar toolchain packages what a JVM backend emits; "
+                     "use --toolchain cc for a backend emitting C or assembly")
+        if request.extra_inputs:
+            raise LinkError(
+                "the jar toolchain takes no extra link inputs",
+                detail=", ".join(request.extra_inputs),
+                help="a class file resolves its dependencies at load time; "
+                     "put extra classes on the class path when you run it")
+
+        output = request.output
+        output.parent.mkdir(parents=True, exist_ok=True)
+        # The manifest goes in FIRST. A JVM finds it by name either way, but
+        # every other tool that reads jars expects it at the front, and one of
+        # them is `jar tf` when someone is working out what went wrong.
+        order = sorted(request.artifacts,
+                       key=lambda n: (n != "META-INF/MANIFEST.MF", n))
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as jar:
+            for name in order:
+                # A fixed timestamp: two builds of one program should produce
+                # identical bytes, and a zip entry's mtime is the one field
+                # that would otherwise stop them.
+                info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = 0o644 << 16
+                jar.writestr(info, request.artifacts[name])
+        request.commands.append(["(zip)", str(output), *order])
+        return output
+
+
 class NoToolchain(Toolchain):
     """Write the artifacts out and stop.
 
@@ -105,4 +161,5 @@ class NoToolchain(Toolchain):
 
 def load_builtin() -> None:
     register(CcToolchain())
+    register(JarToolchain())
     register(NoToolchain())

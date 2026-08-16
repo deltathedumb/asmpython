@@ -31,7 +31,11 @@ DYN_METHOD_TABLE = {
     "add":          [None, "apy_set_add"],
     "discard":      [None, "apy_set_discard"],
     "index":        [None, "apy_index_of"],
-    "count":        [None, "apy_count_of"],
+    # `count` on a LIST takes only the item; the start/end forms are str's
+    # alone, which is why the wider arities name the string entry points
+    # directly. A list reaching them is not a shape Python allows.
+    "count":        [None, "apy_count_of", "apy_str_count2",
+                     "apy_str_count3"],
     "remove":       [None, "apy_list_remove"],
     "insert":       [None, None, "apy_list_insert"],
     "extend":       [None, "apy_extend"],
@@ -54,7 +58,11 @@ DYN_METHOD_TABLE = {
     # all-keywords -- so the zero-argument shape is real. See
     # `_dyn_builtin_method`, which supplies the keyword dict.
     "update":       ["apy_update", "apy_update"],
-    "pop":          ["apy_list_pop", "apy_list_pop"],
+    # `pop` reaches a LIST, a SET or a DICT, and the receiver is not known
+    # until run time -- so the one-argument form dispatches inside
+    # `apy_list_pop`, and the two-argument form is a dict's alone.
+    "pop":          ["apy_list_pop", "apy_list_pop", "apy_pop_or"],
+    "popitem":      ["apy_dict_popitem"],
     # set algebra, as methods
     "union":            [None, "apy_set_union"],
     "intersection":     [None, "apy_set_intersection"],
@@ -82,7 +90,7 @@ DYN_METHOD_TABLE = {
     "removeprefix": [None, "apy_str_removeprefix"],
     "removesuffix": [None, "apy_str_removesuffix"],
     # str: splitting and joining
-    "split":        ["apy_str_split_ws", "apy_str_split", "apy_str_split_n"],
+    "split":        ["apy_str_split_ws", "apy_split_of", "apy_str_split_n"],
     "rsplit":       ["apy_str_rsplit_ws", "apy_str_rsplit", "apy_str_rsplit_n"],
     "splitlines":   ["apy_str_splitlines", "apy_str_splitlines_keep"],
     "partition":    [None, "apy_str_partition"],
@@ -115,20 +123,51 @@ DYN_METHOD_TABLE = {
     # as UTF-8 already, so encoding is a change of kind and not of content.
     # That makes both exact for UTF-8 and wrong for every other codec -- and
     # refusing the argument would reject the spelling nearly all code uses.
-    "encode":       ["apy_str_encode", "apy_str_encode"],
-    "decode":       ["apy_bytes_decode", "apy_bytes_decode"],
+    # THE ERROR HANDLER IS THE SECOND ARGUMENT, and every arity reaches the
+    # same three-parameter entry -- lowering pads the ones the call omitted,
+    # because `errors="replace"` is what decides whether a bad byte is a
+    # refusal or a replacement character.
+    "encode":       ["apy_str_encode", "apy_str_encode", "apy_str_encode"],
+    "decode":       ["apy_bytes_decode", "apy_bytes_decode",
+                     "apy_bytes_decode"],
     "bit_length":   ["apy_bit_length"],
     "bit_count":    ["apy_bit_count"],
     "is_integer":   ["apy_is_integer"],
     "conjugate":    ["apy_conjugate"],
     # `hex` with a separator, `to_bytes` and `expandtabs` all take an argument
     # the no-argument form supplies a default for -- see `_dyn_builtin_method`.
-    "hex":          ["apy_bytes_hex", "apy_bytes_hex"],
+    # `hex` reaches BYTES or a FLOAT, and the two answer entirely different
+    # things -- so the no-argument form dispatches on the receiver. The
+    # separator form is bytes' alone.
+    "hex":          ["apy_hex_of", "apy_bytes_hex"],
     "fromhex":      [None, "apy_bytes_fromhex"],
     "to_bytes":     [None, None, "apy_to_bytes_n"],
     "as_integer_ratio": ["apy_as_integer_ratio"],
     "expandtabs":   ["apy_str_expandtabs", "apy_str_expandtabs"],
+    "translate":    [None, "apy_str_translate"],
+    # DUNDERS CALLED DIRECTLY ON A BUILTIN. `(-5).__abs__()` and
+    # `(0.0).__bool__()` are ordinary Python, and every one of these is the
+    # operation the runtime already performs for the operator form -- so they
+    # are the same symbol reached by another spelling, not a second
+    # implementation that could disagree with it.
+    "__abs__":      ["apy_abs"],
+    "__bool__":     ["apy_to_bool"],
+    "__trunc__":    ["apy_math_trunc"],
+    "__neg__":      ["apy_neg"],
+    "__len__":      ["apy_len"],
+    "__repr__":     ["apy_repr"],
+    "__str__":      ["apy_str"],
     "add_note":     [None, "apy_add_note"],
+    # PEP 654. `subgroup` answers one group or None; `split` is shared with
+    # `str.split` and dispatches on the receiver -- see `apy_split_of`.
+    "subgroup":     [None, "apy_group_subgroup"],
+    # `s.indices(n)` -- the numbers a walk over a sequence of that length
+    # would really use, with omitted and negative bounds resolved.
+    "indices":      [None, "apy_slice_indices"],
+    # `@v.setter` and `@v.getter` -- each answers a NEW property carrying the
+    # other half, because the decorator's result is rebound afterwards.
+    "setter":       [None, "apy_prop_setter"],
+    "getter":       [None, "apy_prop_getter"],
     # generators
     "send":         [None, "apy_gen_send"],
     "throw":        [None, "apy_gen_throw"],

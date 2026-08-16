@@ -605,7 +605,11 @@ def compiled_output(src: str, tmp_path: Path, backend: str) -> list[str]:
 
     if runner == "qemu":
         return aarch64.run_image(result.program)
-    ran = subprocess.run([str(result.program)], capture_output=True, text=True)
+    # UTF-8: this is the PROGRAM's output, and a str is stored as UTF-8 by
+    # this runtime -- the locale codec turns every non-ASCII character into
+    # mojibake and compares it against CPython's correct answer.
+    ran = subprocess.run([str(result.program)], capture_output=True,
+                         text=True, encoding="utf-8")
     assert ran.returncode == 0, ran.stderr
     return ran.stdout.split("\n")[:-1]
 

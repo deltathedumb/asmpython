@@ -51,6 +51,13 @@ class Target:
     #: architecture, and so a second toolchain for the same architecture is a
     #: registration rather than a special case.
     cc_names: tuple[str, ...] = ()
+    #: Which registered toolchain turns this target's artifacts into a program,
+    #: when the user names none. Empty means the C compiler driver.
+    #:
+    #: A field for the same reason `abi` is one: a target whose artifacts are
+    #: class files cannot be linked by `cc`, and the alternative to saying so
+    #: is the driver recognising platforms by name.
+    default_toolchain: str = ""
 
     @property
     def pointer_bits(self) -> int:

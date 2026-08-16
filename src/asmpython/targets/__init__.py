@@ -57,5 +57,18 @@ AARCH64_MACOS = register(Target(
     cc_names=("clang",),
 ), aliases=("arm64-macos", "apple-silicon"))
 
+#: The Java virtual machine. Not a machine anyone builds: the architecture is
+#: the bytecode, the "object format" is a class file, and there is no calling
+#: convention to get wrong because the JVM's own is the only one.
+#:
+#: `pointer_size` is 8 and the byte order little-endian because the IR's memory
+#: is a byte array this target's backend indexes itself -- those two fields
+#: describe that array, not a JVM, which has no addressable memory at all.
+JVM = register(Target(
+    "jvm", arch="jvm", os="jvm", abi="jvm",
+    object_format="class", object_suffix=".class", executable_suffix=".jar",
+    stack_alignment=8, default_toolchain="jar",
+), aliases=("java", "jar"))
+
 __all__ = ["PORTABLE_C", "X86_64_LINUX", "X86_64_WINDOWS", "X86_64_MACOS",
-           "AARCH64_NONE", "AARCH64_LINUX", "AARCH64_MACOS"]
+           "AARCH64_NONE", "AARCH64_LINUX", "AARCH64_MACOS", "JVM"]

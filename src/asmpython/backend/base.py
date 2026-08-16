@@ -16,6 +16,7 @@ is a library a backend may call; it is not a stage anyone must implement, and
 from __future__ import annotations
 
 import abc
+from dataclasses import dataclass
 
 from ..ir import Module
 # Re-exported so a backend author needs one import. The TYPE belongs to the
@@ -34,11 +35,45 @@ from ..target import Target
 ENTRY_SYMBOL = "asmpython_main"
 
 
+@dataclass(frozen=True, slots=True)
+class Option:
+    """One command-line option a backend takes.
+
+    Declared rather than added to the driver's parser, for the reason every
+    other extension point here exists: a backend that ships outside this
+    repository gets its flags the same way a built-in does, and `asmpython
+    backends` can say what a backend accepts without the driver knowing what
+    any of them mean.
+    """
+
+    #: As typed, without the dashes: "class-version" is `--class-version`.
+    name: str
+    help: str
+    #: What the value is called in `--help`.
+    metavar: str = "VALUE"
+
+    @property
+    def flag(self) -> str:
+        return "--" + self.name
+
+
+class OptionError(Exception):
+    """A backend option nobody can act on.
+
+    Distinct from a crash: the value is the user's and the message says what
+    was wrong with it, so the driver reports it as a diagnostic rather than
+    letting a traceback out.
+    """
+
+
 class Backend(abc.ABC):
     """Turn a verified module into named artifacts."""
 
     name: str = ""
     description: str = ""
+    #: Options this backend takes from the command line. The driver turns each
+    #: into a flag and hands the values back through `configure`.
+    options: tuple[Option, ...] = ()
     #: False for a work in progress; the driver warns.
     ready: bool = True
     #: Name of the target used when the user names none. A NAME, not a
@@ -72,6 +107,25 @@ class Backend(abc.ABC):
     #: itself, at the cost of the prefix for the loser -- which is exactly
     #: where the ambiguity was.
     modules: dict[str, dict] = {}
+
+    def configure(self, values: dict[str, str], sink) -> "Backend":
+        """The backend to emit with, given this run's option values.
+
+        `values` holds only the options this backend declared, keyed by name
+        without the dashes. Raise `OptionError` for a value that cannot be
+        used; report anything advisory to `sink`.
+
+        RETURN A NEW INSTANCE rather than mutating `self`. The registry holds
+        one shared backend object, so a backend that stored its flags on itself
+        would leak them into the next compilation in the same process -- which
+        is invisible in a command-line run and wrong in every test suite and
+        every embedding tool.
+
+        The default ignores both arguments, which is right for a backend with
+        no options: the driver rejects a flag no backend declared before it
+        ever gets here.
+        """
+        return self
 
     @abc.abstractmethod
     def emit(self, module: Module, target: Target) -> dict[str, bytes]:
@@ -109,7 +163,7 @@ def available() -> dict[str, Backend]:
 
 
 def load_builtin() -> None:
-    from ..backends import arm64, c, x86_64  # noqa: F401
+    from ..backends import arm64, c, jvm, x86_64  # noqa: F401
 
 
 class BackendUnsupported(Exception):

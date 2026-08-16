@@ -83,8 +83,28 @@ def run_image(image: Path, *, timeout: int = 120) -> list[str]:
     """
     ran = subprocess.run(
         [QEMU, "-M", "virt", "-cpu", "cortex-a57", "-nographic",
+         # `tb-size` CAPS THE JIT TRANSLATION BUFFER, which defaults to 1 GiB.
+         # One of those is free -- it is reserved, not touched -- but a dozen
+         # at once is not, and on Windows the twelfth fails to launch with
+         # "the paging file is too small". The images here are a few hundred
+         # instructions; 64 MiB is already far more than they can fill.
+         "-accel", "tcg,tb-size=64",
          "-kernel", str(image)],
-        capture_output=True, text=True, timeout=timeout)
+        # UTF-8: the guest's UART writes land on stdout as the bytes the
+        # program produced, and a str is stored as UTF-8 here.
+        capture_output=True, text=True, encoding="utf-8",
+        timeout=timeout)
+    # A QEMU THAT NEVER STARTED PRINTS NOTHING, and nothing compares equal to
+    # no expected output about as often as it doesn't -- so without this the
+    # failure reads as "the program printed the wrong thing" and sends you
+    # hunting through the code generator. It cost a long detour once: several
+    # of these at once made QEMU fail to launch, and the report blamed arm64
+    # codegen that turned out to be correct. Say what actually happened.
+    if ran.returncode != 0:
+        raise RuntimeError(
+            f"qemu exited {ran.returncode} for {image.name} -- this is the "
+            f"emulator failing to run the image, NOT a wrong answer from it."
+            f"\nstderr: {ran.stderr.strip() or '(silent)'}")
     # Only the trailing empty entry from the final newline is dropped. A blank
     # line in the MIDDLE is output -- `print()` produces one -- and filtering
     # every empty line made that case silently pass.

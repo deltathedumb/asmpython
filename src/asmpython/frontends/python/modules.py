@@ -22,6 +22,14 @@ Each member is `(kind, payload)`:
 * `("call", symbol, arity, params, defaults)` -- the same, with PARAMETER
   NAMES so a keyword argument can find its slot, and float defaults for the
   trailing ones. `math.isclose(a, b, rel_tol=1e-9)` needs both.
+* `("callv", symbol)` -- VARIADIC: the arguments arrive as one tuple, which is
+  how `asyncio.gather(a, b, c)` reaches an entry point with no fixed arity.
+* `("tuple", (n, ...))` -- a tuple of integers, emitted element by element.
+* `("form", name)` -- a `typing` special form: an object a program names in an
+  annotation and never inspects.
+* `("ns", {members})` -- a NESTED NAMESPACE, built as a type object with
+  attributes. `sys.implementation.name` is one; its members follow the same
+  rules as the top level, through the same code, so the two cannot drift.
 
 Both analysis and lowering read this: analysis to know a name exists and
 lowering to emit it. Two copies would drift, and the way they would drift is
@@ -83,8 +91,113 @@ _FUTURE = {
                  "nested_scopes", "with_statement", "generators")
 }
 
+#: `typing`. THE PART OF IT THAT EXISTS AT RUN TIME, WHICH IS NEARLY NONE.
+#: Almost everything here is inert once the program runs: a special form is
+#: an object a program names in an annotation and never inspects, and `final`
+#: and `override` are decorators whose entire effect is to set one attribute
+#: and hand the argument straight back.
+#:
+#: NOT HERE, deliberately: `get_type_hints`, `get_origin`, `get_args`. Those
+#: read annotations as live objects and need `int | None` and `list[str]` to
+#: be values with a repr, which is real machinery rather than a table entry.
+#: Listing them as inert would turn honest refusals into wrong answers.
+_TYPING = {
+    name: ("form", name)
+    for name in ("Any", "AnyStr", "Final", "LiteralString", "Never",
+                 "NoReturn", "Self", "TypeAlias", "Optional", "Union",
+                 "ClassVar", "Callable", "Iterable", "Iterator", "Sequence",
+                 "Mapping", "List", "Dict", "Set", "Tuple", "Type", "Text",
+                 "Hashable", "Sized", "Annotated", "Literal", "Protocol",
+                 "Generic", "TypedDict", "Required", "NotRequired",
+                 "ReadOnly", "Unpack", "Concatenate", "ParamSpec",
+                 "TypeVarTuple", "TypeGuard", "TypeIs", "Counter",
+                 "DefaultDict", "Deque", "FrozenSet", "NamedTuple")
+}
+_TYPING.update({
+    # PEP 484's runtime introspection. Both read a generic alias, which is
+    # what subscripting a form or a builtin type already produces.
+    "get_origin": ("call", "apy_get_origin", 1),
+    "get_args": ("call", "apy_get_args", 1),
+    "final": ("call", "apy_typing_final", 1),
+    "override": ("call", "apy_typing_override", 1),
+    # `runtime_checkable` and `no_type_check` are the same shape: a decorator
+    # that marks and returns. `dataclass_transform` takes only keywords and
+    # returns a decorator, which is not this shape, so it stays out.
+    "runtime_checkable": ("call", "apy_typing_mark", 1),
+    "no_type_check": ("call", "apy_typing_mark", 1),
+})
+
+#: `asyncio`. A COROUTINE IS A GENERATOR here, so the scheduler is small: it
+#: drives a frame that already knows how to suspend and resume.
+#:
+#: `sleep` DOES NOT WAIT, and no program here can observe duration: there is
+#: no clock and no I/O in a freestanding image, so `sleep(10)` returns as fast
+#: as `sleep(0)`.
+#:
+#: WHAT IT DOES GUARANTEE IS ORDER. The loop keeps a virtual clock and moves
+#: it only to the next moment something can happen, so two coroutines sleeping
+#: for different times wake shortest-first -- which is observable, and which
+#: an implementation that merely suspended once got wrong while passing every
+#: conformance case in the suite.
+_ASYNCIO = {
+    "run": ("call", "apy_asyncio_run", 1),
+    "sleep": ("call", "apy_asyncio_sleep", 1),
+    # Variadic: `gather(a, b, c)` has no fixed arity, so its arguments arrive
+    # as one tuple. See `_dyn_native_value`.
+    "gather": ("callv", "apy_asyncio_gather"),
+    # A TASK IS A COROUTINE THE LOOP OWNS, and that is the whole difference
+    # from `await`: it runs in the gaps, whenever whatever is being driven
+    # suspends. See the task layer in link/objects.py.
+    "create_task": ("call", "apy_asyncio_create_task", 1),
+    # THE PARAMETER NAMES, because `wait_for(c, timeout=1)` is how every
+    # program writes it -- the keyword is not optional in practice even
+    # though the parameter is positional.
+    "wait_for": ("call", "apy_asyncio_wait_for", 2, ("fut", "timeout")),
+    "TaskGroup": ("call", "apy_asyncio_taskgroup", 0),
+    # THE EXCEPTIONS, as values. `except asyncio.CancelledError:` matches on
+    # the name and never needs one -- see `_one_handler_name` -- but
+    # `asyncio.TimeoutError is TimeoutError` is a question about objects, and
+    # a program that raises one writes it out.
+    "CancelledError": ("exc", "CancelledError"),
+    "TimeoutError": ("exc", "TimeoutError"),
+    "InvalidStateError": ("exc", "InvalidStateError"),
+}
+
+#: `inspect`. ONLY THE COROUTINE QUESTIONS -- what kind of frame is this, and
+#: does calling that build one. A program importing `inspect` in async code is
+#: nearly always asking one of them; the rest of the module is introspection
+#: over source text and signatures that this compiler does not keep at run
+#: time, and claiming more would be worse than claiming less.
+_INSPECT = {
+    "iscoroutine": ("call", "apy_inspect_iscoroutine", 1),
+    "isgenerator": ("call", "apy_inspect_isgenerator", 1),
+    "isasyncgen": ("call", "apy_inspect_isasyncgen", 1),
+    "iscoroutinefunction": ("call", "apy_inspect_iscoroutinefunction", 1),
+}
+
+#: `sys`. ONLY WHAT CAN BE ANSWERED HONESTLY: this is a compiler, and most of
+#: `sys` describes a running interpreter that is not there -- no `argv` for a
+#: freestanding image, no `modules` because there is no import machinery, no
+#: `settrace` because there are no frames to trace. What it does know is which
+#: implementation compiled the program.
+_SYS = {
+    "implementation": ("ns", {
+        "name": ("str", "asmpython"),
+        "version": ("tuple", (3, 14, 0)),
+        "hexversion": ("int", 0x030E00F0),
+        "cache_tag": ("str", "asmpython-314"),
+    }),
+    "maxsize": ("int", 2 ** 63 - 1),
+    "byteorder": ("str", "little"),
+    "platform": ("str", "asmpython"),
+}
+
 BUILTIN_MODULES = {
     "math": _MATH,
+    "typing": _TYPING,
+    "asyncio": _ASYNCIO,
+    "inspect": _INSPECT,
+    "sys": _SYS,
     "__future__": _FUTURE,
 }
 
@@ -93,18 +206,29 @@ BUILTIN_MODULES = {
 #: which names are importable -- a backend for a board can offer the board.
 _BACKEND_ID = ""
 _BACKEND_MODULES: dict[str, dict] = {}
+#: How to reach one of the backend's types by its own internal name, or None.
+#: A namespace lists the types in a PACKAGE; an instance method call starts
+#: from a value whose type names a class directly, which is a different
+#: question and needs a different door.
+_BACKEND_TYPE = None
 
 
-def use_backend(backend_id: str, modules: dict) -> None:
+def type_of(internal: str):
+    """The backend's table for one of its own types, or None."""
+    return None if _BACKEND_TYPE is None else _BACKEND_TYPE(internal)
+
+
+def use_backend(backend_id: str, modules: dict, type_lookup=None) -> None:
     """Make `modules` importable for this compilation.
 
     Called once per compile, before the frontend runs. Replacing rather than
     merging: two compiles in one process must not see each other's backends,
     which is the shape every test that compiles twice has.
     """
-    global _BACKEND_ID, _BACKEND_MODULES
+    global _BACKEND_ID, _BACKEND_MODULES, _BACKEND_TYPE
     _BACKEND_ID = backend_id
     _BACKEND_MODULES = dict(modules or {})
+    _BACKEND_TYPE = type_lookup
 
 
 def resolve(name: str):

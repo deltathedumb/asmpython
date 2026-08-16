@@ -342,6 +342,7 @@ def test_the_readme_layout_lists_the_real_packages() -> None:
     ("c", "c"),
     ("x86-64", "x86_64-linux"),
     ("arm64", "aarch64-none"),
+    ("jvm", "jvm"),
 ])
 def test_every_documented_backend_compiles_a_program(
         backend: str, target: str, tmp_path: Path) -> None:

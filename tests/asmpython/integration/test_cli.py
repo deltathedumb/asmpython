@@ -22,9 +22,14 @@ import textwrap
 from pathlib import Path
 
 from tests import harness
+from tests.harness import snapshot
 
 HAS_CC = shutil.which("gcc") or shutil.which("cc")
-SRC = Path(__file__).resolve().parents[3] / "src"
+#: THE TREE THIS RUN IS MEASURING, not `src/` unconditionally: the runner
+#: works from a snapshot so `src/` can be edited mid-run, and a subprocess
+#: started here has to compile with the same code the rest of the run did.
+#: See `tests/harness/snapshot.py`.
+SRC = snapshot.current(Path(__file__).resolve().parents[3])
 
 #: `double` is deliberate. It is a C keyword, and emitting it verbatim made
 #: the C backend produce `r7 = double(r1);` -- a syntax error in generated
@@ -237,7 +242,11 @@ class TestBuildProducesAProgram:
         r = run_cli("build", str(program), "-o", str(exe), *extra)
         assert r.returncode == 0, r.stderr + r.stdout
         assert exe.exists(), "no output file"
-        ran = subprocess.run([str(exe)], capture_output=True, text=True)
+        # UTF-8: this is the PROGRAM's output, and a str is stored as
+        # UTF-8 by this runtime -- the locale codec turns every
+        # non-ASCII character into mojibake. See the conformance shim.
+        ran = subprocess.run([str(exe)], capture_output=True, text=True,
+                             encoding="utf-8")
         return ran
 
     def test_default_backend(self, program, tmp_path):

@@ -48,6 +48,11 @@ class Options:
     output: Path | None = None
     frontend: str | None = None
     backend: str = "c"
+    #: Values for the options the chosen backend declares, keyed by option name
+    #: without the dashes -- {"class-version": "75"}. Not interpreted here: the
+    #: driver knows the flags exist because a backend said so, and knows
+    #: nothing about what any of them mean.
+    backend_options: dict[str, str] = field(default_factory=dict)
     target: Target | None = None
     passes: tuple[str, ...] = ()
     optimise: bool = False
@@ -106,7 +111,8 @@ def _publish_backend_modules(be) -> None:
         from asmpython.frontends.python import modules as py_modules
     except ImportError:                     # the frontend is not installed
         return
-    py_modules.use_backend(be.name if be else "", getattr(be, "modules", {}))
+    py_modules.use_backend(be.name if be else "", getattr(be, "modules", {}),
+                           getattr(be, "java_classes", None))
 
 
 def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
@@ -128,7 +134,17 @@ def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
     # Looked up through `available()` rather than `get()`: an unknown backend
     # is reported below, with the rest of the options checked, and `get` exits
     # the process rather than raising.
-    _publish_backend_modules(backend_registry.available().get(opts.backend))
+    #
+    # CONFIGURED FIRST, because a backend's options can decide what it offers:
+    # the JVM backend's `--classpath` is the whole of which Java packages are
+    # importable, and publishing the unconfigured backend's modules would have
+    # offered none of them.
+    selected = backend_registry.available().get(opts.backend)
+    if selected is not None:
+        selected = _configure_backend(selected, opts, sink)
+        if selected is None:
+            return Result()
+    _publish_backend_modules(selected)
 
     fe = (frontend_registry.get(opts.frontend) if opts.frontend
           else frontend_registry.for_path(opts.source))
@@ -176,7 +192,11 @@ def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
         result.ir_text = print_module(module, show_spans=opts.show_spans)
         return result
 
-    be = backend_registry.get(opts.backend)
+    # The instance configured above, not a fresh one: a backend's `configure`
+    # may have built state the frontend has since been reading from -- the JVM
+    # backend records which Java calls were named while the source was
+    # analysed, and emits exactly those.
+    be = selected if selected is not None else backend_registry.get(opts.backend)
     if not be.ready:
         sink.report(
             error("W9102", f"backend {be.name!r} is not finished")
@@ -199,6 +219,46 @@ def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
     return result
 
 
+def _configure_backend(be, opts: Options, sink: DiagnosticSink):
+    """Hand the backend its own options. Returns the backend, or None to stop.
+
+    An option the chosen backend does not declare is an ERROR rather than
+    something ignored. `--class-version 75 --backend c` reads as a request the
+    C backend cannot honour, and quietly building without it hands back an
+    artifact that is not what was asked for.
+    """
+    from .. import backend as backend_registry
+    from ..backend.base import OptionError
+
+    declared = {o.name for o in be.options}
+    stray = sorted(set(opts.backend_options) - declared)
+    if stray:
+        for name in stray:
+            takers = sorted(other.name
+                            for other in backend_registry.available().values()
+                            if any(o.name == name for o in other.options))
+            d = error("E9106",
+                      f"the {be.name} backend does not take --{name}")
+            if takers:
+                d.help(f"--{name} belongs to the "
+                       f"{' or '.join(repr(t) for t in takers)} backend; "
+                       f"pass --backend {takers[0]}")
+            sink.report(d)
+        return None
+
+    mine = {name: value for name, value in opts.backend_options.items()
+            if name in declared}
+    try:
+        return be.configure(mine, sink)
+    except OptionError as exc:
+        message, _, detail = str(exc).partition("\n")
+        d = error("E9107", f"{be.name} backend: {message}")
+        for line in detail.splitlines():
+            d.note(line)
+        sink.report(d)
+        return None
+
+
 def _link_stage(opts: Options, result: Result, be, target: Target,
                 module: Module, sink: DiagnosticSink) -> None:
     """Artifacts to a program.
@@ -212,11 +272,15 @@ def _link_stage(opts: Options, result: Result, be, target: Target,
     from .. import link as link_registry
 
     # A bare-metal target cannot be linked by the hosted toolchain: no libc,
-    # no start files, and a linker script that has to match the machine. The
-    # default follows the target rather than making every invocation say so.
+    # no start files, and a linker script that has to match the machine. Nor
+    # can a class file, which is packaged rather than linked. The default
+    # follows the target rather than making every invocation say so.
     name = opts.toolchain
-    if name == "cc" and target.os == "none":
-        name = "baremetal"
+    if name == "cc":
+        if target.default_toolchain:
+            name = target.default_toolchain
+        elif target.os == "none":
+            name = "baremetal"
     toolchain = link_registry.get(name)
     workdir = opts.workdir or (opts.output or opts.source).parent / ".asmpython"
     output = opts.output or opts.source.with_suffix(target.executable_suffix)

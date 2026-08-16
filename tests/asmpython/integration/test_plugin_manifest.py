@@ -26,9 +26,14 @@ import textwrap
 from pathlib import Path
 
 from tests import harness
+from tests.harness import snapshot
 
 ROOT = Path(__file__).resolve().parents[3]
-SRC = ROOT / "src"
+#: THE TREE THIS RUN IS MEASURING, not `src/` unconditionally: the runner
+#: works from a snapshot so `src/` can be edited mid-run, and a subprocess
+#: started here has to compile with the same code the rest of the run did.
+#: See `tests/harness/snapshot.py`.
+SRC = snapshot.current(ROOT)
 
 PLUGIN = '''
 from asmpython.plugins import Plugin, Backend, Target, Frontend, Linker

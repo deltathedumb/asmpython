@@ -5,6 +5,7 @@
     asmpython build prog.py --emit-ir        stop after the IR and print it
     asmpython build prog.py -O --time-passes optimise, and show what each pass cost
     asmpython build prog.py --target x86_64-linux --backend x86-64
+    asmpython build prog.py --backend jvm --java-version 21   -> a runnable jar
     asmpython run prog.py                    execute in the reference interpreter
     asmpython check prog.py                  analyse and verify, produce nothing
     asmpython ops / types / targets / backends / frontends / toolchains / passes
@@ -47,6 +48,7 @@ def _options(args) -> Options:
         output=Path(args.output) if getattr(args, "output", None) else None,
         frontend=getattr(args, "frontend", None),
         backend=getattr(args, "backend", "c"),
+        backend_options=dict(getattr(args, "backend_options", None) or {}),
         target=(target_registry.get(args.target)
                 if getattr(args, "target", None) else None),
         link=not getattr(args, "emit", False),
@@ -205,6 +207,13 @@ def cmd_backends(args) -> int:
     for name, be in items:
         flag = "" if be.ready else "   (unfinished)"
         print(f"  {name:<{width}} {be.description}{flag}")
+        # A backend's own flags are listed with it rather than only in
+        # `build --help`, where they sit among thirty options that apply to
+        # every backend and give no hint which one they belong to.
+        for option in be.options:
+            print(f"  {'':<{width}}   {option.flag} {option.metavar}")
+            for line in _wrap(option.help, 60):
+                print(f"  {'':<{width}}     {line}")
     return 0
 
 
@@ -449,7 +458,54 @@ def _wrap(text: str, width: int) -> list[str]:
     return lines
 
 
+class _CollectBackendOption(argparse.Action):
+    """Store a backend's flag into one dict, keyed by the flag's own name.
+
+    One `dest` for every backend option, so the driver hands `configure` a
+    table rather than the driver knowing the name of any particular flag.
+    """
+
+    def __call__(self, parser, namespace, value, option_string=None):
+        table = getattr(namespace, "backend_options", None)
+        if table is None:
+            table = {}
+            setattr(namespace, "backend_options", table)
+        table[option_string.lstrip("-")] = value
+
+
+def _add_backend_options(parser: argparse.ArgumentParser) -> None:
+    """Give `parser` every registered backend's own flags.
+
+    ALL of them, not just the selected backend's: `--backend` is parsed by the
+    same pass that would have to know the answer, and a parser that rejected
+    `--class-version` before reading `--backend jvm` would depend on the order
+    the flags were typed in. Passing one to a backend that does not declare it
+    is caught in the driver, which by then knows which backend was chosen and
+    can say who does take it.
+    """
+    seen: dict[str, str] = {}
+    group = parser.add_argument_group("backend options")
+    for name, be in sorted(backend_registry.available().items()):
+        for option in be.options:
+            if option.name in seen:
+                # Two backends wanting one flag name is not a conflict worth
+                # failing over -- only the selected backend is ever handed the
+                # value -- but the help text has to come from somewhere, and
+                # first registration is as good a rule as any.
+                continue
+            seen[option.name] = name
+            group.add_argument(
+                option.flag, action=_CollectBackendOption,
+                metavar=option.metavar, default=None,
+                help=f"[{name}] {option.help}")
+
+
 def build_parser() -> argparse.ArgumentParser:
+    # Backends load before the parser is built, not before it runs: each one
+    # contributes its own flags, and argparse has to know a flag exists before
+    # it can accept it. Plugins were loaded earlier still, in `main`, for the
+    # same reason -- a third-party backend's options are not second class.
+    backend_registry.load_builtin()
     ap = argparse.ArgumentParser(prog="asmpython", description=__doc__.split("\n")[0])
     # Two dests, one flag. A subparser's argument OVERWRITES the namespace
     # attribute rather than appending to it, so sharing `dest` would make
@@ -498,6 +554,7 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--emit-ir", action="store_true")
     b.add_argument("--show-spans", action="store_true",
                    help="annotate each instruction with its source position")
+    _add_backend_options(b)
     b.set_defaults(fn=cmd_build)
 
     r = sub.add_parser("run", help="execute in the reference interpreter")
@@ -576,6 +633,31 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _named_plugins(argv: list[str]) -> list[str]:
+    """The `--plugin` values in `argv`, wherever they appear.
+
+    A pass of its own because plugins have to load BEFORE the real parser is
+    built -- a third-party backend contributes flags, and argparse cannot
+    accept a flag it has not been told about. `parse_known_args` on a parser
+    that knows only this one option ignores everything else, including the
+    subcommand it has no subparsers for.
+
+    Two `--plugin` arguments exist on the real parser (before and after the
+    subcommand) because a subparser OVERWRITES the namespace attribute rather
+    than appending to it. Here there is one parser and one list, so both
+    positions land in it.
+    """
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--plugin", action="append", default=[])
+    try:
+        known, _ = pre.parse_known_args(argv)
+    except SystemExit:
+        # `--plugin` with no value. The real parser reports it properly a
+        # moment from now; failing here would print the wrong usage line.
+        return []
+    return list(known.plugin)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse arguments and run the command.
 
@@ -588,15 +670,13 @@ def main(argv: list[str] | None = None) -> int:
     Nothing else is caught: an unexpected exception IS a compiler bug, and the
     traceback is the most useful thing to show.
     """
-    args = build_parser().parse_args(argv)
+    argv = list(sys.argv[1:] if argv is None else argv)
 
-    # Plugins load before anything asks a registry a question, because that
-    # is the whole point: a third-party backend has to be registered by the
-    # time `--backend` is resolved, and every command resolves something.
+    # Plugins load before the PARSER, not merely before the command: a
+    # third-party backend declares its own options (see `Backend.options`), and
+    # those have to be on the parser by the time it reads the command line.
     try:
-        report = plugins.load_all(
-            list(getattr(args, "plugin_before", []))
-            + list(getattr(args, "plugin", [])))
+        report = plugins.load_all(_named_plugins(argv))
     except plugins.PluginError as exc:
         print(f"asmpython: {exc}", file=sys.stderr)
         return 2
@@ -606,6 +686,8 @@ def main(argv: list[str] | None = None) -> int:
         # cannot be the one thing a broken plugin prevents.
         print(f"asmpython: warning: installed plugin {name!r} did not load "
               f"({why})", file=sys.stderr)
+
+    args = build_parser().parse_args(argv)
     if report.loaded and getattr(args, "verbose", False):
         print(f"loaded plugins: {', '.join(report.loaded)}", file=sys.stderr)
 

@@ -92,6 +92,11 @@ from __future__ import annotations
 #: the C is then byte-identical in both builds, so they cannot drift.
 _API_TOKEN = "@APY_API@"
 
+#: The generated Unicode class table, spliced into the C at its
+#: marker. Kept in its own module because it is sixty kilobytes of
+#: data and this file is meant to be read.
+from .unicode_table import UNICODE_C
+
 OBJECTS_C = r"""/* asmpython dynamic object runtime. Generated -- edit link/objects.py. */
 #include <stdio.h>
 #include <stdint.h>
@@ -114,6 +119,33 @@ typedef struct apy_obj apy_obj;
 typedef uintptr_t apy_value;
 #define O(v) ((apy_obj *)(v))
 #define V(p) ((apy_value)(p))
+
+/* The runtime builtins a FUNC_K can stand for. `object`'s defaults, so a
+   `super()` whose base chain has run out answers with the same behaviour
+   CPython's `object` gives -- and `type`'s two, which are what a metaclass
+   reaches through `super().__new__(mcls, name, bases, ns)`. */
+enum {
+    APY_NAT_NONE = 0,
+    APY_NAT_INIT, APY_NAT_NEW, APY_NAT_REPR, APY_NAT_STR, APY_NAT_EQ,
+    APY_NAT_NE, APY_NAT_HASH, APY_NAT_GETATTR, APY_NAT_SETATTR,
+    APY_NAT_DELATTR,
+    /* `type.__new__(mcls, name, bases, ns)` and `type.__init__`, which is a
+       no-op -- the class is complete when `__new__` returns it. */
+    APY_NAT_TYPE_NEW, APY_NAT_TYPE_INIT, APY_NAT_TYPE_CALL,
+    APY_NAT_DESCR_GET, APY_NAT_DESCR_SET, APY_NAT_DESCR_DEL,
+    APY_NAT_KIND, APY_NAT_HAS_DEFAULT,
+    /* `object.__init_subclass__` -- a no-op that EXISTS, which is what
+       `super().__init_subclass__(**kw)` at the end of a user hook needs. */
+    APY_NAT_INIT_SUBCLASS,
+    /* A generator's own three. They are dispatched by NAME at the call site,
+       so nothing needed a VALUE for them -- until a program asked
+       `hasattr(g, "close")`, which every duck-typed consumer does. */
+    APY_NAT_GEN_SEND, APY_NAT_GEN_THROW, APY_NAT_EXC_INIT, APY_NAT_POSITIONS,
+    APY_NAT_TASK_CANCEL, APY_NAT_TASK_RESULT, APY_NAT_TASK_DONE,
+    APY_NAT_TASK_CANCELLED, APY_NAT_TG_ENTER, APY_NAT_TG_EXIT,
+    APY_NAT_TG_CREATE,
+    APY_NAT_GEN_CLOSE
+};
 
 enum {
     APY_NONE_K = 0, APY_BOOL_K, APY_INT_K, APY_FLOAT_K, APY_STR_K,
@@ -144,11 +176,59 @@ enum {
        Ellipsis` is the test programs write and a fresh cell per literal would
        answer False. It has no payload: being itself is all it does. */
     APY_ELLIPSIS_K,
+    /* `NotImplemented`. A SINGLETON, because `x is NotImplemented` is the
+       test programs write, and because what it means -- "I cannot answer
+       this; ask the other operand" -- is a signal rather than a value. */
+    APY_NOTIMPL_K,
     /* A SUSPENDED FUNCTION. Its locals live here rather than in registers,
        because a register does not survive the return a `yield` compiles to --
        see `apy_gen_new`. */
-    APY_GEN_K
+    APY_GEN_K,
+    /* `a:b:c` AS A VALUE. Built only where one is needed as an object --
+       a user `__getitem__` receives it, and `c[1:2, 3]` puts one in a tuple.
+       Slicing a list or a str still goes straight through `apy_slice` without
+       allocating anything, because that is the common case by a mile. */
+    APY_SLICE_K,
+    /* `list[int]`, `dict[str, int]` -- a PARAMETERISED type. It is not a type
+       itself: nothing is instantiated from one here, and what a program does
+       with it is print it or pass it to an annotation. Kept as the origin and
+       the arguments so the repr can be rebuilt exactly. */
+    APY_ALIAS_K,
+    /* `d.keys()`, `d.values()`, `d.items()`. A WINDOW ON THE DICT, not a copy
+       of it: `ks = d.keys()` then `d['b'] = 2` and `len(ks)` is 2. A snapshot
+       is the obvious implementation and it is wrong in a way that only shows
+       up after the dict changes, which is exactly when a program is relying
+       on the view being live. */
+    APY_VIEW_K,
+    /* A DESCRIPTOR the runtime supplies: `property`, `classmethod`,
+       `staticmethod`. One kind for the three because they differ only in what
+       reading one through an instance does -- see `apy_descr_get`. A user
+       class defining `__get__` is a descriptor too and is NOT this kind; it
+       is an ordinary instance, recognised by having the method. */
+    APY_PROP_K,
+    /* `memoryview(b)`. A WINDOW, like the dict views and for the same reason:
+       `mv[0] = 122` has to be seen by the bytearray it was taken from, and a
+       copy would swallow the write. Kept as the buffer it looks at plus an
+       offset, a length and a STRIDE -- the stride is what lets `mv[::-1]`
+       stay a view rather than becoming the copy that would break the
+       write-through. */
+    APY_MVIEW_K,
+    /* `range(0, 10, 2)`. A LAZY SEQUENCE: three numbers, not the elements.
+       It was materialised into a list, so `type(range(3)).__name__` said
+       `list` and `range(10**9)` would have allocated a billion of them.
+       Everything a program does with one -- length, index, slice, membership,
+       equality -- is arithmetic on the three. */
+    APY_RANGE_K
 };
+
+/* The three views a dict offers. The numbers match `DICT_PARTS` in the
+   frontend, which is where the selector is chosen -- two tables that must
+   agree, and the agreement is what makes `d.items()` items rather than keys. */
+enum { APY_PART_KEYS = 0, APY_PART_VALUES = 1, APY_PART_ITEMS = 2 };
+
+/* Which of the three a descriptor cell is. `property` is the only DATA one --
+   it defines `__set__` -- which is why it alone beats the instance dict. */
+enum { APY_PROP_PROPERTY, APY_PROP_CLASSMETHOD, APY_PROP_STATICMETHOD };
 
 /* WHAT A CURSOR DOES on the way. A plain `iter(x)` walks; the rest apply
    something as they go, which is what makes `map(f, xs)` lazy -- `f` runs
@@ -171,8 +251,17 @@ struct apy_obj {
            arbitrary-precision section for why that invariant is the whole
            design and not an optimisation. */
         struct { uint32_t *limb; int64_t n; int neg; } big;
-        struct { const char *p; int64_t n; } s;   /* str: bytes + length */
+        /* str, and bytes. `mut` is the whole of `bytearray`: the same
+           layout with the buffer writable, so every length, index, slice,
+           comparison and method the bytes kind has is already the
+           bytearray's -- which is also what CPython says, since
+           `b"a" == bytearray(b"a")` is True. What differs is the repr, the
+           name, that it can be assigned into, and that it cannot be hashed.
+           A separate kind would have had to be taught all thirty of the
+           shared paths to get the four that differ. */
+        struct { const char *p; int64_t n; int mut; } s;
         struct { double re, im; } z;             /* complex */
+        struct { int64_t start, stop, step; } rg;   /* range */
         /* A CURSOR. `src` is what it walks and `i` where it is; `fn` and
            `mode` are what it does on the way. `map`, `filter`, `enumerate`
            and `zip` are cursors rather than lists because they are LAZY --
@@ -181,6 +270,11 @@ struct apy_obj {
         struct {
             apy_value src, fn;
             int64_t i;
+            /* THE SIZE THE WALK STARTED WITH, for a dict. Growing or
+               shrinking one while iterating it rehashes the table and the
+               walk would silently skip or repeat entries, so CPython refuses
+               -- and refusing needs the original size to compare against. */
+            int64_t n0;
             int mode;
         } it;
         /* A GENERATOR: the step function, the frame its locals live in, where
@@ -207,6 +301,31 @@ struct apy_obj {
             apy_value pending;
             int64_t n, state;
             int running;
+            /* WHETHER THIS CAME FROM `async def`. The machinery is identical
+               -- a coroutine is a generator with a frame and a step -- so
+               this decides only what the object calls itself, which is how a
+               program that awaits a generator or iterates a coroutine finds
+               out it made a mistake. */
+            int coro;
+            /* WHICH BUILT-IN COROUTINE THIS IS, or 0 for an ordinary one
+               lowered from an `async def`. `sleep` and `gather` have no
+               Python body and so no step function to re-enter; they are
+               driven directly by `apy_await_step`, which needs to know which
+               of them it is holding. */
+            int builtin;
+            /* WHETHER THIS IS AN `async def` CONTAINING `yield` -- an async
+               generator, which is neither a coroutine nor a plain generator.
+               It is driven by `async for`, and awaiting one is an error. */
+            int agen;
+            /* WHEN A `sleep` WANTS TO WAKE, on the virtual clock, and
+               what `wait_for` will give up at. Unused by everything else. */
+            double deadline;
+            /* CANCELLATION, for a task: 0 none, 1 asked for, 2 delivered.
+               Three states and not two, because `cancel()` does not raise --
+               it asks, and the exception is raised at the task's next
+               suspension point, which is where a `try` around the `await`
+               inside it can catch it. */
+            int cancel;
         } g;
         /* list, tuple, set and frozenset share ONE layout. They differ in
            what is allowed -- a tuple never grows, a set never holds two
@@ -224,6 +343,12 @@ struct apy_obj {
            Without it the second lost its argument. */
         struct {
             const char *name; apy_value arg; int has_arg;
+            /* EVERY argument, when there is more than one. `OSError(2, "No
+               such file")` carries both and reads them back as `errno` and
+               `strerror`; one field could hold only the first, so a program
+               that passed two silently lost one. 0 when a single argument (or
+               none) was given, which `arg` already covers. */
+            apy_value argv;
             /* CHAINING. `__context__` is whatever was being handled when this
                one was raised, set implicitly; `__cause__` is what `raise X
                from Y` said, set explicitly. They are separate because
@@ -233,6 +358,25 @@ struct apy_obj {
 
                `notes` is what `add_note` appends, a list or 0. */
             apy_value context, cause, notes;
+            /* THE CLASS THE PROGRAM WROTE, and this exception's own
+               attributes -- both 0 for the exceptions the runtime raises
+               itself, which have neither.
+
+               `raise` and `except` match on the NAME and always did; what
+               these add is everything a class body puts on an exception that
+               a name alone cannot hold. `self.code = 404` goes in `dict` and
+               `def summary(self)` is found through `cls`, so a user exception
+               is an ordinary object in every way except how it is caught. */
+            apy_value dict, cls;
+            /* WHERE IT CAME FROM, as an index into the position table, or -1
+               when nothing was recorded -- which is every program that never
+               asks about a traceback. See `apy_pos_add`. */
+            int64_t pos;
+            /* THE EXCEPTIONS AN `ExceptionGroup` CARRIES, or 0 for an
+               ordinary one. A group is an exception like any other -- it has
+               a name and a message and propagates the same way -- and this is
+               the only thing that distinguishes it. */
+            apy_value subs;
             int suppress;
             /* WHETHER `arg` is the already-formatted message rather than the
                object the program raised. `apy_error_value` rebuilds an Exc
@@ -258,6 +402,9 @@ struct apy_obj {
             uintptr_t code; int64_t arity; apy_value name;
             apy_value *cells; int64_t ncells; apy_value bound;
             apy_value *defaults; int64_t ndefaults; int vararg;
+            /* How many of the trailing defaults are the keyword-only
+               parameters'. See `apy_func_kwdefaults`. */
+            int nkwdefault;
             /* WHETHER the last declared parameter is `**kw`. A flag and not a
                name, because the only thing any caller needs to know is where
                to put the keywords it could not place -- and that the slot is
@@ -289,7 +436,63 @@ struct apy_obj {
                frontend would otherwise drop it as the bare string statement
                it is. */
             apy_value doc;
+            /* WHICH RUNTIME BUILTIN THIS IS, or 0 for an ordinary
+               compiled function. Every callable in this runtime used to be
+               compiled code, which meant `super().__init__()` on a class with
+               no base had nothing to hand back -- the default bodies exist
+               (`apy_default_init` and friends) but no VALUE named them. A
+               native carries a selector instead of a code pointer, and
+               `apy_invoke` dispatches on it. */
+            int native;
+            /* WHETHER THIS IS A BUILTIN TYPE NAME used as a value --
+               `int`, `str`, `list`. It stays callable, because that is what
+               `map(str, xs)` needs; the flag is what makes `print(int)` say
+               `<class 'int'>` rather than naming a function. */
+            int is_type;
+            /* WHETHER THIS IS A BUILTIN reached as a value -- `print`, `len`.
+               A synthesised thunk is an ordinary compiled function here, so
+               `type(print).__name__` said `function` where CPython says
+               `builtin_function_or_method`. */
+            int builtin;
+            /* WHETHER CALLING THIS BUILDS A COROUTINE -- an `async def`.
+               Recorded on the function and not only on what it returns,
+               because `inspect.iscoroutinefunction(f)` asks before anything
+               has been called. */
+            int coro;
+            /* PEP 3155: the QUALIFIED name -- `C.m`, `outer.<locals>.inner`
+               -- or 0, in which case `__qualname__` is the plain name. The
+               frontend's own key for a function is already in exactly this
+               spelling, which is why it can simply be handed over. */
+            apy_value qualname;
+            /* PEP 649: the THUNK that builds `__annotations__`, or 0 for a
+               function with none. Lazy rather than a dict evaluated at the
+               `def`, because an annotation may name something that does not
+               exist yet -- `def f(x: Undefined)` is a legal definition and
+               only READING its annotations is an error. */
+            apy_value annotate;
+            /* ARBITRARY ATTRIBUTES SET ON THE FUNCTION ITSELF, or 0 until one
+               is. A Python function is an object a program may hang anything
+               on -- `f.__override__ = True` is a decorator doing exactly that
+               -- and without somewhere to put it every such assignment was an
+               AttributeError. Created on first write, so an ordinary `def`
+               still allocates nothing extra. */
+            apy_value dict;
         } fn;
+        /* A runtime descriptor -- `property`, `classmethod`, `staticmethod`.
+           `get` holds the getter (or the wrapped function, for the other
+           two) and `set` the setter, 0 when there is none. */
+        struct { apy_value get, set, del_; int kind; } p;
+        /* `slice(start, stop, step)`. Each is a VALUE and each may be None --
+           an omitted bound is not the same as any number, which is the whole
+           reason the three are kept rather than resolved to indices here. */
+        struct { apy_value start, stop, step; } sl;
+        /* `list[int]`: what was subscripted, and with what. */
+        struct { apy_value origin, args; } ga;
+        /* What a memoryview looks at, and where. `step` is signed: -1 is
+           `mv[::-1]`, which reads the same bytes backwards. */
+        struct { apy_value src; int64_t off, n, step; } mv;
+        /* The dict a view looks at, and WHICH of the three it is. */
+        struct { apy_value dict; int part; } vw;
         /* One closure variable's box. A captured local lives HERE instead of
            in a register, so the enclosing function and every closure over it
            read and write the same storage. */
@@ -297,9 +500,26 @@ struct apy_obj {
         /* A CLASS: its name as a str value (so `__name__` is just a field),
            its single base or 0, and a dict of everything its body bound --
            methods and class attributes alike. */
-        struct { apy_value name, base, dict; } t;
+        /* A CLASS: its name as a str value (so `__name__` is just a
+           field), its single base or 0, a dict of everything its body bound,
+           and the METACLASS that made it -- 0 for an ordinary `class`, which
+           reads as `type`. `type(C)` answers the metaclass, and a metaclass's
+           `__instancecheck__` is reached through it. */
+        /* `base` is the FIRST base and `bases` all of them; `mro` is the
+           C3 linearisation attribute lookup walks, starting with the
+           class itself. `mro` is 0 for a class built before it could be
+           computed, and the base chain is the answer there. */
+        /* `builtin` is the KIND a class extends -- `class D(dict)` --
+           or 0. Recorded rather than derived, because the base chain holds
+           only classes and a builtin is not one. */
+        struct { apy_value name, base, dict, meta, bases, mro;
+                 int builtin; } t;
         /* An INSTANCE: what class made it, and its own attribute dict. */
-        struct { apy_value cls, dict; } o;
+        /* `held` is the BUILTIN VALUE an instance of a builtin-extending
+           class carries -- a real list, dict or tuple. 0 for an ordinary
+           instance. What a class defines wins; what it does not is answered
+           by delegating here, which is the whole of `class D(dict)`. */
+        struct { apy_value cls, dict, held; } o;
         /* What `super()` evaluates to: the class the calling method was
            DEFINED in, plus the receiver. Attribute lookup starts at that
            class's base, so a two-level hierarchy does not recurse forever. */
@@ -324,8 +544,59 @@ static char apy_err_msg[256];
    there was no object. */
 static apy_value apy_err_value;
 
+/* --- source positions -----------------------------------------------------
+
+   PEP 657. A traceback names a FRAME and a frame names a CODE OBJECT, whose
+   positions say where each of its operations was written. Neither existed
+   here, so `e.__traceback__` was an empty tuple standing in for one.
+
+   WHAT IS RECORDED IS ONE POSITION PER STATEMENT, not one per operation. The
+   frontend already sets a span per statement and that is the granularity it
+   has; `co_positions()` therefore answers one four-tuple per statement of the
+   function, which is coarser than CPython's per-instruction table and is made
+   of exactly the same kind of fact. Saying so is the whole of the difference.
+
+   AND NOTHING IS RECORDED UNLESS THE PROGRAM ASKS. The cursor costs a call
+   per statement, so the frontend emits none of it unless the source mentions
+   `__traceback__` or one of the attributes that reads through it -- see
+   `_wants_positions` in frontends/python/lower.py. */
+typedef struct {
+    apy_value fn;                       /* the function it was written in */
+    int32_t line, end_line, col, end_col;
+} apy_srcpos;                           /* NOT `apy_pos`, which is unary `+` */
+static apy_srcpos *apy_pos_tab;
+static int64_t apy_pos_n, apy_pos_cap;
+/* WHICH STATEMENT IS RUNNING, and where the last failure happened. Two cells
+   because a handler's own statements move the first one, and what the
+   traceback has to report is where the exception came from. */
+static int64_t apy_pos_here = -1, apy_err_pos = -1;
+
+APY_API void apy_pos_add(apy_value name, int64_t line, int64_t end_line,
+                         int64_t col, int64_t end_col) {
+    if (apy_pos_n == apy_pos_cap) {
+        apy_pos_cap = apy_pos_cap ? apy_pos_cap * 2 : 128;
+        apy_pos_tab = (apy_srcpos *)realloc(
+            apy_pos_tab, (size_t)apy_pos_cap * sizeof *apy_pos_tab);
+        if (!apy_pos_tab) return;
+    }
+    apy_pos_tab[apy_pos_n].fn = name;
+    apy_pos_tab[apy_pos_n].line = (int32_t)line;
+    apy_pos_tab[apy_pos_n].end_line = (int32_t)end_line;
+    apy_pos_tab[apy_pos_n].col = (int32_t)col;
+    apy_pos_tab[apy_pos_n].end_col = (int32_t)end_col;
+    apy_pos_n++;
+}
+
+APY_API void apy_at(int64_t which) { apy_pos_here = which; }
+
 static apy_value apy_fail(const char *type, const char *msg) {
     if (!apy_err_type) {          /* first error wins, like a real traceback */
+        /* WHERE IT HAPPENED, taken at the moment the flag goes up. By the
+           time a handler asks, its own statements have moved the cursor --
+           and this is the choke point every FAILED OPERATION comes through,
+           which is most of them: `apy_fail_replacing` is only for a `raise`
+           that overrides a pending error. */
+        apy_err_pos = apy_pos_here;
         apy_err_type = type;
         apy_err_value = 0;
         snprintf(apy_err_msg, sizeof apy_err_msg, "%s", msg);
@@ -353,6 +624,9 @@ static apy_value apy_fail(const char *type, const char *msg) {
    REPLACEMENT is what changes which exception a handler sees, and that part
    is now right. */
 static apy_value apy_fail_replacing(const char *type, const char *msg) {
+    /* WHERE IT HAPPENED, taken at the moment the flag goes up. By the time a
+       handler asks, its own statements have moved the cursor. */
+    apy_err_pos = apy_pos_here;
     apy_err_type = type;
     apy_err_value = 0;
     snprintf(apy_err_msg, sizeof apy_err_msg, "%s", msg);
@@ -387,6 +661,7 @@ APY_API void apy_fatal_if_error(void) {
 /* --- construction ------------------------------------------------------ */
 static apy_obj apy_none_cell = { APY_NONE_K, { 0 } };
 static apy_obj apy_ellipsis_cell = { APY_ELLIPSIS_K, { 0 } };
+static apy_obj apy_notimpl_cell = { APY_NOTIMPL_K, { 0 } };
 static apy_obj apy_true_cell = { APY_BOOL_K, { 1 } };
 static apy_obj apy_false_cell = { APY_BOOL_K, { 0 } };
 
@@ -407,6 +682,7 @@ APY_API apy_value apy_none(void) { return V(&apy_none_cell); }
 
 /* `...` and the name `Ellipsis` -- one cell, so `is` answers True. */
 APY_API apy_value apy_ellipsis(void) { return V(&apy_ellipsis_cell); }
+APY_API apy_value apy_notimplemented(void) { return V(&apy_notimpl_cell); }
 
 APY_API apy_value apy_from_bool(int64_t b) {
     return V(b ? &apy_true_cell : &apy_false_cell);
@@ -1350,8 +1626,31 @@ static apy_value apy_text(apy_value v, int quoted);
 /* `str(e)` is the ARGUMENT alone and `repr(e)` is `ValueError('x')`.
    Printing an exception shows its message, which is why the two differ
    here and not for any other kind. */
+static int apy_is_seq(apy_value v);
+
 static apy_value apy_exc_text(apy_value v, int quoted) {
     apy_value arg = O(v)->v.e.arg;
+    /* MORE THAN ONE ARGUMENT PRINTS AS THE TUPLE. `str(ValueError('a','b'))`
+       is `('a', 'b')` and its repr is `ValueError('a', 'b')` -- CPython shows
+       the whole of `args` once there is more than one to show, and rendering
+       only the first silently dropped the rest. */
+    if (O(v)->v.e.argv && apy_is_seq(O(v)->v.e.argv)
+            && O(O(v)->v.e.argv)->v.q.n > 1) {
+        apy_value shown = apy_text(O(v)->v.e.argv, 1);
+        int64_t n, out;
+        char *buf;
+        if (!quoted) return shown;
+        n = (int64_t)strlen(O(v)->v.e.name) + O(shown)->v.s.n + 1;
+        buf = (char *)malloc((size_t)n + 1);
+        out = (int64_t)strlen(O(v)->v.e.name);
+        memcpy(buf, O(v)->v.e.name, (size_t)out);
+        /* The tuple's own parentheses ARE the call's, which is why the text
+           is spliced in whole rather than wrapped again. */
+        memcpy(buf + out, O(shown)->v.s.p, (size_t)O(shown)->v.s.n);
+        out += O(shown)->v.s.n;
+        buf[out] = 0;
+        return apy_str_take(buf, out);
+    }
     /* WHETHER there was an argument, not whether it is None. `str(E())` is
        empty and `str(E(None))` is "None"; `repr` shows `E()` and `E(None)`.
        Testing the argument's kind conflated the two, so an exception
@@ -1365,7 +1664,18 @@ static apy_value apy_exc_text(apy_value v, int quoted) {
                     : apy_text(arg, !O(v)->v.e.rendered
                                     && strcmp(O(v)->v.e.name, "KeyError") == 0);
     {
-        apy_value shown = !has ? apy_lit("") : apy_text(arg, 1);
+        /* A KeyError REBUILT FROM A FAILED LOOKUP already holds the repr of
+           the key -- that is what `rendered` records -- so repr'ing it again
+           gave `KeyError("'k'")` where CPython says `KeyError('k')`. Every
+           other type stores the plain message and does want the quotes.
+
+           WHAT THIS DOES NOT FIX: `e.args[0]` is still the repr TEXT rather
+           than the key, because a failed operation keeps a type and a message
+           and never the object -- see `apy_err_value`. Retaining the key
+           would fix both; this fixes the half that can be fixed without it. */
+        int twice = O(v)->v.e.rendered
+            && strcmp(O(v)->v.e.name, "KeyError") == 0;
+        apy_value shown = !has ? apy_lit("") : apy_text(arg, !twice);
         int64_t n = (int64_t)strlen(O(v)->v.e.name) + O(shown)->v.s.n + 2;
         char *buf = (char *)malloc((size_t)n + 1);
         int64_t out = (int64_t)strlen(O(v)->v.e.name);
@@ -1381,7 +1691,77 @@ static apy_value apy_exc_text(apy_value v, int quoted) {
 APY_API apy_value apy_repr(apy_value v);
 static apy_value apy_lit(const char *p);
 APY_API apy_value apy_getitem(apy_value seq, apy_value index);
+/* A view's contents, taken when asked -- and the snapshot helper the
+   non-dict path still uses. Both run above where they are defined. */
+APY_API apy_value apy_view_items(apy_value v);
+static apy_value apy_dict_parts_snapshot(apy_value d, int64_t which);
+/* The set operators convert a view at the boundary, above where the helper
+   that does it is defined. */
+static apy_value apy_view_as_set(apy_value v);
+/* `x.hex()` dispatches to the bytes form well above where it is defined. */
+APY_API apy_value apy_bytes_hex(apy_value b, apy_value sep);
+/* `ascii` walks a str by CHARACTER to escape it, far above where the UTF-8
+   step is defined. */
+static int64_t apy_utf8_at(const unsigned char *p, int64_t n, int64_t i,
+                           int64_t *len);
+/* Subscripting a CLASS builds a generic alias, far above where aliases are
+   defined. */
+APY_API apy_value apy_alias_new(apy_value origin, apy_value args);
+/* Subscripting with a slice OBJECT resolves its bounds and slices, far above
+   where the slicing itself is defined. */
+APY_API apy_value apy_slice(apy_value seq, int64_t start, int64_t stop,
+                            int64_t step, int64_t has_start, int64_t has_stop);
+/* Slice ASSIGNMENT resolves the bounds through this, far above it. */
+APY_API apy_value apy_slice_indices(apy_value sl, apy_value len_v);
 static apy_value apy_dict_text(apy_value v);
+/* The runtime's own callables, defined beside `apy_invoke` and reached from
+   the `super()` lookup far above it. */
+/* A str's length in CHARACTERS, which is what indexing and slicing it count
+   -- defined with the other string measures, far below the subscript. */
+/* A format field may carry accessors -- `{x[0]}`, `{a.real}` -- and attribute
+   lookup is defined with the object model, well below the formatter. */
+APY_API apy_value apy_getattr(apy_value obj, apy_value name);
+/* PEP 604's `int | str` builds a union out of a `typing` form,
+   which is defined with the rest of `typing` far below the
+   operators. */
+APY_API apy_value apy_typing_form(apy_value name);
+static int64_t apy_str_chars(apy_value v);
+static apy_value apy_object_default(const char *want);
+static apy_value apy_kind_class(apy_value obj);
+APY_API apy_value apy_dict_get_or(apy_value d, apy_value key,
+                                  apy_value fallback);
+static void apy_union_arms(apy_value into, apy_value v);
+APY_API apy_value apy_typing_form(apy_value name);
+/* `__init_subclass__` is called with the class KEYWORDS, and the keyword-call
+   entry point is defined with the rest of the calling machinery far below. */
+APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
+                              apy_value kwd);
+/* `f(*xs, **kw)` -- the spread form, defined beside the plain spread call and
+   reaching the keyword binder above. */
+APY_API apy_value apy_call_spread_kw(apy_value f, apy_value args,
+                                     apy_value kwd);
+static apy_value apy_native(int sel, int64_t arity, const char *name);
+/* `object` and `type` as class OBJECTS, defined beside the natives they hold
+   and reached from the attribute lookup far above. */
+APY_API apy_value apy_object_class(void);
+APY_API apy_value apy_type_class(void);
+/* `%` formatting, defined beside `str.format` -- it borrows the whole of the
+   mini-language -- and reached from `apy_mod`, far above. */
+static apy_value apy_str_percent(apy_value fmt, apy_value right);
+/* `typing`'s forms and the two introspection calls, defined at the very
+   bottom beside the rest of `typing` and reached from `apy_getitem`. */
+static int apy_is_special_form(apy_value v);
+/* memoryview. Defined beside the dict views, which is far below `apy_getitem`
+   and `apy_setitem` -- the two places that matter most. */
+static const char *apy_mview_buf(apy_value v);
+static int64_t apy_mview_at(apy_value v, int64_t i);
+static apy_value apy_mview_slice(apy_value v, int64_t off, int64_t n,
+                                 int64_t step);
+APY_API apy_value apy_mview_bytes(apy_value v);
+/* Cycle detection for `repr`, used by the dict renderer well above where the
+   sequence one defines it. */
+static int apy_repr_entered(apy_value v);
+static void apy_repr_left(apy_value v);
 /* Declared with APY_API, not `static`: these two are host functions the IR
    can call, so their storage class has to match their definition -- and in
    the linked build that is external. A `static` forward declaration of an
@@ -1440,10 +1820,34 @@ APY_API int64_t apy_error_matches(apy_value handler);
 APY_API void apy_error_clear(void);
 APY_API apy_value apy_getitem(apy_value seq, apy_value index);
 APY_API apy_value apy_to_bytes(apy_value src);
+/* `range` is three numbers and every question about one is arithmetic on
+   them; the helpers live with the constructor, far below the operators that
+   ask. */
+APY_API apy_value apy_range(int64_t start, int64_t stop, int64_t step);
+static int64_t apy_range_len(apy_value r);
+static int64_t apy_range_at(apy_value r, int64_t i);
+static int64_t apy_range_find(apy_value r, int64_t want);
 static apy_value apy_name(const char *text);
+/* `class D(dict)` -- the builtin an instance carries, defined with the object
+   model far below the operators that delegate to it. */
+static apy_value apy_inst_held(apy_value v);
+static int64_t apy_dict_find(apy_value d, apy_value key);
+APY_API apy_value apy_dict_get(apy_value d, apy_value key);
 static apy_value apy_class_find(apy_value cls, apy_value name);
 static apy_value apy_bind(apy_value f, apy_value self);
 static int apy_type_is_sub(apy_value of, apy_value cls);
+/* `format(n, 'c')` encodes a code point where the formatter runs, well above
+   where `chr` is defined. */
+APY_API apy_value apy_chr(apy_value v);
+/* `next()` reports a generator's exhaustion with the value its `return`
+   carried, and runs well above where generators are defined. */
+static apy_value apy_gen_stop(apy_value g);
+/* `del obj.attr` consults a descriptor, well above where the descriptor
+   protocol itself is defined. */
+static int apy_is_data_descriptor(apy_value v);
+/* Declared here and not just above its definition: `__dict__` access reads
+   it several hundred lines earlier than `__slots__` enforcement defines it. */
+static int apy_slot_allows(apy_value cls, apy_value name);
 
 /* A str value's bytes as a NUL-terminated C string, for comparing an
    attribute name against a literal. Every str cell keeps a NUL after its
@@ -1543,16 +1947,191 @@ static apy_value apy_bytes_repeat(apy_value v, apy_value count) {
 
 APY_API apy_value apy_getitem(apy_value seq, apy_value index) {
     int64_t i, n;
+    if (O(seq)->kind == APY_MVIEW_K) {
+        if (apy_is_int_like(index)) {
+            if (!apy_index_arg(index, &i, APY_IDX_SUB)) return 0;
+            n = O(seq)->v.mv.n;
+            if (i < 0) i += n;
+            if (i < 0 || i >= n)
+                return apy_fail("IndexError", "index out of bounds on "
+                                              "dimension 1");
+            return apy_from_int((int64_t)(unsigned char)
+                                apy_mview_buf(seq)[apy_mview_at(seq, i)]);
+        }
+        if (index && O(index)->kind == APY_SLICE_K) {
+            /* STILL A VIEW. `mv[1:3][0] = 9` writes to the original buffer,
+               which a copy here would silently lose. */
+            apy_value bounds = apy_slice_indices(index,
+                                                 apy_from_int(O(seq)->v.mv.n));
+            int64_t start, stop, step, count;
+            if (!bounds) return 0;
+            start = O(O(bounds)->v.q.items[0])->v.i;
+            stop = O(O(bounds)->v.q.items[1])->v.i;
+            step = O(O(bounds)->v.q.items[2])->v.i;
+            count = step > 0 ? (stop > start ? (stop - start + step - 1) / step
+                                             : 0)
+                             : (start > stop ? (start - stop - step - 1)
+                                               / -step
+                                             : 0);
+            return apy_mview_slice(seq, apy_mview_at(seq, start), count,
+                                   O(seq)->v.mv.step * step);
+        }
+        return apy_fail2("TypeError",
+                         "memoryview indices must be integers%s%s", "", "");
+    }
     if (O(seq)->kind == APY_BYTES_K && apy_is_int_like(index)) {
         if (!apy_index_arg(index, &i, APY_IDX_SUB)) return 0;
         return apy_bytes_getitem(seq, i);
     }
-    if (O(seq)->kind == APY_INST_K)
-        /* No fallthrough: a class without `__getitem__` is "not
-           subscriptable", and `apy_method1` answering 0 with no error set
-           lands on exactly that message below. */
-        { apy_value r = apy_method1(seq, "__getitem__", index);
-          if (r || apy_error_occurred()) return r; }
+    if (O(seq)->kind == APY_INST_K) {
+        /* No fallthrough for an ordinary class: one without `__getitem__` is
+           "not subscriptable", and `apy_method1` answering 0 with no error
+           set lands on exactly that message below. */
+        apy_value r = apy_method1(seq, "__getitem__", index);
+        if (r || apy_error_occurred()) return r;
+        /* A CLASS THAT EXTENDS A BUILTIN IS one for everything it did not
+           write. `class D(dict)` with only a `__missing__` in it still has to
+           answer `d[k]`, and this is the dict it answers from. */
+        {
+            apy_value held = apy_inst_held(seq);
+            if (held) {
+                if (O(held)->kind == APY_DICT_K) {
+                    int64_t at = apy_dict_find(held, index);
+                    if (at >= 0) return O(held)->v.d.vals[at];
+                    /* `__missing__` IS WHAT A dict SUBCLASS IS FOR: a key
+                       that is not there is the class's question to answer,
+                       and a KeyError only when it declines to. */
+                    {
+                        apy_value miss = apy_method1(seq, "__missing__",
+                                                     index);
+                        if (miss || apy_error_occurred()) return miss;
+                    }
+                    return apy_dict_get(held, index);
+                }
+                return apy_getitem(held, index);
+            }
+        }
+    }
+    if (O(seq)->kind == APY_TYPE_K) {
+        /* `C[int]`. A CLASS IS NOT A CONTAINER: subscripting one asks
+           `__class_getitem__`, and a class without it is parameterised into a
+           generic alias -- which is what `list[int]` is and why it prints
+           rather than indexing anything. */
+        apy_value hook = apy_class_find(seq, apy_name("__class_getitem__"));
+        if (hook) {
+            /* AN IMPLICIT CLASSMETHOD: it receives the class as its first
+               argument, so the call is bound to the class rather than
+               passing the subscript alone. */
+            apy_value arg = index;
+            return apy_call_n(apy_bind(hook, seq), &arg, 1);
+        }
+        /* THE METACLASS DECIDES, if it has an opinion: `Box[int]` where
+           `Box` inherits `Generic` is `type(Box).__getitem__(Box, int)`, and
+           that is how a generic class is parameterised without every class
+           in the program becoming subscriptable. */
+        if (O(seq)->v.t.meta) {
+            apy_value m = apy_class_find(O(seq)->v.t.meta,
+                                         apy_name("__getitem__"));
+            if (m) {
+                apy_value arg = index;
+                return apy_call_n(apy_bind(m, seq), &arg, 1);
+            }
+        }
+        /* A CLASS WITHOUT THE HOOK IS NOT SUBSCRIPTABLE. CPython says so --
+           `class D: pass` then `D[int]` is a TypeError -- and only the
+           builtin containers answer a generic alias, because they carry
+           `__class_getitem__` of their own. Making every class parameterise
+           silently would turn a mistake into an object. */
+        return apy_fail2("TypeError", "type '%s' is not subscriptable%s",
+                         APY_CSTR(O(seq)->v.t.name), "");
+    }
+    if (O(seq)->kind == APY_RANGE_K) {
+        int64_t n = apy_range_len(seq);
+        if (index && O(index)->kind == APY_SLICE_K) {
+            /* A SLICE OF A RANGE IS A RANGE, not a list -- `r[1:3]` in
+               CPython answers `range(2, 6, 2)`, and materialising would
+               undo the whole point of the kind. */
+            apy_value a = O(index)->v.sl.start, b = O(index)->v.sl.stop;
+            apy_value c = O(index)->v.sl.step;
+            int64_t lo = 0, hi = n, by = 1;
+            if (c && O(c)->kind != APY_NONE_K
+                    && !apy_index_arg(c, &by, APY_IDX_SIZE)) return 0;
+            if (by == 0) return apy_fail("ValueError",
+                                         "slice step cannot be zero");
+            if (a && O(a)->kind != APY_NONE_K) {
+                if (!apy_index_arg(a, &lo, APY_IDX_SIZE)) return 0;
+                if (lo < 0) lo += n;
+                if (lo < 0) lo = 0;
+                if (lo > n) lo = n;
+            } else if (by < 0) lo = n - 1;
+            if (b && O(b)->kind != APY_NONE_K) {
+                if (!apy_index_arg(b, &hi, APY_IDX_SIZE)) return 0;
+                if (hi < 0) hi += n;
+                if (hi < 0) hi = by < 0 ? -1 : 0;
+                if (hi > n) hi = n;
+            } else if (by < 0) hi = -1;
+            {
+                int64_t start = apy_range_at(seq, lo);
+                int64_t step = O(seq)->v.rg.step * by;
+                int64_t stop = O(seq)->v.rg.start + hi * O(seq)->v.rg.step;
+                return apy_range(start, stop, step);
+            }
+        }
+        {
+            int64_t at;
+            if (!apy_index_arg(index, &at, APY_IDX_SUB)) return 0;
+            if (at < 0) at += n;
+            if (at < 0 || at >= n)
+                return apy_fail("IndexError", "range object index out of "
+                                              "range");
+            return apy_from_int(apy_range_at(seq, at));
+        }
+    }
+    if (apy_is_special_form(seq)) {
+        apy_value args = apy_tuple_new(2);
+        if (O(index)->kind == APY_TUPLE_K) args = index;
+        else apy_seq_push(args, index);
+        /* `Optional[X]` IS `X | None`. 3.14 unified the two spellings, so a
+           program that prints the annotation sees the union rather than the
+           form it was written with, and `get_args` answers two arms. */
+        apy_value form_name = apy_dict_get_or(O(seq)->v.o.dict,
+                                              apy_lit("_name"), 0);
+        if (form_name && strcmp(APY_CSTR(form_name), "Optional") == 0) {
+            apy_value arms = apy_tuple_new(4);
+            int64_t i;
+            for (i = 0; i < O(args)->v.q.n; i++)
+                apy_union_arms(arms, O(args)->v.q.items[i]);
+            apy_union_arms(arms, apy_none());
+            return apy_alias_new(apy_typing_form(apy_lit("Union")), arms);
+        }
+        return apy_alias_new(seq, args);
+    }
+    if (O(seq)->kind == APY_FUNC_K && O(seq)->v.fn.is_type) {
+        /* `list[int]` -- PARAMETERISING a builtin type. It is not indexing:
+           nothing is looked up, and what comes back is an object a program
+           prints or writes in an annotation. */
+        apy_value args = apy_tuple_new(2);
+        if (O(index)->kind == APY_TUPLE_K) args = index;
+        else apy_seq_push(args, index);
+        return apy_alias_new(seq, args);
+    }
+    if (O(seq)->kind == APY_SLICE_K) { /* not a container */ }
+    else if (index && O(index)->kind == APY_SLICE_K) {
+        /* THE BOUNDS ARE RESOLVED HERE, not by the caller: which of the three
+           were written decides what an omitted one means, and for a negative
+           step that is the end rather than the beginning. None is "not
+           written"; anything else is an index. */
+        apy_value a = O(index)->v.sl.start, b = O(index)->v.sl.stop;
+        apy_value c = O(index)->v.sl.step;
+        int64_t start = 0, stop = 0, step = 1;
+        int64_t has_start = a && O(a)->kind != APY_NONE_K;
+        int64_t has_stop = b && O(b)->kind != APY_NONE_K;
+        if (has_start && !apy_index_arg(a, &start, APY_IDX_SIZE)) return 0;
+        if (has_stop && !apy_index_arg(b, &stop, APY_IDX_SIZE)) return 0;
+        if (c && O(c)->kind != APY_NONE_K
+                && !apy_index_arg(c, &step, APY_IDX_SIZE)) return 0;
+        return apy_slice(seq, start, stop, step, has_start, has_stop);
+    }
     if (O(seq)->kind == APY_DICT_K) return apy_dict_get(seq, index);
     /* "Is this subscriptable at all" is asked BEFORE "is the index an int",
        because a set answers the first question and CPython reports that:
@@ -1598,11 +2177,24 @@ APY_API apy_value apy_getitem(apy_value seq, apy_value index) {
         return O(seq)->v.q.items[i];
     }
     if (O(seq)->kind == APY_STR_K) {
-        n = O(seq)->v.s.n;
+        /* BY CHARACTER, not by byte. A str is stored as UTF-8, and `len`
+           already counts characters -- so indexing bytes made `s[1]` on
+           `"héllo"` the first HALF of a character, which `ord` then
+           reported as a string of length != 1: a complaint about a string the
+           program never wrote. Slicing and iteration follow the same rule. */
+        const unsigned char *p = (const unsigned char *)O(seq)->v.s.p;
+        int64_t bytes = O(seq)->v.s.n, at = 0, seen = 0, used;
+        n = apy_str_chars(seq);
         if (i < 0) i += n;
         if (i < 0 || i >= n)
             return apy_fail("IndexError", "string index out of range");
-        return apy_str_copy(O(seq)->v.s.p + i, 1);
+        while (seen < i && at < bytes) {
+            apy_utf8_at(p, bytes, at, &used);
+            at += used;
+            seen++;
+        }
+        apy_utf8_at(p, bytes, at, &used);
+        return apy_str_copy(O(seq)->v.s.p + at, used);
     }
     return apy_fail2("TypeError", "'%s' object is not subscriptable%s",
                      apy_kind_name(seq), "");   /* unreachable; see the guard */
@@ -1659,8 +2251,89 @@ APY_API apy_value apy_setitem(apy_value seq, apy_value index, apy_value item) {
         apy_value m = apy_dunder(seq, "__setitem__"), args[2];
         if (m) { args[0] = index; args[1] = item;
                  return apy_call_n(m, args, 2); }
+        /* A CLASS THAT EXTENDS A BUILTIN writes into the one it carries for
+           everything its body did not define. */
+        if (apy_inst_held(seq))
+            return apy_setitem(apy_inst_held(seq), index, item);
     }
     if (O(seq)->kind == APY_DICT_K) return apy_dict_set(seq, index, item);
+    if (index && O(index)->kind == APY_SLICE_K && O(seq)->kind == APY_LIST_K) {
+        /* THE SPAN IS REPLACED, and the replacement need not be the same
+           length -- `xs[1:3] = [9]` shortens the list. So this is a rebuild
+           rather than a write through the existing cells, which is also why
+           it cannot share the index path below. */
+        apy_value bounds = apy_slice_indices(index, apy_from_int(
+            O(seq)->v.q.n));
+        apy_value fresh, given;
+        int64_t start, stop, step, k;
+        if (!bounds) return 0;
+        start = O(O(bounds)->v.q.items[0])->v.i;
+        stop = O(O(bounds)->v.q.items[1])->v.i;
+        step = O(O(bounds)->v.q.items[2])->v.i;
+        if (step != 1)
+            return apy_fail("ValueError",
+                            "only step 1 slice assignment is supported");
+        given = apy_iterable(item);
+        if (!given) return 0;
+        if (!apy_is_seq(given) && O(given)->kind != APY_SET_K)
+            return apy_fail2("TypeError",
+                             "can only assign an iterable, not %s%s",
+                             apy_kind_name(item), "");
+        fresh = apy_seq_new(APY_LIST_K, O(seq)->v.q.n + 4);
+        for (k = 0; k < start && k < O(seq)->v.q.n; k++)
+            apy_seq_push(fresh, O(seq)->v.q.items[k]);
+        for (k = 0; k < O(given)->v.q.n; k++)
+            apy_seq_push(fresh, O(given)->v.q.items[k]);
+        for (k = stop; k < O(seq)->v.q.n; k++)
+            if (k >= 0) apy_seq_push(fresh, O(seq)->v.q.items[k]);
+        /* IN PLACE: every other name bound to this list has to see the
+           change, which is what makes `xs[:] = ys` the idiom it is. */
+        free(O(seq)->v.q.items);
+        O(seq)->v.q.items = O(fresh)->v.q.items;
+        O(seq)->v.q.n = O(fresh)->v.q.n;
+        O(seq)->v.q.cap = O(fresh)->v.q.cap;
+        O(fresh)->v.q.items = NULL;
+        O(fresh)->v.q.n = 0;
+        O(fresh)->v.q.cap = 0;
+        return apy_none();
+    }
+    if (O(seq)->kind == APY_MVIEW_K) {
+        int64_t byte;
+        if (!O(O(seq)->v.mv.src)->v.s.mut)
+            return apy_fail("TypeError", "cannot modify read-only memory");
+        if (!apy_index_arg(index, &i, APY_IDX_SUB)) return 0;
+        n = O(seq)->v.mv.n;
+        if (i < 0) i += n;
+        if (i < 0 || i >= n)
+            return apy_fail("IndexError", "index out of bounds on "
+                                          "dimension 1");
+        if (!apy_index_arg(item, &byte, APY_IDX_SUB)) return 0;
+        if (byte < 0 || byte > 255)
+            return apy_fail("ValueError", "memoryview: invalid value for "
+                                          "format 'B'");
+        /* THROUGH to the buffer the view was taken over -- that write being
+           visible in the original is the whole of what a memoryview is. */
+        ((char *)apy_mview_buf(seq))[apy_mview_at(seq, i)] = (char)byte;
+        return apy_none();
+    }
+    if (O(seq)->kind == APY_BYTES_K) {
+        int64_t byte;
+        if (!O(seq)->v.s.mut)
+            return apy_fail("TypeError",
+                            "'bytes' object does not support item assignment");
+        if (!apy_index_arg(index, &i, APY_IDX_SUB)) return 0;
+        n = O(seq)->v.s.n;
+        if (i < 0) i += n;
+        if (i < 0 || i >= n)
+            return apy_fail("IndexError", "bytearray index out of range");
+        if (!apy_index_arg(item, &byte, APY_IDX_SUB)) return 0;
+        if (byte < 0 || byte > 255)
+            return apy_fail("ValueError", "byte must be in range(0, 256)");
+        /* The const is the STR half of the shared layout talking; this buffer
+           came from `apy_bytes_copy` and is this object's to write. */
+        ((char *)O(seq)->v.s.p)[i] = (char)byte;
+        return apy_none();
+    }
     if (O(seq)->kind != APY_LIST_K)
         return apy_fail2("TypeError",
                          "'%s' object does not support item assignment%s",
@@ -1681,10 +2354,19 @@ APY_API apy_value apy_setitem(apy_value seq, apy_value index, apy_value item) {
 /* The length as a machine word, for the frontend's own use -- a `for` loop
    bound, not a value the program ever sees. `apy_len` is the builtin. */
 APY_API int64_t apy_raw_len(apy_value v) {
+    if (O(v)->kind == APY_VIEW_K)
+        return O(O(v)->v.vw.dict)->v.d.n;
+    if (O(v)->kind == APY_MVIEW_K) return O(v)->v.mv.n;
+    if (O(v)->kind == APY_RANGE_K) return apy_range_len(v);
     if (O(v)->kind == APY_DICT_K) return O(v)->v.d.n;
     if (apy_is_seq(v) || apy_is_set(v)) return O(v)->v.q.n;
     if (O(v)->kind == APY_BYTES_K) return O(v)->v.s.n;
-    if (O(v)->kind == APY_STR_K) return O(v)->v.s.n;
+    /* IN CHARACTERS, matching `apy_len` and matching what indexing counts.
+       This used to answer BYTES while `apy_len` answered characters, and the
+       two disagreeing was written down as a limitation -- but a `for` loop
+       takes its bound from here and its elements from the subscript, so a
+       string with any non-ASCII character in it walked off the end. */
+    if (O(v)->kind == APY_STR_K) return apy_str_chars(v);
     if (O(v)->kind == APY_ITER_K) {
         /* A PLAIN cursor over a real container knows WHAT REMAINS without
            walking it, and answering cheaply keeps ordinary code off the slow
@@ -1778,6 +2460,10 @@ static const char *apy_unhashable(apy_value v) {
     if (O(v)->kind == APY_LIST_K || O(v)->kind == APY_DICT_K
         || O(v)->kind == APY_SET_K)
         return apy_kind_name(v);
+    /* A bytearray is unhashable for the reason every mutable container is:
+       the hash would stop describing the contents the moment it is written
+       to, and the dict that filed it could never find it again. */
+    if (O(v)->kind == APY_BYTES_K && O(v)->v.s.mut) return apy_kind_name(v);
     /* A FROZENSET is hashable and is not walked, unlike a tuple: every element
        it holds was checked on the way in, so there is nothing a walk could
        find. A tuple has no such gate -- `(1, [2])` is a perfectly ordinary
@@ -1788,6 +2474,16 @@ static const char *apy_unhashable(apy_value v) {
             if (bad) return bad;
         }
     }
+    /* A USER OBJECT WHOSE CLASS DEFINES `__eq__` AND NOT `__hash__` is
+       unhashable, and this is where a CONTAINER finds that out. `hash(x)`
+       already refused it, but `{x: 1}` and `{x}` went through here, found
+       nothing to complain about, and built a mapping whose key could never be
+       looked up again -- two objects that compare equal hashed by address and
+       landed in different places. A silent wrong answer where CPython raises. */
+    if (O(v)->kind == APY_INST_K
+            && !apy_class_find(O(v)->v.o.cls, apy_name("__hash__"))
+            && apy_class_find(O(v)->v.o.cls, apy_name("__eq__")))
+        return APY_CSTR(O(O(v)->v.o.cls)->v.t.name);
     return NULL;
 }
 
@@ -1858,12 +2554,17 @@ static apy_value apy_dict_text(apy_value v) {
     apy_value *parts;
     char *buf;
     if (n == 0) return apy_lit("{}");
+    /* ALREADY BEING RENDERED -- `d['self'] = d` is as ordinary as the list
+       version, and recursing on it runs the stack out. See
+       `apy_repr_entered`. */
+    if (apy_repr_entered(v)) return apy_lit("{...}");
     parts = (apy_value *)malloc((size_t)n * 2 * sizeof(apy_value));
     for (i = 0; i < n; i++) {
         parts[i * 2] = apy_text(O(v)->v.d.keys[i], 1);
         parts[i * 2 + 1] = apy_text(O(v)->v.d.vals[i], 1);
         len += O(parts[i * 2])->v.s.n + O(parts[i * 2 + 1])->v.s.n + 4;
     }
+    apy_repr_left(v);
     buf = (char *)malloc((size_t)len + 1);
     buf[out++] = '{';
     for (i = 0; i < n * 2; i++) {
@@ -1886,6 +2587,7 @@ static apy_value apy_dict_text(apy_value v) {
    a set is iterable and not subscriptable, and this is the function that means
    "iterate". */
 APY_API apy_value apy_key_at(apy_value v, int64_t i) {
+    if (O(v)->kind == APY_VIEW_K) return apy_key_at(apy_view_items(v), i);
     if (O(v)->kind == APY_GEN_K)
         /* From what the length query drained -- see `apy_raw_len`. */
         return O(v)->v.g.cache ? apy_key_at(O(v)->v.g.cache, i) : apy_none();
@@ -1960,11 +2662,73 @@ static int64_t apy_set_find(apy_value s, apy_value item) {
    it is unhashable and the error flag has been set. Three outcomes because
    `.add` and `.discard` need to tell "already present" from "refused", and a
    caller that only cares about failure can test for a negative. */
+/* Declared here because set INSERTION needs an element's hash to place it,
+   several thousand lines before hashing is defined. */
+static int64_t apy_hash_raw(apy_value v);
+
+/* THE TABLE SIZE CPYTHON WOULD BE USING for a set of `n` elements: the
+   smallest power of two at least 8 whose load stays under 60%, which is
+   CPython's growth rule. Returns the mask, one less than that size. */
+static int64_t apy_set_mask(int64_t n) {
+    int64_t size = 8;
+    while (n * 5 >= size * 3) size *= 2;
+    return size - 1;
+}
+
+/* Order the elements the way CPython's table would hold them.
+   Called when the mask changes, which is O(log n) times over a set's life. */
+static void apy_set_reorder(apy_value s, int64_t mask) {
+    apy_value *items = O(s)->v.q.items;
+    int64_t n = O(s)->v.q.n, i, j;
+    /* Insertion sort by slot. Stable, so elements sharing a slot keep the
+       order they arrived in -- see the note on collisions in `apy_set_insert`.
+       n is small enough here that anything cleverer is not worth the code. */
+    for (i = 1; i < n; i++) {
+        apy_value held = items[i];
+        int64_t want = apy_hash_raw(held) & mask;
+        for (j = i; j > 0 && (apy_hash_raw(items[j - 1]) & mask) > want; j--)
+            items[j] = items[j - 1];
+        items[j] = held;
+    }
+}
+
+/* 1 when the element was added, 0 when an equal one was already there, -1 when
+   it is unhashable and the error flag has been set.
+
+   THE POSITION IS THE SLOT'S, NOT THE END. A set is an open-addressed hash
+   table in CPython, so `{3, 1, 2}` iterates as 1, 2, 3 -- the three land in
+   slots 3, 1 and 2 of an eight-slot table whatever order they were written
+   in, and iteration walks the slots. Appending gave insertion order, which is
+   the one thing CPython's order is never about, and seven conformance cases
+   read it back.
+
+   WHAT THIS DOES NOT CLAIM: two elements landing in ONE slot are ordered here
+   by arrival, where CPython places them by a perturbed probe
+   (`i = i*5 + 1 + perturb`). For sets whose elements do not collide -- every
+   one in the suite, and most small int and str sets -- the order is exactly
+   CPython's; with collisions it can differ. A real open-addressed table with
+   that probe is the eventual shape, and buys O(1) membership as well; this
+   keeps the array and the linear scan and changes only where things go. */
 static int apy_set_insert(apy_value s, apy_value item) {
+    int64_t n, mask, was, i, want;
     const char *bad = apy_unhashable(item);
     if (bad) { apy_unhashable_elem(item, bad); return -1; }
     if (apy_set_find(s, item) >= 0) return 0;
+    n = O(s)->v.q.n;
+    was = apy_set_mask(n);
+    mask = apy_set_mask(n + 1);
     apy_q_append(s, item);
+    if (mask != was) {
+        /* The table grew, so every slot moved. */
+        apy_set_reorder(s, mask);
+        return 1;
+    }
+    /* Walk back over anything that belongs after this one. */
+    want = apy_hash_raw(item) & mask;
+    for (i = n; i > 0
+             && (apy_hash_raw(O(s)->v.q.items[i - 1]) & mask) > want; i--)
+        O(s)->v.q.items[i] = O(s)->v.q.items[i - 1];
+    O(s)->v.q.items[i] = item;
     return 1;
 }
 
@@ -2245,13 +3009,24 @@ static apy_value apy_set_pop(apy_value s) {
    and the value is built only when a handler actually catches -- so the
    common path, where nothing fails, allocates nothing. */
 static const char *apy_exc_parent(const char *name);
+/* A user exception class runs its own `__init__`, which needs the class
+   registry and the call machinery -- both far below this. */
+static apy_value apy_exc_construct(apy_value exc, apy_value *args, int64_t n);
 
 APY_API apy_value apy_make_exc(apy_value type_name, apy_value arg) {
     apy_obj *o = apy_alloc(APY_EXC_K);
+    /* NOT INHERITED FROM THE UNION: a fresh exception carries no
+       sub-exceptions, and reading a stale pointer here would make
+       every ordinary raise look like a group. */
+    o->v.e.subs = 0;
+    o->v.e.dict = 0;
+    o->v.e.cls = 0;
+    o->v.e.pos = -1;
     o->v.e.name = O(type_name)->v.s.p;
     o->v.e.arg = arg;
     o->v.e.has_arg = 1;
-    return V(o);
+    o->v.e.argv = 0;
+    return apy_exc_construct(V(o), &arg, 1);
 }
 
 /* `raise E` and `except E:` -- an exception with NO argument, as distinct from
@@ -2259,10 +3034,18 @@ APY_API apy_value apy_make_exc(apy_value type_name, apy_value arg) {
    to be carried rather than inferred. */
 APY_API apy_value apy_make_exc0(apy_value type_name) {
     apy_obj *o = apy_alloc(APY_EXC_K);
+    /* NOT INHERITED FROM THE UNION: a fresh exception carries no
+       sub-exceptions, and reading a stale pointer here would make
+       every ordinary raise look like a group. */
+    o->v.e.subs = 0;
+    o->v.e.dict = 0;
+    o->v.e.cls = 0;
+    o->v.e.pos = -1;
     o->v.e.name = O(type_name)->v.s.p;
     o->v.e.arg = apy_none();
     o->v.e.has_arg = 0;
-    return V(o);
+    o->v.e.argv = 0;
+    return apy_exc_construct(V(o), NULL, 0);
 }
 
 /* THE exception being handled right now, for implicit chaining: a `raise`
@@ -2336,6 +3119,10 @@ APY_API apy_value apy_raise(apy_value exc) {
         if (pending && pending != exc && O(pending)->kind == APY_EXC_K)
             O(exc)->v.e.context = pending;
     }
+    /* WHERE IT WAS RAISED. An exception carries no traceback until this
+       runs, which is what makes `ValueError("x").__traceback__` None and the
+       same object's traceback real once it has been raised. */
+    O(exc)->v.e.pos = apy_pos_here;
     name = O(exc)->v.e.name;
     shown = O(exc)->v.e.arg;
     if (!O(exc)->v.e.has_arg) {
@@ -2368,6 +3155,17 @@ static const char *const APY_EXC_TREE[][2] = {
     {"SystemExit", "BaseException"},
     {"KeyboardInterrupt", "BaseException"},
     {"GeneratorExit", "BaseException"},
+    /* PEP 654. `BaseExceptionGroup` catches groups of BaseExceptions and
+       `ExceptionGroup` is the narrower one every ordinary program means. */
+    /* `asyncio.CancelledError` inherits BaseException and NOT Exception,
+       since 3.8: `except Exception:` inside a task must not swallow the
+       cancellation the loop just delivered. */
+    {"CancelledError", "BaseException"},
+    /* `InvalidStateError` is what a Future raises when asked for a result it
+       does not have. */
+    {"InvalidStateError", "Exception"},
+    {"BaseExceptionGroup", "BaseException"},
+    {"ExceptionGroup", "Exception"},
     {"ArithmeticError", "Exception"},
     {"ZeroDivisionError", "ArithmeticError"},
     {"OverflowError", "ArithmeticError"},
@@ -2381,6 +3179,9 @@ static const char *const APY_EXC_TREE[][2] = {
     {"TypeError", "Exception"},
     {"ValueError", "Exception"},
     {"UnicodeError", "ValueError"},
+    {"UnicodeDecodeError", "UnicodeError"},
+    {"UnicodeEncodeError", "UnicodeError"},
+    {"UnicodeTranslateError", "UnicodeError"},
     {"RuntimeError", "Exception"},
     {"NotImplementedError", "RuntimeError"},
     {"RecursionError", "RuntimeError"},
@@ -2388,13 +3189,49 @@ static const char *const APY_EXC_TREE[][2] = {
     {"ImportError", "Exception"},
     {"ModuleNotFoundError", "ImportError"},
     {"OSError", "Exception"},
+    /* PEP 3151 SUBSUMED THE OLD NAMES: `IOError` and `EnvironmentError` are
+       `OSError` in CPython -- the same object, not subclasses -- and the
+       errno-specific ones became real classes under it. `IOError is OSError`
+       is the test a program writes, so the two aliases are resolved to the
+       one name rather than added to the tree; see `apy_exc_canonical`. */
     {"FileNotFoundError", "OSError"},
+    {"PermissionError", "OSError"},
+    {"IsADirectoryError", "OSError"},
+    {"NotADirectoryError", "OSError"},
+    {"FileExistsError", "OSError"},
+    {"InterruptedError", "OSError"},
+    {"BlockingIOError", "OSError"},
+    {"ChildProcessError", "OSError"},
+    {"ProcessLookupError", "OSError"},
+    {"ConnectionError", "OSError"},
+    {"BrokenPipeError", "ConnectionError"},
+    {"ConnectionAbortedError", "ConnectionError"},
+    {"ConnectionRefusedError", "ConnectionError"},
+    {"ConnectionResetError", "ConnectionError"},
+    {"TimeoutError", "OSError"},
     {"StopIteration", "Exception"},
+    /* The WARNING categories. They are exceptions in Python -- `Warning`
+       inherits `Exception` -- and a program reads `issubclass(
+       DeprecationWarning, Warning)` back, which is why they belong in the
+       hierarchy rather than in whatever module raises them. */
+    {"Warning", "Exception"},
+    {"UserWarning", "Warning"},
+    {"DeprecationWarning", "Warning"},
+    {"PendingDeprecationWarning", "Warning"},
+    {"SyntaxWarning", "Warning"},
+    {"RuntimeWarning", "Warning"},
+    {"FutureWarning", "Warning"},
+    {"ImportWarning", "Warning"},
+    {"UnicodeWarning", "Warning"},
+    {"BytesWarning", "Warning"},
+    {"ResourceWarning", "Warning"},
+    {"EncodingWarning", "Warning"},
     {"StopAsyncIteration", "Exception"},
     {"MemoryError", "Exception"},
     {"EOFError", "Exception"},
     {"SyntaxError", "Exception"},
     {"IndentationError", "SyntaxError"},
+    {"TabError", "IndentationError"},
 };
 
 /* A `class MyError(ValueError):` written by the PROGRAM, registered at the
@@ -2477,6 +3314,15 @@ APY_API apy_value apy_error_value(void) {
        E(42)` caught as `E('42')`. */
     if (apy_err_value) return apy_err_value;
     o = apy_alloc(APY_EXC_K);
+    o->v.e.dict = 0;
+    o->v.e.cls = 0;
+    /* THE FAILING STATEMENT, not the one running now: a handler's own
+       statements have already moved the cursor by the time this is built. */
+    o->v.e.pos = apy_err_pos;
+    /* NOT INHERITED FROM THE UNION: a fresh exception carries no
+       sub-exceptions, and reading a stale pointer here would make
+       every ordinary raise look like a group. */
+    o->v.e.subs = 0;
     o->v.e.name = apy_err_type;
     o->v.e.rendered = 1;
     o->v.e.arg = apy_err_msg[0]
@@ -2516,7 +3362,17 @@ APY_API int64_t apy_index(apy_value v) {
               apy_kind_name(v), "");
     return 0;
 }
-APY_API double  apy_as_float(apy_value v) { return O(v)->v.f; }
+/* KIND-AWARE, unlike its int and bool neighbours. Those are raw extractions
+   the frontend only emits where it has proved the kind; this one is reached
+   with an int whenever a program passes one to a `float` parameter, which
+   Python allows and people write. Reading `v.f` there reinterpreted the
+   integer bits as a double and `f(42)` answered 4.15e-322. */
+APY_API double apy_as_float(apy_value v) {
+    if (O(v)->kind == APY_FLOAT_K) return O(v)->v.f;
+    if (apy_is_big(v)) return apy_big_double(O(v));
+    if (apy_is_int_like(v)) return (double)O(v)->v.i;
+    return O(v)->v.f;
+}
 APY_API int64_t apy_as_bool(apy_value v) { return O(v)->v.i != 0; }
 
 /* --- inspection -------------------------------------------------------- */
@@ -2529,6 +3385,26 @@ APY_API int64_t apy_as_bool(apy_value v) { return O(v)->v.i != 0; }
    no double. */
 static apy_value apy_bytes_repr(apy_value v) {
     const unsigned char *p = (const unsigned char *)O(v)->v.s.p;
+    if (O(v)->v.s.mut) {
+        /* `bytearray(b'abc')` -- the repr of the bytes it holds, wrapped.
+           Built by clearing the flag round the recursive call rather than by
+           a second escaping loop, so the two spellings cannot drift. */
+        apy_value inner;
+        char *wrapped;
+        int64_t m;
+        O(v)->v.s.mut = 0;
+        inner = apy_bytes_repr(v);
+        O(v)->v.s.mut = 1;
+        if (!inner) return 0;
+        m = O(inner)->v.s.n;
+        wrapped = (char *)malloc((size_t)m + 12);
+        if (!wrapped) { fputs("asmpython: out of memory\n", stderr); exit(1); }
+        memcpy(wrapped, "bytearray(", 10);
+        memcpy(wrapped + 10, O(inner)->v.s.p, (size_t)m);
+        wrapped[10 + m] = ')';
+        wrapped[11 + m] = 0;
+        return apy_str_take(wrapped, m + 11);
+    }
     int64_t n = O(v)->v.s.n, i;
     int has_single = 0, has_double = 0;
     for (i = 0; i < n; i++) {
@@ -2587,10 +3463,12 @@ static const char *apy_kind_name(apy_value v) {
        name the user's type rather than a word from this file. */
     case APY_INST_K:  return APY_CSTR(O(O(v)->v.o.cls)->v.t.name);
     case APY_TYPE_K:  return "type";
-    case APY_FUNC_K:  return "function";
+    case APY_FUNC_K:
+        if (O(v)->v.fn.is_type) return "type";
+        return O(v)->v.fn.builtin ? "builtin_function_or_method" : "function";
     case APY_CELL_K:  return "cell";
     case APY_SUPER_K: return "super";
-    case APY_BYTES_K: return "bytes";
+    case APY_BYTES_K: return O(v)->v.s.mut ? "bytearray" : "bytes";
     case APY_COMPLEX_K: return "complex";
     /* A CURSOR names what MADE it: `map(str, xs)` is a `map`, which is what
        `type(...).__name__` answers and what tells a reader why it is lazy.
@@ -2605,7 +3483,34 @@ static const char *apy_kind_name(apy_value v) {
         default:               return "iterator";
         }
     case APY_ELLIPSIS_K: return "ellipsis";
-    case APY_GEN_K: return "generator";
+    case APY_NOTIMPL_K: return "NotImplementedType";
+    /* All three share every field; only the name differs, and a program reads
+       it to tell them apart -- `async def` with `yield` is an async
+       generator, which is neither of the other two. */
+    case APY_SLICE_K: return "slice";
+    case APY_ALIAS_K:
+        /* A UNION IS NOT A GENERIC ALIAS to a program that asks. `int | str`
+           is built on the `Union` form, and `type(...).__name__` is how a
+           program tells the two apart. */
+        return O(O(v)->v.ga.origin)->kind == APY_INST_K
+            ? "Union" : "types.GenericAlias";
+    case APY_MVIEW_K: return "memoryview";
+    case APY_RANGE_K: return "range";
+    case APY_VIEW_K:
+        switch (O(v)->v.vw.part) {
+        case APY_PART_KEYS:   return "dict_keys";
+        case APY_PART_VALUES: return "dict_values";
+        default:              return "dict_items";
+        }
+    case APY_PROP_K:
+        switch (O(v)->v.p.kind) {
+        case APY_PROP_CLASSMETHOD:  return "classmethod";
+        case APY_PROP_STATICMETHOD: return "staticmethod";
+        default:                    return "property";
+        }
+    case APY_GEN_K:
+        if (O(v)->v.g.agen) return "async_generator";
+        return O(v)->v.g.coro ? "coroutine" : "generator";
     default:          return "str";
     }
 }
@@ -2614,7 +3519,10 @@ APY_API apy_value apy_type_name(apy_value v) {
     /* The class's own name value, not a fresh copy: `type(a).__name__ is
        type(b).__name__` for two instances of one class, as in CPython. */
     if (O(v)->kind == APY_INST_K) return O(O(v)->v.o.cls)->v.t.name;
-    if (O(v)->kind == APY_TYPE_K) return apy_lit("type");
+    /* `type(C).__name__` IS THE METACLASS'S NAME when one made the class.
+       An ordinary class has no metaclass recorded and is a `type`. */
+    if (O(v)->kind == APY_TYPE_K)
+        return O(v)->v.t.meta ? O(O(v)->v.t.meta)->v.t.name : apy_lit("type");
     return apy_lit(apy_kind_name(v));
 }
 
@@ -2679,6 +3587,18 @@ static int64_t apy_str_chars(apy_value v) {
 }
 
 APY_API apy_value apy_len(apy_value v) {
+    /* A CLASS THAT EXTENDS A BUILTIN has one for everything it did not write.
+       Asked before the dunder walk below, which would report "has no len()"
+       for a `class D(dict)` whose body says nothing about length. */
+    if (O(v)->kind == APY_INST_K && apy_inst_held(v)
+            && !apy_class_find(O(v)->v.o.cls, apy_name("__len__")))
+        return apy_len(apy_inst_held(v));
+    /* THROUGH THE VIEW to the dict: a view has no length of its own, and
+       taking one when it was made is what a snapshot does. */
+    if (O(v)->kind == APY_VIEW_K)
+        return apy_from_int(O(O(v)->v.vw.dict)->v.d.n);
+    if (O(v)->kind == APY_MVIEW_K) return apy_from_int(O(v)->v.mv.n);
+    if (O(v)->kind == APY_RANGE_K) return apy_from_int(apy_range_len(v));
     if (O(v)->kind == APY_DICT_K) return apy_from_int(O(v)->v.d.n);
     if (apy_is_seq(v) || apy_is_set(v)) return apy_from_int(O(v)->v.q.n);
     if (O(v)->kind == APY_INST_K) {
@@ -2720,15 +3640,45 @@ static apy_value apy_text_result(apy_value r, const char *which) {
 /* A container always shows its ELEMENTS with repr, whichever of str/repr was
    asked of the container: `print(['a'])` is `['a']`, not `[a]`. A one-element
    tuple keeps its trailing comma, because `(1)` is not a tuple. */
+/* CONTAINERS CURRENTLY BEING RENDERED. A list that holds itself is an
+   ordinary thing to build -- `xs.append(xs)` -- and rendering it naively
+   recurses until the stack runs out. Python prints `[...]` for the repeat,
+   which is what makes the output finite and readable.
+
+   A small array rather than a set: the depth of a repr is a handful of frames
+   in every real case, and a linear scan of it is cheaper than a hash. */
+static apy_value apy_repr_active[64];
+static int apy_repr_depth;
+
+static int apy_repr_entered(apy_value v) {
+    int i;
+    for (i = 0; i < apy_repr_depth; i++)
+        if (apy_repr_active[i] == v) return 1;
+    if (apy_repr_depth < 64) apy_repr_active[apy_repr_depth++] = v;
+    return 0;
+}
+
+static void apy_repr_left(apy_value v) {
+    if (apy_repr_depth > 0 && apy_repr_active[apy_repr_depth - 1] == v)
+        apy_repr_depth--;
+}
+
 static apy_value apy_seq_text(apy_value v) {
     int tup = O(v)->kind == APY_TUPLE_K;
-    int64_t n = O(v)->v.q.n, i, len = 2, out = 0;
-    apy_value *parts = (apy_value *)malloc((size_t)(n ? n : 1) * sizeof(apy_value));
+    int64_t n, i, len = 2, out = 0;
+    apy_value *parts;
     char *buf;
+    /* ALREADY BEING RENDERED: this is the cycle, and Python writes `[...]`
+       for it. A tuple that contains itself cannot be built directly but can
+       be reached through a list, so both spellings are needed. */
+    if (apy_repr_entered(v)) return apy_lit(tup ? "(...)" : "[...]");
+    n = O(v)->v.q.n;
+    parts = (apy_value *)malloc((size_t)(n ? n : 1) * sizeof(apy_value));
     for (i = 0; i < n; i++) {
         parts[i] = apy_text(O(v)->v.q.items[i], 1);
         len += O(parts[i])->v.s.n + 2;
     }
+    apy_repr_left(v);
     if (tup && n == 1) len += 1;
     buf = (char *)malloc((size_t)len + 1);
     buf[out++] = tup ? '(' : '[';
@@ -2797,13 +3747,138 @@ static apy_value apy_text(apy_value v, int quoted) {
         py_repr_double(buf, sizeof buf, O(v)->v.f);
         return apy_str_copy(buf, (int64_t)strlen(buf));
     case APY_DICT_K:  return apy_dict_text(v);
+    case APY_RANGE_K: {
+        /* `range(0, 10, 2)` -- and `range(0, 3)` when the step is 1, which
+           is how CPython prints one. */
+        char rbuf[96];
+        int wrote;
+        if (O(v)->v.rg.step == 1)
+            wrote = snprintf(rbuf, sizeof rbuf, "range(%lld, %lld)",
+                             (long long)O(v)->v.rg.start,
+                             (long long)O(v)->v.rg.stop);
+        else
+            wrote = snprintf(rbuf, sizeof rbuf, "range(%lld, %lld, %lld)",
+                             (long long)O(v)->v.rg.start,
+                             (long long)O(v)->v.rg.stop,
+                             (long long)O(v)->v.rg.step);
+        return apy_str_copy(rbuf, wrote);
+    }
     case APY_ELLIPSIS_K: return apy_lit("Ellipsis");
+    case APY_NOTIMPL_K: return apy_lit("NotImplemented");
+    case APY_ALIAS_K: {
+        /* `list[int]`, not `list[<class 'int'>]`. A TYPE ARGUMENT RENDERS AS
+           ITS NAME here even though `str(int)` is `<class 'int'>` -- CPython's
+           alias repr uses the qualname, and the difference is visible in
+           every annotation a program prints. */
+        apy_value origin = O(v)->v.ga.origin;
+        /* THE UNION IS THE ONLY FORM THAT PRINTS WITH BARS. PEP 604 made `int
+           | str` the spelling for that one; every other form keeps the
+           subscript it was written with, and testing "the origin is an
+           instance" made `Annotated[int, 'x']` print as a union. */
+        apy_value form_nm = O(origin)->kind == APY_INST_K
+            ? apy_dict_get_or(O(origin)->v.o.dict, apy_lit("_name"), 0) : 0;
+        int is_union = form_nm && strcmp(APY_CSTR(form_nm), "Union") == 0;
+        apy_value head = (O(origin)->kind == APY_FUNC_K
+                          && O(origin)->v.fn.is_type) ? O(origin)->v.fn.name
+                         : O(origin)->kind == APY_TYPE_K
+                           ? O(origin)->v.t.name : apy_text(origin, 0);
+        apy_value args = O(v)->v.ga.args;
+        int64_t i, n = apy_is_seq(args) ? O(args)->v.q.n : 0;
+        int64_t room = O(head)->v.s.n + 8;
+        char *out;
+        int64_t at;
+        apy_value *parts = (apy_value *)malloc(
+            (size_t)(n ? n : 1) * sizeof(apy_value));
+        for (i = 0; i < n; i++) {
+            apy_value one = O(args)->v.q.items[i];
+            /* `NoneType` IS SPELLED `None` INSIDE A UNION, which is how
+               CPython prints `int | None` -- the class is what the union
+               HOLDS and `None` is what it is written as. */
+            parts[i] = (O(one)->kind == APY_TYPE_K
+                        && strcmp(APY_CSTR(O(one)->v.t.name), "NoneType") == 0)
+                ? apy_lit("None")
+                : O(one)->kind == APY_TYPE_K ? O(one)->v.t.name
+                : (O(one)->kind == APY_FUNC_K && O(one)->v.fn.is_type)
+                    ? O(one)->v.fn.name
+                    : apy_text(one, 1);
+            room += O(parts[i])->v.s.n + 2;
+        }
+        out = (char *)malloc((size_t)room + 1);
+        /* A UNION PRINTS WITH BARS, not as `Union[...]`: PEP 604 made `int |
+           str` the spelling, and that is what CPython's repr answers. It is
+           an alias like any other underneath. */
+        if (is_union) {
+            at = 0;
+            for (i = 0; i < n; i++) {
+                if (i) { out[at++] = ' '; out[at++] = '|'; out[at++] = ' '; }
+                memcpy(out + at, O(parts[i])->v.s.p,
+                       (size_t)O(parts[i])->v.s.n);
+                at += O(parts[i])->v.s.n;
+            }
+            out[at] = 0;
+            free(parts);
+            return apy_str_take(out, at);
+        }
+        memcpy(out, O(head)->v.s.p, (size_t)O(head)->v.s.n);
+        at = O(head)->v.s.n;
+        out[at++] = '[';
+        for (i = 0; i < n; i++) {
+            if (i) { out[at++] = ','; out[at++] = ' '; }
+            memcpy(out + at, O(parts[i])->v.s.p, (size_t)O(parts[i])->v.s.n);
+            at += O(parts[i])->v.s.n;
+        }
+        out[at++] = ']';
+        out[at] = 0;
+        free(parts);
+        return apy_str_take(out, at);
+    }
+    case APY_SLICE_K: {
+        /* `slice(1, 2, None)` -- always all three, and always the repr of
+           each, which is how CPython prints one whether or not the bound was
+           written. */
+        apy_value a = apy_text(O(v)->v.sl.start, 1);
+        apy_value b = apy_text(O(v)->v.sl.stop, 1);
+        apy_value c = apy_text(O(v)->v.sl.step, 1);
+        int64_t n = O(a)->v.s.n + O(b)->v.s.n + O(c)->v.s.n + 12;
+        char *out = (char *)malloc((size_t)n + 1);
+        int wrote = snprintf(out, (size_t)n + 1, "slice(%.*s, %.*s, %.*s)",
+                             (int)O(a)->v.s.n, O(a)->v.s.p,
+                             (int)O(b)->v.s.n, O(b)->v.s.p,
+                             (int)O(c)->v.s.n, O(c)->v.s.p);
+        return apy_str_take(out, wrote);
+    }
     case APY_EXC_K:   return apy_exc_text(v, quoted);
     case APY_LIST_K:
     case APY_TUPLE_K: return apy_seq_text(v);
     case APY_SET_K:
     case APY_FROZEN_K: return apy_set_text(v);
+    case APY_VIEW_K: {
+        /* `dict_keys(['a'])` -- the KIND NAME around the list of what the
+           view is looking at, which is how CPython prints one. Falling
+           through to the default answered the empty string, so a program that
+           printed `d.keys()` printed nothing at all. */
+        apy_value items = apy_seq_text(apy_view_items(v));
+        const char *head = apy_kind_name(v);
+        int64_t room = (int64_t)strlen(head) + O(items)->v.s.n + 3;
+        char *out = (char *)malloc((size_t)room + 1);
+        int wrote = snprintf(out, (size_t)room + 1, "%s(%.*s)", head,
+                             (int)O(items)->v.s.n, O(items)->v.s.p);
+        return apy_str_take(out, wrote);
+    }
     case APY_INST_K: {
+        /* A TYPING FORM PRINTS AS `typing.Name`. It is an instance with no
+           `__repr__`, so the default `<_SpecialForm object at 0x...>` came
+           out -- an address where CPython prints the name a program wrote. */
+        if (apy_is_special_form(v)) {
+            apy_value nm = apy_dict_get_or(O(v)->v.o.dict, apy_lit("_name"), 0);
+            if (nm) {
+                char *outf = (char *)malloc((size_t)O(nm)->v.s.n + 8);
+                int wrotef = snprintf(outf, (size_t)O(nm)->v.s.n + 8,
+                                      "typing.%.*s", (int)O(nm)->v.s.n,
+                                      O(nm)->v.s.p);
+                return apy_str_take(outf, wrotef);
+            }
+        }
         /* `str(x)` asks `__str__` and FALLS BACK to `__repr__`; `repr(x)`
            asks only `__repr__`. That asymmetry is Python's and it is load
            bearing: a class defining only `__repr__` prints with it, and one
@@ -2828,6 +3903,14 @@ static apy_value apy_text(apy_value v, int quoted) {
                  APY_CSTR(O(v)->v.t.name));
         return apy_str_copy(buf, (int64_t)strlen(buf));
     case APY_FUNC_K:
+        /* A BUILTIN TYPE NAME PRINTS AS A CLASS. `print(int)` says
+           `<class 'int'>` in Python, and it reaches here as a callable thunk
+           -- so the flag, not the kind, decides what it is called. */
+        if (O(v)->v.fn.is_type) {
+            snprintf(buf, sizeof buf, "<class '%s'>",
+                     APY_CSTR(O(v)->v.fn.name));
+            return apy_str_copy(buf, (int64_t)strlen(buf));
+        }
         snprintf(buf, sizeof buf, "<%s %s at 0x%llx>",
                  O(v)->v.fn.bound ? "bound method" : "function",
                  APY_CSTR(O(v)->v.fn.name), (unsigned long long)v);
@@ -2879,6 +3962,15 @@ APY_API apy_value apy_repr(apy_value v) { return apy_text(v, 1); }
    letting a `del` through would erase it. */
 APY_API apy_value apy_delitem(apy_value seq, apy_value key) {
     int64_t i;
+    if (O(seq)->kind == APY_INST_K) {
+        /* `del obj[k]` IS `obj.__delitem__(k)`. Never dispatched before, so
+           a class that wrote one had it ignored and the delete was reported
+           as unsupported -- a wrong answer about the class's own method. */
+        apy_value r = apy_method1(seq, "__delitem__", key);
+        if (r || apy_error_occurred()) return r;
+        /* A CLASS THAT EXTENDS A BUILTIN deletes from the one it carries. */
+        if (apy_inst_held(seq)) return apy_delitem(apy_inst_held(seq), key);
+    }
     if (O(seq)->kind == APY_DICT_K) {
         const char *bad = apy_unhashable(key);
         if (bad) return apy_fail2("TypeError", "unhashable type: '%s'%s",
@@ -2901,6 +3993,28 @@ APY_API apy_value apy_delitem(apy_value seq, apy_value key) {
     if (O(seq)->kind != APY_LIST_K)
         return apy_fail2("TypeError", "'%s' object doesn't support item deletion%s",
                          apy_kind_name(seq), "");
+    /* `del xs[1:3]` REMOVES A SPAN. Falling through to the index path asked
+       `apy_index_arg` for an integer, got the slice, and reported an
+       IndexError about a subscript the program never wrote. */
+    if (key && O(key)->kind == APY_SLICE_K) {
+        apy_value bounds = apy_slice_indices(key,
+                                             apy_from_int(O(seq)->v.q.n));
+        int64_t start, stop, step, from, to;
+        if (!bounds) return 0;
+        start = O(O(bounds)->v.q.items[0])->v.i;
+        stop = O(O(bounds)->v.q.items[1])->v.i;
+        step = O(O(bounds)->v.q.items[2])->v.i;
+        if (step != 1)
+            return apy_fail("ValueError",
+                            "only step 1 slice deletion is supported");
+        if (start < 0) start = 0;
+        if (stop > O(seq)->v.q.n) stop = O(seq)->v.q.n;
+        if (stop < start) stop = start;
+        for (from = stop, to = start; from < O(seq)->v.q.n; from++, to++)
+            O(seq)->v.q.items[to] = O(seq)->v.q.items[from];
+        O(seq)->v.q.n -= stop - start;
+        return apy_none();
+    }
     if (!apy_index_arg(key, &i, APY_IDX_SUB)) return 0;
     if (i < 0) i += O(seq)->v.q.n;
     if (i < 0 || i >= O(seq)->v.q.n)
@@ -3001,6 +4115,7 @@ static const char *const APY_OP_DUNDERS[][3] = {
     { "^",  "__xor__",      "__rxor__"      },
     { "<<", "__lshift__",   "__rlshift__"   },
     { ">>", "__rshift__",   "__rrshift__"   },
+    { "@",  "__matmul__",   "__rmatmul__"   },
     { NULL, NULL, NULL },
 };
 
@@ -3051,6 +4166,50 @@ static int apy_as_complex(apy_value v, double *re, double *im) {
    `+0.0`. The sign of a zero is observable in the repr, so the parts are
    converted and stored rather than computed. */
 APY_API apy_value apy_complex_of(apy_value re, apy_value im) {
+    /* `complex(x)` WITH ONE ARGUMENT ASKS THE CLASS. `__complex__` is the
+       hook, and it only applies to the one-argument form -- `complex(a, b)`
+       is building from parts and has nothing to ask. */
+    if (O(re)->kind == APY_INST_K && O(im)->kind == APY_NONE_K) {
+        apy_value got = apy_unary_dunder(re, "__complex__");
+        if (apy_error_occurred()) return 0;
+        if (got) return got;
+    }
+    /* `complex("1+2j")` -- THE STRING FORM, which is a parse rather than an
+       arithmetic conversion, and only exists for the one-argument shape. The
+       message above already promised a string was acceptable. */
+    if (O(re)->kind == APY_STR_K && O(im)->kind == APY_NONE_K) {
+        const char *p = APY_CSTR(re);
+        char *end = 0;
+        double a = 0.0, b = 0.0;
+        while (*p == ' ' || *p == '	') p++;
+        if (*p == '(') p++;
+        a = strtod(p, &end);
+        if (end == p)
+            return apy_fail("ValueError",
+                            "complex() arg is a malformed string");
+        if (*end == 'j' || *end == 'J') {
+            /* A bare imaginary: `complex("2j")`. */
+            b = a; a = 0.0; end++;
+        } else if (*end == '+' || *end == '-') {
+            const char *at = end;
+            double sign = *end == '-' ? -1.0 : 1.0;
+            b = strtod(end, &end);
+            if (end == at + 1) { b = sign; end = at + 1; }
+            if (*end != 'j' && *end != 'J')
+                return apy_fail("ValueError",
+                                "complex() arg is a malformed string");
+            end++;
+        }
+        if (*end == ')') end++;
+        while (*end == ' ' || *end == '	') end++;
+        if (*end)
+            return apy_fail("ValueError",
+                            "complex() arg is a malformed string");
+        return apy_from_complex(a, b);
+    }
+    /* An omitted imaginary part is zero from here on: only the question of
+       whether it was WRITTEN needed the distinction, and that is settled. */
+    if (O(im)->kind == APY_NONE_K) im = apy_from_int(0);
     double rr, ri, ir, ii;
     if (!apy_as_complex(re, &rr, &ri))
         return apy_fail2("TypeError",
@@ -3106,13 +4265,16 @@ APY_API apy_value apy_add(apy_value a, apy_value b) {
         buf[n] = 0;
         { apy_value r = apy_str_take(buf, n);
           O(r)->kind = APY_BYTES_K;
+          O(r)->v.s.mut = O(a)->v.s.mut;
           return r; }
     }
-    if (O(a)->kind == APY_BYTES_K || O(b)->kind == APY_BYTES_K) {
-        if (O(a)->kind != O(b)->kind) return 0;
-        return O(a)->v.s.n == O(b)->v.s.n
-            && memcmp(O(a)->v.s.p, O(b)->v.s.p, (size_t)O(a)->v.s.n) == 0;
-    }
+    /* MIXING BYTES AND str IS A TypeError, which is the whole point of PEP
+       3112 -- they are different types and `+` will not bridge them. An
+       equality body ended up here during the bytes work and returned a C int
+       as an `apy_value`, so `b"a" + "a"` segfaulted rather than raising. */
+    if (O(a)->kind == APY_BYTES_K || O(b)->kind == APY_BYTES_K)
+        return apy_fail2("TypeError", "can't concat %s to %s",
+                         apy_kind_name(b), apy_kind_name(a));
     if (O(a)->kind == APY_STR_K && O(b)->kind == APY_STR_K) {
         int64_t n = O(a)->v.s.n + O(b)->v.s.n;
         char *buf = (char *)malloc((size_t)n + 1);
@@ -3166,6 +4328,7 @@ APY_API apy_value apy_add(apy_value a, apy_value b) {
 }
 
 APY_API apy_value apy_sub(apy_value a, apy_value b) {
+    a = apy_view_as_set(a); b = apy_view_as_set(b);
     if (apy_either_complex(a, b)) return apy_complex_binop("-", a, b);
     /* `-` between two sets is difference. Checked before the numeric test
        because a set is not a number and would otherwise report an unsupported
@@ -3205,6 +4368,13 @@ static apy_value apy_seq_repeat(apy_value seq, int64_t k) {
     for (r = 0; r < k; r++)
         for (i = 0; i < O(seq)->v.q.n; i++) apy_seq_push(out, O(seq)->v.q.items[i]);
     return out;
+}
+
+/* `a @ b`. NO BUILT-IN KIND IMPLEMENTS IT -- there are no matrices here --
+   so this is the dunder dispatch and nothing else. PEP 465 added the operator
+   for exactly that: a spelling for libraries, with no meaning of its own. */
+APY_API apy_value apy_matmul(apy_value a, apy_value b) {
+    return apy_binop_fallback("@", a, b);
 }
 
 APY_API apy_value apy_mul(apy_value a, apy_value b) {
@@ -3409,15 +4579,11 @@ APY_API apy_value apy_mod(apy_value a, apy_value b) {
         return apy_fail2("TypeError",
                          "can't take floor or mod of complex number%s%s",
                          "", "");
-    /* `%` on a str is PRINTF-STYLE FORMATTING in Python, not arithmetic, so
-       CPython never reports it as an unsupported operand -- it tries to
-       format and complains about the arguments. Formatting is not implemented
-       here; reporting CPython's message is what a program that reaches this
-       will see, and it is at least the message for the operation it actually
-       asked for. */
-    if (O(a)->kind == APY_STR_K)
-        return apy_fail("TypeError",
-                        "not all arguments converted during string formatting");
+    /* `%` on a str or on bytes is PRINTF-STYLE FORMATTING in Python, not
+       arithmetic. `b"%d" % 3` answers bytes and `"%d" % 3` answers a str,
+       which `apy_str_percent` decides from the left operand's kind. */
+    if (O(a)->kind == APY_STR_K || O(a)->kind == APY_BYTES_K)
+        return apy_str_percent(a, b);
     if (!apy_is_num(a) || !apy_is_num(b)) return apy_binop_fallback("%", a, b);
     if (O(a)->kind == APY_FLOAT_K || O(b)->kind == APY_FLOAT_K) {
         double x = apy_num_f(a), y = apy_num_f(b), r;
@@ -3657,8 +4823,58 @@ static apy_value apy_intop(const char *name, apy_value a, apy_value b, int which
     }
 }
 
-APY_API apy_value apy_bitand(apy_value a, apy_value b) { return apy_intop("&", a, b, 0); }
+APY_API apy_value apy_bitand(apy_value a, apy_value b) {
+    a = apy_view_as_set(a); b = apy_view_as_set(b); return apy_intop("&", a, b, 0); }
+/* A VIEW BEHAVES AS A SET under `&`, `|`, `-` and `^`. `d.keys() & {'a'}` is
+   ordinary Python, and the view is not itself a set -- it is a window on a
+   dict -- so the operators convert it at the boundary rather than every
+   consumer having to know. Values are NOT set-like in CPython (they may
+   repeat), but converting one here only affects programs that already asked
+   for something CPython refuses. */
+static apy_value apy_view_as_set(apy_value v) {
+    return O(v)->kind == APY_VIEW_K ? apy_to_set(apy_view_items(v)) : v;
+}
+
+/* Is this something `|` should read as a TYPE? A builtin type used as a
+   value, a user class, or a union already built from either. */
+static int apy_is_type_like(apy_value v) {
+    if (O(v)->kind == APY_FUNC_K && O(v)->v.fn.is_type) return 1;
+    if (O(v)->kind == APY_TYPE_K) return 1;
+    if (O(v)->kind == APY_NONE_K) return 1;      /* `int | None` */
+    return O(v)->kind == APY_ALIAS_K
+        && O(O(v)->v.ga.origin)->kind == APY_INST_K;
+}
+
+/* Append `v`'s arms to `into`. A union contributes its own arms rather than
+   itself, so unions flatten instead of nesting. */
+static void apy_union_arms(apy_value into, apy_value v) {
+    if (O(v)->kind == APY_ALIAS_K
+            && O(O(v)->v.ga.origin)->kind == APY_INST_K) {
+        int64_t i;
+        for (i = 0; i < O(O(v)->v.ga.args)->v.q.n; i++)
+            apy_seq_push(into, O(O(v)->v.ga.args)->v.q.items[i]);
+        return;
+    }
+    /* `None` IN A UNION IS `NoneType`. `int | None` is written with the
+       VALUE and holds the TYPE -- `get_args` answers `<class 'NoneType'>` in
+       CPython, and pushing the singleton answered `None`, which is a
+       different object with a different repr. */
+    if (O(v)->kind == APY_NONE_K) { apy_seq_push(into, apy_kind_class(v)); return; }
+    apy_seq_push(into, v);
+}
+
 APY_API apy_value apy_bitor(apy_value a, apy_value b) {
+    a = apy_view_as_set(a); b = apy_view_as_set(b);
+    /* PEP 604: `int | str` IS A TYPE, not an arithmetic operation. Either
+       side may already be a union, and the arms flatten -- `int | str | None`
+       is one three-armed union, which is what makes `isinstance` over it a
+       single walk. */
+    if (apy_is_type_like(a) && apy_is_type_like(b)) {
+        apy_value args = apy_tuple_new(4);
+        apy_union_arms(args, a);
+        apy_union_arms(args, b);
+        return apy_alias_new(apy_typing_form(apy_lit("Union")), args);
+    }
     /* `d1 | d2` MERGES, with the right-hand side winning -- PEP 584. */
     if (O(a)->kind == APY_DICT_K && O(b)->kind == APY_DICT_K) {
         apy_value out = apy_copy(a);
@@ -3667,7 +4883,8 @@ APY_API apy_value apy_bitor(apy_value a, apy_value b) {
     }
     return apy_intop("|", a, b, 1);
 }
-APY_API apy_value apy_bitxor(apy_value a, apy_value b) { return apy_intop("^", a, b, 2); }
+APY_API apy_value apy_bitxor(apy_value a, apy_value b) {
+    a = apy_view_as_set(a); b = apy_view_as_set(b); return apy_intop("^", a, b, 2); }
 APY_API apy_value apy_lshift(apy_value a, apy_value b) { return apy_intop("<<", a, b, 3); }
 APY_API apy_value apy_rshift(apy_value a, apy_value b) { return apy_intop(">>", a, b, 4); }
 
@@ -3762,12 +4979,21 @@ static int apy_eq_raw(apy_value a, apy_value b);
 
 /* Element-by-element, and only between the SAME kind: a list never equals a
    tuple in Python even when their contents match. */
+/* IDENTITY FIRST, then equality -- which is what every CONTAINER does to
+   its elements, and why `[nan] == [nan]` is True while `nan == nan` is False.
+   A container asks "is this the same object?" before it asks the object, so
+   a value that is not equal to itself still compares equal to itself inside
+   one. `x in [x]` and `d == d` rest on the same rule. */
+static int apy_eq_element(apy_value a, apy_value b) {
+    return a == b || apy_eq_raw(a, b);
+}
+
 static int apy_seq_eq(apy_value a, apy_value b) {
     int64_t i;
     if (O(a)->kind != O(b)->kind) return 0;
     if (O(a)->v.q.n != O(b)->v.q.n) return 0;
     for (i = 0; i < O(a)->v.q.n; i++)
-        if (!apy_eq_raw(O(a)->v.q.items[i], O(b)->v.q.items[i])) return 0;
+        if (!apy_eq_element(O(a)->v.q.items[i], O(b)->v.q.items[i])) return 0;
     return 1;
 }
 
@@ -3779,12 +5005,22 @@ static int apy_dict_eq(apy_value a, apy_value b) {
     for (i = 0; i < O(a)->v.d.n; i++) {
         at = apy_dict_find(b, O(a)->v.d.keys[i]);
         if (at < 0) return 0;
-        if (!apy_eq_raw(O(a)->v.d.vals[i], O(b)->v.d.vals[at])) return 0;
+        if (!apy_eq_element(O(a)->v.d.vals[i], O(b)->v.d.vals[at])) return 0;
     }
     return 1;
 }
 
 static int apy_eq_raw(apy_value a, apy_value b) {
+    /* TWO RANGES ARE EQUAL WHEN THEY YIELD THE SAME ELEMENTS, which is not
+       the same as holding the same three numbers: `range(0, 3, 1)` and
+       `range(3)` are equal, and every empty range equals every other. */
+    if (O(a)->kind == APY_RANGE_K && O(b)->kind == APY_RANGE_K) {
+        int64_t na = apy_range_len(a), nb = apy_range_len(b);
+        if (na != nb) return 0;
+        if (na == 0) return 1;
+        if (O(a)->v.rg.start != O(b)->v.rg.start) return 0;
+        return na == 1 || O(a)->v.rg.step == O(b)->v.rg.step;
+    }
     /* An instance dispatches to `__eq__`, and it is hooked HERE rather than in
        `apy_eq` so that a container holding instances compares element by
        element through the user's method: `[P(1)] == [P(1)]` has to ask P.
@@ -3800,6 +5036,24 @@ static int apy_eq_raw(apy_value a, apy_value b) {
         if (r) return apy_truth(r) != 0;
         if (apy_error_occurred()) return 0;
         return a == b;
+    }
+    /* A MEMORYVIEW COMPARES BY CONTENT, and against bytes as well as against
+       another view -- `memoryview(b"ab") == b"ab"` is True. */
+    if (O(a)->kind == APY_MVIEW_K || O(b)->kind == APY_MVIEW_K) {
+        apy_value x = O(a)->kind == APY_MVIEW_K ? apy_mview_bytes(a) : a;
+        apy_value y = O(b)->kind == APY_MVIEW_K ? apy_mview_bytes(b) : b;
+        if (O(x)->kind != APY_BYTES_K || O(y)->kind != APY_BYTES_K) return 0;
+        return apy_str_cmp(x, y) == 0;
+    }
+    /* `d.keys()` and `d.items()` are SET-LIKE and compare as sets, against
+       each other and against a real set. `d.values()` is not -- it defines no
+       equality at all, so two of them are equal only when they are the same
+       object, which is what the identity fallthrough below gives it. */
+    if ((O(a)->kind == APY_VIEW_K && O(a)->v.vw.part != APY_PART_VALUES)
+        || (O(b)->kind == APY_VIEW_K && O(b)->v.vw.part != APY_PART_VALUES)) {
+        apy_value x = apy_view_as_set(a), y = apy_view_as_set(b);
+        if (!apy_is_set(x) || !apy_is_set(y)) return 0;
+        return O(x)->v.q.n == O(y)->v.q.n && apy_subset(x, y);
     }
     /* A set equals a FROZENSET with the same elements -- the two kinds are one
        equality class, unlike list and tuple, which are never equal to each
@@ -3820,10 +5074,51 @@ static int apy_eq_raw(apy_value a, apy_value b) {
             return 0;
         return ar == br && ai == bi;
     }
+    /* BYTES COMPARE BY CONTENT, and this branch is what makes them: without
+       it a bytes value fell through to the numeric path, where `v.i` aliases
+       the BUFFER POINTER -- so `b"ab" == b"ab"` was True only because the
+       backend emits one static buffer for two identical literals, and
+       `b"ab" == b"a" + b"b"` was False. The ordering path had the case from
+       the start; equality did not, and the accident hid it.
+
+       One branch covers bytearray too, and that is right rather than
+       convenient: `b"a" == bytearray(b"a")` is True in CPython. */
+    if (O(a)->kind == APY_BYTES_K || O(b)->kind == APY_BYTES_K)
+        return O(a)->kind == O(b)->kind && apy_str_cmp(a, b) == 0;
     if (O(a)->kind == APY_STR_K || O(b)->kind == APY_STR_K)
         return O(a)->kind == O(b)->kind && apy_str_cmp(a, b) == 0;
     if (O(a)->kind == APY_NONE_K || O(b)->kind == APY_NONE_K)
         return O(a)->kind == O(b)->kind;
+    /* `slice(1, 2) == slice(1, 3)` is False: a slice compares by its three
+       BOUNDS, which is the only thing it holds. */
+    if (O(a)->kind == APY_SLICE_K || O(b)->kind == APY_SLICE_K)
+        return O(a)->kind == O(b)->kind
+            && apy_eq_raw(O(a)->v.sl.start, O(b)->v.sl.start)
+            && apy_eq_raw(O(a)->v.sl.stop, O(b)->v.sl.stop)
+            && apy_eq_raw(O(a)->v.sl.step, O(b)->v.sl.step);
+    /* EVERYTHING LEFT THAT IS NOT A NUMBER IS COMPARED BY IDENTITY, and this
+       guard is the general form of a bug that reached four kinds. The numeric
+       path below reads `v.i`, which for a non-number aliases whatever the
+       union's first member is -- a POINTER for most kinds. Two slices sharing
+       a `start`, two views onto one dict, two memoryviews over one buffer:
+       each compared equal because the pointers matched, and none of them
+       failed loudly. A kind added later gets identity here rather than an
+       accident, and has to opt in to content equality above. */
+    /* A BOUND METHOD IS A FRESH OBJECT PER ACCESS -- `c.m is c.m` is False --
+       and two of them are EQUAL when they wrap the same function and the same
+       receiver, which is what CPython compares. Only bound ones: two closures
+       over the same `def` are distinct objects with distinct cells, and
+       CPython calls those unequal.
+
+       This was answered correctly by accident before the guard below existed:
+       a function fell through to the numeric path, which read the union's
+       first member -- the code pointer -- so two methods of one class matched
+       whatever their receivers were. `c.m == d.m` was True. */
+    if (O(a)->kind == APY_FUNC_K && O(b)->kind == APY_FUNC_K)
+        return a == b || (O(a)->v.fn.bound && O(b)->v.fn.bound
+                          && O(a)->v.fn.code == O(b)->v.fn.code
+                          && O(a)->v.fn.bound == O(b)->v.fn.bound);
+    if (!apy_is_num(a) || !apy_is_num(b)) return a == b;
     /* `nan == nan` is False, and so is `nan == 1.0`: APY_UNORD is not 0. */
     return apy_num_order(a, b) == 0;
 }
@@ -3862,6 +5157,31 @@ APY_API apy_value apy_is(apy_value a, apy_value b) { return apy_from_bool(a == b
    legal Python and it is False, not an error. A str haystack is a SUBSTRING
    test and demands a str needle, which is the one place `in` raises. */
 APY_API apy_value apy_contains(apy_value needle, apy_value hay) {
+    /* ARITHMETIC, not a search: `10**11 in range(10**12)` is a division. */
+    if (O(hay)->kind == APY_RANGE_K) {
+        int64_t want;
+        if (!apy_is_int_like(needle)) return apy_from_bool(0);
+        if (!apy_index_arg(needle, &want, APY_IDX_SIZE)) return 0;
+        return apy_from_bool(apy_range_find(hay, want) >= 0);
+    }
+    /* `k in d.keys()` -- read through, so a key added after the view was made
+       is found. */
+    if (O(hay)->kind == APY_VIEW_K)
+        return apy_contains(needle, apy_view_items(hay));
+    /* `x in gen` CONSUMES the generator up to the match, and leaves the rest.
+       That is what makes `2 in squares` then `list(squares)` answer `False`
+       and `[]` -- a generator is consumed once. Stepping rather than draining
+       is the whole of the difference, and draining reported the generator as
+       not iterable at all. */
+    if (O(hay)->kind == APY_GEN_K) {
+        for (;;) {
+            int done;
+            apy_value item = apy_gen_step(hay, apy_none(), &done);
+            if (!item) return 0;
+            if (done) return apy_from_bool(0);
+            if (apy_eq_element(needle, item)) return apy_from_bool(1);
+        }
+    }
     int64_t i;
     if (O(hay)->kind == APY_INST_K) {
         /* `__contains__` first, then `__getitem__` walked from 0 until it
@@ -3888,7 +5208,7 @@ APY_API apy_value apy_contains(apy_value needle, apy_value hay) {
             for (i = 0; i < n; i++) {
                 apy_value item = apy_key_at(hay, i);
                 if (!item) return 0;
-                if (apy_eq_raw(needle, item)) return apy_from_bool(1);
+                if (apy_eq_element(needle, item)) return apy_from_bool(1);
             }
             return apy_from_bool(0);
         }
@@ -3903,7 +5223,7 @@ APY_API apy_value apy_contains(apy_value needle, apy_value hay) {
         /* Membership and iteration both walk the KEYS -- `in` on a dict
            asks about keys, not values, and so does `for k in d`. */
         for (i = 0; i < O(hay)->v.d.n; i++)
-            if (apy_eq_raw(needle, O(hay)->v.d.keys[i]))
+            if (apy_eq_element(needle, O(hay)->v.d.keys[i]))
                 return apy_from_bool(1);
         return apy_from_bool(0);
     }
@@ -3923,7 +5243,7 @@ APY_API apy_value apy_contains(apy_value needle, apy_value hay) {
     }
     if (apy_is_seq(hay)) {
         for (i = 0; i < O(hay)->v.q.n; i++)
-            if (apy_eq_raw(needle, O(hay)->v.q.items[i]))
+            if (apy_eq_element(needle, O(hay)->v.q.items[i]))
                 return apy_from_bool(1);
         return apy_from_bool(0);
     }
@@ -4111,6 +5431,19 @@ static apy_value apy_conv_error(const char *prefix, apy_value s) {
 }
 
 APY_API apy_value apy_to_int(apy_value v) {
+    /* A CLASS SAYS WHAT ITS INTEGER IS. `__int__` first and `__index__` after
+       it -- the two are not the same question, and a class may define only
+       the second. Without this the conversion reported that the object was
+       not a number, which is the class's answer to give and not this one's. */
+    if (O(v)->kind == APY_INST_K) {
+        apy_value got = apy_unary_dunder(v, "__int__");
+        if (apy_error_occurred()) return 0;
+        if (!got) {
+            got = apy_unary_dunder(v, "__index__");
+            if (apy_error_occurred()) return 0;
+        }
+        if (got) return got;
+    }
     if (O(v)->kind == APY_FLOAT_K) {
         /* `int(nan)` and `int(inf)` are errors, not whatever a cast gives --
            the cast is undefined for both. */
@@ -4168,6 +5501,18 @@ APY_API apy_value apy_to_int(apy_value v) {
 }
 
 APY_API apy_value apy_to_float(apy_value v) {
+    /* `__float__`, and `__index__` after it: an object that can be an integer
+       can be a float, which is the rule CPython follows too. */
+    if (O(v)->kind == APY_INST_K) {
+        apy_value got = apy_unary_dunder(v, "__float__");
+        if (apy_error_occurred()) return 0;
+        if (!got) {
+            got = apy_unary_dunder(v, "__index__");
+            if (apy_error_occurred()) return 0;
+            if (got) return apy_to_float(got);
+        }
+        if (got) return got;
+    }
     if (O(v)->kind == APY_FLOAT_K) return v;
     if (apy_is_big(v)) {
         double d = apy_big_double(O(v));
@@ -4240,7 +5585,10 @@ APY_API apy_value apy_to_bool(apy_value v) { return apy_from_bool(apy_truth(v));
    -- `'abc'.find('', 9)` is -1 while `'abc'.find('', 3)` is 3, and an upper
    clamp on `start` would answer 3 to both. */
 static int apy_str_self(const char *name, apy_value v) {
-    if (O(v)->kind == APY_STR_K) return 1;
+    /* BYTES TOO. `b.strip()` is the same operation on the same layout -- a
+       pointer and a length -- and the only difference is that the RESULT
+       comes back tagged bytes, which `apy_str_like` does at the call site. */
+    if (O(v)->kind == APY_STR_K || O(v)->kind == APY_BYTES_K) return 1;
     apy_fail2("AttributeError", "'%s' object has no attribute '%s'",
               apy_kind_name(v), name);
     return 0;
@@ -4264,7 +5612,11 @@ static apy_value apy_arg_must_be_str(const char *meth, int argno, apy_value v) {
 }
 
 static int apy_str_other(const char *meth, int argno, apy_value v) {
-    if (O(v)->kind == APY_STR_K) return 1;
+    /* BYTES TOO, for the same reason the receiver may be: `b.replace(b"l",
+       b"L")` hands bytes to an operation that reads a pointer and a length.
+       Mixing the two is what CPython rejects, and the RECEIVER is what
+       decides -- see `apy_str_like`. */
+    if (O(v)->kind == APY_STR_K || O(v)->kind == APY_BYTES_K) return 1;
     apy_arg_must_be_str(meth, argno, v);
     return 0;
 }
@@ -4336,6 +5688,33 @@ static apy_value apy_str_slice_of(apy_value s, int64_t lo, int64_t hi) {
    the -1-on-failure form from the raise-on-failure one; that is the only
    difference between `find` and `index`, and CPython's message for the second
    is `substring not found` with no mention of what was looked for. */
+/* The byte offset of character `ci`, and the character index of byte offset
+   `bo`. Every position a str method takes or answers is in CHARACTERS -- the
+   search itself works in bytes, because that is what `memcmp` compares -- so
+   these two are the boundary between the two counts. For an all-ASCII string
+   both are the identity, which is why the distinction stayed invisible. */
+static int64_t apy_char_to_byte(apy_value s, int64_t ci) {
+    const unsigned char *p = (const unsigned char *)O(s)->v.s.p;
+    int64_t bytes = O(s)->v.s.n, at = 0, seen = 0, used;
+    while (seen < ci && at < bytes) {
+        apy_utf8_at(p, bytes, at, &used);
+        at += used;
+        seen++;
+    }
+    return at;
+}
+
+static int64_t apy_byte_to_char(apy_value s, int64_t bo) {
+    const unsigned char *p = (const unsigned char *)O(s)->v.s.p;
+    int64_t bytes = O(s)->v.s.n, at = 0, seen = 0, used;
+    while (at < bo && at < bytes) {
+        apy_utf8_at(p, bytes, at, &used);
+        at += used;
+        seen++;
+    }
+    return seen;
+}
+
 static apy_value apy_str_search(apy_value s, apy_value sub, apy_value start,
                                 apy_value end, int from_right, int want_index) {
     int64_t lo = 0, hi, at;
@@ -4343,14 +5722,20 @@ static apy_value apy_str_search(apy_value s, apy_value sub, apy_value start,
                                   : (from_right ? "rfind" : "find");
     if (!apy_str_self(meth, s)) return 0;
     if (!apy_str_other(meth, 1, sub)) return 0;
-    hi = O(s)->v.s.n;
+    hi = apy_str_chars(s);
     if (start && !apy_slice_arg(start, &lo)) return 0;
     if (end && !apy_slice_arg(end, &hi)) return 0;
-    apy_clamp_range(O(s)->v.s.n, &lo, &hi);
+    /* THE BOUNDS ARRIVE IN CHARACTERS and the search runs in bytes, so they
+       are clamped against the character count and then converted. Answering a
+       byte offset made `"héllo".find("ll")` say 3 where CPython says 2.
+    */
+    apy_clamp_range(apy_str_chars(s), &lo, &hi);
+    lo = apy_char_to_byte(s, lo);
+    hi = apy_char_to_byte(s, hi);
     at = from_right ? apy_rfind_at(s, sub, lo, hi) : apy_find_at(s, sub, lo, hi);
     if (at < 0 && want_index)
         return apy_fail("ValueError", "substring not found");
-    return apy_from_int(at);
+    return apy_from_int(at < 0 ? at : apy_byte_to_char(s, at));
 }
 
 APY_API apy_value apy_str_find(apy_value s, apy_value sub) {
@@ -4430,17 +5815,58 @@ static int apy_c_space(unsigned char c) {
         || c == '\v';
 }
 
-enum { APY_UPPER, APY_LOWER, APY_TITLE, APY_CAPITAL, APY_SWAP };
+enum { APY_UPPER, APY_LOWER, APY_TITLE, APY_CAPITAL, APY_SWAP, APY_FOLD };
 
+/* THE OUTPUT CAN BE LONGER THAN THE INPUT, which is why this does not write
+   in place over a same-sized buffer: 'ß'.upper() is 'SS', one character
+   becoming two. Only Latin-1 is mapped -- the two-byte sequences starting
+   0xC3, which covers the accented letters and the one length-changing case
+   that programs actually meet. Anything above that is left alone rather than
+   half-done; a full Unicode case table is not here. */
 static apy_value apy_str_case(apy_value s, int mode) {
     int64_t n = O(s)->v.s.n, i;
-    char *buf = (char *)malloc((size_t)n + 1);
+    /* Room for every byte to become two, which is the worst this can do. */
+    char *buf = (char *)malloc((size_t)n * 2 + 1);
+    int64_t out_n = 0;
     int prev_cased = 0;
     for (i = 0; i < n; i++) {
         unsigned char c = (unsigned char)O(s)->v.s.p[i];
         unsigned char out = c;
+        /* A LATIN-1 LETTER: 0xC3 then the low byte. Uppercase runs
+           0x80..0x9E and lowercase 0xA0..0xBE, offset by 0x20 exactly as
+           ASCII is by 32 -- with 0x97 and 0xB7 the multiplication and
+           division signs, which are not letters, and 0x9F the sharp s,
+           which is lowercase despite sitting in the uppercase run. */
+        if (c == 0xC3 && i + 1 < n) {
+            unsigned char d = (unsigned char)O(s)->v.s.p[i + 1];
+            int is_upper = d >= 0x80 && d <= 0x9E && d != 0x97;
+            int is_lower = d >= 0xA0 && d <= 0xBE && d != 0xB7;
+            int raise = mode == APY_UPPER
+                || (mode == APY_SWAP && is_lower)
+                || (mode == APY_CAPITAL && i == 0)
+                || (mode == APY_TITLE && !prev_cased);
+            if (d == 0x9F && (raise || mode == APY_FOLD)) {
+                /* 'ß' has no single uppercase form: it becomes 'SS', and
+                   casefold gives 'ss' so that the two match caselessly. */
+                buf[out_n++] = raise ? 'S' : 's';
+                buf[out_n++] = raise ? 'S' : 's';
+                prev_cased = 1;
+                i++;
+                continue;
+            }
+            if (raise && is_lower) d = (unsigned char)(d - 0x20);
+            else if (!raise && is_upper) d = (unsigned char)(d + 0x20);
+            buf[out_n++] = (char)c;
+            buf[out_n++] = (char)d;
+            prev_cased = is_upper || is_lower || d == 0x9F;
+            i++;
+            continue;
+        }
         switch (mode) {
         case APY_UPPER: if (apy_c_lower(c)) out = (unsigned char)(c - 32); break;
+        /* `casefold` IS lowercasing for ASCII -- the pair it exists for,
+           'ß' against 'ss', is handled in the Latin-1 branch above. */
+        case APY_FOLD:
         case APY_LOWER: if (apy_c_upper(c)) out = (unsigned char)(c + 32); break;
         case APY_SWAP:
             if (apy_c_lower(c)) out = (unsigned char)(c - 32);
@@ -4464,10 +5890,10 @@ static apy_value apy_str_case(apy_value s, int mode) {
             break;
         }
         prev_cased = apy_c_alpha(c);
-        buf[i] = (char)out;
+        buf[out_n++] = (char)out;
     }
-    buf[n] = '\0';
-    return apy_str_take(buf, n);
+    buf[out_n] = '\0';
+    return apy_str_take(buf, out_n);
 }
 
 APY_API apy_value apy_str_upper(apy_value s) {
@@ -4491,11 +5917,12 @@ APY_API apy_value apy_str_swapcase(apy_value s) {
     return apy_str_case(s, APY_SWAP);
 }
 /* `casefold` is aggressive lowercasing for caseless matching, and for ASCII
-   it IS lowercasing. The pair it exists for -- 'ß' folding to 'ss' -- is
-   exactly the non-ASCII case this runtime does not do. */
+   it IS lowercasing. It differs from `lower` on the pair it exists for --
+   'ß' folds to 'ss' where lowering leaves it alone -- so the two are not the
+   same mode even though they agree on everything a plain program prints. */
 APY_API apy_value apy_str_casefold(apy_value s) {
     if (!apy_str_self("casefold", s)) return 0;
-    return apy_str_case(s, APY_LOWER);
+    return apy_str_case(s, APY_FOLD);
 }
 
 /* --- predicates ---------------------------------------------------------
@@ -4504,63 +5931,106 @@ APY_API apy_value apy_str_casefold(apy_value s) {
    the loop so that "no character failed" means True would get every one of
    them wrong for ''. */
 enum { APY_ISALPHA, APY_ISDIGIT, APY_ISALNUM, APY_ISSPACE, APY_ISLOWER,
-       APY_ISUPPER, APY_ISTITLE, APY_ISPRINTABLE, APY_ISIDENT, APY_ISASCII };
+       APY_ISUPPER, APY_ISTITLE, APY_ISPRINTABLE, APY_ISIDENT, APY_ISASCII,
+       APY_ISDECIMAL, APY_ISNUMERIC };
+
+/* The UTF-8 decoder lives with the codecs, far below the predicates that
+   walk a string by code point. */
+static int64_t apy_utf8_step(const unsigned char *p, int64_t n, int64_t i,
+                             uint32_t *out);
+
+/* @UNICODE_TABLE@ */
+
+/* The classes ONE CODE POINT belongs to. ASCII is decided here -- it is the
+   dense half of the range and the table starts past it -- and everything
+   above is a lookup in the generated runs. */
+static unsigned apy_char_class(uint32_t cp) {
+    unsigned m = 0;
+    if (cp >= 0x80) return apy_uc_mask(cp);
+    if ((cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z'))
+        m |= APY_UC_ALPHA | APY_UC_XIDSTART | APY_UC_XIDCONT;
+    if (cp >= '0' && cp <= '9')
+        m |= APY_UC_DECIMAL | APY_UC_DIGIT | APY_UC_NUMERIC | APY_UC_XIDCONT;
+    if (cp >= 'a' && cp <= 'z') m |= APY_UC_LOWER;
+    if (cp >= 'A' && cp <= 'Z') m |= APY_UC_UPPER;
+    if (cp == ' ' || cp == '\t' || cp == '\n' || cp == '\v' || cp == '\f'
+        || cp == '\r') m |= APY_UC_SPACE;
+    if (cp >= 0x20 && cp < 0x7f) m |= APY_UC_PRINTABLE;
+    if (cp == '_') m |= APY_UC_XIDSTART | APY_UC_XIDCONT;
+    return m;
+}
 
 static apy_value apy_str_is(apy_value s, int which) {
     int64_t n = O(s)->v.s.n, i;
-    int cased = 0, prev_cased = 0, ok = 1;
+    const unsigned char *p = (const unsigned char *)O(s)->v.s.p;
+    int cased = 0, prev_cased = 0, ok = 1, first = 1, any = 0;
     if (which == APY_ISASCII) {
         for (i = 0; i < n; i++)
-            if ((unsigned char)O(s)->v.s.p[i] > 0x7f) return apy_from_bool(0);
-        return apy_from_bool(1);
-    }
-    if (which == APY_ISPRINTABLE) {
-        /* Printable is about the absence of control characters, so '' and
-           ' ' are both True while '\n' is not. */
-        for (i = 0; i < n; i++) {
-            unsigned char c = (unsigned char)O(s)->v.s.p[i];
-            if (c < 0x20 || c == 0x7f) return apy_from_bool(0);
-        }
-        return apy_from_bool(1);
-    }
-    if (which == APY_ISIDENT) {
-        if (n == 0) return apy_from_bool(0);
-        if (!apy_c_alpha((unsigned char)O(s)->v.s.p[0])
-            && O(s)->v.s.p[0] != '_') return apy_from_bool(0);
-        for (i = 1; i < n; i++) {
-            unsigned char c = (unsigned char)O(s)->v.s.p[i];
-            if (!apy_c_alpha(c) && !apy_c_digit(c) && c != '_')
-                return apy_from_bool(0);
-        }
+            if (p[i] > 0x7f) return apy_from_bool(0);
         return apy_from_bool(1);
     }
     if (n == 0) return apy_from_bool(0);
-    for (i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)O(s)->v.s.p[i];
+    /* BY CODE POINT, not by byte. Every predicate below asks a question about
+       a CHARACTER, and a multi-byte one walked as bytes was asked about its
+       continuation bytes -- which belong to no class, so every non-ASCII
+       string answered False. */
+    for (i = 0; i < n; ) {
+        uint32_t cp;
+        int64_t used = apy_utf8_step(p, n, i, &cp);
+        unsigned m;
+        if (!used) { cp = 0xFFFD; used = 1; }
+        i += used;
+        any = 1;
+        m = apy_char_class(cp);
         switch (which) {
-        case APY_ISALPHA: if (!apy_c_alpha(c)) ok = 0; break;
-        case APY_ISDIGIT: if (!apy_c_digit(c)) ok = 0; break;
-        case APY_ISALNUM: if (!apy_c_alpha(c) && !apy_c_digit(c)) ok = 0; break;
-        case APY_ISSPACE: if (!apy_c_space(c)) ok = 0; break;
+        case APY_ISALPHA: if (!(m & APY_UC_ALPHA)) ok = 0; break;
+        case APY_ISDIGIT: if (!(m & APY_UC_DIGIT)) ok = 0; break;
+        case APY_ISDECIMAL: if (!(m & APY_UC_DECIMAL)) ok = 0; break;
+        case APY_ISNUMERIC: if (!(m & APY_UC_NUMERIC)) ok = 0; break;
+        case APY_ISALNUM:
+            if (!(m & (APY_UC_ALPHA | APY_UC_NUMERIC | APY_UC_DIGIT
+                       | APY_UC_DECIMAL))) ok = 0;
+            break;
+        case APY_ISSPACE: if (!(m & APY_UC_SPACE)) ok = 0; break;
+        case APY_ISPRINTABLE:
+            /* A SPACE IS PRINTABLE and no other whitespace is, which is the
+               one place this differs from "not a control character". */
+            if (cp != ' ' && !(m & APY_UC_PRINTABLE)) ok = 0;
+            break;
+        case APY_ISIDENT:
+            if (first) {
+                if (!(m & APY_UC_XIDSTART)) ok = 0;
+            } else if (!(m & APY_UC_XIDCONT)) ok = 0;
+            break;
         case APY_ISLOWER:
             /* "no uppercase AND at least one lowercase" -- `'ab1'.islower()`
                is True and `'123'.islower()` is False. A plain "every
                character is lowercase" answers the second one wrongly. */
-            if (apy_c_upper(c)) ok = 0;
-            if (apy_c_lower(c)) cased = 1;
+            if (m & (APY_UC_UPPER | APY_UC_TITLE)) ok = 0;
+            if (m & APY_UC_LOWER) cased = 1;
             break;
         case APY_ISUPPER:
-            if (apy_c_lower(c)) ok = 0;
-            if (apy_c_upper(c)) cased = 1;
+            if (m & (APY_UC_LOWER | APY_UC_TITLE)) ok = 0;
+            if (m & APY_UC_UPPER) cased = 1;
             break;
         default:
-            if (apy_c_upper(c)) { if (prev_cased) ok = 0; cased = 1; }
-            else if (apy_c_lower(c)) { if (!prev_cased) ok = 0; cased = 1; }
-            prev_cased = apy_c_alpha(c);
+            /* `istitle`: an upper- or title-case character may only follow an
+               uncased one, and a lowercase one may only follow a cased one. */
+            if (m & (APY_UC_UPPER | APY_UC_TITLE)) {
+                if (prev_cased) ok = 0;
+                cased = 1;
+            } else if (m & APY_UC_LOWER) {
+                if (!prev_cased) ok = 0;
+                cased = 1;
+            }
+            prev_cased = (m & (APY_UC_UPPER | APY_UC_LOWER
+                               | APY_UC_TITLE)) != 0;
             break;
         }
+        first = 0;
         if (!ok) return apy_from_bool(0);
     }
+    if (!any) return apy_from_bool(0);
     if (which == APY_ISLOWER || which == APY_ISUPPER || which == APY_ISTITLE)
         return apy_from_bool(cased);
     return apy_from_bool(1);
@@ -4574,17 +6044,17 @@ APY_API apy_value apy_str_isdigit(apy_value s) {
     if (!apy_str_self("isdigit", s)) return 0;
     return apy_str_is(s, APY_ISDIGIT);
 }
-/* `isdecimal` and `isnumeric` differ from `isdigit` only outside ASCII --
-   '²' is a digit and numeric but not decimal, and 'Ⅶ' is numeric alone. In
-   ASCII all three are the same test, so they share it rather than pretending
-   to a distinction this runtime cannot draw. */
+/* `isdecimal`, `isdigit` and `isnumeric` are three different questions
+   outside ASCII: U+00B2 is a digit and numeric but not decimal, and U+2167 is
+   numeric alone. They shared one test while there was no table to tell them
+   apart; there is one now, so they do not. */
 APY_API apy_value apy_str_isdecimal(apy_value s) {
     if (!apy_str_self("isdecimal", s)) return 0;
-    return apy_str_is(s, APY_ISDIGIT);
+    return apy_str_is(s, APY_ISDECIMAL);
 }
 APY_API apy_value apy_str_isnumeric(apy_value s) {
     if (!apy_str_self("isnumeric", s)) return 0;
-    return apy_str_is(s, APY_ISDIGIT);
+    return apy_str_is(s, APY_ISNUMERIC);
 }
 APY_API apy_value apy_str_isalnum(apy_value s) {
     if (!apy_str_self("isalnum", s)) return 0;
@@ -4792,7 +6262,9 @@ static apy_value apy_str_split_impl(apy_value s, apy_value sep, apy_value limit,
     if (maxsplit < 0) maxsplit = -1;      /* any negative means "no limit" */
     if (!sep || O(sep)->kind == APY_NONE_K)
         return apy_split_ws(s, maxsplit, from_right);
-    if (O(sep)->kind != APY_STR_K)
+    /* BYTES TOO -- `b"a,b".split(b",")` is the same operation. The receiver
+       decides the result's kind; see `apy_str_like`. */
+    if (O(sep)->kind != APY_STR_K && O(sep)->kind != APY_BYTES_K)
         return apy_fail2("TypeError", "must be str or None, not %s%s",
                          apy_kind_name(sep), "");
     return apy_split_sep(s, sep, maxsplit, from_right);
@@ -4862,7 +6334,8 @@ static apy_value apy_partition_impl(apy_value s, apy_value sep, int from_right) 
     int64_t n = O(s)->v.s.n, m, at;
     /* `must be str, not int` -- no method name at all, which is how CPython
        words this one and unlike every other method in this file. */
-    if (O(sep)->kind != APY_STR_K)
+    /* BYTES TOO -- `b"abc".partition(b"b")` is the same operation. */
+    if (O(sep)->kind != APY_STR_K && O(sep)->kind != APY_BYTES_K)
         return apy_fail2("TypeError", "must be str, not %s%s",
                          apy_kind_name(sep), "");
     m = O(sep)->v.s.n;
@@ -4898,6 +6371,13 @@ APY_API apy_value apy_str_join(apy_value sep, apy_value parts) {
     apy_value *got;
     char *buf;
     if (!apy_str_self("join", sep)) return 0;
+    /* ANY iterable, not just an indexable one. The walk below is by index, so
+       a generator has to be drained first -- and once generator expressions
+       became real generators, `sep.join(f(x) for x in xs)` started arriving
+       here as one. It reported "can only join an iterable" about something
+       that plainly was one. */
+    parts = apy_iterable(parts);
+    if (!parts) return 0;
     /* The iterability check is written out rather than left to `apy_raw_len`,
        whose message names the kind (`'int' object is not iterable`) where
        `join`'s does not (`can only join an iterable`). Letting raw_len report
@@ -4912,7 +6392,10 @@ APY_API apy_value apy_str_join(apy_value sep, apy_value parts) {
     for (i = 0; i < n; i++) {
         got[i] = apy_key_at(parts, i);
         if (!got[i]) { free(got); return 0; }
-        if (O(got[i])->kind != APY_STR_K) {
+        /* BYTES TOO -- `b"-".join([b"a", b"b"])` joins bytes. The receiver
+           decides the result's kind; see `apy_str_like`. */
+        if (O(got[i])->kind != APY_STR_K
+                && O(got[i])->kind != APY_BYTES_K) {
             char msg[128];
             snprintf(msg, sizeof msg,
                      "sequence item %lld: expected str instance, %s found",
@@ -5023,7 +6506,9 @@ static apy_value apy_affix(apy_value s, apy_value fix, apy_value start,
         }
         return apy_from_bool(0);
     }
-    if (O(fix)->kind != APY_STR_K)
+    /* BYTES TOO -- `b"ab".startswith(b"a")` is the same
+       operation on the same layout. */
+    if (O(fix)->kind != APY_STR_K && O(fix)->kind != APY_BYTES_K)
         return apy_fail2("TypeError",
                          "%s first arg must be str or a tuple of str, not %s",
                          meth, apy_kind_name(fix));
@@ -5524,6 +7009,16 @@ APY_API apy_value apy_print_seq(apy_value args) {
     return apy_none();
 }
 
+/* `print(*xs, sep=..., end=...)`. The starred form builds its arguments as a
+   sequence at run time, so it cannot go through the stack-array entry point
+   the fixed form uses -- and routing it through `apy_print_seq`, which has
+   nowhere to put them, DROPPED the separator silently. */
+APY_API apy_value apy_print_seq_with(apy_value args, apy_value sep,
+                                     apy_value end) {
+    apy_print_with((apy_value)O(args)->v.q.items, O(args)->v.q.n, sep, end);
+    return apy_none();
+}
+
 APY_API apy_value apy_dict_of(apy_value args) {
     if (O(args)->v.q.n == 0) return apy_dict_new(1);
     return apy_to_dict(O(args)->v.q.items[0]);
@@ -5628,9 +7123,30 @@ APY_API apy_value apy_to_dict(apy_value src) {
 APY_API apy_value apy_to_bytes(apy_value src) {
     int64_t i, n;
     char *buf;
-    if (O(src)->kind == APY_BYTES_K) return src;
+    if (O(src)->kind == APY_MVIEW_K) return apy_mview_bytes(src);
+    if (O(src)->kind == APY_BYTES_K) {
+        if (!O(src)->v.s.mut) return src;
+        /* A COPY, not the same buffer with the flag cleared: `bytes(ba)` is a
+           snapshot, and the bytearray goes on being written to. */
+        return apy_bytes_copy(O(src)->v.s.p, O(src)->v.s.n);
+    }
     if (O(src)->kind == APY_STR_K)
         return apy_fail("TypeError", "string argument without an encoding");
+    /* `bytes(3)` is THREE ZERO BYTES, not the digit three -- the same rule
+       `bytearray(3)` follows, and the reason a count has to be tested before
+       the sequence walk below asks an int to be iterable. */
+    if (apy_is_int_like(src)) {
+        int64_t count, k;
+        char *zeros;
+        if (!apy_index_arg(src, &count, APY_IDX_SUB)) return 0;
+        if (count < 0) return apy_fail("ValueError", "negative count");
+        zeros = (char *)malloc((size_t)(count ? count : 1) + 1);
+        if (!zeros) { fputs("asmpython: out of memory\n", stderr); exit(1); }
+        for (k = 0; k <= count; k++) zeros[k] = 0;
+        { apy_value r = apy_str_take(zeros, count);
+          O(r)->kind = APY_BYTES_K;
+          return r; }
+    }
     n = apy_raw_len(src);
     if (apy_error_occurred()) return 0;
     buf = (char *)malloc((size_t)(n ? n : 1) + 1);
@@ -5652,9 +7168,101 @@ APY_API apy_value apy_to_bytes(apy_value src) {
       return r; }
 }
 
+/* `bytearray(...)`. Always a fresh heap buffer, never the argument's --
+   `ba = bytearray(b)` then `ba[0] = 1` must not reach through to `b`, and
+   the bytes it was built from may be a literal in read-only memory. */
+APY_API apy_value apy_to_bytearray(apy_value src) {
+    apy_value out;
+    if (apy_is_int_like(src)) {
+        /* `bytearray(5)` is five zero bytes, not the digit five. */
+        int64_t n, i;
+        char *buf;
+        if (!apy_index_arg(src, &n, APY_IDX_SUB)) return 0;
+        if (n < 0) return apy_fail("ValueError", "negative count");
+        buf = (char *)malloc((size_t)(n ? n : 1) + 1);
+        if (!buf) { fputs("asmpython: out of memory\n", stderr); exit(1); }
+        for (i = 0; i <= n; i++) buf[i] = 0;
+        out = apy_str_take(buf, n);
+        O(out)->kind = APY_BYTES_K;
+    } else {
+        out = apy_to_bytes(src);
+        if (!out) return 0;
+        /* `apy_to_bytes` hands back its argument unchanged when it is already
+           bytes; copy so the flag lands on a buffer this owns. */
+        out = apy_bytes_copy(O(out)->v.s.p, O(out)->v.s.n);
+    }
+    O(out)->v.s.mut = 1;
+    return out;
+}
+
+/* One name into the dict `locals()` is building. A name the path taken never
+   bound arrives NULL -- an unassigned register and an unset global are both
+   zero, and zero is never a value -- so this SKIPS rather than storing, which
+   is what makes `locals().get("v", "unbound")` answer the default after a
+   branch that did not run. Every other runtime entry treats a null argument
+   as "an earlier call failed"; this is the one place it means "not bound",
+   and that is why the test is here rather than at the call site. */
+/* A module-level name that is ALSO a builtin: what the global holds, or the
+   builtin when the global holds nothing. That is the last step of Python's
+   name resolution -- local, then global, then builtins -- and it is why
+   `len = 5` followed by `del len` leaves `len([1, 2])` working again rather
+   than raising NameError.
+
+   `got` is read WITHOUT the null check every other entry point makes: a zero
+   here means the global was never assigned or has been deleted, which is the
+   question being asked rather than a failure. */
+/* `a, b = xs` -- THE ARITY, checked before anything is bound. Without it a
+   short sequence read past the end and reported IndexError from a subscript
+   the program never wrote, and a long one bound the first two and silently
+   dropped the rest, which is the worse of the two.
+
+   `at_least` is set when the target has a `*rest`, which turns the exact
+   count into a floor and changes the message to match CPython's. */
+APY_API apy_value apy_unpack_check(apy_value v, int64_t want,
+                                   int64_t at_least) {
+    char buf[128];
+    int64_t n = apy_raw_len(v);
+    if (apy_error_occurred()) return 0;
+    if (n < want) {
+        snprintf(buf, sizeof buf,
+                 "not enough values to unpack (expected %s%lld, got %lld)",
+                 at_least ? "at least " : "", (long long)want, (long long)n);
+        return apy_fail("ValueError", buf);
+    }
+    if (!at_least && n > want) {
+        snprintf(buf, sizeof buf,
+                 "too many values to unpack (expected %lld, got %lld)",
+                 (long long)want, (long long)n);
+        return apy_fail("ValueError", buf);
+    }
+    return apy_none();
+}
+
+APY_API apy_value apy_name_or(apy_value got, apy_value fallback) {
+    return got ? got : fallback;
+}
+
+APY_API apy_value apy_locals_put(apy_value d, apy_value name, apy_value v) {
+    if (!v) return d;
+    return apy_dict_set(d, name, v) ? d : 0;
+}
+
 APY_API apy_value apy_iter(apy_value v) {
     apy_obj *o;
     if (O(v)->kind == APY_ITER_K) return v;
+    /* ITERATING A CLASS IS THE METACLASS'S BUSINESS: `for c in Color` is
+       `type(Color).__iter__(Color)`, which is how an enum lists its members.
+       A class with no metaclass cannot be iterated, and the refusal further
+       down is still the right answer for it. */
+    if (O(v)->kind == APY_TYPE_K && O(v)->v.t.meta) {
+        apy_value hook = apy_class_find(O(v)->v.t.meta, apy_name("__iter__"));
+        if (hook) {
+            apy_value got = apy_call_n(apy_bind(hook, v), NULL, 0);
+            if (!got) return 0;
+            return got;
+        }
+    }
+
     /* `iter(g)` IS `g`, so a half-consumed generator handed to `iter` keeps
        its position -- which is what makes `for v in g` after two `next`s
        start from the third. */
@@ -5671,12 +7279,19 @@ APY_API apy_value apy_iter(apy_value v) {
         if (got != v) return apy_iter(got);
     }
     if (!apy_is_seq(v) && !apy_is_set(v) && O(v)->kind != APY_STR_K
-        && O(v)->kind != APY_BYTES_K && O(v)->kind != APY_DICT_K)
+        && O(v)->kind != APY_BYTES_K && O(v)->kind != APY_DICT_K
+        && O(v)->kind != APY_RANGE_K)
         return apy_fail2("TypeError", "'%s' object is not iterable%s",
                          apy_kind_name(v), "");
     o = apy_alloc(APY_ITER_K);
     o->v.it.src = v;
     o->v.it.i = 0;
+    /* NOT INHERITED FROM THE UNION. `fn`, `mode` and `n0` are read on every
+       step; leaving them as whatever the recycled cell held made a plain
+       `iter(d)` report the dict as resized on its very first `next`. */
+    o->v.it.fn = 0;
+    o->v.it.mode = APY_IT_PLAIN;
+    o->v.it.n0 = (O(v)->kind == APY_DICT_K) ? O(v)->v.d.n : -1;
     return V(o);
 }
 
@@ -5694,12 +7309,42 @@ APY_API apy_value apy_iter(apy_value v) {
 APY_API apy_value apy_iterable(apy_value v) {
     apy_value it, out;
     int64_t guard;
+    /* A VIEW IS READ WHEN IT IS WALKED, which is what makes it live. Every
+       consumer that wants a sequence comes through here, so this one line is
+       where the liveness actually happens. */
+    if (O(v)->kind == APY_VIEW_K) return apy_view_items(v);
     /* A GENERATOR is drained: the walk below is by index and an index walk
        needs a length. See `apy_gen_drain` for what that costs. */
     if (O(v)->kind == APY_GEN_K) return apy_gen_drain(v);
+    /* ITERATING A CLASS IS THE METACLASS'S BUSINESS: `for c in Color` is
+       `type(Color).__iter__(Color)`, which is how an enum lists its members.
+       A class with no metaclass cannot be iterated, and the refusal further
+       down is still the right answer for it. */
+    if (O(v)->kind == APY_TYPE_K && O(v)->v.t.meta) {
+        apy_value hook = apy_class_find(O(v)->v.t.meta, apy_name("__iter__"));
+        if (hook) {
+            apy_value got = apy_call_n(apy_bind(hook, v), NULL, 0);
+            if (!got) return 0;
+            return apy_iterable(got);
+        }
+    }
     if (O(v)->kind != APY_INST_K) return v;
     it = apy_unary_dunder(v, "__iter__");
     if (apy_error_occurred()) return 0;
+    if (it) {
+        /* WHAT `__iter__` RETURNS MUST BE AN ITERATOR -- see `apy_getiter`,
+           which enforces the same rule on the lazy path. A str is not one
+           however walkable it looks, and accepting it turned a broken class
+           into a working one that iterated something else entirely. */
+        if (O(it)->kind != APY_GEN_K && O(it)->kind != APY_ITER_K
+            && !apy_is_seq(it) && !apy_is_set(it)
+            && O(it)->kind != APY_DICT_K
+            && !(O(it)->kind == APY_INST_K
+                 && apy_class_find(O(it)->v.o.cls, apy_name("__next__"))))
+            return apy_fail2("TypeError",
+                             "iter() returned non-iterator of type '%s'%s",
+                             apy_kind_name(it), "");
+    }
     if (!it) {
         /* No `__iter__`. `__len__` plus `__getitem__` is the older protocol
            and the index walk is already it; `__getitem__` alone is walked
@@ -5764,6 +7409,13 @@ APY_API apy_value apy_next(apy_value it, apy_value fallback,
     if (!got) return 0;
     if (got == apy_stop()) {
         if (has_default) return fallback;
+        /* A GENERATOR CARRIES ITS RETURN VALUE OUT IN THE EXCEPTION:
+           `return "done"` becomes `StopIteration("done")`, and `e.value` is
+           how a program reads it. Raising a bare one here threw that away --
+           `yield from` still saw the value, because it reads the object
+           rather than catching, so the two spellings disagreed about the same
+           generator. */
+        if (O(it)->kind == APY_GEN_K) return apy_gen_stop(it);
         return apy_fail("StopIteration", "");
     }
     return got;
@@ -5852,8 +7504,19 @@ APY_API apy_value apy_sum(apy_value seq) {
    the result's TYPE -- `sum([], 0.0)` is `0.0` and `sum([Vec()], Vec())` is a
    Vec, neither of which an int zero could produce. */
 APY_API apy_value apy_sum_from(apy_value seq, apy_value start) {
-    int64_t n = apy_raw_len(seq), i;
+    int64_t n, i;
     apy_value total = start;
+    /* `sum` REFUSES STRINGS, and it is not an oversight in CPython: joining
+       strings this way is quadratic, and `''.join(...)` is the answer. The
+       concatenation works perfectly well, which is exactly why the refusal
+       has to be explicit rather than emergent. */
+    if (O(start)->kind == APY_STR_K)
+        return apy_fail("TypeError",
+                        "sum() can't sum strings [use ''.join(seq) instead]");
+    if (O(start)->kind == APY_BYTES_K)
+        return apy_fail("TypeError",
+                        "sum() can't sum bytes [use b''.join(seq) instead]");
+    n = apy_raw_len(seq);
     if (apy_error_occurred()) return 0;
     for (i = 0; i < n; i++) {
         total = apy_add(total, apy_key_at(seq, i));
@@ -5895,8 +7558,25 @@ APY_API apy_value apy_extreme_or(apy_value seq, apy_value keyfn,
 }
 
 APY_API apy_value apy_reversed(apy_value seq) {
-    int64_t n = apy_raw_len(seq), i;
+    int64_t n, i;
     apy_value out;
+    /* `__reversed__` WINS OVER THE INDEX WALK. A class may define both it and
+       `__getitem__`, and they need not agree -- the hook is the answer the
+       class chose, and walking indices backwards instead silently produced a
+       different sequence from the one it asked for. */
+    if (O(seq)->kind == APY_INST_K) {
+        apy_value hook = apy_unary_dunder(seq, "__reversed__");
+        if (apy_error_occurred()) return 0;
+        if (hook) return apy_iterable(hook);
+    }
+    /* A SET HAS NO ORDER TO REVERSE. It has a length and it can be walked by
+       index here, which is exactly why this has to refuse explicitly: the
+       index walk would have produced a confident answer to a question the
+       type cannot be asked. CPython says so too. */
+    if (apy_is_set(seq))
+        return apy_fail2("TypeError", "'%s' object is not reversible%s",
+                         apy_kind_name(seq), "");
+    n = apy_raw_len(seq);
     if (apy_error_occurred()) return 0;
     out = apy_seq_new(APY_LIST_K, n + 1);
     for (i = n - 1; i >= 0; i--) apy_seq_push(out, apy_key_at(seq, i));
@@ -5938,6 +7618,26 @@ APY_API apy_value apy_delattr(apy_value obj, apy_value name) {
         apy_value hook = apy_class_find(O(obj)->v.o.cls,
                                         apy_name("__delattr__"));
         if (hook) return apy_call_n(apy_bind(hook, obj), &name, 1);
+        {
+            /* A DATA DESCRIPTOR TAKES THE DELETE, exactly as it takes the
+               write -- `__delete__` is the third of the three, and a property
+               or a user descriptor that defines it never reaches the instance
+               dict. Without this, `del c.d` on a descriptor attribute looked
+               in the dict, found nothing, and reported an attribute the class
+               plainly has. */
+            apy_value found = apy_class_find(O(obj)->v.o.cls, name);
+            if (found && apy_is_data_descriptor(found)) {
+                apy_value m = 0;
+                if (O(found)->kind == APY_PROP_K) {
+                    if (!O(found)->v.p.del_)
+                        return apy_fail("AttributeError",
+                                        "can't delete attribute");
+                    return apy_call_n(O(found)->v.p.del_, &obj, 1);
+                }
+                m = apy_class_find(O(found)->v.o.cls, apy_name("__delete__"));
+                if (m) return apy_call_n(apy_bind(m, found), &obj, 1);
+            }
+        }
     }
     return apy_default_delattr(obj, name);
 }
@@ -5967,16 +7667,38 @@ APY_API apy_value apy_zip2(apy_value a, apy_value b) {
    come here: it lowers to a counter loop with no allocation at all, which is
    the case that matters for cost. */
 APY_API apy_value apy_range(int64_t start, int64_t stop, int64_t step) {
-    apy_value out;
-    int64_t i, n;
-    if (step == 0) return apy_fail("ValueError", "range() arg 3 must not be zero");
+    apy_obj *o;
+    if (step == 0)
+        return apy_fail("ValueError", "range() arg 3 must not be zero");
+    o = apy_alloc(APY_RANGE_K);
+    o->v.rg.start = start;
+    o->v.rg.stop = stop;
+    o->v.rg.step = step;
+    return V(o);
+}
+
+/* How many elements a range has. The formula rather than a walk: that is the
+   whole reason a range is three numbers. */
+static int64_t apy_range_len(apy_value r) {
+    int64_t start = O(r)->v.rg.start, stop = O(r)->v.rg.stop;
+    int64_t step = O(r)->v.rg.step, n;
     n = step > 0 ? (stop - start + step - 1) / step
                  : (start - stop - step - 1) / (-step);
-    if (n < 0) n = 0;
-    out = apy_seq_new(APY_LIST_K, n + 1);
-    for (i = start; step > 0 ? i < stop : i > stop; i += step)
-        apy_seq_push(out, apy_from_int(i));
-    return out;
+    return n < 0 ? 0 : n;
+}
+
+static int64_t apy_range_at(apy_value r, int64_t i) {
+    return O(r)->v.rg.start + i * O(r)->v.rg.step;
+}
+
+/* Is `want` in the range, and where? Arithmetic, so `10**11 in range(10**12)`
+   is a division and not a search. Answers -1 for absent. */
+static int64_t apy_range_find(apy_value r, int64_t want) {
+    int64_t start = O(r)->v.rg.start, step = O(r)->v.rg.step, off, at;
+    off = want - start;
+    if (off % step) return -1;
+    at = off / step;
+    return (at >= 0 && at < apy_range_len(r)) ? at : -1;
 }
 
 APY_API apy_value apy_abs(apy_value v) {
@@ -6004,6 +7726,14 @@ APY_API apy_value apy_abs(apy_value v) {
    from zero, so it answers 3 for round(2.5) where Python answers 2. And
    `round(x)` with no digits returns an INT. */
 APY_API apy_value apy_round(apy_value v) {
+    /* `__round__` WITH NO DIGITS. A class defining it decides what rounding
+       itself means, and answering from the numeric tower instead would round
+       something the class never claimed was a number. */
+    if (O(v)->kind == APY_INST_K) {
+        apy_value got = apy_unary_dunder(v, "__round__");
+        if (apy_error_occurred()) return 0;
+        if (got) return got;
+    }
     double x, down, frac;
     if (apy_is_big(v)) return v;      /* already whole, and already exact */
     if (apy_is_int_like(v)) return apy_from_int(O(v)->v.i);
@@ -6033,6 +7763,15 @@ APY_API apy_value apy_round(apy_value v) {
    2.67499999999999982..., so any scale-multiply-round-divide gets 2.68 and
    disagrees with Python on a number every tutorial uses as the example. */
 APY_API apy_value apy_round_to(apy_value v, apy_value nd) {
+    /* `__round__(ndigits)` -- the two-argument form, which is a different
+       call into the same hook. */
+    if (O(v)->kind == APY_INST_K) {
+        apy_value hook = apy_class_find(O(v)->v.o.cls, apy_name("__round__"));
+        if (hook) {
+            apy_value arg = nd;
+            return apy_call_n(apy_bind(hook, v), &arg, 1);
+        }
+    }
     int64_t n;
     double x, p, y, r;
     char buf[512];
@@ -6087,6 +7826,36 @@ APY_API apy_value apy_round_to(apy_value v, apy_value nd) {
    TypeError and not False -- `issubclass(1, int)` raises, where
    `isinstance(1, int)` answers. */
 APY_API apy_value apy_is_subclass(apy_value a, apy_value b) {
+    /* THE METACLASS DECIDES, if it says so. `__subclasscheck__` is asked
+       before the base chain is walked, which is what lets a metaclass claim
+       a class it has no structural relationship to -- and is the whole of
+       what `issubclass` means for an abstract base class. Asked FIRST, and
+       of `b`, because it is the class being tested AGAINST. */
+    if (b && O(b)->kind == APY_TYPE_K && O(b)->v.t.meta) {
+        apy_value hook = apy_class_find(O(b)->v.t.meta,
+                                        apy_name("__subclasscheck__"));
+        if (hook) {
+            apy_value args[2];
+            apy_value got;
+            args[0] = b;
+            args[1] = a;
+            got = apy_call_n(hook, args, 2);
+            return got ? apy_from_bool(apy_truth(got) != 0) : got;
+        }
+    }
+    /* BUILTIN TYPES REACHED AS VALUES: `issubclass(bool, int)`. Each side
+       is a callable thunk carrying its name, so the question is asked of the
+       names -- the same rule `isinstance` uses, and the only place the
+       builtin subtype relation is written down. */
+    if (a && O(a)->kind == APY_FUNC_K && O(a)->v.fn.is_type
+        && b && O(b)->kind == APY_FUNC_K && O(b)->v.fn.is_type) {
+        const char *have = APY_CSTR(O(a)->v.fn.name);
+        const char *want = APY_CSTR(O(b)->v.fn.name);
+        return apy_from_bool(strcmp(have, want) == 0
+                             || strcmp(want, "object") == 0
+                             || (strcmp(have, "bool") == 0
+                                 && strcmp(want, "int") == 0));
+    }
     if (O(a)->kind != APY_TYPE_K)
         return apy_fail("TypeError", "issubclass() arg 1 must be a class");
     if (O(b)->kind != APY_TYPE_K)
@@ -6113,11 +7882,128 @@ APY_API apy_value apy_is_subclass(apy_value a, apy_value b) {
 /* A builtin exception NAME used as a value -- `issubclass(KeyError, ...)`,
    `except (A, B)`, `e.__class__`. Interned by `apy_type_of`, so the same name
    is the same object and `type(e) is ValueError` holds. */
+/* `E(a, b, ...)` -- an exception built from MORE THAN ONE argument. `e.args`
+   is the whole tuple, and the OSError family reads the first two back as
+   `errno` and `strerror`. */
+/* Which OSError subclass an errno names, or 0 for one with no dedicated
+   class. The numbers are the Linux/POSIX values CPython maps, and they are
+   written out rather than taken from <errno.h> so the answer does not change
+   with the platform the compiler happens to run on. */
+static const char *apy_errno_class(int code) {
+    switch (code) {
+    case 1:   return "PermissionError";        /* EPERM */
+    case 2:   return "FileNotFoundError";      /* ENOENT */
+    case 3:   return "ProcessLookupError";     /* ESRCH */
+    case 4:   return "InterruptedError";       /* EINTR */
+    case 10:  return "ChildProcessError";      /* ECHILD */
+    case 11:  return "BlockingIOError";        /* EAGAIN */
+    case 13:  return "PermissionError";        /* EACCES */
+    case 17:  return "FileExistsError";        /* EEXIST */
+    case 20:  return "NotADirectoryError";     /* ENOTDIR */
+    case 21:  return "IsADirectoryError";      /* EISDIR */
+    case 32:  return "BrokenPipeError";        /* EPIPE */
+    case 103: return "ConnectionAbortedError"; /* ECONNABORTED */
+    case 104: return "ConnectionResetError";   /* ECONNRESET */
+    case 110: return "TimeoutError";           /* ETIMEDOUT */
+    case 111: return "ConnectionRefusedError"; /* ECONNREFUSED */
+    case 115: return "BlockingIOError";        /* EINPROGRESS */
+    default:  return 0;
+    }
+}
+
+/* USER EXCEPTION CLASSES, BY NAME.
+
+   The hierarchy is a table of names -- that is what makes `except
+   LookupError:` catch a KeyError without either being a value -- so a class
+   with a body has to be findable from the name alone, at the moment an
+   exception of that name is made. Nothing else knows: `apy_make_exc` is
+   handed a string, and the `class` statement that wrote the body may be in
+   another function entirely. */
+static apy_value apy_exc_class_table;
+
+APY_API apy_value apy_exc_class_bind(apy_value name, apy_value cls) {
+    if (!apy_exc_class_table) apy_exc_class_table = apy_dict_new(8);
+    if (!apy_dict_set(apy_exc_class_table, name, cls)) return 0;
+    return apy_none();
+}
+
+static apy_value apy_exc_class_named(const char *name) {
+    if (!apy_exc_class_table) return 0;
+    return apy_dict_get_or(apy_exc_class_table, apy_lit(name), 0);
+}
+
+/* Give a fresh exception its class and, where the class writes one, run its
+   `__init__` over the arguments the `raise` supplied.
+
+   AFTER the defaults are in place, not instead of them: CPython sets `args`
+   in `BaseException.__new__` and only then calls `__init__`, so a class whose
+   `__init__` never calls `super().__init__` still reads back what was passed.
+   One that does call it overwrites them, which is the whole reason
+   `AppError(404, "missing")` can report `('404: missing',)`. */
+static apy_value apy_exc_construct(apy_value exc, apy_value *args, int64_t n) {
+    apy_value cls = apy_exc_class_named(O(exc)->v.e.name), init, argv[9];
+    int64_t i;
+    if (!cls) return exc;
+    O(exc)->v.e.cls = cls;
+    init = apy_class_find(cls, apy_name("__init__"));
+    if (!init || O(init)->kind != APY_FUNC_K) return exc;
+    if (n > 8) n = 8;
+    argv[0] = exc;
+    for (i = 0; i < n; i++) argv[i + 1] = args[i];
+    if (!apy_call_n(init, argv, n + 1)) return 0;
+    return exc;
+}
+
+APY_API apy_value apy_make_excn(apy_value name, apy_value argv, int64_t n) {
+    apy_value *raw = (apy_value *)argv;
+    apy_value tuple = apy_tuple_new(n > 0 ? n : 1);
+    int64_t i;
+    apy_obj *o;
+    for (i = 0; i < n; i++) apy_seq_push(tuple, raw[i]);
+    o = apy_alloc(APY_EXC_K);
+    o->v.e.subs = 0;
+    o->v.e.dict = 0;
+    o->v.e.cls = 0;
+    o->v.e.pos = -1;
+    o->v.e.name = APY_CSTR(name);
+    /* PEP 3151: `OSError(errno, ...)` BUILDS THE SPECIFIC SUBCLASS. The
+       errno decides which -- `OSError(2, ...)` IS a FileNotFoundError -- so
+       a program can catch the precise failure without inspecting `errno`,
+       which is the whole point of the hierarchy. Only for the plain name: a
+       subclass written out stays what it was written as. */
+    if (n >= 1 && strcmp(o->v.e.name, "OSError") == 0
+            && O(raw[0])->kind == APY_INT_K) {
+        const char *want = apy_errno_class((int)O(raw[0])->v.i);
+        if (want) o->v.e.name = want;
+    }
+    o->v.e.arg = n > 0 ? raw[0] : apy_none();
+    o->v.e.has_arg = n > 0;
+    o->v.e.argv = tuple;
+    return apy_exc_construct(V(o), raw, n);
+}
+
 APY_API apy_value apy_exc_type(apy_value name) {
-    apy_obj *o = apy_alloc(APY_EXC_K);
+    apy_obj *o;
+    /* THE CLASS THE PROGRAM WROTE, when it wrote one. `except AppError:`,
+       `isinstance(e, AppError)` and `super()` inside its own method must all
+       reach the SAME object, or a method found through one would be missing
+       through another. */
+    {
+        apy_value user = apy_exc_class_named(APY_CSTR(name));
+        if (user) return user;
+    }
+    o = apy_alloc(APY_EXC_K);
+    /* NOT INHERITED FROM THE UNION: a fresh exception carries no
+       sub-exceptions, and reading a stale pointer here would make
+       every ordinary raise look like a group. */
+    o->v.e.subs = 0;
+    o->v.e.dict = 0;
+    o->v.e.cls = 0;
+    o->v.e.pos = -1;
     o->v.e.name = APY_CSTR(name);
     o->v.e.arg = apy_none();
     o->v.e.has_arg = 0;
+    o->v.e.argv = 0;
     return apy_type_of(V(o));
 }
 
@@ -6167,15 +8053,559 @@ APY_API apy_value apy_iter_until(apy_value fn, apy_value sentinel) {
    Comparing NAMES would have been enough right up until user classes existed,
    and then two classes both called `Node` in one program would be instances
    of each other. */
+/* --- `match` ------------------------------------------------------------
+   The predicates a `case` pattern needs that nothing else does. Class and
+   value patterns reuse `apy_isinstance` and `apy_eq`; these three are the
+   parts with rules of their own. */
+
+/* Does a SEQUENCE pattern -- `case [a, b]` -- apply to this value?
+
+   A str is NOT a sequence for matching, and neither is bytes. `case [x, y]`
+   against "ab" must not bind 'a' and 'b': Python excludes them precisely
+   because matching a string element-wise is almost never what was meant, and
+   the loop that did it would silently succeed. */
+APY_API int64_t apy_match_seq(apy_value v) {
+    return O(v)->kind == APY_LIST_K || O(v)->kind == APY_TUPLE_K;
+}
+
+/* Does a MAPPING pattern -- `case {"k": v}` -- apply? */
+APY_API int64_t apy_match_map(apy_value v) {
+    return O(v)->kind == APY_DICT_K;
+}
+
+/* `cls.__match_args__`, or an empty tuple.
+
+   POSITIONAL SUB-PATTERNS ARE ATTRIBUTE NAMES: `case Point(0, y)` means
+   "attribute `x` equals 0, bind attribute `y`", and the class says which
+   attributes those are. A class without the declaration accepts no positional
+   patterns at all, which is a TypeError in CPython and an empty tuple here --
+   the length check that follows reports it. */
+APY_API apy_value apy_match_args(apy_value cls) {
+    apy_value got;
+    if (O(cls)->kind != APY_TYPE_K) return apy_tuple_new(1);
+    got = apy_class_find(cls, apy_name("__match_args__"));
+    if (got && (O(got)->kind == APY_TUPLE_K || O(got)->kind == APY_LIST_K))
+        return got;
+    return apy_tuple_new(1);
+}
+
+/* What `**rest` in a mapping pattern binds: the dict MINUS the keys the
+   pattern named. A copy, because the subject must not change shape because
+   something matched it. */
+APY_API apy_value apy_match_rest(apy_value d, apy_value used) {
+    apy_value out;
+    int64_t i, k;
+    if (O(d)->kind != APY_DICT_K) return apy_dict_new(1);
+    out = apy_dict_new(O(d)->v.d.n ? O(d)->v.d.n : 1);
+    for (i = 0; i < O(d)->v.d.n; i++) {
+        int skip = 0;
+        for (k = 0; k < O(used)->v.q.n; k++)
+            if (apy_eq_raw(O(d)->v.d.keys[i], O(used)->v.q.items[k])) {
+                skip = 1;
+                break;
+            }
+        if (!skip && !apy_dict_set(out, O(d)->v.d.keys[i],
+                                   O(d)->v.d.vals[i])) return 0;
+    }
+    return out;
+}
+
+/* `dir(x)` -- the names it answers to, SORTED.
+
+   `__dir__` overrides the whole computation when a class defines one, and its
+   answer is sorted but NOT deduplicated: CPython sorts what the method
+   returned and hands it back, so a class returning ["b", "a", "a"] gets
+   ["a", "a", "b"]. Deduplicating would be tidier and would disagree.
+
+   Without the hook it is the instance's own attributes plus every class in
+   the chain -- which IS deduplicated, because a subclass overriding a method
+   must not make it appear twice. */
+APY_API apy_value apy_dir(apy_value v) {
+    apy_value out, hook;
+    if (O(v)->kind == APY_INST_K
+            && (hook = apy_class_find(O(v)->v.o.cls, apy_name("__dir__")))) {
+        apy_value got = apy_call_n(apy_bind(hook, v), NULL, 0);
+        if (!got) return 0;
+        got = apy_iterable(got);
+        if (!got) return 0;
+        return apy_sorted(got);
+    }
+    out = apy_seq_new(APY_LIST_K, 8);
+    if (O(v)->kind == APY_INST_K) {
+        apy_value cls = O(v)->v.o.cls;
+        apy_value d = O(v)->v.o.dict;
+        int64_t i;
+        for (i = 0; i < O(d)->v.d.n; i++)
+            if (apy_set_find(out, O(d)->v.d.keys[i]) < 0)
+                apy_seq_push(out, O(d)->v.d.keys[i]);
+        while (cls && O(cls)->kind == APY_TYPE_K) {
+            apy_value cd = O(cls)->v.t.dict;
+            for (i = 0; i < O(cd)->v.d.n; i++)
+                if (apy_set_find(out, O(cd)->v.d.keys[i]) < 0)
+                    apy_seq_push(out, O(cd)->v.d.keys[i]);
+            cls = O(cls)->v.t.base;
+        }
+    } else if (O(v)->kind == APY_TYPE_K) {
+        apy_value cls = v;
+        int64_t i;
+        while (cls && O(cls)->kind == APY_TYPE_K) {
+            apy_value cd = O(cls)->v.t.dict;
+            for (i = 0; i < O(cd)->v.d.n; i++)
+                if (apy_set_find(out, O(cd)->v.d.keys[i]) < 0)
+                    apy_seq_push(out, O(cd)->v.d.keys[i]);
+            cls = O(cls)->v.t.base;
+        }
+    }
+    /* A built-in kind answers an empty list rather than a made-up one: the
+       method table lives in the frontend, not in a place this can enumerate,
+       and inventing a partial list would be worse than admitting to none. */
+    return apy_sorted(out);
+}
+
+/* `ExceptionGroup(msg, [excs])`. */
+APY_API apy_value apy_excgroup_new(apy_value msg, apy_value excs) {
+    apy_value g;
+    excs = apy_iterable(excs);
+    if (!excs) return 0;
+    if (!apy_is_seq(excs))
+        return apy_fail("TypeError",
+                        "second argument (exceptions) must be a sequence");
+    if (O(excs)->v.q.n == 0)
+        return apy_fail("ValueError",
+                        "second argument (exceptions) must be a non-empty "
+                        "sequence");
+    g = apy_make_exc(apy_lit("ExceptionGroup"), msg);
+    if (!g) return 0;
+    O(g)->v.e.subs = excs;
+    return g;
+}
+
+/* Every leaf of `g` that matches `want`, as a group of the same shape -- or 0
+   when nothing in it does.
+
+   THE NESTING IS PRESERVED: a match inside an inner group comes back inside
+   an inner group, because `split` is defined to give you back something you
+   could have raised, not a flat list. That is what makes the two halves add
+   up to the original. */
+static apy_value apy_group_select(apy_value g, apy_value want, int keep) {
+    apy_value picked, out;
+    int64_t i;
+    if (O(g)->kind != APY_EXC_K || !O(g)->v.e.subs) return 0;
+    picked = apy_seq_new(APY_LIST_K, 4);
+    for (i = 0; i < O(O(g)->v.e.subs)->v.q.n; i++) {
+        apy_value one = O(O(g)->v.e.subs)->v.q.items[i];
+        if (O(one)->kind == APY_EXC_K && O(one)->v.e.subs) {
+            apy_value inner = apy_group_select(one, want, keep);
+            if (inner) apy_seq_push(picked, inner);
+            continue;
+        }
+        {
+            apy_value hit = apy_isinstance(one, want);
+            if (!hit) return 0;
+            if (apy_truth(hit) == (keep ? 1 : 0)) apy_seq_push(picked, one);
+        }
+    }
+    if (O(picked)->v.q.n == 0) return 0;
+    out = apy_make_exc(apy_lit("ExceptionGroup"),
+                       O(g)->v.e.has_arg ? O(g)->v.e.arg : apy_none());
+    if (!out) return 0;
+    O(out)->v.e.subs = picked;
+    return out;
+}
+
+/* `g.subgroup(T)` -- the part that matches, or None. */
+APY_API apy_value apy_group_subgroup(apy_value g, apy_value want) {
+    apy_value got;
+    if (O(g)->kind != APY_EXC_K || !O(g)->v.e.subs)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'subgroup'%s",
+                         apy_kind_name(g), "");
+    got = apy_group_select(g, want, 1);
+    if (apy_error_occurred()) return 0;
+    return got ? got : apy_none();
+}
+
+/* `g.split(T)` -- `(matching, rest)`, either of which may be None. Together
+   they hold every leaf the original did. */
+APY_API apy_value apy_group_split(apy_value g, apy_value want);
+
+/* `x.split(y)` where `x` may be a str OR an ExceptionGroup.
+
+   ONE METHOD NAME, TWO RECEIVERS, and which is meant is not known until run
+   time -- the same shape `count` and `index` have. Written as a dispatcher
+   rather than two table entries because the method table is keyed by name and
+   argument count, and both take exactly one. */
+APY_API apy_value apy_split_of(apy_value x, apy_value arg) {
+    if (O(x)->kind == APY_EXC_K && O(x)->v.e.subs)
+        return apy_group_split(x, arg);
+    return apy_str_split(x, arg);
+}
+
+APY_API apy_value apy_group_split(apy_value g, apy_value want) {
+    apy_value hit, miss, out;
+    if (O(g)->kind != APY_EXC_K || !O(g)->v.e.subs)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'split'%s",
+                         apy_kind_name(g), "");
+    hit = apy_group_select(g, want, 1);
+    if (apy_error_occurred()) return 0;
+    miss = apy_group_select(g, want, 0);
+    if (apy_error_occurred()) return 0;
+    out = apy_tuple_new(2);
+    apy_seq_push(out, hit ? hit : apy_none());
+    apy_seq_push(out, miss ? miss : apy_none());
+    return out;
+}
+
+/* A class body's namespace, read by name.
+
+   NOT `apy_dict_get`, whose miss is a KeyError: this stands for reading a
+   NAME, and a name that is not bound is a NameError. Both spellings are
+   passed because the KEY is mangled -- `__x` inside `class C` is stored as
+   `_C__x` -- and the message has to say what the program wrote. */
+APY_API apy_value apy_ns_get(apy_value ns, apy_value key, apy_value shown) {
+    int64_t at = apy_dict_find(ns, key);
+    char buf[200];
+    if (at >= 0) return O(ns)->v.d.vals[at];
+    snprintf(buf, sizeof buf, "name '%.*s' is not defined",
+             (int)O(shown)->v.s.n, O(shown)->v.s.p);
+    return apy_fail("NameError", buf);
+}
+
+/* Declared here because the object model they belong to is defined much
+   further down, and this is the first use of each. */
+APY_API apy_value apy_type_new(apy_value name, apy_value base);
+APY_API apy_value apy_instance_new(apy_value cls);
+APY_API apy_value apy_setattr(apy_value obj, apy_value name, apy_value value);
+APY_API apy_value apy_type_set(apy_value cls, apy_value name, apy_value value);
+static apy_value apy_native(int sel, int64_t arity, const char *name);
+static int apy_eq_raw(apy_value a, apy_value b);
+APY_API apy_value apy_dict_get_or(apy_value d, apy_value key,
+                                  apy_value fallback);
+
+/* The code object a frame names, built from what `apy_pos_add` recorded.
+
+   ONE PER FUNCTION NAME and interned, so `tb.tb_frame.f_code is
+   f.__code__`-style identity holds for two tracebacks out of one function. */
+APY_API apy_value apy_code_of(apy_value name) {
+    static apy_value cls, made;
+    apy_value code, seen;
+    if (!cls) {
+        cls = apy_type_new(apy_lit("code"), 0);
+        if (!cls) return 0;
+        /* A METHOD, because that is how CPython spells it -- a program CALLS
+           `co_positions()`, and `hasattr(code, "co_positions")` is the test
+           the suite writes before it does. */
+        apy_type_set(cls, apy_lit("co_positions"),
+                     apy_native(APY_NAT_POSITIONS, 1, "co_positions"));
+    }
+    if (!made) made = apy_dict_new(8);
+    seen = apy_dict_get_or(made, name, 0);
+    if (seen) return seen;
+    code = apy_instance_new(cls);
+    if (!code) return 0;
+    apy_setattr(code, apy_lit("co_name"), name);
+    apy_setattr(code, apy_lit("co_qualname"), name);
+    apy_setattr(code, apy_lit("co_filename"), apy_lit("<compiled>"));
+    {
+        /* THE POSITIONS OF THIS FUNCTION'S STATEMENTS, in the order they were
+           recorded -- which is the order they were lowered, which is source
+           order. A four-tuple apiece, spelled as CPython spells it:
+           (lineno, end_lineno, col_offset, end_col_offset). */
+        apy_value rows = apy_seq_new(APY_LIST_K, 8);
+        int64_t i;
+        int64_t first = 0;
+        for (i = 0; i < apy_pos_n; i++) {
+            apy_value row;
+            if (!apy_eq_raw(apy_pos_tab[i].fn, name)) continue;
+            row = apy_tuple_new(4);
+            apy_seq_push(row, apy_from_int(apy_pos_tab[i].line));
+            apy_seq_push(row, apy_from_int(apy_pos_tab[i].end_line));
+            apy_seq_push(row, apy_from_int(apy_pos_tab[i].col));
+            apy_seq_push(row, apy_from_int(apy_pos_tab[i].end_col));
+            apy_seq_push(rows, row);
+            if (!first) first = apy_pos_tab[i].line;
+        }
+        apy_setattr(code, apy_lit("_positions"), rows);
+        apy_setattr(code, apy_lit("co_firstlineno"), apy_from_int(first));
+    }
+    if (apy_error_occurred()) return 0;
+    if (!apy_dict_set(made, name, code)) return 0;
+    return code;
+}
+
+/* The traceback an exception carries: where it came from, and the frame it
+   came from. ONE FRAME DEEP -- there is no call stack here, so the chain a
+   real traceback walks has a single link and `tb_next` is None. Saying that
+   is better than inventing frames the runtime never had. */
+static apy_value apy_traceback_of(apy_value exc) {
+    static apy_value tbcls, frcls;
+    apy_value tb, frame, code, where;
+    int64_t at = O(exc)->v.e.pos;
+    if (!tbcls) {
+        tbcls = apy_type_new(apy_lit("traceback"), 0);
+        frcls = apy_type_new(apy_lit("frame"), 0);
+        if (!tbcls || !frcls) return 0;
+    }
+    where = (at >= 0 && at < apy_pos_n) ? apy_pos_tab[at].fn
+                                        : apy_lit("<module>");
+    code = apy_code_of(where);
+    if (!code) return 0;
+    frame = apy_instance_new(frcls);
+    if (!frame) return 0;
+    apy_setattr(frame, apy_lit("f_code"), code);
+    apy_setattr(frame, apy_lit("f_lineno"),
+                apy_from_int(at >= 0 && at < apy_pos_n
+                             ? apy_pos_tab[at].line : 0));
+    apy_setattr(frame, apy_lit("f_globals"), apy_dict_new(1));
+    apy_setattr(frame, apy_lit("f_locals"), apy_dict_new(1));
+    tb = apy_instance_new(tbcls);
+    if (!tb) return 0;
+    apy_setattr(tb, apy_lit("tb_frame"), frame);
+    apy_setattr(tb, apy_lit("tb_lineno"),
+                apy_from_int(at >= 0 && at < apy_pos_n
+                             ? apy_pos_tab[at].line : 0));
+    apy_setattr(tb, apy_lit("tb_lasti"), apy_from_int(-1));
+    apy_setattr(tb, apy_lit("tb_next"), apy_none());
+    if (apy_error_occurred()) return 0;
+    return tb;
+}
+
+/* --- PEP 750 template strings ---------------------------------------------
+
+   A t-string DOES NOT JOIN. That is the whole of it: an f-string decides at
+   the point of writing that the answer is text and throws away everything it
+   used to get there, and a template keeps the pieces apart so that whatever
+   consumes it decides instead -- which is what makes one safe to hand a SQL
+   or HTML builder and the other not. */
+
+/* Declared here because the three are defined with the rest of the object
+   model, further down: this is the first use of them. */
+APY_API apy_value apy_type_new(apy_value name, apy_value base);
+APY_API apy_value apy_instance_new(apy_value cls);
+APY_API apy_value apy_setattr(apy_value obj, apy_value name, apy_value value);
+
+/* One replacement field: what was WRITTEN and what it CAME TO, side by side.
+
+   The expression source is kept because a consumer that reports an error, or
+   builds a query with named parameters, needs the text -- and an f-string has
+   already discarded it by the time anyone could ask. */
+APY_API apy_value apy_interpolation_new(apy_value value, apy_value expression,
+                                        apy_value conversion,
+                                        apy_value spec) {
+    static apy_value cls = 0;
+    apy_value one;
+    if (!cls) cls = apy_type_new(apy_lit("Interpolation"), 0);
+    if (!cls) return 0;
+    one = apy_instance_new(cls);
+    if (!one) return 0;
+    apy_setattr(one, apy_lit("value"), value);
+    apy_setattr(one, apy_lit("expression"), expression);
+    apy_setattr(one, apy_lit("conversion"), conversion);
+    apy_setattr(one, apy_lit("format_spec"), spec);
+    if (apy_error_occurred()) return 0;
+    return one;
+}
+
+/* The template itself. `strings` is ALWAYS one longer than `interpolations`
+   -- an empty piece stands between two adjacent fields, and one stands at
+   each end -- so a consumer walks them in lockstep without having to ask
+   which of the two came first. */
+APY_API apy_value apy_template_new(apy_value strings, apy_value interps,
+                                   apy_value values) {
+    static apy_value cls = 0;
+    apy_value t;
+    if (!cls) cls = apy_type_new(apy_lit("Template"), 0);
+    if (!cls) return 0;
+    t = apy_instance_new(cls);
+    if (!t) return 0;
+    apy_setattr(t, apy_lit("strings"), strings);
+    apy_setattr(t, apy_lit("interpolations"), interps);
+    apy_setattr(t, apy_lit("values"), values);
+    if (apy_error_occurred()) return 0;
+    return t;
+}
+
+/* PEP 654's `except*` dispatch, whole, in one call.
+
+   EVERY CLAUSE RUNS -- not the first that matches. A group carrying a
+   ValueError and a TypeError enters both handlers, each holding its own half,
+   and that is the entire difference from `except`. Splitting here rather than
+   as a chain of calls in the lowering keeps the LEFTOVER in one place, and the
+   leftover is what has to be re-raised once the clauses between them have not
+   accounted for everything.
+
+   Answers one entry per clause -- what it catches, or None -- and last what
+   nothing caught, or None. */
+APY_API apy_value apy_group_dispatch(apy_value raised, apy_value types) {
+    apy_value rest, out;
+    int64_t i, n = O(types)->v.q.n;
+    int wrapped = 0, any_hit = 0;
+    if (O(raised)->kind == APY_EXC_K && O(raised)->v.e.subs) {
+        rest = raised;
+    } else {
+        /* A BARE EXCEPTION IS A GROUP OF ONE to `except*`, which is why a
+           handler binds a group even where the program raised a plain
+           ValueError. */
+        apy_value one = apy_seq_new(APY_LIST_K, 1);
+        if (!one) return 0;
+        apy_seq_push(one, raised);
+        rest = apy_make_exc(apy_lit("ExceptionGroup"), apy_lit(""));
+        if (!rest) return 0;
+        O(rest)->v.e.subs = one;
+        wrapped = 1;
+    }
+    out = apy_tuple_new(n + 1);
+    if (!out) return 0;
+    for (i = 0; i < n; i++) {
+        apy_value hit = 0;
+        if (rest) {
+            hit = apy_group_select(rest, O(types)->v.q.items[i], 1);
+            if (apy_error_occurred()) return 0;
+        }
+        if (hit) {
+            any_hit = 1;
+            rest = apy_group_select(rest, O(types)->v.q.items[i], 0);
+            if (apy_error_occurred()) return 0;
+        }
+        apy_seq_push(out, hit ? hit : apy_none());
+    }
+    if (!any_hit) {
+        /* NOTHING MATCHED, so the ORIGINAL propagates -- not the wrapper this
+           made to split with. A program catching the plain ValueError outside
+           has to see the ValueError. */
+        rest = raised;
+    } else if (rest && wrapped && O(O(rest)->v.e.subs)->v.q.n == 1) {
+        rest = O(O(rest)->v.e.subs)->v.q.items[0];
+    }
+    apy_seq_push(out, rest ? rest : apy_none());
+    return out;
+}
+
+/* `ascii(x)` -- `repr(x)` with every non-ASCII character escaped.
+
+   IT IS NOT AN ALIAS FOR `repr`, which is what it was here: `repr('aé')` is
+   `'aé'` and `ascii('aé')` is `'a\\xe9'`. The whole point of the function is
+   that its answer survives a channel that cannot carry the character, so
+   handing back the character defeats it entirely.
+
+   The three widths are Python's: `\\xNN` below 0x100, `\\uNNNN` below 0x10000,
+   `\\UNNNNNNNN` above. */
+APY_API apy_value apy_ascii(apy_value v) {
+    apy_value shown = apy_repr(v);
+    const unsigned char *p;
+    int64_t n, i = 0, at = 0, room;
+    char *out;
+    if (!shown) return 0;
+    p = (const unsigned char *)O(shown)->v.s.p;
+    n = O(shown)->v.s.n;
+    /* Ten bytes is the widest escape, `\\UNNNNNNNN`, and one input byte can
+       never produce more than one escape. */
+    room = n * 10 + 1;
+    out = (char *)malloc((size_t)room);
+    while (i < n) {
+        if (p[i] < 0x80) {
+            out[at++] = (char)p[i++];
+            continue;
+        }
+        {
+            int64_t used, code = apy_utf8_at(p, n, i, &used);
+            if (code < 0x100) at += snprintf(out + at, 11, "\\x%02llx",
+                                             (unsigned long long)code);
+            else if (code < 0x10000) at += snprintf(out + at, 11, "\\u%04llx",
+                                                    (unsigned long long)code);
+            else at += snprintf(out + at, 11, "\\U%08llx",
+                                (unsigned long long)code);
+            i += used;
+        }
+    }
+    out[at] = 0;
+    return apy_str_take(out, at);
+}
+
+/* `x.hex()` where `x` may be BYTES or a FLOAT.
+
+   ONE METHOD NAME, TWO RECEIVERS, and which is meant is not known until run
+   time -- the same shape `count`, `index`, `pop` and `split` have. The two
+   answer entirely different things: bytes give their contents in hex digits,
+   a float gives the exact binary value it holds. */
+APY_API apy_value apy_hex_of(apy_value x, apy_value sep) {
+    if (O(x)->kind == APY_FLOAT_K) {
+        /* `%a` IS the C library's hexadecimal float, and it is exact -- which
+           is the whole reason `float.hex` exists: a decimal repr rounds and
+           this one does not, so a value can be written down and read back
+           unchanged. */
+        /* THIRTEEN HEX DIGITS ALWAYS -- 52 mantissa bits, four to a digit --
+           because that is what `float.hex` writes and what makes two values
+           comparable as text. `%a` alone trims trailing zeros and gave
+           `0x1.4p+1` where CPython says `0x1.4000000000000p+1`.
+
+           ZERO IS THE EXCEPTION: CPython writes `0x0.0p+0`, not thirteen
+           zeros, and the sign of a negative zero survives. */
+        char buf[64];
+        double f = O(x)->v.f;
+        if (f == 0.0) {
+            int neg = signbit(f);
+            snprintf(buf, sizeof buf, "%s0x0.0p+0", neg ? "-" : "");
+        } else {
+            snprintf(buf, sizeof buf, "%.13a", f);
+        }
+        return apy_str_copy(buf, (int64_t)strlen(buf));
+    }
+    /* The separator is bytes' alone -- the no-argument form supplies a
+       default for it, which is why this takes two even though a float uses
+       neither. */
+    return apy_bytes_hex(x, sep);
+}
+
+/* `float.fromhex('0x1.4p+1')` -- the inverse, and exact for the same reason. */
+APY_API apy_value apy_float_fromhex(apy_value text) {
+    double got;
+    char *end = 0;
+    if (O(text)->kind != APY_STR_K)
+        return apy_fail2("TypeError",
+                         "fromhex() argument must be str, not %s%s",
+                         apy_kind_name(text), "");
+    got = strtod(APY_CSTR(text), &end);
+    if (!end || end == APY_CSTR(text))
+        return apy_fail("ValueError",
+                        "invalid hexadecimal floating-point string");
+    return apy_from_float(got);
+}
+
 APY_API apy_value apy_isinstance(apy_value v, apy_value type_name) {
     const char *want;
     const char *have;
+    /* THE METACLASS DECIDES, if it says so -- `__instancecheck__` is asked
+       before anything structural, which is what makes `isinstance(42, Duck)`
+       able to answer True. */
+    if (type_name && O(type_name)->kind == APY_TYPE_K
+        && O(type_name)->v.t.meta) {
+        apy_value hook = apy_class_find(O(type_name)->v.t.meta,
+                                        apy_name("__instancecheck__"));
+        if (hook) {
+            apy_value args[2];
+            apy_value got;
+            args[0] = type_name;
+            args[1] = v;
+            got = apy_call_n(hook, args, 2);
+            /* A BOOL, whatever the hook returned. `isinstance` answers True
+               or False in CPython however truthy the hook was -- returning
+               the hook's own value printed `quacks`. */
+            return got ? apy_from_bool(apy_truth(got) != 0) : got;
+        }
+    }
     /* A TUPLE OF TYPES means ANY OF THESE, and there is no ambiguity with
        asking about the tuple type itself: `isinstance(x, tuple)` arrives as
        the STRING "tuple", because a builtin kind has no value form. So a
        tuple HERE is always the multi-type form -- including one built at run
        time and held in a variable, which is what makes
        `isinstance(node, self.KINDS)` work. */
+    /* PEP 604: `isinstance(x, int | str)` asks each ARM, which is the same
+       question a tuple of types asks and is answered the same way. */
+    if (O(type_name)->kind == APY_ALIAS_K
+            && O(O(type_name)->v.ga.origin)->kind == APY_INST_K)
+        return apy_isinstance(v, O(type_name)->v.ga.args);
     if (O(type_name)->kind == APY_TUPLE_K) {
         int64_t i;
         for (i = 0; i < O(type_name)->v.q.n; i++) {
@@ -6185,9 +8615,28 @@ APY_API apy_value apy_isinstance(apy_value v, apy_value type_name) {
         }
         return apy_from_bool(0);
     }
-    if (O(type_name)->kind == APY_TYPE_K)
-        return apy_from_bool(O(v)->kind == APY_INST_K
-                             && apy_type_is_sub(O(v)->v.o.cls, type_name));
+    if (O(type_name)->kind == APY_FUNC_K && O(type_name)->v.fn.is_type)
+        /* `t = int; isinstance(x, t)` -- the same question as the literal
+           form, which the frontend rewrites to a name at the call site. */
+        return apy_isinstance(v, O(type_name)->v.fn.name);
+    if (O(type_name)->kind == APY_TYPE_K) {
+        /* AN EXCEPTION TYPE REACHED AS A VALUE. `isinstance(e, ValueError)`
+           is rewritten to the NAME at the call site, but `t = ValueError;
+           isinstance(e, t)` -- and `g.split(ValueError)` -- hand the type
+           object over instead, and an exception is not an `APY_INST_K`. It
+           answered False for every such test, which is a wrong answer rather
+           than a refusal. Compare by name through the chain, as the string
+           form does. */
+        if (O(v)->kind == APY_EXC_K)
+            return apy_isinstance(v, O(type_name)->v.t.name);
+        if (O(v)->kind == APY_INST_K)
+            return apy_from_bool(apy_type_is_sub(O(v)->v.o.cls, type_name));
+        /* A TYPE OBJECT FOR A BUILTIN KIND -- which is what `type(2)` answers
+           now that it is a value rather than a name. Asking by NAME reuses
+           the whole builtin rule below, including bool being an int and
+           everything being an object. */
+        return apy_isinstance(v, O(type_name)->v.t.name);
+    }
     if (O(type_name)->kind != APY_STR_K)
         return apy_fail("TypeError", "isinstance() arg 2 must be a type, "
                                      "a tuple of types, or a union");
@@ -6196,7 +8645,19 @@ APY_API apy_value apy_isinstance(apy_value v, apy_value type_name) {
     /* An INSTANCE never matches a built-in name. Its `apy_kind_name` is its
        class's name, so without this a class called `int` -- or, far more
        likely, `object` two lines down -- would answer True. */
-    if (O(v)->kind == APY_INST_K) return apy_from_bool(strcmp(want, "object") == 0);
+    if (O(v)->kind == APY_INST_K) {
+        /* EXCEPT WHEN ITS CLASS EXTENDS ONE. `class D(dict)` makes every D an
+           instance of `dict`, which is what the base says and what a program
+           testing `isinstance(d, dict)` is asking. */
+        apy_value held = apy_inst_held(v);
+        if (held && strcmp(apy_kind_name(held), want) == 0)
+            return apy_from_bool(1);
+        /* A tuple subclass is a tuple; `bool` under `int` is the same rule
+           one level down, and asking the held value by NAME reuses it. */
+        if (held && strcmp(want, "object") != 0)
+            return apy_isinstance(held, type_name);
+        return apy_from_bool(strcmp(want, "object") == 0);
+    }
     if (strcmp(have, want) == 0) return apy_from_bool(1);
     if (O(v)->kind == APY_BOOL_K && strcmp(want, "int") == 0)
         return apy_from_bool(1);
@@ -6217,13 +8678,205 @@ APY_API apy_value apy_isinstance(apy_value v, apy_value type_name) {
    indexing does, which is why this cannot share `apy_getitem`.
    `has_start`/`has_stop` distinguish `xs[:2]` from `xs[0:2]`, which differ for
    a negative step. */
+/* `s.indices(n)` -- the (start, stop, step) a walk over a sequence of length
+   `n` would really use, with the omitted bounds filled in and the negative
+   ones resolved. A program uses it to implement `__getitem__` over its own
+   storage without reimplementing the clamping rules. */
+APY_API apy_value apy_slice_indices(apy_value sl, apy_value len_v) {
+    int64_t n, start, stop, step = 1;
+    apy_value out;
+    if (O(sl)->kind != APY_SLICE_K)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'indices'%s",
+                         apy_kind_name(sl), "");
+    if (!apy_index_arg(len_v, &n, APY_IDX_SIZE)) return 0;
+    if (O(sl)->v.sl.step && O(sl)->v.sl.step != apy_none()
+            && O(O(sl)->v.sl.step)->kind != APY_NONE_K
+            && !apy_index_arg(O(sl)->v.sl.step, &step, APY_IDX_SIZE))
+        return 0;
+    if (step == 0) return apy_fail("ValueError", "slice step cannot be zero");
+    start = step > 0 ? 0 : n - 1;
+    stop = step > 0 ? n : -1;
+    if (O(sl)->v.sl.start && O(O(sl)->v.sl.start)->kind != APY_NONE_K) {
+        if (!apy_index_arg(O(sl)->v.sl.start, &start, APY_IDX_SIZE)) return 0;
+        if (start < 0) start += n;
+        if (start < 0) start = step > 0 ? 0 : -1;
+        if (start > n) start = step > 0 ? n : n - 1;
+    }
+    if (O(sl)->v.sl.stop && O(O(sl)->v.sl.stop)->kind != APY_NONE_K) {
+        if (!apy_index_arg(O(sl)->v.sl.stop, &stop, APY_IDX_SIZE)) return 0;
+        if (stop < 0) stop += n;
+        if (stop < 0) stop = step > 0 ? 0 : -1;
+        if (stop > n) stop = step > 0 ? n : n - 1;
+    }
+    out = apy_tuple_new(3);
+    apy_seq_push(out, apy_from_int(start));
+    apy_seq_push(out, apy_from_int(stop));
+    apy_seq_push(out, apy_from_int(step));
+    return out;
+}
+
+/* The buffer a view is over, as a char pointer. One place that knows a
+   memoryview's source is always the bytes kind, so the cast is written once
+   rather than at each of the six readers. */
+static const char *apy_mview_buf(apy_value v) {
+    return O(O(v)->v.mv.src)->v.s.p;
+}
+
+/* The offset in the underlying buffer of the view's `i`th byte. THE STRIDE IS
+   APPLIED HERE and nowhere else, so a reversed view indexes, assigns and
+   converts through the same arithmetic. */
+static int64_t apy_mview_at(apy_value v, int64_t i) {
+    return O(v)->v.mv.off + i * O(v)->v.mv.step;
+}
+
+APY_API apy_value apy_memoryview(apy_value src) {
+    apy_obj *o;
+    if (O(src)->kind == APY_MVIEW_K) return src;
+    if (O(src)->kind != APY_BYTES_K)
+        return apy_fail2("TypeError",
+                         "memoryview: a bytes-like object is required, not "
+                         "'%s'%s", apy_kind_name(src), "");
+    o = apy_alloc(APY_MVIEW_K);
+    o->v.mv.src = src;
+    o->v.mv.off = 0;
+    o->v.mv.n = O(src)->v.s.n;
+    o->v.mv.step = 1;
+    return V(o);
+}
+
+/* A view over the same buffer, `n` bytes from `off` at `step`. Slicing a
+   memoryview answers one of these, so `mv[1:3][0]` reaches the right byte
+   without either slice having copied anything. */
+static apy_value apy_mview_slice(apy_value v, int64_t off, int64_t n,
+                                 int64_t step) {
+    apy_obj *o = apy_alloc(APY_MVIEW_K);
+    o->v.mv.src = O(v)->v.mv.src;
+    o->v.mv.off = off;
+    o->v.mv.n = n;
+    o->v.mv.step = step;
+    return V(o);
+}
+
+/* What the view shows right now, as bytes. `bytes(mv)` and every consumer
+   wanting a sequence goes through here -- the same shape as
+   `apy_view_items`, and live for the same reason. */
+APY_API apy_value apy_mview_bytes(apy_value v) {
+    int64_t i, n = O(v)->v.mv.n;
+    const char *buf = apy_mview_buf(v);
+    char *out = (char *)malloc((size_t)(n ? n : 1) + 1);
+    if (!out) { fputs("asmpython: out of memory\n", stderr); exit(1); }
+    for (i = 0; i < n; i++) out[i] = buf[apy_mview_at(v, i)];
+    out[n] = 0;
+    { apy_value r = apy_str_take(out, n);
+      O(r)->kind = APY_BYTES_K;
+      return r; }
+}
+
+APY_API apy_value apy_dict_view(apy_value d, int64_t part) {
+    apy_obj *o;
+    if (O(d)->kind != APY_DICT_K)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'keys'%s",
+                         apy_kind_name(d), "");
+    o = apy_alloc(APY_VIEW_K);
+    o->v.vw.dict = d;
+    o->v.vw.part = (int)part;
+    return V(o);
+}
+
+/* WHAT THE VIEW SHOWS RIGHT NOW, as a list. Every consumer that wants a
+   sequence -- iteration, `sorted`, `list()` -- goes through this, so the
+   contents are read at the moment they are asked for rather than when the
+   view was made. That IS the liveness. */
+APY_API apy_value apy_view_items(apy_value v) {
+    apy_value d, out;
+    int64_t i, n;
+    if (O(v)->kind != APY_VIEW_K) return v;
+    d = O(v)->v.vw.dict;
+    n = O(d)->v.d.n;
+    out = apy_seq_new(APY_LIST_K, n ? n : 1);
+    for (i = 0; i < n; i++) {
+        if (O(v)->v.vw.part == APY_PART_KEYS) {
+            apy_seq_push(out, O(d)->v.d.keys[i]);
+        } else if (O(v)->v.vw.part == APY_PART_VALUES) {
+            apy_seq_push(out, O(d)->v.d.vals[i]);
+        } else {
+            apy_value pair = apy_tuple_new(2);
+            apy_seq_push(pair, O(d)->v.d.keys[i]);
+            apy_seq_push(pair, O(d)->v.d.vals[i]);
+            apy_seq_push(out, pair);
+        }
+    }
+    return out;
+}
+
+/* `list[int]` as a value. `args` is always a tuple, even for one argument,
+   because that is what `get_args` answers and what the repr walks. */
+APY_API apy_value apy_alias_new(apy_value origin, apy_value args) {
+    apy_obj *o = apy_alloc(APY_ALIAS_K);
+    o->v.ga.origin = origin;
+    o->v.ga.args = args;
+    return V(o);
+}
+
+/* `slice(a, b, c)` as an object. Also the builtin of the same name. */
+APY_API apy_value apy_slice_new(apy_value start, apy_value stop,
+                                apy_value step) {
+    apy_obj *o = apy_alloc(APY_SLICE_K);
+    o->v.sl.start = start;
+    o->v.sl.stop = stop;
+    o->v.sl.step = step;
+    return V(o);
+}
+
 APY_API apy_value apy_slice(apy_value seq, int64_t start, int64_t stop,
                             int64_t step, int64_t has_start, int64_t has_stop) {
     int64_t n, i;
     apy_value out;
+    /* A USER OBJECT GETS THE SLICE AS AN OBJECT. `c[1:2]` on an instance is
+       `c.__getitem__(slice(1, 2, None))` -- the class decides what a slice of
+       it means, and it can only do that if it is handed one. Sequences skip
+       this entirely and are sliced below without allocating. */
+    if (O(seq)->kind == APY_INST_K) {
+        apy_value key = apy_slice_new(
+            has_start ? apy_from_int(start) : apy_none(),
+            has_stop ? apy_from_int(stop) : apy_none(),
+            step == 1 ? apy_none() : apy_from_int(step));
+        return apy_getitem(seq, key);
+    }
+    /* A SLICE OF A RANGE IS A RANGE, not a list: `range(0, 10, 2)[1:3]` is
+       `range(2, 6, 2)` in CPython, and materialising it would undo the whole
+       reason a range is three numbers. */
+    if (O(seq)->kind == APY_RANGE_K) {
+        int64_t len = apy_range_len(seq), lo, hi;
+        if (step == 0)
+            return apy_fail("ValueError", "slice step cannot be zero");
+        lo = has_start ? start : (step < 0 ? len - 1 : 0);
+        hi = has_stop ? stop : (step < 0 ? -1 : len);
+        if (has_start && lo < 0) { lo += len; if (lo < 0) lo = step < 0 ? -1 : 0; }
+        if (lo > len) lo = len;
+        if (has_stop && hi < 0) { hi += len; if (hi < 0) hi = step < 0 ? -1 : 0; }
+        if (hi > len) hi = len;
+        return apy_range(apy_range_at(seq, lo),
+                         O(seq)->v.rg.start + hi * O(seq)->v.rg.step,
+                         O(seq)->v.rg.step * step);
+    }
+    /* A MEMORYVIEW GOES THE SAME WAY AS A USER OBJECT, because the answer
+       is another view rather than a fresh sequence -- the copying path below
+       would lose the write-through that is the whole point of one. */
+    if (O(seq)->kind == APY_MVIEW_K) {
+        apy_value key = apy_slice_new(
+            has_start ? apy_from_int(start) : apy_none(),
+            has_stop ? apy_from_int(stop) : apy_none(),
+            step == 1 ? apy_none() : apy_from_int(step));
+        return apy_getitem(seq, key);
+    }
     if (step == 0) return apy_fail("ValueError", "slice step cannot be zero");
-    if (O(seq)->kind == APY_STR_K || O(seq)->kind == APY_BYTES_K)
-        n = O(seq)->v.s.n;
+    /* A str is measured in CHARACTERS, bytes in bytes -- which is the whole
+       reason the two cannot share the copy loop below. */
+    if (O(seq)->kind == APY_STR_K) n = apy_str_chars(seq);
+    else if (O(seq)->kind == APY_BYTES_K) n = O(seq)->v.s.n;
     else if (apy_is_seq(seq)) n = O(seq)->v.q.n;
     else return apy_fail2("TypeError", "'%s' object is not subscriptable%s",
                           apy_kind_name(seq), "");
@@ -6241,7 +8894,32 @@ APY_API apy_value apy_slice(apy_value seq, int64_t start, int64_t stop,
         if (stop > n) stop = n;
     }
 
-    if (O(seq)->kind == APY_STR_K || O(seq)->kind == APY_BYTES_K) {
+    if (O(seq)->kind == APY_STR_K) {
+        /* THE BYTE OFFSET OF EACH CHARACTER, walked once. A slice with a step
+           reaches characters in any order, so the offsets are needed as a
+           table rather than as a running position -- and every character can
+           be up to four bytes, which is what sizes the output. */
+        const unsigned char *p = (const unsigned char *)O(seq)->v.s.p;
+        int64_t bytes = O(seq)->v.s.n, at = 0, k = 0, out_n = 0, used;
+        int64_t *offset = (int64_t *)malloc((size_t)(n + 1) * sizeof(int64_t));
+        char *buf = (char *)malloc((size_t)(n > 0 ? n : 1) * 4 + 1);
+        if (!offset || !buf) { fputs("asmpython: out of memory\n", stderr); exit(1); }
+        while (k < n && at < bytes) {
+            offset[k++] = at;
+            apy_utf8_at(p, bytes, at, &used);
+            at += used;
+        }
+        offset[n] = bytes;
+        for (i = start; step > 0 ? i < stop : i > stop; i += step) {
+            int64_t from = offset[i], to = (i + 1 <= n) ? offset[i + 1] : bytes;
+            int64_t j;
+            for (j = from; j < to; j++) buf[out_n++] = O(seq)->v.s.p[j];
+        }
+        buf[out_n] = 0;
+        free(offset);
+        return apy_str_take(buf, out_n);
+    }
+    if (O(seq)->kind == APY_BYTES_K) {
         char *buf = (char *)malloc((size_t)(n > 0 ? n : 1) + 1);
         int64_t out_n = 0;
         for (i = start; step > 0 ? i < stop : i > stop; i += step)
@@ -6251,6 +8929,9 @@ APY_API apy_value apy_slice(apy_value seq, int64_t start, int64_t stop,
           /* A slice of bytes is bytes. Indexing gives an int and slicing does
              not, which is the one asymmetry a reader will not expect. */
           O(r)->kind = O(seq)->kind;
+          /* And a slice of a bytearray is a bytearray -- a fresh one, whose
+             buffer this just malloc'd, so it is writable as it must be. */
+          O(r)->v.s.mut = O(seq)->v.s.mut;
           return r; }
     }
     out = apy_seq_new(O(seq)->kind, n + 1);
@@ -6267,8 +8948,76 @@ APY_API apy_value apy_slice(apy_value seq, int64_t start, int64_t stop,
    each get ONE symbol, and the dispatch on what the receiver actually is
    happens here. Splitting them into `apy_list_pop` and `apy_set_pop` at the
    ABI would mean the frontend deciding, which it cannot. */
+/* `d.pop(k)` and `d.pop(k, default)`. A MISSING KEY WITH NO DEFAULT IS A
+   KeyError, which is the whole difference from `d.get(k)` -- and the reason
+   the two-argument form exists at all. */
+static apy_value apy_dict_pop(apy_value d, apy_value key, apy_value fallback,
+                              int64_t has_default) {
+    int64_t at = apy_dict_find(d, key);
+    if (at < 0) {
+        apy_value shown;
+        char buf[200];
+        if (has_default) return fallback;
+        /* The KEY'S REPR is the message, as every other missing-key report
+           here does it -- `KeyError: 'a'` and not `KeyError: a`. */
+        shown = apy_repr(key);
+        snprintf(buf, sizeof buf, "%.*s",
+                 (int)O(shown)->v.s.n, O(shown)->v.s.p);
+        return apy_fail("KeyError", buf);
+    }
+    {
+        apy_value taken = O(d)->v.d.vals[at];
+        int64_t k, n = O(d)->v.d.n;
+        for (k = at; k + 1 < n; k++) {
+            O(d)->v.d.keys[k] = O(d)->v.d.keys[k + 1];
+            O(d)->v.d.vals[k] = O(d)->v.d.vals[k + 1];
+        }
+        O(d)->v.d.n = n - 1;
+        return taken;
+    }
+}
+
+/* `d.pop(k, default)`. Its own entry point because the method table is keyed
+   by ARGUMENT COUNT, and at two arguments `xs.pop(i)` cannot be meant. */
+APY_API apy_value apy_pop_or(apy_value d, apy_value key, apy_value fallback) {
+    if (O(d)->kind != APY_DICT_K)
+        return apy_fail2("TypeError",
+                         "pop() takes at most 1 argument for '%s'%s",
+                         apy_kind_name(d), "");
+    return apy_dict_pop(d, key, fallback, 1);
+}
+
+/* `d.popitem()` -- the LAST pair, and removed. Last rather than arbitrary:
+   CPython has taken it from the end since dicts became ordered, and a program
+   that pops a dict empty in a loop sees the reverse of insertion order. */
+APY_API apy_value apy_dict_popitem(apy_value d) {
+    apy_value out;
+    int64_t n;
+    if (O(d)->kind != APY_DICT_K)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'popitem'%s",
+                         apy_kind_name(d), "");
+    n = O(d)->v.d.n;
+    /* QUOTED, like `apy_set_pop`'s: `str(KeyError(x))` is the REPR of the
+       argument, so a KeyError message carries its own quotes here rather than
+       being re-quoted on the way out. */
+    if (n == 0)
+        return apy_fail("KeyError", "'popitem(): dictionary is empty'");
+    out = apy_tuple_new(2);
+    apy_seq_push(out, O(d)->v.d.keys[n - 1]);
+    apy_seq_push(out, O(d)->v.d.vals[n - 1]);
+    O(d)->v.d.n = n - 1;
+    return out;
+}
+
 APY_API apy_value apy_list_pop(apy_value seq, apy_value index, int64_t given) {
     int64_t i, n, k;
+    /* A DICT REACHES HERE TOO -- one method name, three receivers, and the
+       frontend cannot know which it has until run time. `d.pop(k)` takes a
+       KEY where `xs.pop(i)` takes an index, so the dict case has to be split
+       off before anything treats the argument as a position. */
+    if (O(seq)->kind == APY_DICT_K)
+        return apy_dict_pop(seq, index, apy_none(), 0);
     if (apy_is_set(seq) && !given) return apy_set_pop(seq);
     if (O(seq)->kind != APY_LIST_K)
         return apy_fail2("AttributeError", "'%s' object has no attribute 'pop'%s",
@@ -6302,12 +9051,27 @@ static int apy_has_index(const char *name, apy_value v) {
 }
 
 APY_API apy_value apy_index_of(apy_value seq, apy_value item) {
+    /* ON A RANGE THIS IS ARITHMETIC, not a walk: the position of a value in
+       `range(0, 10**12, 3)` is one division. */
+    if (O(seq)->kind == APY_RANGE_K) {
+        int64_t want, at;
+        if (!apy_is_int_like(item))
+            return apy_fail("ValueError", "value is not in range");
+        if (!apy_index_arg(item, &want, APY_IDX_SIZE)) return 0;
+        at = apy_range_find(seq, want);
+        if (at < 0) return apy_fail("ValueError", "value is not in range");
+        return apy_from_int(at);
+    }
     int64_t i, n;
     /* A str receiver means SUBSTRING search, not element search. Falling
        through to the element loop below would answer correctly for a
        one-character needle and silently wrongly for every other one, because
        `apy_key_at` on a str yields single characters. */
-    if (O(seq)->kind == APY_STR_K) return apy_str_index_of(seq, item);
+    /* BYTES TOO: `b"abc".index(b"b")` is a SUBSTRING search, and the element
+       loop below would answer for a one-byte needle and silently wrongly for
+       any longer one. */
+    if (O(seq)->kind == APY_STR_K || O(seq)->kind == APY_BYTES_K)
+        return apy_str_index_of(seq, item);
     if (!apy_has_index("index", seq)) return 0;
     n = O(seq)->v.q.n;
     for (i = 0; i < n; i++)
@@ -6321,9 +9085,19 @@ APY_API apy_value apy_index_of(apy_value seq, apy_value item) {
 }
 
 APY_API apy_value apy_count_of(apy_value seq, apy_value item) {
+    /* A RANGE HOLDS EACH VALUE AT MOST ONCE, so the count is the membership
+       test -- and arithmetic rather than a walk. */
+    if (O(seq)->kind == APY_RANGE_K) {
+        int64_t want;
+        if (!apy_is_int_like(item)) return apy_from_int(0);
+        if (!apy_index_arg(item, &want, APY_IDX_SIZE)) return 0;
+        return apy_from_int(apy_range_find(seq, want) >= 0 ? 1 : 0);
+    }
     int64_t i, n, hits = 0;
-    /* Substring counting for a str, for the same reason `index` splits. */
-    if (O(seq)->kind == APY_STR_K) return apy_str_count_in(seq, item, 0, 0);
+    /* Substring counting for a str -- and for BYTES, for the same reason
+       `index` splits. */
+    if (O(seq)->kind == APY_STR_K || O(seq)->kind == APY_BYTES_K)
+        return apy_str_count_in(seq, item, 0, 0);
     if (!apy_has_index("count", seq)) return 0;
     n = O(seq)->v.q.n;
     for (i = 0; i < n; i++)
@@ -6359,6 +9133,14 @@ APY_API apy_value apy_list_remove(apy_value seq, apy_value item) {
    and these are snapshots, which differs if the dict is mutated while one is
    held; `list(d.keys())` is how the suite uses them and that is identical. */
 APY_API apy_value apy_dict_parts(apy_value d, int64_t which) {
+    /* A VIEW, not a snapshot -- `ks = d.keys()` then `d['b'] = 2` and
+       `len(ks)` is 2. What it shows is read when it is asked, which is the
+       whole of the liveness; see `apy_view_items`. */
+    if (O(d)->kind == APY_DICT_K) return apy_dict_view(d, which);
+    return apy_dict_parts_snapshot(d, which);
+}
+
+static apy_value apy_dict_parts_snapshot(apy_value d, int64_t which) {
     int64_t i;
     apy_value out;
     if (O(d)->kind != APY_DICT_K)
@@ -6628,28 +9410,305 @@ APY_API apy_value apy_setdefault(apy_value d, apy_value key,
    UTF-8 and wrong for every other codec, which is why neither takes an
    encoding argument -- offering one it would ignore is worse than not having
    it. */
-APY_API apy_value apy_str_encode(apy_value s, apy_value encoding) {
-    (void)encoding;
+/* --- codecs ------------------------------------------------------------- */
+/* Text is held as UTF-8, so `encode("utf-8")` is a re-tag and every other
+   encoding is a real conversion. Both directions go through CODE POINTS: the
+   internal form is decoded to them and the target built from them, which is
+   one shared middle rather than a matrix of pairs. */
+
+/* Which codec a name means. Canonicalised the way CPython does -- case and
+   the `-`/`_` distinction do not matter -- so `UTF_8` and `utf-8` are one. */
+enum { APY_ENC_UTF8 = 0, APY_ENC_ASCII, APY_ENC_LATIN1,
+       APY_ENC_UTF16, APY_ENC_UTF16LE, APY_ENC_UTF16BE,
+       APY_ENC_UTF32, APY_ENC_UTF32LE, APY_ENC_UTF32BE, APY_ENC_UNKNOWN };
+
+static int apy_codec_of(apy_value name) {
+    char buf[32];
+    int64_t i, n;
+    const char *p;
+    if (!name || O(name)->kind != APY_STR_K) return APY_ENC_UTF8;
+    p = O(name)->v.s.p;
+    n = O(name)->v.s.n;
+    if (n >= (int64_t)sizeof buf) return APY_ENC_UNKNOWN;
+    for (i = 0; i < n; i++) {
+        char c = p[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        buf[i] = (c == '_') ? '-' : c;
+    }
+    buf[n] = 0;
+    if (!strcmp(buf, "utf-8") || !strcmp(buf, "utf8")
+        || !strcmp(buf, "u8")) return APY_ENC_UTF8;
+    if (!strcmp(buf, "ascii") || !strcmp(buf, "us-ascii")
+        || !strcmp(buf, "646")) return APY_ENC_ASCII;
+    if (!strcmp(buf, "latin-1") || !strcmp(buf, "latin1")
+        || !strcmp(buf, "iso-8859-1") || !strcmp(buf, "l1")
+        || !strcmp(buf, "8859")) return APY_ENC_LATIN1;
+    if (!strcmp(buf, "utf-16") || !strcmp(buf, "utf16")) return APY_ENC_UTF16;
+    if (!strcmp(buf, "utf-16-le") || !strcmp(buf, "utf-16le"))
+        return APY_ENC_UTF16LE;
+    if (!strcmp(buf, "utf-16-be") || !strcmp(buf, "utf-16be"))
+        return APY_ENC_UTF16BE;
+    if (!strcmp(buf, "utf-32") || !strcmp(buf, "utf32")) return APY_ENC_UTF32;
+    if (!strcmp(buf, "utf-32-le") || !strcmp(buf, "utf-32le"))
+        return APY_ENC_UTF32LE;
+    if (!strcmp(buf, "utf-32-be") || !strcmp(buf, "utf-32be"))
+        return APY_ENC_UTF32BE;
+    return APY_ENC_UNKNOWN;
+}
+
+/* The error handler, as a small code. Only the three that can be honoured
+   without a callback registry. */
+enum { APY_ERR_STRICT = 0, APY_ERR_REPLACE, APY_ERR_IGNORE };
+
+static int apy_errors_of(apy_value name) {
+    if (!name || O(name)->kind != APY_STR_K) return APY_ERR_STRICT;
+    if (!strcmp(APY_CSTR(name), "replace")) return APY_ERR_REPLACE;
+    if (!strcmp(APY_CSTR(name), "ignore")) return APY_ERR_IGNORE;
+    return APY_ERR_STRICT;
+}
+
+/* One code point out of UTF-8. Answers how many bytes it consumed, or 0 for
+   a malformed sequence -- which is the whole of the validation the strict
+   handler needs. */
+static int64_t apy_utf8_step(const unsigned char *p, int64_t n, int64_t i,
+                             uint32_t *out) {
+    unsigned char c = p[i];
+    if (c < 0x80) { *out = c; return 1; }
+    if ((c & 0xE0) == 0xC0 && i + 1 < n && (p[i+1] & 0xC0) == 0x80) {
+        *out = (uint32_t)((c & 0x1F) << 6) | (uint32_t)(p[i+1] & 0x3F);
+        return *out >= 0x80 ? 2 : 0;      /* an overlong form is malformed */
+    }
+    if ((c & 0xF0) == 0xE0 && i + 2 < n && (p[i+1] & 0xC0) == 0x80
+        && (p[i+2] & 0xC0) == 0x80) {
+        *out = (uint32_t)((c & 0x0F) << 12)
+             | (uint32_t)((p[i+1] & 0x3F) << 6) | (uint32_t)(p[i+2] & 0x3F);
+        return *out >= 0x800 ? 3 : 0;
+    }
+    if ((c & 0xF8) == 0xF0 && i + 3 < n && (p[i+1] & 0xC0) == 0x80
+        && (p[i+2] & 0xC0) == 0x80 && (p[i+3] & 0xC0) == 0x80) {
+        *out = (uint32_t)((c & 0x07) << 18)
+             | (uint32_t)((p[i+1] & 0x3F) << 12)
+             | (uint32_t)((p[i+2] & 0x3F) << 6) | (uint32_t)(p[i+3] & 0x3F);
+        return (*out >= 0x10000 && *out <= 0x10FFFF) ? 4 : 0;
+    }
+    return 0;
+}
+
+/* One code point INTO UTF-8. Answers how many bytes it wrote. */
+static int apy_utf8_put(char *out, uint32_t cp) {
+    if (cp < 0x80) { out[0] = (char)cp; return 1; }
+    if (cp < 0x800) {
+        out[0] = (char)(0xC0 | (cp >> 6));
+        out[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        out[0] = (char)(0xE0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    out[0] = (char)(0xF0 | (cp >> 18));
+    out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+APY_API apy_value apy_str_encode(apy_value s, apy_value encoding,
+                                 apy_value errors) {
+    int codec, handler;
+    const unsigned char *p;
+    int64_t n, i, at = 0;
+    char *buf;
     apy_value out;
     if (O(s)->kind != APY_STR_K)
         return apy_fail2("AttributeError",
                          "'%s' object has no attribute 'encode'%s",
                          apy_kind_name(s), "");
-    out = apy_str_copy(O(s)->v.s.p, O(s)->v.s.n);
-    O(out)->kind = APY_BYTES_K;
+    codec = apy_codec_of(encoding);
+    handler = apy_errors_of(errors);
+    if (codec == APY_ENC_UNKNOWN)
+        return apy_fail2("LookupError", "unknown encoding: %s%s",
+                         APY_CSTR(encoding), "");
+    if (codec == APY_ENC_UTF8) {
+        /* ALREADY THE INTERNAL FORM: a copy, re-tagged. */
+        out = apy_str_copy(O(s)->v.s.p, O(s)->v.s.n);
+        O(out)->kind = APY_BYTES_K;
+        return out;
+    }
+    p = (const unsigned char *)O(s)->v.s.p;
+    n = O(s)->v.s.n;
+    /* Four bytes per code point covers every target, and a code point is at
+       least one byte of the source -- so `4 * n` can never be short. */
+    buf = (char *)malloc((size_t)(n * 4 + 8));
+    if (!buf) { fputs("asmpython: out of memory\n", stderr); exit(1); }
+    /* THE BOM IS PART OF THE ENCODING for the unsuffixed spellings, which is
+       what makes `len("a".encode("utf-16"))` 4 rather than 2. */
+    if (codec == APY_ENC_UTF16) {
+        buf[at++] = (char)0xFF; buf[at++] = (char)0xFE;
+    } else if (codec == APY_ENC_UTF32) {
+        buf[at++] = (char)0xFF; buf[at++] = (char)0xFE;
+        buf[at++] = 0; buf[at++] = 0;
+    }
+    for (i = 0; i < n; ) {
+        uint32_t cp;
+        int64_t used = apy_utf8_step(p, n, i, &cp);
+        if (!used) { cp = 0xFFFD; used = 1; }
+        i += used;
+        if (codec == APY_ENC_ASCII || codec == APY_ENC_LATIN1) {
+            uint32_t limit = codec == APY_ENC_ASCII ? 0x80u : 0x100u;
+            if (cp >= limit) {
+                if (handler == APY_ERR_IGNORE) continue;
+                if (handler == APY_ERR_REPLACE) { buf[at++] = '?'; continue; }
+                free(buf);
+                return apy_fail2("UnicodeEncodeError",
+                                 "'%s' codec can't encode character%s",
+                                 codec == APY_ENC_ASCII ? "ascii" : "latin-1",
+                                 "");
+            }
+            buf[at++] = (char)cp;
+            continue;
+        }
+        if (codec == APY_ENC_UTF32 || codec == APY_ENC_UTF32LE
+            || codec == APY_ENC_UTF32BE) {
+            int be = codec == APY_ENC_UTF32BE;
+            int k;
+            for (k = 0; k < 4; k++) {
+                int shift = be ? (24 - 8 * k) : (8 * k);
+                buf[at++] = (char)((cp >> shift) & 0xFF);
+            }
+            continue;
+        }
+        {   /* UTF-16, with a surrogate pair above the BMP. */
+            int be = codec == APY_ENC_UTF16BE;
+            uint32_t units[2];
+            int count = 1, k;
+            if (cp >= 0x10000) {
+                uint32_t v = cp - 0x10000;
+                units[0] = 0xD800 + (v >> 10);
+                units[1] = 0xDC00 + (v & 0x3FF);
+                count = 2;
+            } else units[0] = cp;
+            for (k = 0; k < count; k++) {
+                if (be) {
+                    buf[at++] = (char)((units[k] >> 8) & 0xFF);
+                    buf[at++] = (char)(units[k] & 0xFF);
+                } else {
+                    buf[at++] = (char)(units[k] & 0xFF);
+                    buf[at++] = (char)((units[k] >> 8) & 0xFF);
+                }
+            }
+        }
+    }
+    out = apy_bytes_copy(buf, at);
+    free(buf);
     return out;
 }
 
-APY_API apy_value apy_bytes_decode(apy_value b, apy_value encoding) {
-    (void)encoding;
-    apy_value out;
+APY_API apy_value apy_bytes_decode(apy_value b, apy_value encoding,
+                                   apy_value errors) {
+    int codec, handler;
+    const unsigned char *p;
+    int64_t n, i, at = 0;
+    char *buf;
+    if (O(b)->kind == APY_MVIEW_K) b = apy_mview_bytes(b);
     if (O(b)->kind != APY_BYTES_K)
         return apy_fail2("AttributeError",
                          "'%s' object has no attribute 'decode'%s",
                          apy_kind_name(b), "");
-    out = apy_str_copy(O(b)->v.s.p, O(b)->v.s.n);
-    O(out)->kind = APY_STR_K;
-    return out;
+    codec = apy_codec_of(encoding);
+    handler = apy_errors_of(errors);
+    if (codec == APY_ENC_UNKNOWN)
+        return apy_fail2("LookupError", "unknown encoding: %s%s",
+                         APY_CSTR(encoding), "");
+    p = (const unsigned char *)O(b)->v.s.p;
+    n = O(b)->v.s.n;
+    /* Three bytes of UTF-8 per input byte is the worst case for every codec
+       here -- one latin-1 byte becomes at most two, one UTF-16 unit at most
+       three -- so this cannot be short. */
+    buf = (char *)malloc((size_t)(n * 3 + 8));
+    if (!buf) { fputs("asmpython: out of memory\n", stderr); exit(1); }
+    if (codec == APY_ENC_UTF8) {
+        for (i = 0; i < n; ) {
+            uint32_t cp;
+            int64_t used = apy_utf8_step(p, n, i, &cp);
+            if (!used) {
+                if (handler == APY_ERR_IGNORE) { i++; continue; }
+                if (handler == APY_ERR_REPLACE) {
+                    at += apy_utf8_put(buf + at, 0xFFFD);
+                    i++;
+                    continue;
+                }
+                free(buf);
+                return apy_fail2("UnicodeDecodeError",
+                                 "'utf-8' codec can't decode byte%s%s",
+                                 "", "");
+            }
+            memcpy(buf + at, p + i, (size_t)used);
+            at += used;
+            i += used;
+        }
+        return apy_str_take(buf, at);
+    }
+    if (codec == APY_ENC_LATIN1 || codec == APY_ENC_ASCII) {
+        for (i = 0; i < n; i++) {
+            if (codec == APY_ENC_ASCII && p[i] >= 0x80) {
+                if (handler == APY_ERR_IGNORE) continue;
+                if (handler == APY_ERR_REPLACE) {
+                    at += apy_utf8_put(buf + at, 0xFFFD);
+                    continue;
+                }
+                free(buf);
+                return apy_fail2("UnicodeDecodeError",
+                                 "'ascii' codec can't decode byte%s%s",
+                                 "", "");
+            }
+            /* EVERY BYTE IS A CODE POINT in latin-1, which is what makes it
+               the round-trip encoding for arbitrary octets. */
+            at += apy_utf8_put(buf + at, p[i]);
+        }
+        return apy_str_take(buf, at);
+    }
+    {   /* UTF-16 and UTF-32, with the BOM consumed where one is allowed. */
+        int wide = (codec == APY_ENC_UTF32 || codec == APY_ENC_UTF32LE
+                    || codec == APY_ENC_UTF32BE) ? 4 : 2;
+        int be = (codec == APY_ENC_UTF16BE || codec == APY_ENC_UTF32BE);
+        i = 0;
+        if (codec == APY_ENC_UTF16 && n >= 2) {
+            if (p[0] == 0xFF && p[1] == 0xFE) { be = 0; i = 2; }
+            else if (p[0] == 0xFE && p[1] == 0xFF) { be = 1; i = 2; }
+        } else if (codec == APY_ENC_UTF32 && n >= 4) {
+            if (p[0] == 0xFF && p[1] == 0xFE && !p[2] && !p[3]) {
+                be = 0; i = 4;
+            } else if (!p[0] && !p[1] && p[2] == 0xFE && p[3] == 0xFF) {
+                be = 1; i = 4;
+            }
+        }
+        for (; i + wide <= n; i += wide) {
+            uint32_t cp = 0;
+            int k;
+            for (k = 0; k < wide; k++) {
+                int shift = be ? (8 * (wide - 1 - k)) : (8 * k);
+                cp |= (uint32_t)p[i + k] << shift;
+            }
+            /* A SURROGATE PAIR IS ONE CHARACTER. Only UTF-16 has them, and a
+               lone half is as malformed as a truncated UTF-8 sequence. */
+            if (wide == 2 && cp >= 0xD800 && cp <= 0xDBFF && i + 4 <= n) {
+                uint32_t low = 0;
+                for (k = 0; k < 2; k++) {
+                    int shift = be ? (8 * (1 - k)) : (8 * k);
+                    low |= (uint32_t)p[i + 2 + k] << shift;
+                }
+                if (low >= 0xDC00 && low <= 0xDFFF) {
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                    i += 2;
+                }
+            }
+            at += apy_utf8_put(buf + at, cp);
+        }
+        return apy_str_take(buf, at);
+    }
 }
 
 /* `b.hex()` and `b.hex(sep)` -- the octets as lowercase hex pairs. The
@@ -6856,14 +9915,17 @@ APY_API apy_value apy_conjugate(apy_value v) {
 
 typedef struct {
     char fill, align, sign, type, group;
-    int alt, zero, width, precision, has_precision;
+    /* PEP 682's `z`: a negative zero formats as a POSITIVE one. It sits
+       between the sign and the `#`, and it is about the VALUE rather than
+       about the padding, which is why it is a flag of its own. */
+    int alt, zero, width, precision, has_precision, coerce_zero;
 } apy_spec;
 
 static int apy_spec_parse(const char *p, int64_t n, apy_spec *out) {
     int64_t i = 0;
     out->fill = ' '; out->align = 0; out->sign = 0; out->type = 0;
     out->group = 0; out->alt = 0; out->zero = 0; out->width = 0;
-    out->precision = 0; out->has_precision = 0;
+    out->precision = 0; out->has_precision = 0; out->coerce_zero = 0;
     /* FILL is only a fill when an align follows it, which is why position 1 is
        examined before position 0: in `{:<5}` the `<` is the align and in
        `{:*<5}` the `*` is the fill. */
@@ -6874,6 +9936,8 @@ static int apy_spec_parse(const char *p, int64_t n, apy_spec *out) {
         out->align = p[0]; i = 1;
     }
     if (i < n && (p[i] == '+' || p[i] == '-' || p[i] == ' ')) out->sign = p[i++];
+    /* PEP 682, between the sign and the `#`. */
+    if (i < n && p[i] == 'z') { out->coerce_zero = 1; i++; }
     if (i < n && p[i] == '#') { out->alt = 1; i++; }
     if (i < n && p[i] == '0') {
         /* A leading zero means `0=` -- padding between the sign and the
@@ -7019,8 +10083,13 @@ APY_API apy_value apy_format(apy_value v, apy_value spec) {
         }
         iv = O(v)->v.i;
         if (sp.type == 'c') {
-            body[0] = (char)iv;
-            return apy_spec_pad(body, 1, &sp, 0);
+            /* THE CHARACTER, encoded -- `format(255, 'c')` is `chr(255)`, and
+               a str is stored as UTF-8, so that is two bytes and not one.
+               Writing the low byte raw produced a string that compared
+               unequal to `chr(255)` and was not valid UTF-8 either. */
+            apy_value ch = apy_chr(v);
+            if (!ch) return 0;
+            return apy_spec_pad(APY_CSTR(ch), O(ch)->v.s.n, &sp, 0);
         }
         if (sp.type == 'b') base = 2;
         else if (sp.type == 'o') base = 8;
@@ -7055,9 +10124,27 @@ APY_API apy_value apy_format(apy_value v, apy_value spec) {
         if (!apy_is_num(v)) return apy_bad_code(type, v);
         d = apy_as_float(v);
         if (type == '%') { d *= 100.0; type = 'f'; }
-        if (!type) {
-            /* No type at all: `str(v)`, the shortest round-tripping form, and
-               NOT `%g` -- `f"{0.1:>8}"` must still say `0.1`. */
+        /* PEP 682: `z` turns a negative zero into a positive one -- and it is
+           about the ROUNDED value, so `format(-0.001, 'z.1f')` is `0.0` too.
+           Applied after the scaling above and before the conversion below,
+           which is the only point at which both are true. */
+        if (sp.coerce_zero) {
+            double scale = 1.0;
+            int k;
+            for (k = 0; k < prec && k < 17; k++) scale *= 10.0;
+            /* `signbit`, not `d < 0.0`: NEGATIVE ZERO is not less than
+               zero, and it is the value the flag exists for. */
+            if (signbit(d) && fabs(d) * scale < 0.5) d = 0.0;
+        }
+        if (!type && sp.has_precision) {
+            /* A PRECISION WITH NO TYPE is `g`: `format(3.14159, '.3')` is
+               '3.14', three SIGNIFICANT digits, not three decimal places and
+               not the unrounded number. Without this the precision was
+               dropped and the whole value printed. */
+            snprintf(tmp, sizeof tmp, "%.*g", prec ? prec : 1, d);
+        } else if (!type) {
+            /* No type and no precision: `str(v)`, the shortest round-tripping
+               form, and NOT `%g` -- `f"{0.1:>8}"` must still say `0.1`. */
             apy_value s = apy_str(v);
             if (!s) return 0;
             if (O(s)->v.s.n >= (int64_t)sizeof tmp)
@@ -7163,9 +10250,16 @@ static apy_value apy_format_at(apy_value fmt, apy_value args, apy_value kw,
             {
                 int64_t fend = colon >= 0 ? colon : (bang >= 0 ? bang : i);
                 int64_t flen = fend - start;
+                int64_t blen;
                 if (flen >= (int64_t)sizeof field) flen = sizeof field - 1;
                 memcpy(field, p + start, (size_t)flen);
                 field[flen] = 0;
+                /* `{x[0]}` and `{a.real}`: the NAME stops at the first `.` or
+                   `[`, and what follows is a chain of accessors applied to
+                   whatever the name resolved to. Treating the whole thing as
+                   one keyword looked for an argument called `x[0]`. */
+                for (blen = 0; blen < flen; blen++)
+                    if (field[blen] == '.' || field[blen] == '[') break;
                 if (!flen) {
                     if (*explicit_used) {
                         free(out);
@@ -7203,13 +10297,61 @@ static apy_value apy_format_at(apy_value fmt, apy_value args, apy_value kw,
                     }
                     value = O(args)->v.q.items[at];
                 } else {
-                    apy_value key = apy_lit(field);
-                    int64_t at = apy_dict_find(kw, key);
+                    char base[64];
+                    apy_value key;
+                    int64_t at;
+                    int64_t n2 = blen < (int64_t)sizeof base - 1
+                        ? blen : (int64_t)sizeof base - 1;
+                    memcpy(base, field, (size_t)n2);
+                    base[n2] = 0;
+                    key = apy_lit(base);
+                    at = apy_dict_find(kw, key);
                     if (at < 0) {
                         free(out);
-                        return apy_fail2("KeyError", "'%s'%s", field, "");
+                        return apy_fail2("KeyError", "'%s'%s", base, "");
                     }
                     value = O(kw)->v.d.vals[at];
+                }
+                /* THE ACCESSORS, left to right. `{a.b[0].c}` is ordinary
+                   Python written inside a format field, and each step is the
+                   operation it looks like. */
+                {
+                    int64_t k = blen;
+                    while (k < flen && value) {
+                        char part[64];
+                        int64_t j = 0;
+                        if (field[k] == '.') {
+                            k++;
+                            while (k < flen && field[k] != '.'
+                                   && field[k] != '['
+                                   && j < (int64_t)sizeof part - 1)
+                                part[j++] = field[k++];
+                            part[j] = 0;
+                            value = apy_getattr(value, apy_lit(part));
+                        } else if (field[k] == '[') {
+                            int all_digits = 1;
+                            k++;
+                            while (k < flen && field[k] != ']'
+                                   && j < (int64_t)sizeof part - 1) {
+                                if (field[k] < '0' || field[k] > '9')
+                                    all_digits = 0;
+                                part[j++] = field[k++];
+                            }
+                            part[j] = 0;
+                            if (k < flen && field[k] == ']') k++;
+                            /* AN ALL-DIGIT KEY IS AN INDEX, as CPython reads
+                               it -- `{x[0]}` indexes a list, and a mapping
+                               with a numeric string key needs the quotes a
+                               format field cannot carry. */
+                            value = apy_getitem(
+                                value, j && all_digits
+                                    ? apy_from_int(strtoll(part, 0, 10))
+                                    : apy_lit(part));
+                        } else {
+                            break;
+                        }
+                    }
+                    if (!value) { free(out); return 0; }
                 }
             }
             if (bang >= 0) conv = p[bang + 1];
@@ -7243,6 +10385,212 @@ static apy_value apy_format_at(apy_value fmt, apy_value args, apy_value kw,
     }
     out[out_n] = 0;
     return apy_str_take(out, out_n);
+}
+
+/* `"%d %s" % (1, "a")` -- printf-style formatting.
+   TRANSLATED INTO THE MINI-LANGUAGE, not reimplemented. `%05.2f` and
+   `{:05.2f}` mean the same thing down to the zero padding and the rounding,
+   so the padding, the precision and every presentation type are read from
+   `apy_format` rather than written a second time here. What this function
+   owns is the printf SPELLING: which flags mean what, where the arguments
+   come from, and the two conversions (`%r`, `%s`) the mini-language has no
+   type character for.
+
+   WHAT IT DOES NOT DO: the mapping form, `"%(name)s" % {...}`. A dict on the
+   right is currently one argument like any other, which is right for `%s` and
+   wrong for the mapping form -- so that spelling is refused below rather than
+   quietly formatting the dict. */
+static apy_value apy_str_percent(apy_value fmt, apy_value right) {
+    const char *p = APY_CSTR(fmt);
+    int64_t n = O(fmt)->v.s.n, i = 0, out_cap = n + 64, out_n = 0, at = 0;
+    int64_t supplied;
+    char *out;
+    /* A TUPLE ON THE RIGHT IS THE ARGUMENT LIST; anything else is one
+       argument. That is the whole of the rule, and it is why `"%s" % (1, 2)`
+       is an error while `"%s" % [1, 2]` prints the list. */
+    int many = O(right)->kind == APY_TUPLE_K;
+    /* A MAPPING ON THE RIGHT supplies NAMED fields only -- `"%(x)s" % {...}`
+       -- and nothing is consumed positionally, so an unused entry is not an
+       error. `"ab" % {"ab": 1}` is just `"ab"`. */
+    int mapping = O(right)->kind == APY_DICT_K;
+    supplied = many ? O(right)->v.q.n : 1;
+
+    out = (char *)malloc((size_t)out_cap + 1);
+    if (!out) { fputs("asmpython: out of memory\n", stderr); exit(1); }
+
+    while (i < n) {
+        char spec[64];
+        int64_t sn = 0;
+        apy_value value, shown, named = 0;
+        char conv;
+        int minus = 0, zero = 0;
+
+        if (p[i] != '%') {
+            if (out_n + 1 >= out_cap) {
+                out_cap = out_cap * 2 + 8;
+                out = (char *)realloc(out, (size_t)out_cap + 1);
+            }
+            out[out_n++] = p[i++];
+            continue;
+        }
+        i++;
+        if (i < n && p[i] == '%') {      /* `%%` is a literal percent */
+            if (out_n + 1 >= out_cap) {
+                out_cap = out_cap * 2 + 8;
+                out = (char *)realloc(out, (size_t)out_cap + 1);
+            }
+            out[out_n++] = '%'; i++; continue;
+        }
+        if (i < n && p[i] == '(') {
+            /* `%(name)s` -- the MAPPING FORM. The key runs to the matching
+               `)`; what follows is an ordinary spec. */
+            char key[64];
+            int64_t j = 0;
+            apy_value found;
+            if (!mapping) {
+                free(out);
+                return apy_fail("TypeError", "format requires a mapping");
+            }
+            i++;
+            while (i < n && p[i] != ')' && j < (int64_t)sizeof key - 1)
+                key[j++] = p[i++];
+            key[j] = 0;
+            if (i < n && p[i] == ')') i++;
+            found = apy_dict_get_or(right, apy_lit(key), 0);
+            if (!found) {
+                free(out);
+                return apy_fail2("KeyError", "'%s'%s", key, "");
+            }
+            named = found;
+        }
+        /* THE FLAGS ARE COLLECTED, NOT EMITTED, because two of them depend
+           on the conversion that has not been read yet -- and because the
+           mini-language fixes an order (align, sign, `#`, `0`, width) that
+           printf does not. Emitting each flag where it was read produced
+           `+<` for `%-+d`, which is not a spec at all. */
+        int plus = 0, space = 0, hash = 0, is_text;
+        int64_t wid_at, wid_n = 0, prec_at, prec_n = 0;
+        while (i < n && (p[i] == '-' || p[i] == '+' || p[i] == ' '
+                         || p[i] == '0' || p[i] == '#')) {
+            if (p[i] == '-') minus = 1;
+            else if (p[i] == '0') zero = 1;
+            else if (p[i] == '+') plus = 1;
+            else if (p[i] == ' ') space = 1;
+            else hash = 1;
+            i++;
+        }
+        wid_at = i;
+        while (i < n && p[i] >= '0' && p[i] <= '9') { i++; wid_n++; }
+        prec_at = i;
+        if (i < n && p[i] == '.') {
+            i++; prec_n++;
+            while (i < n && p[i] >= '0' && p[i] <= '9') { i++; prec_n++; }
+        }
+        if (i >= n) {
+            free(out);
+            return apy_fail("ValueError", "incomplete format");
+        }
+        conv = p[i++];
+        is_text = conv == 's' || conv == 'r' || conv == 'a' || conv == 'c'
+            || conv == 'b';
+        /* PRINTF RIGHT-ALIGNS A STRING; the mini-language left-aligns one.
+           The only difference between the two languages that is not a
+           spelling, and `"%5s" % "ab"` is where it shows. */
+        if (minus) spec[sn++] = '<';
+        else if (is_text) spec[sn++] = '>';
+        if (plus) spec[sn++] = '+';
+        else if (space) spec[sn++] = ' ';
+        if (hash) spec[sn++] = '#';
+        /* A zero fill on TEXT is not a thing printf does either. */
+        if (zero && !minus && !is_text) spec[sn++] = '0';
+        { int64_t k;
+          for (k = 0; k < wid_n; k++) spec[sn++] = p[wid_at + k];
+          for (k = 0; k < prec_n; k++) spec[sn++] = p[prec_at + k]; }
+        if (!named) {
+            if (at >= supplied) {
+                free(out);
+                return apy_fail("TypeError",
+                                "not enough arguments for format string");
+            }
+            value = many ? O(right)->v.q.items[at] : right;
+            at++;
+        } else {
+            value = named;
+        }
+
+        /* `%s` and `%r` have no mini-language type character: the value
+           becomes text FIRST and the spec then pads that text. */
+        if (conv == 's' || conv == 'b') {
+            if (O(fmt)->kind == APY_BYTES_K
+                && O(value)->kind == APY_BYTES_K) {
+                /* `b"%s" % b"ab"` inserts THE BYTES, not their repr -- and
+                   `%b` is PEP 461's spelling of the same thing. Re-tagged as
+                   a str so the padding below stays one implementation: the
+                   two kinds share a layout, and the result is stamped back
+                   to bytes at the end. */
+                value = apy_from_bytes(
+                    (apy_value)(uintptr_t)O(value)->v.s.p, O(value)->v.s.n);
+            } else {
+                value = apy_str(value);
+            }
+        }
+        else if (conv == 'r') { value = apy_repr(value); }
+        else if (conv == 'a') { value = apy_ascii(value); }
+        else if (conv == 'c') {
+            value = apy_is_int_like(value) ? apy_chr(value) : apy_str(value);
+        } else if (conv == 'i' || conv == 'u') {
+            /* Both are spelled `d` in the mini-language, and `%u` has meant
+               `%d` since Python 2. */
+            spec[sn++] = 'd';
+        } else {
+            spec[sn++] = conv;
+        }
+        if (!value) { free(out); return 0; }
+        spec[sn] = 0;
+        shown = apy_format(value, apy_str_copy(spec, sn));
+        if (!shown) { free(out); return 0; }
+        while (out_n + O(shown)->v.s.n >= out_cap) {
+            out_cap = out_cap * 2 + O(shown)->v.s.n;
+            out = (char *)realloc(out, (size_t)out_cap + 1);
+        }
+        memcpy(out + out_n, APY_CSTR(shown), (size_t)O(shown)->v.s.n);
+        out_n += O(shown)->v.s.n;
+    }
+    /* A MAPPING has nothing to leave unconsumed: its entries are reached by
+       name, and an unused one is ordinary. */
+    if (!mapping && at < supplied) {
+        free(out);
+        return apy_fail("TypeError",
+                        "not all arguments converted during string "
+                        "formatting");
+    }
+    out[out_n] = 0;
+    { apy_value r = apy_str_take(out, out_n);
+      /* `b"%d" % 3` IS BYTES. The whole of the difference is the kind: the
+         format string's own bytes are ASCII either way, and every conversion
+         above produced text. */
+      if (O(fmt)->kind == APY_BYTES_K) O(r)->kind = APY_BYTES_K;
+      return r; }
+}
+
+/* Re-tag a str METHOD'S RESULT to match its receiver.
+   `b"a b".split()` answers a list of BYTES, not of str, and `b.find(...)`
+   answers an int that must be left alone -- so this converts str results and
+   the str elements of a sequence result, and nothing else. One place, at the
+   call site, rather than a change to each of the fifty-odd methods. */
+APY_API apy_value apy_str_like(apy_value recv, apy_value out) {
+    if (!out || O(recv)->kind != APY_BYTES_K) return out;
+    if (O(out)->kind == APY_STR_K) {
+        apy_value made = apy_str_copy(O(out)->v.s.p, O(out)->v.s.n);
+        O(made)->kind = APY_BYTES_K;
+        return made;
+    }
+    if (apy_is_seq(out)) {
+        int64_t i;
+        for (i = 0; i < O(out)->v.q.n; i++)
+            O(out)->v.q.items[i] = apy_str_like(recv, O(out)->v.q.items[i]);
+    }
+    return out;
 }
 
 APY_API apy_value apy_str_format(apy_value fmt, apy_value args, apy_value kw) {
@@ -7538,7 +10886,122 @@ APY_API apy_value apy_gen_new(apy_value step, int64_t nslots) {
     o->v.g.state = 0;
     o->v.g.sent = apy_none();
     o->v.g.running = 0;
+    o->v.g.coro = 0;
+    o->v.g.builtin = 0;
+    o->v.g.agen = 0;
+    o->v.g.deadline = 0.0;
+    o->v.g.cancel = 0;
     return V(o);
+}
+
+/* Mark a freshly built frame as a COROUTINE. Separate from `apy_gen_new` so
+   that the constructor an `async def` lowers to is the generator one plus a
+   single call, rather than a second nearly identical entry point. */
+APY_API apy_value apy_coro_mark(apy_value g) {
+    if (O(g)->kind == APY_GEN_K) O(g)->v.g.coro = 1;
+    return g;
+}
+
+/* EVERY ASYNC GENERATOR MADE DURING A RUN, so the loop can close the ones a
+   program abandoned. `async for ...: break` leaves the generator suspended
+   inside its own `try`, and its `finally` has not run; CPython closes those
+   at loop shutdown -- `shutdown_asyncgens` -- rather than when the loop is
+   left, and a program that breaks out of one and never touches it again
+   still sees its cleanup. Nothing is ever removed: a run is short and the
+   list is only walked once, at the end. */
+static apy_value apy_live_agens = 0;
+
+/* Mark a FUNCTION as one whose call builds a coroutine -- `async def`. */
+/* Mark a thunk as standing for a builtin TYPE.
+
+   WHAT THIS DOES NOT BUY IS IDENTITY. `type(1) is int` is still False: the
+   frontend synthesises one thunk per builtin per module and `type` makes its
+   own cells, so two different objects both claim to be `int`. A registry
+   filled on first mention was tried and is worse -- it makes the answer
+   depend on which of `type(1)` and `int` the program evaluates first.
+
+   The real fix is one canonical cell per builtin type, callable, which means
+   teaching the call path to construct from a type. That is the change this
+   flag was chosen to avoid, and it is still the right one. */
+/* Mark a thunk as a builtin TYPE, and hand back the CANONICAL one for that
+   name. `int` mentioned twice built two thunks, so `int == int` was False and
+   `{int, str} == {str, int}` was False -- a plainly wrong answer to a plainly
+   ordinary question, and the reason the caller must use what this returns
+   rather than the value it passed in.
+
+   This is NOT the registry that was tried and reverted for `type(1) is int`.
+   That one made `type(x)` answer whichever object had been built first, so
+   the result depended on which of `type(1)` and `int` the program evaluated
+   sooner. Interning by NAME has no such order to depend on: the first mention
+   of `int` decides, every later one gets the same object, and `type()` is not
+   involved. `type(1) is int` still needs a real type cell and still does not
+   hold. */
+static apy_value apy_canonical_types = 0;
+
+/* PEP 649: record the thunk that builds this function's annotations. */
+/* PEP 3155: record a function's qualified name. */
+APY_API apy_value apy_func_qualname(apy_value f, apy_value name) {
+    if (O(f)->kind == APY_FUNC_K) O(f)->v.fn.qualname = name;
+    return f;
+}
+
+APY_API apy_value apy_func_annotate(apy_value f, apy_value thunk) {
+    if (O(f)->kind == APY_FUNC_K) O(f)->v.fn.annotate = thunk;
+    return f;
+}
+
+/* Mark a thunk as standing for a BUILTIN reached as a value. */
+APY_API apy_value apy_func_builtin(apy_value f) {
+    if (O(f)->kind == APY_FUNC_K) O(f)->v.fn.builtin = 1;
+    return f;
+}
+
+APY_API apy_value apy_func_is_type(apy_value f) {
+    apy_value found;
+    if (O(f)->kind != APY_FUNC_K) return f;
+    O(f)->v.fn.is_type = 1;
+    if (!apy_canonical_types) apy_canonical_types = apy_dict_new(16);
+    found = apy_dict_get_or(apy_canonical_types, O(f)->v.fn.name, 0);
+    if (found) return found;
+    apy_dict_set(apy_canonical_types, O(f)->v.fn.name, f);
+    return f;
+}
+
+APY_API apy_value apy_func_coro(apy_value f) {
+    if (O(f)->kind == APY_FUNC_K) O(f)->v.fn.coro = 1;
+    return f;
+}
+
+/* `inspect.iscoroutine`, `isgenerator`, `iscoroutinefunction`. The three are
+   the whole of what programs ask `inspect` about coroutines, and each is one
+   flag -- an async generator is NEITHER a coroutine nor a generator, which is
+   the distinction the case turns on. */
+APY_API apy_value apy_inspect_iscoroutine(apy_value v) {
+    return apy_from_bool(O(v)->kind == APY_GEN_K && O(v)->v.g.coro
+                         && !O(v)->v.g.agen);
+}
+
+APY_API apy_value apy_inspect_isgenerator(apy_value v) {
+    return apy_from_bool(O(v)->kind == APY_GEN_K && !O(v)->v.g.coro);
+}
+
+APY_API apy_value apy_inspect_isasyncgen(apy_value v) {
+    return apy_from_bool(O(v)->kind == APY_GEN_K && O(v)->v.g.agen);
+}
+
+APY_API apy_value apy_inspect_iscoroutinefunction(apy_value v) {
+    return apy_from_bool(O(v)->kind == APY_FUNC_K && O(v)->v.fn.coro);
+}
+
+/* Mark a frame as an ASYNC GENERATOR -- `async def` with `yield` in it. */
+APY_API apy_value apy_agen_mark(apy_value g) {
+    if (O(g)->kind == APY_GEN_K) {
+        O(g)->v.g.coro = 1;
+        O(g)->v.g.agen = 1;
+        if (!apy_live_agens) apy_live_agens = apy_seq_new(APY_LIST_K, 4);
+        apy_seq_push(apy_live_agens, g);
+    }
+    return g;
 }
 
 /* An UNSET slot reads as None rather than as a null. A local a `yield` has
@@ -7649,7 +11112,25 @@ static apy_value apy_gen_step(apy_value g, apy_value sent, int *done) {
     O(g)->v.g.running = 1;
     out = apy_invoke(O(g)->v.g.step, &arg, 1);
     O(g)->v.g.running = 0;
-    if (!out) { O(g)->v.g.state = -1; return 0; }
+    if (!out) {
+        O(g)->v.g.state = -1;
+        /* PEP 479: a `StopIteration` that ESCAPES a generator body becomes a
+           RuntimeError, with the original as its `__cause__`. Left alone it
+           was indistinguishable from the generator finishing normally, so a
+           bug inside the body read as a clean end of iteration -- which is
+           the entire reason the PEP exists. */
+        if (apy_error_occurred()
+            && strcmp(apy_err_type, "StopIteration") == 0) {
+            apy_value cause = apy_error_value();
+            apy_value wrapped = apy_make_exc(
+                apy_lit("RuntimeError"),
+                apy_lit("generator raised StopIteration"));
+            if (wrapped && cause) O(wrapped)->v.e.cause = cause;
+            apy_error_clear();
+            if (wrapped) apy_raise(wrapped);
+        }
+        return 0;
+    }
     /* The body sets the state to -1 on its way out, so "did this call finish
        the generator" is a question about the state AFTER it, not about the
        value -- a generator may legitimately yield None. */
@@ -7755,6 +11236,680 @@ APY_API apy_value apy_gen_drain(apy_value g) {
     return out;
 }
 
+/* --- asyncio -------------------------------------------------------------
+   A COROUTINE IS A GENERATOR, and this is the whole of what makes one run.
+
+   `async def` lowers through the generator path: a frame, a step function
+   re-entered per resume, and none of the body running until something drives
+   it -- which is exactly what `await` and `asyncio.run` do here.
+
+   WHAT THIS IS NOT. There is no clock and no I/O: `sleep` does not wait, it
+   SUSPENDS, which is the only part of it a program can observe when nothing
+   else is competing for the loop. A freestanding image has nothing to wait
+   on, and pretending otherwise would mean a timer that never fires. */
+
+enum { APY_CORO_SLEEP = 1, APY_CORO_GATHER = 2, APY_CORO_ANEXT = 3,
+       APY_CORO_TASK = 4, APY_CORO_WAITFOR = 5, APY_CORO_VALUE = 6,
+       APY_CORO_TGWAIT = 7 };
+
+/* The steps for the kinds above. Declared here because `apy_await_step` --
+   which dispatches on the kind -- comes before the task layer that defines
+   them, and the object model each of them uses comes after both. */
+static apy_value apy_task_step(apy_value t);
+static apy_value apy_waitfor_step(apy_value w);
+static apy_value apy_tgwait_step(apy_value w);
+APY_API apy_value apy_type_set(apy_value cls, apy_value name, apy_value value);
+static apy_value apy_native(int sel, int64_t arity, const char *name);
+static apy_value apy_gather_step(apy_value g);
+
+/* THE VIRTUAL CLOCK. Not a real one: nothing here waits, and `sleep(10)`
+   returns as fast as `sleep(0)`. What it buys is ORDER -- two coroutines
+   sleeping for different times must wake shortest-first, which is observable
+   from the program and which round-robin gets wrong.
+
+   Time only ever advances to the next moment something can happen: when
+   everything is blocked, the driver jumps `now` to the earliest deadline. */
+static double apy_now = 0.0;
+
+/* WHERE A SUSPENSION LEAVES ITS WAKE TIME. Not in the value it hands back:
+   an async generator yields values of its own through that same channel, and
+   `yield 0.05` would have been read as a deadline. Only one coroutine steps
+   at a time -- a step is synchronous from the driver's side -- so the time
+   does not need to travel as a value at all.
+
+   The driver CLEARS this, steps, and READS it: whatever suspended deepest has
+   written the moment it wants back. */
+static double apy_wake_at = 0.0;
+static int apy_wake_set = 0;
+
+static void apy_wake_clear(void) { apy_wake_set = 0; apy_wake_at = 0.0; }
+
+/* The EARLIEST request wins, so a short sleep beside a long one decides how
+   far the clock moves. */
+static void apy_wake_note(double when) {
+    if (!apy_wake_set || when < apy_wake_at) apy_wake_at = when;
+    apy_wake_set = 1;
+}
+
+/* What a suspension hands back. An OPAQUE token carrying nothing, so that
+   anything a program yields on purpose is unambiguous. */
+static apy_value apy_suspend_token(void) {
+    static apy_value tok = 0;
+    if (!tok) tok = apy_str_copy("<suspend>", 9);
+    return tok;
+}
+
+/* `await x`, one step of it.
+
+   DELEGATION, NOT DRAINING. Each step of the awaited coroutine is handed back
+   so the awaiting one can suspend too, which is what makes a whole chain of
+   `await`s park together on one suspension point. Draining the inner one
+   here would give the same answer for every case that awaits sequentially --
+   and would have to be torn out the moment anything runs concurrently.
+
+   FINISHING IS REPORTED AS `apy_stop()`, the same sentinel `apy_step` uses,
+   rather than through an out-parameter -- the IR has no way to pass a pointer
+   to a local. What the awaited coroutine returned is then read with
+   `apy_gen_taken`, where its `return` already left it. */
+APY_API apy_value apy_await_step(apy_value awaited, apy_value sent) {
+    int fin = 0;
+    apy_value out;
+    if (O(awaited)->kind != APY_GEN_K)
+        /* `await` on something that is not awaitable. Naming the kind is the
+           whole diagnostic: it is nearly always a missing call, `await f`
+           where `await f()` was meant. */
+        return apy_fail2("TypeError", "object %s can't be used in 'await' "
+                                      "expression%s", apy_kind_name(awaited), "");
+    /* A BUILT-IN COROUTINE has no step function to re-enter, because it has
+       no Python body. It is driven here instead. Handled before
+       `apy_gen_step`, which would otherwise call through a null pointer. */
+    if (!O(awaited)->v.g.step) {
+        if (O(awaited)->v.g.builtin == APY_CORO_GATHER)
+            return apy_gather_step(awaited);
+        if (O(awaited)->v.g.builtin == APY_CORO_TASK)
+            return apy_task_step(awaited);
+        if (O(awaited)->v.g.builtin == APY_CORO_WAITFOR)
+            return apy_waitfor_step(awaited);
+        if (O(awaited)->v.g.builtin == APY_CORO_TGWAIT)
+            return apy_tgwait_step(awaited);
+        if (O(awaited)->v.g.builtin == APY_CORO_VALUE) {
+            apy_gen_result(awaited, O(awaited)->v.g.slots[0]);
+            return apy_stop();
+        }
+        /* `sleep` ALWAYS SUSPENDS AT LEAST ONCE, before the clock is even
+           consulted. `sleep(0)` is how a program hands control to the loop on
+           purpose, and a version that returned immediately when the deadline
+           had passed ran each coroutine straight to the end -- concurrency
+           gone, and every conformance case still green because they only ever
+           check the results.
+
+           After that first suspension it is ready when the clock reaches its
+           deadline, which is what wakes a short sleep before a long one. */
+        if (O(awaited)->v.g.state == 0) {
+            O(awaited)->v.g.state = 1;
+            apy_wake_note(O(awaited)->v.g.deadline);
+            return apy_suspend_token();
+        }
+        if (apy_now < O(awaited)->v.g.deadline) {
+            apy_wake_note(O(awaited)->v.g.deadline);
+            return apy_suspend_token();
+        }
+        return apy_stop();
+    }
+    out = apy_gen_step(awaited, sent, &fin);
+    if (!out) return 0;
+    return fin ? apy_stop() : out;
+}
+
+/* The suspend token as a value, so lowered code can compare against it.
+   `async for` needs to tell "the generator suspended on an await" from "the
+   generator produced an item", and those arrive through one channel. */
+APY_API apy_value apy_suspend_value(void) { return apy_suspend_token(); }
+
+/* One step of `async for v in agen`.
+
+   AN ASYNC GENERATOR DOES TWO THINGS THROUGH ONE CHANNEL: `yield v` produces
+   an item, and `await` inside it suspends. Both come back from the step as a
+   value, and telling them apart is the whole of this function -- a suspension
+   is the opaque token and nothing else can be, which is why the token stopped
+   carrying the deadline.
+
+   Answers the token when the generator suspended (pass it outward and come
+   back), `apy_stop()` when it is exhausted, and otherwise the next item. */
+/* What `async for` actually iterates: `__aiter__` of whatever was written.
+
+   AN ASYNC GENERATOR IS ITS OWN ITERATOR, which is why this was skipped for
+   so long -- every `async for` in the suite ran over one, and `__aiter__` on
+   it answers itself. A CLASS is the other half of the protocol and the more
+   common one in real code: `__aiter__` hands back the object that has
+   `__anext__`, and `__anext__` is an `async def`, so each item arrives
+   through a coroutine that may suspend before it produces one.
+
+   That coroutine has to survive between steps -- the loop asks for one item
+   at a time and a suspension means "no item yet, ask again" -- so the class
+   is wrapped in a generator cell whose slots hold the iterator and whatever
+   `__anext__` call is currently in flight. Nothing else in this runtime has
+   somewhere to keep it. */
+APY_API apy_value apy_aiter(apy_value src) {
+    apy_value it, wrap;
+    if (O(src)->kind == APY_GEN_K && O(src)->v.g.agen) return src;
+    it = apy_dunder(src, "__aiter__");
+    if (!it)
+        return apy_fail2("TypeError", "'%s' object does not support "
+                                      "asynchronous iteration%s",
+                         apy_kind_name(src), "");
+    it = apy_call_n(it, NULL, 0);
+    if (!it) return 0;
+    if (O(it)->kind == APY_GEN_K && O(it)->v.g.agen) return it;
+    if (!apy_dunder(it, "__anext__")) {
+        apy_error_clear();
+        return apy_fail2("TypeError", "'%s' object does not support "
+                                      "asynchronous iteration%s",
+                         apy_kind_name(it), "");
+    }
+    wrap = apy_gen_new(0, 2);
+    O(wrap)->v.g.agen = 1;
+    O(wrap)->v.g.builtin = APY_CORO_ANEXT;
+    O(wrap)->v.g.slots[0] = it;
+    O(wrap)->v.g.slots[1] = 0;
+    return wrap;
+}
+
+/* One step of an `async for` over a CLASS -- see `apy_aiter`.
+
+   Answers the same three things every other step here does: the next item,
+   the suspend token, or `apy_stop()`. `StopAsyncIteration` out of `__anext__`
+   is exhaustion and not an error, which is the whole convention the protocol
+   is built on. */
+static apy_value apy_anext_step(apy_value g) {
+    apy_value pending = O(g)->v.g.slots[1], v;
+    if (!pending) {
+        apy_value m = apy_dunder(O(g)->v.g.slots[0], "__anext__");
+        if (!m) return 0;
+        pending = apy_call_n(m, NULL, 0);
+        if (!pending) {
+            if (apy_error_matches(apy_lit("StopAsyncIteration"))) {
+                apy_error_clear();
+                return apy_stop();
+            }
+            return 0;
+        }
+        /* `__anext__` WRITTEN AS A PLAIN `def` answers the item itself rather
+           than a coroutine. Ordinary Python -- `async for` awaits what it
+           gets, and awaiting a value that is not awaitable is the error, so a
+           class returning one directly is only an unusual way to write it. */
+        if (O(pending)->kind != APY_GEN_K) return pending;
+        O(g)->v.g.slots[1] = pending;
+    }
+    v = apy_await_step(pending, apy_none());
+    if (!v) {
+        O(g)->v.g.slots[1] = 0;
+        if (apy_error_matches(apy_lit("StopAsyncIteration"))) {
+            apy_error_clear();
+            return apy_stop();
+        }
+        return 0;
+    }
+    if (v != apy_stop()) return v;              /* suspended: ask again */
+    O(g)->v.g.slots[1] = 0;
+    return apy_gen_taken(pending);
+}
+
+APY_API apy_value apy_agen_step(apy_value g) {
+    int fin = 0;
+    apy_value out;
+    if (O(g)->kind != APY_GEN_K || !O(g)->v.g.agen)
+        return apy_fail2("TypeError", "'%s' object does not support "
+                                      "asynchronous iteration%s",
+                         apy_kind_name(g), "");
+    if (O(g)->v.g.builtin == APY_CORO_ANEXT) return apy_anext_step(g);
+    if (O(g)->v.g.state < 0) return apy_stop();
+    out = apy_gen_step(g, apy_none(), &fin);
+    if (!out) return 0;
+    return fin ? apy_stop() : out;
+}
+
+/* `asyncio.sleep(delay)`. A coroutine that suspends once and returns None.
+
+   Built by hand rather than lowered from Python source, because there is no
+   Python source in this compiler -- see `frontends/python/modules.py`. The
+   frame is a generator with a NULL step function, which is how
+   `apy_await_step` recognises it and drives it directly -- there is no Python
+   body to re-enter. */
+APY_API apy_value apy_asyncio_sleep(apy_value delay) {
+    apy_value g = apy_gen_new(0, 0);
+    double d = apy_is_num(delay) ? apy_as_float(delay) : 0.0;
+    O(g)->v.g.coro = 1;
+    O(g)->v.g.builtin = APY_CORO_SLEEP;
+    /* THE DEADLINE IS TAKEN NOW, when `sleep` is called, not when it is first
+       awaited -- exactly as a real loop does it, and the difference shows the
+       moment a coroutine is created before the thing it races. */
+    O(g)->v.g.deadline = apy_now + (d > 0.0 ? d : 0.0);
+    return g;
+}
+
+/* `asyncio.gather(*coros)`. Runs them CONCURRENTLY and answers their results
+   IN ARGUMENT ORDER -- which is the whole point of it, and not the order they
+   happened to finish in.
+
+   The arguments arrive as one tuple: the callable is variadic, so the frontend
+   packs them. Slot 0 holds that tuple and slot 1 the result list, because a
+   built-in coroutine has no registers that survive a suspension either. */
+APY_API apy_value apy_asyncio_gather(apy_value coros) {
+    apy_value g;
+    int64_t i, n;
+    if (!apy_is_seq(coros))
+        return apy_fail2("TypeError", "gather() takes coroutines, not %s%s",
+                         apy_kind_name(coros), "");
+    n = O(coros)->v.q.n;
+    g = apy_gen_new(0, 2);
+    O(g)->v.g.coro = 1;
+    O(g)->v.g.builtin = APY_CORO_GATHER;
+    O(g)->v.g.slots[0] = coros;
+    /* The results list is built FULL of None and filled in place, so that a
+       coroutine finishing third still lands at its own index. Appending as
+       they complete is what loses the ordering. */
+    O(g)->v.g.slots[1] = apy_seq_new(APY_LIST_K, n ? n : 1);
+    for (i = 0; i < n; i++) apy_seq_push(O(g)->v.g.slots[1], apy_none());
+    return g;
+}
+
+/* One round of `gather`: advance every unfinished child once, then suspend.
+
+   ROUND-ROBIN AND NOT ONE-AT-A-TIME, which is the difference between running
+   concurrently and merely running. A child that suspends gives the round to
+   the next one, so `gather` finishes in as many rounds as its slowest member
+   needs rather than the sum of all of them -- and interleaving is observable,
+   which is what makes this worth doing properly. */
+static apy_value apy_gather_step(apy_value g) {
+    apy_value coros = O(g)->v.g.slots[0];
+    apy_value out = O(g)->v.g.slots[1];
+    int64_t i, n = O(coros)->v.q.n, pending = 0;
+    /* THE EARLIEST MOMENT ANY CHILD COULD MAKE PROGRESS. Suspending with the
+       minimum rather than with the first one seen is what makes a short sleep
+       wake before a long one when both are running here. */
+    double soonest = 0.0;
+    int have_soonest = 0;
+    for (i = 0; i < n; i++) {
+        apy_value child = O(coros)->v.q.items[i];
+        apy_value v;
+        if (O(child)->kind != APY_GEN_K) {
+            /* Already finished, or never a coroutine. A non-coroutine is its
+               own result -- `gather(3)` is not something to run. */
+            O(out)->v.q.items[i] = child;
+            continue;
+        }
+        /* A NEGATIVE STATE ALREADY MEANS FINISHED -- `apy_gen_step` sets it
+           and reports done from it. Skipping those here is what stops a
+           completed child being stepped again every round for as long as its
+           slowest sibling runs. */
+        if (O(child)->v.g.state < 0) continue;
+        /* CLEARED BEFORE EACH CHILD, so what is read back afterwards is that
+           child's request and not a sibling's left over from this round. */
+        apy_wake_clear();
+        v = apy_await_step(child, apy_none());
+        if (!v) return 0;
+        if (v == apy_stop()) {
+            O(out)->v.q.items[i] = apy_gen_taken(child);
+        } else {
+            pending++;
+            /* WHAT THIS CHILD ASKED FOR, read from where it left it. A child
+               that suspended without naming a time is ready now, which keeps
+               a plain `await` beside a sleep from stalling the clock past
+               something that could already run. */
+            if (!have_soonest || (apy_wake_set ? apy_wake_at : apy_now)
+                                 < soonest) {
+                soonest = apy_wake_set ? apy_wake_at : apy_now;
+                have_soonest = 1;
+            }
+        }
+    }
+    if (pending) {
+        apy_wake_note(have_soonest ? soonest : apy_now);
+        return apy_suspend_token();
+    }
+    apy_gen_result(g, out);
+    return apy_stop();
+}
+
+/* --- tasks ----------------------------------------------------------------
+
+   A TASK IS A COROUTINE THE LOOP OWNS. `await coro` runs it inside the
+   awaiting one; `create_task(coro)` hands it to the loop, which runs it
+   whenever anything else suspends -- and that difference is the whole of what
+   a task is for. Everything below exists to give the loop somewhere to keep
+   them and something to do with one that has been cancelled. */
+
+/* EVERY TASK THE PROGRAM HANDED OVER, so the loop can run them in the gaps.
+   A list rather than a queue: they are stepped round-robin and a finished one
+   is skipped, which is what `gather` already does for its children. */
+static apy_value apy_tasks;
+
+APY_API apy_value apy_asyncio_create_task(apy_value coro) {
+    apy_value t;
+    if (O(coro)->kind != APY_GEN_K || !O(coro)->v.g.coro)
+        return apy_fail2("TypeError", "a coroutine was expected, got %s%s",
+                         apy_kind_name(coro), "");
+    t = apy_gen_new(0, 3);
+    O(t)->v.g.coro = 1;
+    O(t)->v.g.builtin = APY_CORO_TASK;
+    O(t)->v.g.slots[0] = coro;      /* what it runs                        */
+    O(t)->v.g.slots[1] = 0;         /* what it returned                    */
+    O(t)->v.g.slots[2] = 0;         /* how it failed, if it did            */
+    if (!apy_tasks) apy_tasks = apy_seq_new(APY_LIST_K, 4);
+    apy_seq_push(apy_tasks, t);
+    return t;
+}
+
+/* One step of a task, whether the loop is running it in a gap or a program is
+   awaiting it. The two are the same act -- which is why `await task` after
+   the loop has already finished it answers what it finished with rather than
+   running it again. */
+static apy_value apy_task_step(apy_value t) {
+    apy_value child = O(t)->v.g.slots[0], v;
+    if (O(t)->v.g.state < 0) {
+        /* ALREADY FINISHED. A task that ended in an exception raises it
+           again, which is what makes `await task` report a cancellation the
+           loop delivered while the awaiter was elsewhere. */
+        if (O(t)->v.g.slots[2]) {
+            apy_raise(O(t)->v.g.slots[2]);
+            return 0;
+        }
+        return apy_stop();
+    }
+    if (O(t)->v.g.cancel == 1) {
+        O(t)->v.g.cancel = 2;
+        if (O(child)->kind == APY_GEN_K && O(child)->v.g.state > 0) {
+            /* AT THE SUSPENSION POINT, which is where CPython delivers it: a
+               `try`/`except CancelledError` around the `await` inside the
+               task catches it, and being catchable there is the whole of what
+               cancellation means. */
+            O(child)->v.g.pending = apy_make_exc0(apy_lit("CancelledError"));
+        } else {
+            /* NEVER STARTED, so there is no point to raise at and the task
+               simply never runs. */
+            O(t)->v.g.state = -1;
+            O(t)->v.g.slots[2] = apy_make_exc0(apy_lit("CancelledError"));
+            apy_raise(O(t)->v.g.slots[2]);
+            return 0;
+        }
+    }
+    v = apy_await_step(child, apy_none());
+    if (!v) {
+        /* HOW IT FAILED IS KEPT, because the loop may be the one that found
+           out and the program may ask later. The flag stays set, so whoever
+           was awaiting sees it now. */
+        O(t)->v.g.state = -1;
+        O(t)->v.g.slots[2] = apy_error_value();
+        return 0;
+    }
+    if (v == apy_stop()) {
+        O(t)->v.g.state = -1;
+        O(t)->v.g.slots[1] = apy_gen_taken(child);
+        /* AND WHERE `await` LOOKS FOR IT. `await task` reads what a finished
+           coroutine returned off the cell it awaited, not off the child --
+           so a task that answered 7 handed back None until this was here. */
+        apy_gen_result(t, O(t)->v.g.slots[1]);
+        return apy_stop();
+    }
+    return v;
+}
+
+/* Every task the loop owns, advanced once. Called wherever the thing being
+   driven suspends -- that gap is exactly when a task may run. */
+static apy_value apy_tasks_turn(void) {
+    int64_t i;
+    double soonest = 0.0;
+    int have = 0;
+    if (!apy_tasks) return apy_none();
+    for (i = 0; i < O(apy_tasks)->v.q.n; i++) {
+        apy_value t = O(apy_tasks)->v.q.items[i], v;
+        if (O(t)->v.g.state < 0) continue;
+        apy_wake_clear();
+        v = apy_task_step(t);
+        if (!v) {
+            /* A TASK THAT FAILED IS NOT THE LOOP'S ERROR. It is recorded on
+               the task and raised where the task is awaited -- which is what
+               `asyncio` does, and why an un-awaited failing task is quiet. */
+            apy_error_clear();
+            continue;
+        }
+        if (v != apy_stop()) {
+            if (!have || (apy_wake_set ? apy_wake_at : apy_now) < soonest) {
+                soonest = apy_wake_set ? apy_wake_at : apy_now;
+                have = 1;
+            }
+        }
+    }
+    apy_wake_clear();
+    if (have) apy_wake_note(soonest);
+    return apy_none();
+}
+
+/* `t.cancel()` -- ASK, do not raise. The exception arrives at the task's next
+   suspension point; here it is only recorded. Answers True when there was a
+   running task to ask, which is what CPython's does. */
+APY_API apy_value apy_task_cancel(apy_value t) {
+    if (O(t)->kind != APY_GEN_K || O(t)->v.g.builtin != APY_CORO_TASK)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'cancel'%s",
+                         apy_kind_name(t), "");
+    if (O(t)->v.g.state < 0) return apy_from_bool(0);
+    if (!O(t)->v.g.cancel) O(t)->v.g.cancel = 1;
+    return apy_from_bool(1);
+}
+
+/* `t.result()` -- what it returned, or the exception it ended with. */
+APY_API apy_value apy_task_result(apy_value t) {
+    if (O(t)->kind != APY_GEN_K || O(t)->v.g.builtin != APY_CORO_TASK)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'result'%s",
+                         apy_kind_name(t), "");
+    if (O(t)->v.g.state >= 0)
+        return apy_fail("InvalidStateError", "Result is not set.");
+    if (O(t)->v.g.slots[2]) { apy_raise(O(t)->v.g.slots[2]); return 0; }
+    return O(t)->v.g.slots[1] ? O(t)->v.g.slots[1] : apy_none();
+}
+
+APY_API apy_value apy_task_done(apy_value t) {
+    if (O(t)->kind != APY_GEN_K || O(t)->v.g.builtin != APY_CORO_TASK)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'done'%s",
+                         apy_kind_name(t), "");
+    return apy_from_bool(O(t)->v.g.state < 0);
+}
+
+APY_API apy_value apy_task_cancelled(apy_value t) {
+    if (O(t)->kind != APY_GEN_K || O(t)->v.g.builtin != APY_CORO_TASK)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'cancelled'%s",
+                         apy_kind_name(t), "");
+    return apy_from_bool(O(t)->v.g.state < 0 && O(t)->v.g.slots[2]
+                         && strcmp(O(O(t)->v.g.slots[2])->v.e.name,
+                                   "CancelledError") == 0);
+}
+
+/* `asyncio.wait_for(coro, timeout)` -- run it, and give up at the deadline.
+
+   THE CLOCK IS VIRTUAL and moves only to the next moment something can
+   happen, so a timeout is not an approximation of waiting: it is a deadline
+   among the others, and the loop reaching it first is exactly what "the
+   coroutine took too long" means here. */
+APY_API apy_value apy_asyncio_wait_for(apy_value coro, apy_value timeout) {
+    apy_value w;
+    double t = apy_is_num(timeout) ? apy_as_float(timeout) : -1.0;
+    if (O(coro)->kind != APY_GEN_K)
+        return apy_fail2("TypeError", "a coroutine was expected, got %s%s",
+                         apy_kind_name(coro), "");
+    w = apy_gen_new(0, 1);
+    O(w)->v.g.coro = 1;
+    O(w)->v.g.builtin = APY_CORO_WAITFOR;
+    O(w)->v.g.slots[0] = coro;
+    /* A negative or absent timeout is no deadline at all, which is what
+       `wait_for(c, None)` means. */
+    O(w)->v.g.deadline = t >= 0.0 ? apy_now + t : -1.0;
+    return w;
+}
+
+static apy_value apy_waitfor_step(apy_value w) {
+    apy_value child = O(w)->v.g.slots[0], v;
+    double limit = O(w)->v.g.deadline;
+    if (limit >= 0.0 && apy_now >= limit && O(child)->v.g.state >= 0) {
+        /* THE CHILD IS STOPPED FIRST. `wait_for` promises not to leave it
+           running, and a `finally` inside it runs on the way out. */
+        if (O(child)->v.g.state > 0 && !apy_gen_close(child)) return 0;
+        O(child)->v.g.state = -1;
+        return apy_fail("TimeoutError", "");
+    }
+    apy_wake_clear();
+    v = apy_await_step(child, apy_none());
+    if (!v) return 0;
+    if (v == apy_stop()) {
+        apy_gen_result(w, apy_gen_taken(child));
+        return apy_stop();
+    }
+    /* THE EARLIER OF the child's own wake and the deadline. Noting only the
+       child's would let the clock jump past the moment this gives up. */
+    if (limit >= 0.0) apy_wake_note(limit);
+    return apy_suspend_token();
+}
+
+/* `asyncio.TaskGroup()`.
+
+   AN OBJECT, not a coroutine: `async with` asks it for `__aenter__` and
+   `__aexit__`, and `tg.create_task(...)` is an ordinary call between them.
+   The class is built once and interned, so two groups share a type. */
+APY_API apy_value apy_asyncio_taskgroup(void) {
+    static apy_value cls;
+    apy_value g;
+    if (!cls) {
+        cls = apy_type_new(apy_lit("TaskGroup"), 0);
+        if (!cls) return 0;
+        apy_type_set(cls, apy_lit("__aenter__"),
+                     apy_native(APY_NAT_TG_ENTER, 1, "__aenter__"));
+        apy_type_set(cls, apy_lit("__aexit__"),
+                     apy_native(APY_NAT_TG_EXIT, 4, "__aexit__"));
+        apy_type_set(cls, apy_lit("create_task"),
+                     apy_native(APY_NAT_TG_CREATE, 2, "create_task"));
+    }
+    g = apy_instance_new(cls);
+    if (!g) return 0;
+    apy_setattr(g, apy_lit("_tasks"), apy_seq_new(APY_LIST_K, 4));
+    if (apy_error_occurred()) return 0;
+    return g;
+}
+
+/* A coroutine that is already finished, carrying one value. `__aenter__` has
+   to answer an awaitable and has nothing to wait for. */
+static apy_value apy_coro_value(apy_value v) {
+    apy_value g = apy_gen_new(0, 1);
+    O(g)->v.g.coro = 1;
+    O(g)->v.g.builtin = APY_CORO_VALUE;
+    O(g)->v.g.slots[0] = v;
+    return g;
+}
+
+/* Leaving the `async with`: every task the group started runs to the end.
+
+   THAT IS THE WHOLE PROMISE of a task group -- the block does not finish
+   while its children are still going -- and it is why `t.result()` after the
+   block is a question with an answer.
+
+   WHAT IT DOES NOT DO is cancel the others when one of them fails, or when
+   the block is left by an exception. CPython's group does both and collects
+   what it cancelled into an `ExceptionGroup`; here every child runs to its
+   end and a failing one is reported where it is awaited. The difference is
+   visible only to a program whose tasks fail, and saying so is cheaper than
+   a half-implementation of the cancellation cascade. */
+static apy_value apy_tgwait_step(apy_value w) {
+    apy_value tasks = O(w)->v.g.slots[0];
+    int64_t i, pending = 0;
+    double soonest = 0.0;
+    int have = 0;
+    for (i = 0; i < O(tasks)->v.q.n; i++) {
+        apy_value t = O(tasks)->v.q.items[i], v;
+        if (O(t)->v.g.state < 0) continue;
+        apy_wake_clear();
+        v = apy_task_step(t);
+        if (!v) return 0;
+        if (v != apy_stop()) {
+            pending++;
+            if (!have || (apy_wake_set ? apy_wake_at : apy_now) < soonest) {
+                soonest = apy_wake_set ? apy_wake_at : apy_now;
+                have = 1;
+            }
+        }
+    }
+    apy_wake_clear();
+    if (pending) {
+        apy_wake_note(have ? soonest : apy_now);
+        return apy_suspend_token();
+    }
+    /* FALSE, not None: `__aexit__` answering truthy would swallow whatever
+       exception was leaving the block. */
+    apy_gen_result(w, apy_from_bool(0));
+    return apy_stop();
+}
+
+/* Drive one coroutine to completion and answer what it returned.
+
+   THE WHOLE EVENT LOOP for a single task: step until done, ignoring what it
+   suspends with, because with one task there is never anything else to run
+   in the gap. `gather` is where suspensions start to matter. */
+APY_API apy_value apy_asyncio_run(apy_value coro) {
+    int64_t guard;
+    if (O(coro)->kind != APY_GEN_K || !O(coro)->v.g.coro)
+        return apy_fail2("ValueError", "a coroutine was expected, got %s%s",
+                         apy_kind_name(coro), "");
+    for (guard = 0; guard < 100000000; guard++) {
+        /* Through `apy_await_step` and not `apy_gen_step`, so that
+           `asyncio.run(asyncio.sleep(0))` -- a coroutine with no Python body
+           and so no step function to call -- is driven rather than jumped
+           through as a null pointer. */
+        apy_value v;
+        apy_wake_clear();
+        v = apy_await_step(coro, apy_none());
+        if (!v) return 0;
+        if (v == apy_stop()) {
+            /* THE LOOP CLOSES WHAT THE PROGRAM ABANDONED, before answering.
+               An `async for` left by `break` holds a generator suspended
+               inside its own `try`, and its `finally` has not run yet. */
+            apy_value result = apy_gen_taken(coro);
+            if (apy_live_agens) {
+                int64_t k;
+                for (k = 0; k < O(apy_live_agens)->v.q.n; k++) {
+                    apy_value ag = O(apy_live_agens)->v.q.items[k];
+                    if (O(ag)->v.g.state > 0 && !apy_gen_close(ag)) return 0;
+                }
+                O(apy_live_agens)->v.q.n = 0;
+            }
+            return result;
+        }
+        /* THE CLOCK ONLY EVER MOVES FORWARD, and only to the next moment
+           something can happen. Everything is blocked when this is reached,
+           so jumping straight to the earliest deadline is not an
+           approximation of waiting -- it is the whole of it, for a program
+           that cannot observe duration. */
+        /* THE GAP IS WHERE A TASK RUNS. What was being driven has
+           suspended, so this is the moment anything the program handed to
+           the loop can make progress -- and without it `create_task` would
+           be an elaborate way of writing `await`. */
+        {
+            double mine = apy_wake_set ? apy_wake_at : apy_now;
+            int had = apy_wake_set;
+            apy_tasks_turn();
+            if (apy_wake_set && had && mine < apy_wake_at) {
+                apy_wake_at = mine;
+            } else if (!apy_wake_set && had) {
+                apy_wake_at = mine;
+                apy_wake_set = 1;
+            }
+        }
+        if (apy_wake_set && apy_wake_at > apy_now) apy_now = apy_wake_at;
+    }
+    return apy_fail("RuntimeError", "coroutine did not finish");
+}
+
 /* --- the iteration protocol --------------------------------------------- */
 /* `for v in x` -- ADVANCE UNTIL DONE, not walk by index.
 
@@ -7777,6 +11932,27 @@ static apy_obj apy_stop_cell = { APY_NONE_K, { 0 } };
 
 APY_API apy_value apy_stop(void) { return V(&apy_stop_cell); }
 
+/* Is this the exhaustion sentinel? A pointer comparison the IR cannot spell,
+   so it is a call. */
+APY_API int64_t apy_is_stop(apy_value v) { return v == apy_stop(); }
+
+/* ONE STEP OF A `yield from`, with the value the outer generator was SENT.
+
+   Delegation has to STEP the inner generator rather than drain it: `got =
+   yield ...` inside the inner one reads what the OUTER was sent, and a drained
+   generator has already run past every such point with nothing. A source that
+   is not a generator has nowhere to put the sent value and is simply
+   advanced, which is what `yield from [1, 2]` means. */
+APY_API apy_value apy_delegate_step(apy_value src, apy_value sent) {
+    if (O(src)->kind == APY_GEN_K) {
+        int done = 0;
+        apy_value v = apy_gen_step(src, sent, &done);
+        if (!v) return 0;
+        return done ? apy_stop() : v;
+    }
+    return apy_step(src);
+}
+
 /* Every cursor is built here, so no site forgets a field. */
 static apy_value apy_cursor(apy_value src, apy_value fn, int mode,
                             int64_t start) {
@@ -7785,25 +11961,59 @@ static apy_value apy_cursor(apy_value src, apy_value fn, int mode,
     o->v.it.fn = fn;
     o->v.it.mode = mode;
     o->v.it.i = start;
+    /* Only a dict is checked. A list may grow or shrink under a walk and
+       CPython allows it -- the walk simply sees the new length -- so
+       recording the size for one would refuse a program that is legal. */
+    o->v.it.n0 = (src && O(src)->kind == APY_DICT_K) ? O(src)->v.d.n : -1;
     return V(o);
 }
 
 APY_API apy_value apy_getiter(apy_value v) {
+    /* A VIEW IS READ WHEN THE WALK STARTS, which is what `for k in d.keys()`
+       expects: the keys are the ones the dict has now, not the ones it had
+       when the view was made. */
+    if (O(v)->kind == APY_VIEW_K) return apy_getiter(apy_view_items(v));
     /* A generator IS its own cursor: stepping it resumes it, and that is the
        whole of the lazy path. */
     if (O(v)->kind == APY_GEN_K) return v;
     if (O(v)->kind == APY_ITER_K) return v;
+    if (O(v)->kind == APY_TYPE_K && O(v)->v.t.meta) {
+        /* ITERATING A CLASS IS THE METACLASS'S BUSINESS: `for c in Color` is
+           `type(Color).__iter__(Color)`, which is how an enum lists its
+           members. A class with no metaclass cannot be iterated, and the
+           refusal below is still the right answer for it. */
+        apy_value hook = apy_class_find(O(v)->v.t.meta, apy_name("__iter__"));
+        if (hook) {
+            apy_value got = apy_call_n(apy_bind(hook, v), NULL, 0);
+            if (!got) return 0;
+            if (O(got)->kind == APY_GEN_K || O(got)->kind == APY_ITER_K)
+                return got;
+            if (O(got)->kind == APY_INST_K
+                && apy_class_find(O(got)->v.o.cls, apy_name("__next__")))
+                return got;
+            return apy_fail2("TypeError",
+                             "iter() returned non-iterator of type '%s'%s",
+                             apy_kind_name(got), "");
+        }
+    }
     if (O(v)->kind == APY_INST_K) {
         apy_value got = apy_unary_dunder(v, "__iter__");
         if (apy_error_occurred()) return 0;
         if (got) {
-            /* What `__iter__` returned drives the walk. An object with
-               `__next__` is stepped directly; anything else is walked as the
-               container it must be. */
+            /* WHAT `__iter__` RETURNS MUST BE AN ITERATOR. A generator or a
+               cursor is one, and so is a user object with `__next__`; a str
+               is not, however walkable it looks. Walking it anyway turned a
+               broken class into a working one that iterated something else
+               entirely -- CPython refuses, and naming the type is what tells
+               the author which method to fix. */
+            if (O(got)->kind == APY_GEN_K || O(got)->kind == APY_ITER_K)
+                return got;
             if (O(got)->kind == APY_INST_K
                 && apy_class_find(O(got)->v.o.cls, apy_name("__next__")))
                 return got;
-            return apy_getiter(got);
+            return apy_fail2("TypeError",
+                             "iter() returned non-iterator of type '%s'%s",
+                             apy_kind_name(got), "");
         }
         /* No `__iter__`: `__len__` plus `__getitem__`, or `__getitem__`
            walked until it reports IndexError. A cursor over the object does
@@ -7812,7 +12022,8 @@ APY_API apy_value apy_getiter(apy_value v) {
             return apy_fail2("TypeError", "'%s' object is not iterable%s",
                              apy_kind_name(v), "");
     } else if (!apy_is_seq(v) && !apy_is_set(v) && O(v)->kind != APY_STR_K
-               && O(v)->kind != APY_BYTES_K && O(v)->kind != APY_DICT_K) {
+               && O(v)->kind != APY_BYTES_K && O(v)->kind != APY_DICT_K
+               && O(v)->kind != APY_RANGE_K) {
         return apy_fail2("TypeError", "'%s' object is not iterable%s",
                          apy_kind_name(v), "");
     }
@@ -7938,6 +12149,14 @@ APY_API apy_value apy_step(apy_value it) {
         {
             int64_t n = apy_raw_len(src);
             if (apy_error_occurred()) return 0;
+            /* A DICT THAT CHANGED SIZE UNDER THE WALK. The table is rehashed
+               by the write, so continuing would skip or repeat entries; the
+               refusal is what makes the loss impossible rather than
+               occasional. */
+            if (O(it)->v.it.n0 >= 0 && O(src)->kind == APY_DICT_K
+                    && n != O(it)->v.it.n0)
+                return apy_fail("RuntimeError",
+                                "dictionary changed size during iteration");
             if (at >= n) return apy_stop();
             O(it)->v.it.i = at + 1;
             return apy_key_at(src, at);
@@ -7998,6 +12217,33 @@ static int64_t apy_hash_raw(apy_value v) {
         for (i = 0; i < O(v)->v.q.n; i++)
             h ^= apy_hash_raw(O(v)->v.q.items[i]) * (int64_t)0x9e3779b97f4a7c15ULL;
         return h ^ O(v)->v.q.n;
+    case APY_INST_K: {
+        /* The class decides. `__hash__` returns an int, and returning
+           anything else is the class's error, not something to paper over. */
+        apy_value h = apy_unary_dunder(v, "__hash__");
+        if (h) {
+            if (O(h)->kind == APY_INT_K || O(h)->kind == APY_BOOL_K)
+                return O(h)->v.i;
+            apy_fail2("TypeError", "__hash__ method should return an "
+                                   "integer, not '%s'%s", apy_kind_name(h), "");
+            return 0;
+        }
+        if (apy_error_occurred()) return 0;
+        /* DEFINING `__eq__` AND NOT `__hash__` MAKES A CLASS UNHASHABLE.
+           Saying so is what turns a dict key of one into an error rather
+           than a lookup that silently finds nothing -- two equal objects
+           hashed by address land in different buckets. The interpreter host
+           has always enforced this; without it here the two paths printed
+           different things for the same program. */
+        if (apy_class_find(O(v)->v.o.cls, apy_name("__eq__"))) {
+            char buf[128];
+            snprintf(buf, sizeof buf, "unhashable type: '%s'",
+                     APY_CSTR(O(O(v)->v.o.cls)->v.t.name));
+            apy_fail("TypeError", buf);
+            return 0;
+        }
+        return (int64_t)v;
+    }
     default:
         return (int64_t)v;      /* by identity, as CPython does for objects */
     }
@@ -8051,6 +12297,10 @@ APY_API apy_value apy_hash(apy_value v) {
    dispatch written once. */
 
 APY_API apy_value apy_getattr(apy_value obj, apy_value name);
+/* Declared here because the `typing` special forms below build an instance
+   and stamp a name onto it, just above where both are defined. */
+APY_API apy_value apy_setattr(apy_value obj, apy_value name, apy_value value);
+APY_API apy_value apy_instance_new(apy_value cls);
 static apy_value apy_call_n(apy_value f, apy_value *argv, int64_t argc);
 static apy_value apy_type_of(apy_value v);
 
@@ -8116,8 +12366,12 @@ APY_API apy_value apy_func_new(apy_value code, int64_t arity, apy_value name,
     o->v.fn.pnames = NULL;
     o->v.fn.kwarg = 0;
     o->v.fn.kwonly = 0;
+    o->v.fn.nkwdefault = 0;
     o->v.fn.posonly = 0;
     o->v.fn.doc = 0;
+    o->v.fn.coro = 0;
+    o->v.fn.is_type = 0;
+    o->v.fn.dict = 0;
     return V(o);
 }
 
@@ -8126,6 +12380,17 @@ APY_API apy_value apy_func_new(apy_value code, int64_t arity, apy_value name,
    varargs, so each fact about a signature is its own call. */
 APY_API apy_value apy_func_kwonly(apy_value f, int64_t n) {
     O(f)->v.fn.kwonly = (int)n;
+    return f;
+}
+
+/* How many of the TRAILING DEFAULTS belong to keyword-only parameters.
+
+   Not derivable from `kwonly`: a keyword-only parameter may be REQUIRED, and
+   `def f(a, b=1, *args, c, **kw)` has one keyword-only parameter and one
+   default that is not its. Splitting on `kwonly` alone therefore reported
+   `b`'s default as `c`'s and left `__defaults__` empty. */
+APY_API apy_value apy_func_kwdefaults(apy_value f, int64_t n) {
+    O(f)->v.fn.nkwdefault = (int)n;
     return f;
 }
 
@@ -8208,17 +12473,39 @@ APY_API apy_value apy_type_new(apy_value name, apy_value base) {
     o->v.t.name = name;
     o->v.t.base = (base && O(base)->kind == APY_TYPE_K) ? base : 0;
     o->v.t.dict = apy_dict_new(4);
+    o->v.t.meta = 0;
+    /* NOT INHERITED FROM THE UNION. A stale pointer here would give a fresh
+       class somebody else's linearisation, which is a wrong answer that looks
+       like a working program until one method resolves to the wrong body. */
+    o->v.t.bases = 0;
+    o->v.t.mro = 0;
+    o->v.t.builtin = 0;
     return V(o);
 }
 
-/* SINGLE INHERITANCE ONLY, and deliberately: every lookup below walks a
-   straight chain of `base` pointers. C3 linearisation is what Python actually
-   does and it is real work -- a merge over every base's own linearisation,
-   with a consistency check that can fail -- and the suite's class cases are
-   single-base almost without exception. A second base is REFUSED by the
-   frontend rather than silently linearised left-to-right, because a wrong MRO
-   surfaces as one method resolving to the wrong body, which is exactly the
-   kind of plausible wrong answer that never gets reported. */
+/* `class D(dict)` -- which builtin kind this class extends. Set after the
+   class exists, like its names and its metaclass. */
+APY_API apy_value apy_type_builtin(apy_value cls, int64_t kind) {
+    O(cls)->v.t.builtin = (int)kind;
+    return cls;
+}
+
+/* The kind a class extends, looked up the whole chain: a subclass of a
+   subclass of `dict` is still a dict. 0 when nothing in the chain does. */
+static apy_value apy_inst_held(apy_value v);
+
+static int apy_class_builtin(apy_value cls) {
+    while (cls && O(cls)->kind == APY_TYPE_K) {
+        if (O(cls)->v.t.builtin) return O(cls)->v.t.builtin;
+        cls = O(cls)->v.t.base;
+    }
+    return 0;
+}
+
+/* MULTIPLE INHERITANCE, through the C3 linearisation in `apy_c3`. A class
+   records both its bases and the order they linearise to, and every lookup
+   walks that order; a class with one base has the same walk it always had,
+   which is why the single-base path is left intact rather than replaced. */
 APY_API apy_value apy_type_set(apy_value cls, apy_value name, apy_value value) {
     if (O(cls)->kind != APY_TYPE_K)
         return apy_fail2("TypeError", "'%s' object is not a class%s",
@@ -8232,12 +12519,275 @@ APY_API apy_value apy_type_set(apy_value cls, apy_value name, apy_value value) {
    attribute miss is only an AttributeError once every class in the chain has
    been asked. */
 static apy_value apy_class_find(apy_value cls, apy_value name) {
+    /* THROUGH THE MRO WHEN THERE IS ONE. With a single base the two orders
+       are the same walk; with several they are not, and the base chain finds
+       the wrong body for `class D(B, C)` over a diamond. */
+    if (cls && O(cls)->kind == APY_TYPE_K && O(cls)->v.t.mro) {
+        apy_value order = O(cls)->v.t.mro;
+        int64_t i;
+        for (i = 0; i < O(order)->v.q.n; i++) {
+            apy_value here = O(order)->v.q.items[i];
+            int64_t at;
+            if (O(here)->kind != APY_TYPE_K) continue;
+            at = apy_dict_find(O(here)->v.t.dict, name);
+            if (at >= 0)
+                return O(here)->v.t.dict
+                    ? O(O(here)->v.t.dict)->v.d.vals[at] : 0;
+        }
+        return 0;
+    }
     while (cls && O(cls)->kind == APY_TYPE_K) {
         int64_t at = apy_dict_find(O(cls)->v.t.dict, name);
         if (at >= 0) return O(cls)->v.t.dict ? O(O(cls)->v.t.dict)->v.d.vals[at] : 0;
         cls = O(cls)->v.t.base;
     }
     return 0;
+}
+
+/* The one class every `typing` special form is an instance of, made once
+   and kept. CPython calls it `_SpecialForm`, and a program that prints
+   `LiteralString.__class__.__name__` sees exactly that. */
+static apy_value apy_special_form_class(void) {
+    static apy_value cls = 0;
+    if (!cls) cls = apy_type_new(apy_lit("_SpecialForm"), 0);
+    return cls;
+}
+
+/* `Final`, `LiteralString`, `Self`, ... A program may name one, annotate
+   with it, and print its class; nothing else about it is observable, so one
+   object kind carrying its own name covers the lot. */
+APY_API apy_value apy_typing_form(apy_value name) {
+    /* INTERNED BY NAME. `get_origin(Literal["a", "b"]) is Literal` is what a
+       program tests, and it can only be True if the two mentions of `Literal`
+       are one object. A fresh instance per mention is the obvious
+       implementation and is wrong in exactly the way that test detects. */
+    static apy_value seen = 0;
+    apy_value found;
+    if (!seen) seen = apy_dict_new(8);
+    /* The NON-RAISING lookup: `apy_dict_get` reports a missing key as a
+       KeyError, and a form not yet interned is the ordinary case here. */
+    found = apy_dict_get_or(seen, name, 0);
+    if (found) return found;
+    {
+    apy_value o = apy_instance_new(apy_special_form_class());
+    if (!o) return 0;
+    apy_setattr(o, apy_lit("_name"), name);
+    if (apy_error_occurred()) return 0;
+    apy_dict_set(seen, name, o);
+    return o;
+    }
+}
+
+/* PEP 695: `type Alias = list[int]`.
+
+   A `TypeAliasType` is a NAME plus the thing it stands for, and neither means
+   anything to the runtime beyond being readable back -- an alias annotates
+   and never converts. Made an instance of an interned class so
+   `type(Alias).__name__` answers `TypeAliasType`, which is what a program
+   asks to tell an alias from the type it aliases. */
+static apy_value apy_alias_class(void) {
+    static apy_value cls = 0;
+    if (!cls) cls = apy_type_new(apy_lit("TypeAliasType"), 0);
+    return cls;
+}
+
+APY_API apy_value apy_type_alias(apy_value name, apy_value value,
+                                 apy_value params) {
+    apy_value o = apy_instance_new(apy_alias_class());
+    if (!o) return 0;
+    apy_dict_set(O(o)->v.o.dict, apy_lit("__name__"), name);
+    apy_dict_set(O(o)->v.o.dict, apy_lit("__value__"), value);
+    apy_dict_set(O(o)->v.o.dict, apy_lit("__type_params__"),
+                 params ? params : apy_tuple_new(1));
+    return o;
+}
+
+/* PEP 695's type PARAMETER, and PEP 484's `TypeVar` under one object: both are
+   a name and nothing else at run time. */
+/* `__import__(name)` -- a DYNAMIC import, which this compiler cannot do.
+
+   There is no import machinery in a produced binary: every module a program
+   uses is resolved and spliced where it is compiled, so a name computed at
+   run time can never be one. Both answers below are honest and neither is
+   silently wrong -- a module this build does not have is a
+   ModuleNotFoundError exactly as in CPython, and one it does have is an
+   ImportError saying the import cannot be performed dynamically. */
+APY_API apy_value apy_import(apy_value name) {
+    static const char *known[] = {
+        "math", "sys", "typing", "asyncio", "inspect", "__future__",
+        "functools", "itertools", "contextlib", "warnings", "statistics",
+        "abc", "enum", "collections", "collections.abc", "fractions",
+        "decimal", "tomllib", "pathlib", "dataclasses", "contextvars",
+        "numbers", "copy", "types", "os", "datetime", "zoneinfo",
+        "annotationlib", 0};
+    const char *want = O(name)->kind == APY_STR_K ? APY_CSTR(name) : "";
+    int i;
+    for (i = 0; known[i]; i++)
+        if (strcmp(known[i], want) == 0)
+            return apy_fail2("ImportError",
+                             "cannot import '%s' dynamically: this build "
+                             "resolves imports at compile time%s", want, "");
+    return apy_fail2("ModuleNotFoundError", "No module named '%s'%s",
+                     want, "");
+}
+
+APY_API apy_value apy_typevar(apy_value name) {
+    static apy_value cls = 0;
+    apy_value o;
+    if (!cls) {
+        cls = apy_type_new(apy_lit("TypeVar"), 0);
+        /* PEP 696: `has_default()` is a METHOD and not an attribute, so the
+           class needs one. Native, because the whole of it is "is the default
+           slot filled" and there is no Python here to write it in. */
+        apy_dict_set(O(cls)->v.t.dict, apy_name("has_default"),
+                     apy_native(APY_NAT_HAS_DEFAULT, 1, "has_default"));
+    }
+    o = apy_instance_new(cls);
+    if (!o) return 0;
+    apy_dict_set(O(o)->v.o.dict, apy_lit("__name__"), name);
+    apy_dict_set(O(o)->v.o.dict, apy_lit("__default__"), apy_none());
+    return o;
+}
+
+/* PEP 696: the DEFAULT a type parameter was written with, or none. Set after
+   the object exists because the default is an expression evaluated where the
+   definition runs, exactly as a parameter's default is. */
+APY_API apy_value apy_typevar_default(apy_value tv, apy_value value) {
+    apy_dict_set(O(tv)->v.o.dict, apy_lit("__default__"), value);
+    return tv;
+}
+
+/* Is this one of the interned typing forms? Subscripting one PARAMETERISES it
+   -- `Literal["a", "b"]`, `TypeGuard[int]` -- rather than looking anything up,
+   which is the same thing `list[int]` does to a builtin type. */
+static int apy_is_special_form(apy_value v) {
+    return O(v)->kind == APY_INST_K
+        && O(v)->v.o.cls == apy_special_form_class();
+}
+
+/* `get_origin(x)` -- what was subscripted, or None. */
+APY_API apy_value apy_get_origin(apy_value v) {
+    if (O(v)->kind == APY_ALIAS_K) return O(v)->v.ga.origin;
+    return apy_none();
+}
+
+/* `get_args(x)` -- what it was subscripted WITH, or the empty tuple. */
+APY_API apy_value apy_get_args(apy_value v) {
+    if (O(v)->kind == APY_ALIAS_K) return O(v)->v.ga.args;
+    return apy_tuple_new(1);
+}
+
+/* `@final` on a class, `@override` on a method. BOTH RETURN THE ARGUMENT --
+   a decorator that returned anything else would replace the thing it marks,
+   and the marking is the whole of what they do. */
+APY_API apy_value apy_typing_final(apy_value obj) {
+    apy_setattr(obj, apy_lit("__final__"), apy_from_bool(1));
+    if (apy_error_occurred()) return 0;
+    return obj;
+}
+
+/* `@runtime_checkable`, `@no_type_check`. A decorator that marks a thing for
+   a CHECKER and does nothing a running program can see -- so the honest
+   implementation is to hand the argument back untouched. Distinct from
+   `final`/`override` only in that no program reads an attribute afterwards;
+   sharing their code would imply an attribute that is not there. */
+APY_API apy_value apy_typing_mark(apy_value obj) { return obj; }
+
+APY_API apy_value apy_typing_override(apy_value obj) {
+    apy_setattr(obj, apy_lit("__override__"), apy_from_bool(1));
+    if (apy_error_occurred()) return 0;
+    return obj;
+}
+
+/* `__init_subclass__` -- the hook a base runs when a subclass is created.
+
+   CALLED ON THE BASE, NOT THE NEW CLASS, and with the new class as its
+   argument: a class does not announce its own creation to itself, which is
+   why the lookup starts at the base. Implicitly a classmethod in CPython, so
+   what it receives is the subclass and nothing else.
+
+   Run after the class body has been filled, because the hook routinely reads
+   what the body bound. */
+APY_API apy_value apy_init_subclass(apy_value cls, apy_value kwd) {
+    apy_value base, hook;
+    if (O(cls)->kind != APY_TYPE_K) return apy_none();
+    base = O(cls)->v.t.base;
+    if (!base || O(base)->kind != APY_TYPE_K) return apy_none();
+    hook = apy_class_find(base, apy_name("__init_subclass__"));
+    if (!hook) return apy_none();
+    {
+        apy_value arg = cls;
+        /* THE CLASS KEYWORDS TRAVEL WITH IT: `class A(Base, tag="a")` is how
+           a program configures the hook, and dropping them left every
+           subclass looking identically unconfigured -- the default, which is
+           a wrong answer rather than a refusal.
+
+           Whatever the hook answers is discarded: it is called for its
+           effect, and CPython ignores the return too. */
+        if (!apy_call_kw(hook, (apy_value)&arg, 1,
+                         kwd ? kwd : apy_dict_new(1)))
+            return 0;
+    }
+    return apy_none();
+}
+
+/* PEP 487: every descriptor a class body bound is TOLD ITS OWN NAME, once,
+   after the body is complete. A descriptor cannot know it otherwise -- it is
+   built by an expression that has no idea what it is about to be assigned to
+   -- which is why the hook exists and why the class has to make the call. */
+/* `__slots__ = ("v",)` and `v = 1` IN THE SAME BODY is a ValueError, at
+   class creation. The slot and the class attribute would occupy the same
+   name and the attribute would win silently, which is why CPython refuses it
+   rather than picking one. Raised at run time, not refused at compile time:
+   a program may catch it, and the case that measures this does. */
+APY_API apy_value apy_check_slots(apy_value cls) {
+    apy_value d, slots;
+    int64_t i, n;
+    if (O(cls)->kind != APY_TYPE_K) return apy_none();
+    d = O(cls)->v.t.dict;
+    slots = apy_dict_get_or(d, apy_name("__slots__"), 0);
+    if (!slots) return apy_none();
+    n = (O(slots)->kind == APY_STR_K) ? 1 : apy_raw_len(slots);
+    if (apy_error_occurred()) { apy_error_clear(); return apy_none(); }
+    for (i = 0; i < n; i++) {
+        apy_value one = (O(slots)->kind == APY_STR_K) ? slots
+                                                      : apy_key_at(slots, i);
+        if (!one || O(one)->kind != APY_STR_K) continue;
+        if (apy_dict_find(d, one) >= 0) {
+            char buf[160];
+            snprintf(buf, sizeof buf,
+                     "'%s' in __slots__ conflicts with class variable",
+                     APY_CSTR(one));
+            return apy_fail("ValueError", buf);
+        }
+    }
+    return apy_none();
+}
+
+/* A SLOT READ THROUGH THE CLASS -- `Ok.v` where `v` is in `__slots__` and the
+   body bound nothing to it. CPython answers a `member_descriptor`, which is
+   what tells a reader the name is a slot rather than a missing attribute. */
+static apy_value apy_member_descriptor(void) {
+    static apy_value cls = 0;
+    if (!cls) cls = apy_type_new(apy_lit("member_descriptor"), 0);
+    return apy_instance_new(cls);
+}
+
+APY_API apy_value apy_set_names(apy_value cls) {
+    int64_t i;
+    apy_value d;
+    if (O(cls)->kind != APY_TYPE_K) return apy_none();
+    d = O(cls)->v.t.dict;
+    for (i = 0; i < O(d)->v.d.n; i++) {
+        apy_value member = O(d)->v.d.vals[i], hook, args[2];
+        if (O(member)->kind != APY_INST_K) continue;
+        hook = apy_class_find(O(member)->v.o.cls, apy_name("__set_name__"));
+        if (!hook) continue;
+        args[0] = cls;
+        args[1] = O(d)->v.d.keys[i];
+        if (!apy_call_n(apy_bind(hook, member), args, 2)) return 0;
+    }
+    return apy_none();
 }
 
 APY_API apy_value apy_instance_new(apy_value cls) {
@@ -8248,12 +12798,49 @@ APY_API apy_value apy_instance_new(apy_value cls) {
     o = apy_alloc(APY_INST_K);
     o->v.o.cls = cls;
     o->v.o.dict = apy_dict_new(4);
+    /* AN INSTANCE OF A BUILTIN-EXTENDING CLASS CARRIES ONE. `class D(dict)`
+       with only a `__missing__` in its body still has to BE a dict for
+       everything it did not write, and this is the dict it is. */
+    o->v.o.held = 0;
+    {
+        int kind = apy_class_builtin(cls);
+        if (kind == APY_DICT_K) o->v.o.held = apy_dict_new(4);
+        else if (kind == APY_LIST_K) o->v.o.held = apy_list_new(4);
+        else if (kind == APY_SET_K) o->v.o.held = apy_set_new(4);
+        else if (kind == APY_TUPLE_K) o->v.o.held = apy_tuple_new(1);
+        else if (kind == APY_STR_K) o->v.o.held = apy_lit("");
+    }
     return V(o);
+}
+
+/* The builtin an instance carries, or 0. The one place anything asks. */
+static apy_value apy_inst_held(apy_value v) {
+    return O(v)->kind == APY_INST_K ? O(v)->v.o.held : 0;
 }
 
 /* --- attributes --------------------------------------------------------- */
 
+static apy_value apy_kind_attr(apy_value obj, const char *want);
+APY_API apy_value apy_memoryview(apy_value src);
+static apy_value apy_kind_attr_of(apy_value obj, const char *want, int bind);
+static apy_value apy_kind_prototype(const char *type_name);
+
+/* Every builtin kind's lookup ends here, which is why the protocol table is
+   consulted HERE rather than in each of a dozen branches: a kind that has
+   `__iter__` reaches this line for it exactly as one that has nothing does. */
 static apy_value apy_no_attribute(apy_value obj, apy_value name) {
+    apy_value found = apy_kind_attr(obj, APY_CSTR(name));
+    if (found) return found;
+    /* THE TYPE ITSELF answers for its instances: `issubclass(dict, Mapping)`
+       is a question about what a dict CAN DO, asked of `dict` and never of
+       one. Unbound, because `dict.keys` is unbound in CPython too. */
+    if (O(obj)->kind == APY_FUNC_K && O(obj)->v.fn.is_type) {
+        apy_value proto = apy_kind_prototype(APY_CSTR(O(obj)->v.fn.name));
+        if (proto) {
+            found = apy_kind_attr_of(proto, APY_CSTR(name), 0);
+            if (found) return found;
+        }
+    }
     return apy_fail2("AttributeError", "'%s' object has no attribute '%s'",
                      apy_kind_name(obj), APY_CSTR(name));
 }
@@ -8263,6 +12850,158 @@ static apy_value apy_no_attribute(apy_value obj, apy_value name) {
    overrides `__getattribute__` needs a way to do what it overrode -- and
    `object.__getattribute__(self, name)` is how Python spells that. */
 APY_API apy_value apy_default_getattr(apy_value obj, apy_value name);
+
+/* `property(fget)`, `classmethod(f)`, `staticmethod(f)`. One constructor for
+   the three because they differ only in what reading one does. */
+APY_API apy_value apy_descr_new(apy_value fn, int64_t kind) {
+    apy_obj *o = apy_alloc(APY_PROP_K);
+    o->v.p.get = fn;
+    o->v.p.set = 0;
+    o->v.p.del_ = 0;
+    o->v.p.kind = (int)kind;
+    return V(o);
+}
+
+/* `@v.setter` -- a NEW property carrying the original getter and this
+   setter. New rather than mutated because the decorator's result is bound to
+   the name afterwards, and a program that kept the old object around must not
+   see it change under it. */
+APY_API apy_value apy_prop_setter(apy_value prop, apy_value fn) {
+    apy_value out;
+    if (O(prop)->kind != APY_PROP_K)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'setter'%s",
+                         apy_kind_name(prop), "");
+    out = apy_descr_new(O(prop)->v.p.get, APY_PROP_PROPERTY);
+    O(out)->v.p.set = fn;
+    O(out)->v.p.del_ = O(prop)->v.p.del_;
+    return out;
+}
+
+/* `@v.deleter`. The third of the three, and the one that was missing --
+   `del obj.v` had a slot to read (`v.p.del_`) and no way to fill it. */
+APY_API apy_value apy_prop_deleter(apy_value prop, apy_value fn) {
+    apy_value out;
+    if (O(prop)->kind != APY_PROP_K)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'deleter'%s",
+                         apy_kind_name(prop), "");
+    out = apy_descr_new(O(prop)->v.p.get, APY_PROP_PROPERTY);
+    O(out)->v.p.set = O(prop)->v.p.set;
+    O(out)->v.p.del_ = fn;
+    return out;
+}
+
+/* `@v.getter`, the mirror of it. */
+APY_API apy_value apy_prop_getter(apy_value prop, apy_value fn) {
+    apy_value out;
+    if (O(prop)->kind != APY_PROP_K)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'getter'%s",
+                         apy_kind_name(prop), "");
+    out = apy_descr_new(fn, APY_PROP_PROPERTY);
+    O(out)->v.p.set = O(prop)->v.p.set;
+    O(out)->v.p.del_ = O(prop)->v.p.del_;
+    return out;
+}
+
+/* --- the descriptor protocol -------------------------------------------
+   An object on a CLASS that decides for itself what reading or writing it
+   through an instance means. `property`, `classmethod` and `staticmethod` are
+   all built on it, and a user class defining `__get__` is one too.
+
+   TWO KINDS, and the difference is only which side of the instance dict they
+   sit on. A DATA descriptor defines `__set__` (or `__delete__`) and wins over
+   the instance dict; a NON-DATA one defines only `__get__` and loses to it.
+   That is what lets `c.v = 4` reach a property's setter while an ordinary
+   method can still be shadowed by an attribute of the same name. */
+static int apy_is_descriptor(apy_value v) {
+    if (O(v)->kind == APY_PROP_K) return 1;
+    return O(v)->kind == APY_INST_K
+        && apy_class_find(O(v)->v.o.cls, apy_name("__get__")) != 0;
+}
+
+static int apy_is_data_descriptor(apy_value v) {
+    if (O(v)->kind == APY_PROP_K) return O(v)->v.p.kind == APY_PROP_PROPERTY;
+    return O(v)->kind == APY_INST_K
+        && (apy_class_find(O(v)->v.o.cls, apy_name("__set__")) != 0
+            || apy_class_find(O(v)->v.o.cls, apy_name("__delete__")) != 0);
+}
+
+/* Read through a descriptor: `d.__get__(obj, type)`. */
+static apy_value apy_descr_get(apy_value d, apy_value obj, apy_value cls) {
+    if (O(d)->kind == APY_PROP_K) {
+        apy_value argv[2];
+        switch (O(d)->v.p.kind) {
+        case APY_PROP_PROPERTY:
+            /* THROUGH THE CLASS, A PROPERTY IS ITSELF. `Base.v` is the
+               property object -- which is how `Base.v.fget(self)` reaches the
+               base getter from an override. Calling the getter with no
+               instance instead returned whatever it computed from nothing,
+               and the program then looked for `.fget` on a str. */
+            if (!obj) return d;
+            if (!O(d)->v.p.get)
+                return apy_fail("AttributeError", "unreadable attribute");
+            argv[0] = obj;
+            return apy_call_n(O(d)->v.p.get, argv, 1);
+        case APY_PROP_CLASSMETHOD:
+            /* Bound to the CLASS, not the instance -- and to the class the
+               lookup started from, so `D.make()` on a subclass sees `D`. */
+            return apy_bind(O(d)->v.p.get, cls);
+        default:
+            /* `staticmethod`: no binding at all, which is its whole point. */
+            return O(d)->v.p.get;
+        }
+    }
+    {
+        apy_value m = apy_class_find(O(d)->v.o.cls, apy_name("__get__"));
+        apy_value argv[2];
+        argv[0] = obj ? obj : apy_none();
+        argv[1] = cls ? cls : apy_none();
+        return apy_call_n(apy_bind(m, d), argv, 2);
+    }
+}
+
+/* Write through a descriptor: `d.__set__(obj, value)`. Answers 0 and leaves
+   the flag set on failure, 1 when it handled the write, -1 when this is not
+   a data descriptor and the caller should store normally. */
+static int apy_descr_set(apy_value d, apy_value obj, apy_value value) {
+    if (!apy_is_data_descriptor(d)) return -1;
+    if (O(d)->kind == APY_PROP_K) {
+        apy_value argv[2];
+        if (!O(d)->v.p.set)
+            return apy_fail("AttributeError",
+                            "can't set attribute") ? 1 : 0;
+        argv[0] = obj;
+        argv[1] = value;
+        return apy_call_n(O(d)->v.p.set, argv, 2) ? 1 : 0;
+    }
+    {
+        apy_value m = apy_class_find(O(d)->v.o.cls, apy_name("__set__"));
+        apy_value argv[2];
+        if (!m) return -1;
+        argv[0] = obj;
+        argv[1] = value;
+        return apy_call_n(apy_bind(m, d), argv, 2) ? 1 : 0;
+    }
+}
+
+/* `getattr(x, 'a', fallback)`. A MISS IS NOT AN ERROR HERE, which is the
+   whole difference from the two-argument form -- so the pending AttributeError
+   is cleared and the fallback answered. Only an AttributeError is swallowed:
+   a `__getattr__` that raised something of its own is the program's error and
+   has to survive, or this would turn every failure inside a property into a
+   silent default. */
+APY_API apy_value apy_getattr_default(apy_value obj, apy_value name,
+                                      apy_value fallback) {
+    apy_value got = apy_getattr(obj, name);
+    if (got) return got;
+    if (apy_error_matches(apy_lit("AttributeError"))) {
+        apy_error_clear();
+        return fallback;
+    }
+    return 0;
+}
 
 APY_API apy_value apy_getattr(apy_value obj, apy_value name) {
     /* `__getattribute__` INTERCEPTS EVERYTHING, before the instance dict is
@@ -8297,11 +13036,26 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
            A class overriding `__getattribute__` is asked first by
            `apy_getattr`, and reaches this by calling the default explicitly,
            which is the only way out of the recursion. */
-        int64_t at = apy_dict_find(O(obj)->v.o.dict, name);
+        int64_t at;
         apy_value found;
-        if (at >= 0) return O(O(obj)->v.o.dict)->v.d.vals[at];
+        /* A DATA DESCRIPTOR ON THE CLASS BEATS THE INSTANCE DICT. That is the
+           one place the "instance wins" rule above does not hold, and it is
+           what makes a `property` a property: `c.v = 4` runs its setter and
+           the instance dict never gets a `v` to shadow it with. A NON-data
+           descriptor -- `__get__` and no `__set__` -- loses to the instance
+           dict instead, which is how a method can be shadowed by an
+           attribute of the same name. */
         found = apy_class_find(O(obj)->v.o.cls, name);
+        if (found && apy_is_data_descriptor(found))
+            return apy_descr_get(found, obj, O(obj)->v.o.cls);
+        at = apy_dict_find(O(obj)->v.o.dict, name);
+        if (at >= 0) return O(O(obj)->v.o.dict)->v.d.vals[at];
         if (found) {
+            /* A NON-DATA descriptor -- `staticmethod`, `classmethod`, or a
+               user class with only `__get__` -- is asked here, after the
+               instance dict has missed. */
+            if (apy_is_descriptor(found))
+                return apy_descr_get(found, obj, O(obj)->v.o.cls);
             /* A function found on the CLASS becomes a bound method; anything
                else -- an int, a str, a list -- is handed back as it is. That
                single test is the whole of the "methods take self" rule. */
@@ -8310,8 +13064,15 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
         if (strcmp(want, "__class__") == 0) return O(obj)->v.o.cls;
         /* THE INSTANCE'S OWN attributes, and the real dict rather than a copy:
            `obj.__dict__["x"] = 1` is how a program sets an attribute
-           dynamically, and a copy would accept the write and lose it. */
-        if (strcmp(want, "__dict__") == 0) return O(obj)->v.o.dict;
+           dynamically, and a copy would accept the write and lose it.
+
+           ABSENT under `__slots__`, which is the point of declaring it --
+           `hasattr(p, "__dict__")` is how a program checks. */
+        if (strcmp(want, "__dict__") == 0) {
+            if (!apy_slot_allows(O(obj)->v.o.cls, apy_lit("__dict__")))
+                return apy_no_attribute(obj, name);
+            return O(obj)->v.o.dict;
+        }
         /* `__getattr__` -- the LAST resort, asked only after the instance
            dict and the class have both missed. That ordering is the whole
            protocol: `__getattribute__` intercepts everything and this
@@ -8327,19 +13088,143 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
     case APY_TYPE_K: {
         apy_value found;
         if (strcmp(want, "__name__") == 0) return O(obj)->v.t.name;
+        /* PEP 3155. A class nested in another would qualify differently; only
+           the top-level spelling is recorded, which is the same limit the
+           frontend's own keys have for classes. */
+        if (strcmp(want, "__qualname__") == 0) return O(obj)->v.t.name;
+        /* PEP 649 for a CLASS: `C.__annotations__` is built on access by the
+           thunk the body left in the dict, for the same reason a function's
+           is -- an annotation may name something that does not exist yet. */
+        if (strcmp(want, "__annotations__") == 0) {
+            apy_value thunk = apy_dict_get_or(O(obj)->v.t.dict,
+                                              apy_name("__annotate__"), 0);
+            if (!thunk) return apy_dict_new(1);
+            return apy_call_n(thunk, NULL, 0);
+        }
         /* `C.__dict__` is what the class body bound, not what it inherited --
            which is the difference `"x" in vars(C)` asks about. A copy, because
            a type's dict is a mapping proxy in CPython and is not writable. */
         if (strcmp(want, "__dict__") == 0) return apy_copy(O(obj)->v.t.dict);
-        if (strcmp(want, "__bases__") == 0) {
-            apy_value out = apy_tuple_new(2);
-            if (O(obj)->v.t.base) apy_seq_push(out, O(obj)->v.t.base);
+        /* A SLOT NAME reached through the class is a descriptor, not a
+           missing attribute: `__slots__` declares storage, and the class dict
+           holds nothing for it. */
+        if (apy_slot_allows(obj, name)
+                && apy_dict_find(O(obj)->v.t.dict, name) < 0
+                && apy_dict_find(O(obj)->v.t.dict,
+                                 apy_name("__slots__")) >= 0)
+            return apy_member_descriptor();
+        /* THE HIERARCHY, as a program reads it back. `object` is the root
+           of every chain even though no class links to it -- see
+           `apy_object_class` -- so a class with no written base still has one
+           base, and only `object` itself has none. Answering the empty tuple
+           there said the chain stopped at the class, which is what
+           `C.__bases__` is asked to disprove. */
+        /* AN EXCEPTION TYPE'S PARENT IS IN THE NAME TABLE, not in a base
+           pointer -- the builtin hierarchy is a table because `raise` and
+           `except` match on the name and never hold a class. So
+           `Exception.__bases__` answered `object` where CPython says
+           `BaseException`: the class had no base pointer and the walk stopped
+           at the root without ever asking the table. */
+        if ((strcmp(want, "__bases__") == 0 || strcmp(want, "__base__") == 0
+             || strcmp(want, "__mro__") == 0)
+                && !O(obj)->v.t.base) {
+            const char *parent = apy_exc_parent(APY_CSTR(O(obj)->v.t.name));
+            if (parent) {
+                if (strcmp(want, "__base__") == 0)
+                    return apy_exc_type(apy_lit(parent));
+                {
+                    apy_value out = apy_tuple_new(4);
+                    const char *walk = parent;
+                    /* `__mro__` STARTS WITH THE CLASS ITSELF; `__bases__` and
+                       `__base__` start with its parent. */
+                    if (strcmp(want, "__mro__") == 0)
+                        apy_seq_push(out, obj);
+                    while (walk) {
+                        apy_seq_push(out, apy_exc_type(apy_lit(walk)));
+                        if (strcmp(want, "__bases__") == 0) break;
+                        walk = apy_exc_parent(walk);
+                    }
+                    if (strcmp(want, "__mro__") == 0)
+                        apy_seq_push(out, apy_object_class());
+                    return out;
+                }
+            }
+        }
+        /* `C.__mro__` -- the classes a lookup walks, in order, ending at
+           `object`. Single inheritance makes it a chain rather than a
+           linearisation. */
+        if (strcmp(want, "__mro__") == 0) {
+            apy_value out = apy_tuple_new(4);
+            apy_value walk = obj, root = apy_object_class();
+            int64_t i;
+            /* THE RECORDED ORDER when the class has one -- that IS the answer,
+               and rebuilding it from the base chain would give a different
+               one for a class with several bases. */
+            if (O(obj)->v.t.mro) {
+                for (i = 0; i < O(O(obj)->v.t.mro)->v.q.n; i++)
+                    apy_seq_push(out, O(O(obj)->v.t.mro)->v.q.items[i]);
+                apy_seq_push(out, root);
+                return out;
+            }
+            while (walk && O(walk)->kind == APY_TYPE_K && walk != root) {
+                apy_seq_push(out, walk);
+                walk = O(walk)->v.t.base;
+            }
+            apy_seq_push(out, root);
             return out;
         }
+        if (strcmp(want, "__bases__") == 0) {
+            apy_value root = apy_object_class();
+            apy_value out = apy_tuple_new(2);
+            /* ALL OF THEM, in the order written. `__base__` is the first;
+               these are what the class statement actually said. */
+            if (O(obj)->v.t.bases) return O(obj)->v.t.bases;
+            if (obj != root)
+                apy_seq_push(out, O(obj)->v.t.base ? O(obj)->v.t.base : root);
+            return out;
+        }
+        if (strcmp(want, "__base__") == 0) {
+            apy_value root = apy_object_class();
+            if (obj == root) return apy_none();
+            return O(obj)->v.t.base ? O(obj)->v.t.base : root;
+        }
+        {
+            /* THROUGH THE CLASS, a descriptor is asked with no instance:
+               `C.make()` binds the class and `C.plain` hands the plain
+               function back. Without this the classmethod object itself came
+               out and calling it failed. */
+            apy_value d = apy_class_find(obj, name);
+            if (d && apy_is_descriptor(d))
+                return apy_descr_get(d, 0, obj);
+        }
+        /* DEFINING `__eq__` AND NOT `__hash__` SETS `__hash__` TO None, and a
+           program reads it back: `C.__hash__ is None` is how it asks whether
+           instances are hashable. The refusal in `apy_hash_raw` already
+           follows this rule; without the attribute the two disagreed about
+           the same class -- unhashable when hashed, no such attribute when
+           asked. */
+        if (strcmp(want, "__hash__") == 0
+                && !apy_class_find(obj, apy_name("__hash__"))
+                && apy_class_find(obj, apy_name("__eq__")))
+            return apy_none();
         found = apy_class_find(obj, name);
         /* Reached through the CLASS, a method is not bound: `C.m` is a plain
            function and `C.m(x)` passes x as self. */
         if (found) return found;
+        /* AN ATTRIBUTE OF THE CLASS'S OWN TYPE. `Quacks.register(Duck)` is a
+           method the METACLASS defines, and the class is its receiver -- the
+           same relationship an instance has to its class, one level up. Asked
+           LAST, because a name the class itself binds wins over one its
+           metaclass does. */
+        if (O(obj)->v.t.meta) {
+            apy_value m = apy_class_find(O(obj)->v.t.meta, name);
+            if (m && apy_is_descriptor(m)) return apy_descr_get(m, obj, obj);
+            if (m && O(m)->kind == APY_FUNC_K) return apy_bind(m, obj);
+            if (m) return m;
+        }
+        /* THE HIERARCHY, as a program reads it back. `object` is the root of
+           every chain even though no class links to it -- see
+           `apy_object_class`. */
         return apy_fail2("AttributeError", "type object '%s' has no "
                          "attribute '%s'", APY_CSTR(O(obj)->v.t.name), want);
     }
@@ -8349,20 +13234,189 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
            `C(B)`, a `super().m()` inside B's `m` must find A's, and starting
            from `type(self)` would find B's own and loop forever. */
         apy_value from = O(obj)->v.sup.from;
-        apy_value found = apy_class_find(O(from)->v.t.base, name);
-        if (!found)
-            return apy_fail2("AttributeError", "'super' object has no "
-                             "attribute '%s'%s", want, "");
-        return O(found)->kind == APY_FUNC_K
-            ? apy_bind(found, O(obj)->v.sup.self) : found;
+        apy_value self = O(obj)->v.sup.self;
+        apy_value found = 0;
+        /* THE RECEIVER'S MRO, PAST THE DEFINING CLASS. This is what makes a
+           diamond work: inside B's method, `super()` on a D instance must
+           reach C and not A, and only the RECEIVER's order knows that C sits
+           between them. With a single base the walk is the base chain again,
+           which is what the fallback below still does. */
+        {
+            apy_value order = 0;
+            apy_value host = self ? apy_type_of(self) : 0;
+            if (host && O(host)->kind == APY_TYPE_K) order = O(host)->v.t.mro;
+            if (order && apy_is_seq(order)) {
+                int64_t i, at = -1;
+                for (i = 0; i < O(order)->v.q.n; i++)
+                    if (O(order)->v.q.items[i] == from) { at = i; break; }
+                for (i = at + 1; at >= 0 && i < O(order)->v.q.n && !found;
+                     i++) {
+                    apy_value here = O(order)->v.q.items[i];
+                    int64_t k;
+                    if (O(here)->kind != APY_TYPE_K) continue;
+                    k = apy_dict_find(O(here)->v.t.dict, name);
+                    if (k >= 0) found = O(O(here)->v.t.dict)->v.d.vals[k];
+                }
+            }
+        }
+        if (!found) found = apy_class_find(O(from)->v.t.base, name);
+        /* THE BASE CHAIN HAS RUN OUT OF PYTHON and the receiver is an
+           exception, so what `super().__init__(msg)` means is
+           `BaseException.__init__` -- which is not a function anywhere in
+           that chain, because the hierarchy above a user exception class is a
+           table of names rather than classes. AFTER the walk, not before: a
+           subclass writing `super().__init__(...)` must reach its own base's
+           `__init__` first, and intercepting early sent every one of them
+           straight past it. Falling through instead would find `object`'s,
+           which takes the message and does nothing with it. */
+        if (!found && self && O(self)->kind == APY_EXC_K
+                && strcmp(want, "__init__") == 0)
+            return apy_bind(apy_native(APY_NAT_EXC_INIT, 2, "__init__"), self);
+        if (!found) {
+            /* THE BASE CHAIN HAS RUN OUT, which means `object` -- and every
+               class has one. `super().__init__()` inside a class with no
+               explicit base is ordinary Python and was an AttributeError
+               here: the default bodies existed and no VALUE named them. */
+            found = apy_object_default(want);
+            if (!found)
+                return apy_fail2("AttributeError", "'super' object has no "
+                                 "attribute '%s'%s", want, "");
+        }
+        /* `__new__` IS AN IMPLICIT STATICMETHOD and is NEVER bound: it
+           receives the class as an ordinary first argument, which the caller
+           writes out -- `super().__new__(cls)`. Binding it put the receiver
+           in front of that and every argument landed one place late. */
+        if (strcmp(want, "__new__") == 0) return found;
+        return O(found)->kind == APY_FUNC_K ? apy_bind(found, self) : found;
     }
+    case APY_SLICE_K:
+        /* `s.start`, `s.stop`, `s.step` -- what a `__getitem__` reads off the
+           slice it was handed. None where the bound was omitted. */
+        if (strcmp(want, "start") == 0) return O(obj)->v.sl.start;
+        if (strcmp(want, "stop") == 0) return O(obj)->v.sl.stop;
+        if (strcmp(want, "step") == 0) return O(obj)->v.sl.step;
+        return apy_no_attribute(obj, name);
+    case APY_PROP_K:
+        /* `p.fget` and `p.fset` -- the functions a property was built from.
+           A subclass overriding a property reaches the base one's getter
+           through `fget`, which is the only way to extend rather than replace
+           it. None where there is no such half, as CPython answers. */
+        if (strcmp(want, "fget") == 0)
+            return O(obj)->v.p.get ? O(obj)->v.p.get : apy_none();
+        if (strcmp(want, "fset") == 0)
+            return O(obj)->v.p.set ? O(obj)->v.p.set : apy_none();
+        if (strcmp(want, "fdel") == 0)
+            return O(obj)->v.p.del_ ? O(obj)->v.p.del_ : apy_none();
+        /* `__func__` is what `classmethod` and `staticmethod` wrap. */
+        if (strcmp(want, "__func__") == 0 && O(obj)->v.p.get)
+            return O(obj)->v.p.get;
+        /* THE PROTOCOL ITSELF, as values. `hasattr(p, "__get__")` is how a
+           program asks whether something is a descriptor, and a property that
+           answered False to it was reported as an ordinary attribute. */
+        if (strcmp(want, "__get__") == 0)
+            return apy_bind(apy_native(APY_NAT_DESCR_GET, 3, "__get__"), obj);
+        if (strcmp(want, "__set__") == 0)
+            return apy_bind(apy_native(APY_NAT_DESCR_SET, 3, "__set__"), obj);
+        if (strcmp(want, "__delete__") == 0)
+            return apy_bind(apy_native(APY_NAT_DESCR_DEL, 2, "__delete__"),
+                            obj);
+        return apy_no_attribute(obj, name);
     case APY_FUNC_K:
+        /* WHAT A PROGRAM PUT THERE WINS over the built-in attributes below.
+           A function's own dict is consulted first for the same reason an
+           instance's is: `f.__name__ = 'other'` has to read back as it was
+           written, not as the function was defined. */
+        if (O(obj)->v.fn.dict) {
+            int64_t at = apy_dict_find(O(obj)->v.fn.dict, name);
+            if (at >= 0) return O(O(obj)->v.fn.dict)->v.d.vals[at];
+        }
         if (strcmp(want, "__name__") == 0) return O(obj)->v.fn.name;
-        /* No qualified name is recorded -- a nested `def` knows its own name
-           and not its enclosing scope's -- so the plain one is what there is.
-           Saying so beats an AttributeError on an attribute every function
-           has. */
-        if (strcmp(want, "__qualname__") == 0) return O(obj)->v.fn.name;
+        /* `f.__code__` -- ENOUGH OF ONE to answer what a program asks a
+           function about its own signature. Not a real code object: there is
+           no bytecode here to describe, and `co_argcount` and `co_varnames`
+           are what introspection actually reads. */
+        if (strcmp(want, "__code__") == 0) {
+            static apy_value cls = 0;
+            apy_value code, names;
+            int64_t declared = O(obj)->v.fn.arity
+                - (O(obj)->v.fn.vararg ? 1 : 0)
+                - (O(obj)->v.fn.kwarg ? 1 : 0);
+            int64_t i;
+            if (!cls) cls = apy_type_new(apy_lit("code"), 0);
+            code = apy_instance_new(cls);
+            if (!code) return 0;
+            names = apy_tuple_new(declared + 3);
+            for (i = 0; i < declared; i++)
+                if (O(obj)->v.fn.pnames && O(obj)->v.fn.pnames[i])
+                    apy_seq_push(names, O(obj)->v.fn.pnames[i]);
+            /* `*rest` AND `**kw` COME LAST, after every declared parameter --
+               which is where CPython puts them and where `inspect` expects to
+               find them. Omitted entirely before, so a signature rebuilt from
+               `co_varnames` had no variadic parts at all. */
+            for (i = declared; i < O(obj)->v.fn.arity; i++)
+                if (O(obj)->v.fn.pnames && O(obj)->v.fn.pnames[i])
+                    apy_seq_push(names, O(obj)->v.fn.pnames[i]);
+            apy_setattr(code, apy_lit("co_argcount"),
+                        apy_from_int(declared - O(obj)->v.fn.kwonly));
+            apy_setattr(code, apy_lit("co_posonlyargcount"),
+                        apy_from_int(O(obj)->v.fn.posonly));
+            apy_setattr(code, apy_lit("co_kwonlyargcount"),
+                        apy_from_int(O(obj)->v.fn.kwonly));
+            /* THE FLAGS `inspect` READS: 0x04 is `*rest` and 0x08 is `**kw`,
+               which is how a signature knows the variadic parts exist without
+               a second field to carry them. */
+            apy_setattr(code, apy_lit("co_flags"),
+                        apy_from_int((O(obj)->v.fn.vararg ? 4 : 0)
+                                     | (O(obj)->v.fn.kwarg ? 8 : 0)));
+            apy_setattr(code, apy_lit("co_varnames"), names);
+            apy_setattr(code, apy_lit("co_name"), O(obj)->v.fn.name);
+            if (apy_error_occurred()) return 0;
+            return code;
+        }
+        /* `f.__defaults__` is the POSITIONAL defaults as a tuple and
+           `__kwdefaults__` the keyword-only ones as a dict -- and each is
+           None rather than empty when there are none, which is how a program
+           tells "no defaults" from "a default that is falsey".
+           The two are stored as one trailing run, keyword-only last, so the
+           split is the number of keyword-only parameters that have one. */
+        if (strcmp(want, "__defaults__") == 0
+                || strcmp(want, "__kwdefaults__") == 0) {
+            int64_t nd = O(obj)->v.fn.ndefaults;
+            /* THE RECORDED COUNT, not the number of keyword-only parameters:
+               one of those may be required, and `def f(a, b=1, *args, c)` has
+               one keyword-only parameter and one default that is not its. */
+            int64_t kw = O(obj)->v.fn.nkwdefault;
+            int64_t at_kw = kw < nd ? kw : nd;
+            int64_t npos = nd - at_kw, i;
+            int64_t declared = O(obj)->v.fn.arity
+                - (O(obj)->v.fn.vararg ? 1 : 0)
+                - (O(obj)->v.fn.kwarg ? 1 : 0);
+            if (strcmp(want, "__defaults__") == 0) {
+                apy_value out;
+                if (npos <= 0) return apy_none();
+                out = apy_tuple_new(npos + 1);
+                for (i = 0; i < npos; i++)
+                    apy_seq_push(out, O(obj)->v.fn.defaults[i]);
+                return out;
+            }
+            if (at_kw <= 0 || !O(obj)->v.fn.pnames) return apy_none();
+            {
+                apy_value out = apy_dict_new(at_kw + 1);
+                for (i = 0; i < at_kw; i++) {
+                    apy_value pn = O(obj)->v.fn.pnames[declared - at_kw + i];
+                    if (pn) apy_dict_set(out, pn,
+                                         O(obj)->v.fn.defaults[npos + i]);
+                }
+                return out;
+            }
+        }
+        /* PEP 3155. The frontend's own key for a function is already the
+           qualified name -- `C.m`, `outer.<locals>.inner` -- so it is handed
+           over at construction. A function built without one (a synthesised
+           thunk) answers its plain name, which is what it is. */
+        if (strcmp(want, "__qualname__") == 0)
+            return O(obj)->v.fn.qualname ? O(obj)->v.fn.qualname
+                                         : O(obj)->v.fn.name;
         /* `m.__self__` is the RECEIVER of a bound method, and its absence is
            how a program tells a bound method from a plain function. */
         if (strcmp(want, "__self__") == 0) {
@@ -8393,19 +13447,127 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
            function has `__doc__`, and one without a docstring has None. */
         if (strcmp(want, "__doc__") == 0)
             return O(obj)->v.fn.doc ? O(obj)->v.fn.doc : apy_none();
-        /* Annotations are not carried -- they are erased by analysis, which is
-           the whole point of the two-path design -- so this is empty rather
-           than absent: `f.__annotations__` exists on every function. */
-        if (strcmp(want, "__annotations__") == 0) return apy_dict_new(1);
+        /* PEP 649: `__annotations__` is BUILT ON ACCESS, by the thunk the
+           `def` recorded. Evaluating them at the `def` would make
+           `def f(x: Undefined)` an error where Python accepts it -- only
+           reading the annotations is. A function with none answers the empty
+           dict, which is what every function has. */
+        if (strcmp(want, "__annotate__") == 0)
+            return O(obj)->v.fn.annotate ? O(obj)->v.fn.annotate
+                                         : apy_none();
+        if (strcmp(want, "__annotations__") == 0) {
+            if (!O(obj)->v.fn.annotate) return apy_dict_new(1);
+            return apy_call_n(O(obj)->v.fn.annotate, NULL, 0);
+        }
+        return apy_no_attribute(obj, name);
+    case APY_ALIAS_K:
+        /* `list[int].__origin__` is `list` and `.__args__` is `(int,)`. A
+           program that inspects an annotation reads exactly these two, and
+           `get_origin`/`get_args` are defined in terms of them. */
+        if (strcmp(want, "__origin__") == 0) return O(obj)->v.ga.origin;
+        if (strcmp(want, "__args__") == 0) return O(obj)->v.ga.args;
+        /* NOT A BARE REFUSAL. `__class__` is answered for every kind that has
+           no attributes of its own, and adding a case here cut this kind off
+           from that -- which is the "a new case must be taught every generic
+           path" trap, arrived at from the other direction. */
+        if (strcmp(want, "__class__") == 0) return apy_kind_class(obj);
+        return apy_no_attribute(obj, name);
+    case APY_GEN_K:
+        /* THE THREE METHODS, AS VALUES. They are dispatched by name at the
+           call site, so nothing needed a value for them -- until a program
+           asked `hasattr(g, "close")`, which every duck-typed consumer does,
+           and got False for a method it can plainly call. */
+        if (strcmp(want, "send") == 0)
+            return apy_bind(apy_native(APY_NAT_GEN_SEND, 2, "send"), obj);
+        if (strcmp(want, "throw") == 0)
+            return apy_bind(apy_native(APY_NAT_GEN_THROW, 2, "throw"), obj);
+        /* A TASK'S OWN METHODS. A task is a generator cell like any
+           other here, so these sit beside `send` and `throw` rather than on a
+           class of their own. */
+        if (O(obj)->v.g.builtin == APY_CORO_TASK) {
+            if (strcmp(want, "cancel") == 0)
+                return apy_bind(apy_native(APY_NAT_TASK_CANCEL, 1, "cancel"),
+                                obj);
+            if (strcmp(want, "result") == 0)
+                return apy_bind(apy_native(APY_NAT_TASK_RESULT, 1, "result"),
+                                obj);
+            if (strcmp(want, "done") == 0)
+                return apy_bind(apy_native(APY_NAT_TASK_DONE, 1, "done"),
+                                obj);
+            if (strcmp(want, "cancelled") == 0)
+                return apy_bind(apy_native(APY_NAT_TASK_CANCELLED, 1,
+                                           "cancelled"), obj);
+        }
+        if (strcmp(want, "close") == 0)
+            return apy_bind(apy_native(APY_NAT_GEN_CLOSE, 1, "close"), obj);
+        return apy_no_attribute(obj, name);
+    case APY_MVIEW_K:
+        if (strcmp(want, "readonly") == 0)
+            return apy_from_bool(!O(O(obj)->v.mv.src)->v.s.mut);
+        if (strcmp(want, "nbytes") == 0) return apy_from_int(O(obj)->v.mv.n);
+        /* One byte per element, unsigned -- the only format a bytes-like
+           source produces, and the only one this constructs. A view over an
+           `array('i')` would report differently, and there is no such source
+           here to report for. */
+        if (strcmp(want, "itemsize") == 0) return apy_from_int(1);
+        if (strcmp(want, "format") == 0) return apy_lit("B");
+        if (strcmp(want, "obj") == 0) return O(obj)->v.mv.src;
         return apy_no_attribute(obj, name);
     case APY_COMPLEX_K:
         if (strcmp(want, "real") == 0) return apy_from_float(O(obj)->v.z.re);
         if (strcmp(want, "imag") == 0) return apy_from_float(O(obj)->v.z.im);
         return apy_no_attribute(obj, name);
+    case APY_INT_K:
+    case APY_BOOL_K:
+    case APY_BIG_K:
+        /* EVERY NUMBER HAS `real` AND `imag`, not only a complex one -- that
+           is what makes the numeric tower uniform, and a program written
+           against it reads `.real` off whatever it was handed. An int's
+           imaginary part is the INT zero, not the float, which `type()` on it
+           can tell apart. */
+        if (strcmp(want, "real") == 0) return obj;
+        if (strcmp(want, "imag") == 0) return apy_from_int(0);
+        return apy_no_attribute(obj, name);
+    case APY_FLOAT_K:
+        if (strcmp(want, "real") == 0) return obj;
+        if (strcmp(want, "imag") == 0) return apy_from_float(0.0);
+        return apy_no_attribute(obj, name);
     case APY_EXC_K:
+        /* WHAT THE PROGRAM STORED WINS over what the KIND offers. `value`,
+           `message` and `exceptions` are answered for every exception here --
+           one cell serves them all -- but in CPython they belong to
+           StopIteration and ExceptionGroup alone, so a class of its own
+           setting `self.value` owns that name and nothing should take it.
+           It did: `raise _Returned(42)` then `caught.value` gave back the
+           MESSAGE rather than the 42, which is a wrong answer and not a
+           missing feature.
+           THE DUNDERS AND `args` ARE NOT IN THIS, because those really are
+           BaseException's and a program writing one means to write through
+           it. */
+        if (O(obj)->v.e.dict && want[0] != '_'
+                && strcmp(want, "args") != 0) {
+            int64_t at = apy_dict_find(O(obj)->v.e.dict, name);
+            if (at >= 0) return O(O(obj)->v.e.dict)->v.d.vals[at];
+        }
+        /* `g.exceptions` -- what an `ExceptionGroup` carries. Absent on an
+           ordinary exception, which is how a program tells the two apart
+           without asking about the type. */
+        if (strcmp(want, "exceptions") == 0) {
+            if (!O(obj)->v.e.subs) return apy_no_attribute(obj, name);
+            return O(obj)->v.e.subs;
+        }
+        /* `g.message` -- the text an ExceptionGroup was built with, which is
+           its FIRST argument and separate from the exceptions it carries.
+           Present only on a group, like `exceptions`. */
+        if (strcmp(want, "message") == 0) {
+            if (!O(obj)->v.e.subs) return apy_no_attribute(obj, name);
+            return O(obj)->v.e.has_arg ? O(obj)->v.e.arg : apy_lit("");
+        }
         /* `e.args` is the one attribute the suite reads off an exception. */
         if (strcmp(want, "args") == 0) {
-            apy_value out = apy_tuple_new(1);
+            apy_value out;
+            if (O(obj)->v.e.argv) return O(obj)->v.e.argv;
+            out = apy_tuple_new(1);
             /* The FLAG, not "is the argument None": `E(None).args` is
                `(None,)` and `E().args` is `()`. */
             if (O(obj)->v.e.has_arg) apy_seq_push(out, O(obj)->v.e.arg);
@@ -8419,6 +13581,16 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
            it in CPython (it is None unless something set it), so answering
            None rather than reporting keeps `except StopIteration as e:
            e.value` working for the bare form too. */
+        /* PEP 3151: `OSError(2, "No such file")` READS BOTH BACK. They
+           are positions in `args`, not fields, which is why they are answered
+           from it rather than stored twice. */
+        if (strcmp(want, "errno") == 0 || strcmp(want, "strerror") == 0) {
+            int64_t at = strcmp(want, "errno") == 0 ? 0 : 1;
+            apy_value all = O(obj)->v.e.argv;
+            if (all && apy_is_seq(all) && O(all)->v.q.n > at)
+                return O(all)->v.q.items[at];
+            return apy_none();
+        }
         if (strcmp(want, "value") == 0)
             return O(obj)->v.e.has_arg ? O(obj)->v.e.arg : apy_none();
         if (strcmp(want, "__context__") == 0)
@@ -8441,10 +13613,42 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
            None` is the test programs actually write. An empty tuple is the
            least dishonest stand-in: it is not None, it is not a frame, and
            iterating it yields the nothing this runtime knows. */
-        if (strcmp(want, "__traceback__") == 0) return apy_tuple_new(1);
+        if (strcmp(want, "__traceback__") == 0) {
+            /* A REAL TRACEBACK where the position table exists, and the old
+               empty-tuple stand-in where it does not -- a program that never
+               asks about positions gets none recorded, and `e.__traceback__
+               is not None` still has to answer True. */
+            if (O(obj)->v.e.pos >= 0) return apy_traceback_of(obj);
+            /* NEVER RAISED, so there is nothing to point at -- which is what
+               CPython answers, and how a program tells a caught exception
+               from one it merely built. */
+            if (apy_pos_n > 0) return apy_none();
+            /* No positions recorded at all: the old stand-in, which is not
+               None because an exception that WAS raised has a traceback and
+               nothing here can tell the two apart without them. */
+            return apy_tuple_new(1);
+        }
         if (strcmp(want, "__class__") == 0) return apy_type_of(obj);
+        /* THIS EXCEPTION'S OWN ATTRIBUTES, then its class's -- the ordinary
+           two-step, arriving late because the fixed names above are what
+           BaseException itself defines and a class body cannot shadow. */
+        if (O(obj)->v.e.dict) {
+            int64_t at = apy_dict_find(O(obj)->v.e.dict, name);
+            if (at >= 0) return O(O(obj)->v.e.dict)->v.d.vals[at];
+        }
+        if (O(obj)->v.e.cls) {
+            apy_value found = apy_class_find(O(obj)->v.e.cls, name);
+            if (found)
+                return O(found)->kind == APY_FUNC_K ? apy_bind(found, obj)
+                                                    : found;
+        }
         return apy_no_attribute(obj, name);
     default:
+        /* `__class__` on a kind with no attributes of its own -- a generic
+           alias, a slice, a view. INTERNED per name, because the object a
+           program compares or reads `__name__` off has to be the same one
+           each time it asks. */
+        if (strcmp(want, "__class__") == 0) return apy_kind_class(obj);
         return apy_no_attribute(obj, name);
     }
 }
@@ -8456,6 +13660,13 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
    `ascii` differs from `repr` only for non-ASCII text, which this runtime does
    not represent yet, so it IS repr here. Saying so beats a second
    implementation that is the same code with a different name. */
+/* `id(x)` -- the object's ADDRESS, which is what identity already means
+   here: `is` compares these words, so the number a program prints and the
+   comparison it writes agree by construction. */
+APY_API apy_value apy_id(apy_value v) {
+    return apy_from_int((int64_t)(uintptr_t)v);
+}
+
 APY_API apy_value apy_ord(apy_value v) {
     if (O(v)->kind == APY_BYTES_K) {
         if (O(v)->v.s.n != 1)
@@ -8529,6 +13740,120 @@ APY_API apy_value apy_chr(apy_value v) {
     return apy_str_copy(buf, n);
 }
 
+/* One code point starting at `p[i]`, with `*len` set to its byte count.
+   Shared by `maketrans` and `translate`, which both have to walk a str by
+   CHARACTER: a translation table is keyed by code point, so stepping a byte
+   at a time would key 'é' under its two halves and match neither. */
+static int64_t apy_utf8_at(const unsigned char *p, int64_t n, int64_t i,
+                           int64_t *len) {
+    int64_t want, code;
+    if (p[i] < 0x80) { want = 1; code = p[i]; }
+    else if ((p[i] & 0xE0) == 0xC0) { want = 2; code = p[i] & 0x1F; }
+    else if ((p[i] & 0xF0) == 0xE0) { want = 3; code = p[i] & 0x0F; }
+    else if ((p[i] & 0xF8) == 0xF0) { want = 4; code = p[i] & 0x07; }
+    else { *len = 1; return p[i]; }            /* a stray continuation byte */
+    if (i + want > n) { *len = 1; return p[i]; }
+    {
+        int64_t k;
+        for (k = 1; k < want; k++) code = (code << 6) | (p[i + k] & 0x3F);
+    }
+    *len = want;
+    return code;
+}
+
+/* `str.maketrans(a, b)` and `str.maketrans(a, b, drop)`. The result is an
+   ORDINARY DICT keyed by code point -- that is not an implementation detail,
+   it is the documented shape, and a program may build the same dict by hand
+   and pass it to `translate`. A None third argument is the two-argument form;
+   the frontend supplies None rather than the table carrying two arities. */
+APY_API apy_value apy_str_maketrans(apy_value a, apy_value b, apy_value drop) {
+    apy_value out;
+    int64_t i = 0, j = 0, alen, blen;
+    const unsigned char *ap, *bp;
+    if (O(a)->kind != APY_STR_K || O(b)->kind != APY_STR_K)
+        return apy_fail("TypeError",
+                        "maketrans() arguments must be strings");
+    if (apy_str_chars(a) != apy_str_chars(b))
+        return apy_fail("ValueError",
+                        "the first two maketrans arguments must have equal "
+                        "length");
+    out = apy_dict_new(8);
+    ap = (const unsigned char *)O(a)->v.s.p;
+    bp = (const unsigned char *)O(b)->v.s.p;
+    while (i < O(a)->v.s.n && j < O(b)->v.s.n) {
+        int64_t ka, kb, from = apy_utf8_at(ap, O(a)->v.s.n, i, &ka);
+        int64_t to = apy_utf8_at(bp, O(b)->v.s.n, j, &kb);
+        if (!apy_dict_set(out, apy_from_int(from), apy_from_int(to))) return 0;
+        i += ka;
+        j += kb;
+    }
+    /* The third argument names characters to DELETE, which the table records
+       as a None value -- the same thing a hand-written table uses to mean
+       "drop this one". */
+    if (drop && O(drop)->kind == APY_STR_K) {
+        const unsigned char *dp = (const unsigned char *)O(drop)->v.s.p;
+        int64_t k = 0;
+        while (k < O(drop)->v.s.n) {
+            int64_t used, cp = apy_utf8_at(dp, O(drop)->v.s.n, k, &used);
+            if (!apy_dict_set(out, apy_from_int(cp), apy_none())) return 0;
+            k += used;
+        }
+    }
+    return out;
+}
+
+/* `s.translate(table)`. A character with no entry is KEPT -- translate maps
+   what it knows and passes the rest through, which is what makes a table
+   holding one key a useful thing to write. */
+APY_API apy_value apy_str_translate(apy_value s, apy_value table) {
+    int64_t i = 0, cap, out_n = 0;
+    char *buf;
+    const unsigned char *p;
+    if (!apy_str_self("translate", s)) return 0;
+    if (O(table)->kind != APY_DICT_K)
+        return apy_fail2("TypeError", "'%s' object is not subscriptable%s",
+                         apy_kind_name(table), "");
+    /* Four bytes per input byte is the worst a replacement can cost: every
+       character could map to a four-byte one. */
+    cap = O(s)->v.s.n * 4 + 1;
+    buf = (char *)malloc((size_t)cap);
+    p = (const unsigned char *)O(s)->v.s.p;
+    while (i < O(s)->v.s.n) {
+        int64_t used, cp = apy_utf8_at(p, O(s)->v.s.n, i, &used);
+        int64_t at = apy_dict_find(table, apy_from_int(cp));
+        if (at < 0) {
+            memcpy(buf + out_n, p + i, (size_t)used);
+            out_n += used;
+        } else {
+            apy_value to = O(table)->v.d.vals[at];
+            if (O(to)->kind == APY_NONE_K) {
+                /* deleted */
+            } else if (apy_is_int_like(to)) {
+                apy_value ch = apy_chr(to);
+                if (!ch) { free(buf); return 0; }
+                memcpy(buf + out_n, O(ch)->v.s.p, (size_t)O(ch)->v.s.n);
+                out_n += O(ch)->v.s.n;
+            } else if (O(to)->kind == APY_STR_K) {
+                /* A table may map to a whole STRING, not just one character
+                   -- `{ord('&'): 'and'}` is a normal thing to write. */
+                if (out_n + O(to)->v.s.n >= cap) {
+                    cap = (out_n + O(to)->v.s.n) * 2 + 1;
+                    buf = (char *)realloc(buf, (size_t)cap);
+                }
+                memcpy(buf + out_n, O(to)->v.s.p, (size_t)O(to)->v.s.n);
+                out_n += O(to)->v.s.n;
+            } else {
+                free(buf);
+                return apy_fail("TypeError",
+                                "character mapping must be in range(0x110000)");
+            }
+        }
+        i += used;
+    }
+    buf[out_n] = '\0';
+    return apy_str_take(buf, out_n);
+}
+
 APY_API apy_value apy_callable(apy_value v) {
     if (O(v)->kind == APY_FUNC_K || O(v)->kind == APY_TYPE_K)
         return apy_from_bool(1);
@@ -8547,29 +13872,27 @@ APY_API apy_value apy_hasattr(apy_value v, apy_value name) {
     return apy_from_bool(0);
 }
 
-APY_API apy_value apy_all(apy_value v) {
-    int64_t i, n = apy_raw_len(v);
-    if (apy_error_occurred()) return 0;
-    for (i = 0; i < n; i++) {
-        apy_value item = O(v)->kind == APY_DICT_K
-            ? O(v)->v.d.keys[i] : apy_getitem(v, apy_from_int(i));
+/* `all(xs)` and `any(xs)` -- and they SHORT-CIRCUIT, which is the whole
+   reason they step rather than index.
+
+   `any(expensive(x) for x in xs)` must stop at the first true one: with a
+   generator argument that is observable, because the generator simply is not
+   resumed again. Walking by index forced the argument to have a length, which
+   drained the generator before the first test and ran `expensive` on every
+   element. */
+static apy_value apy_every(apy_value v, int want, int otherwise) {
+    apy_value it = apy_getiter(v);
+    if (!it) return 0;
+    for (;;) {
+        apy_value item = apy_step(it);
         if (!item) return 0;
-        if (!apy_truth(item)) return apy_from_bool(0);
+        if (item == apy_stop()) return apy_from_bool(otherwise);
+        if (apy_truth(item) == want) return apy_from_bool(want);
     }
-    return apy_from_bool(1);
 }
 
-APY_API apy_value apy_any(apy_value v) {
-    int64_t i, n = apy_raw_len(v);
-    if (apy_error_occurred()) return 0;
-    for (i = 0; i < n; i++) {
-        apy_value item = O(v)->kind == APY_DICT_K
-            ? O(v)->v.d.keys[i] : apy_getitem(v, apy_from_int(i));
-        if (!item) return 0;
-        if (apy_truth(item)) return apy_from_bool(1);
-    }
-    return apy_from_bool(0);
-}
+APY_API apy_value apy_all(apy_value v) { return apy_every(v, 0, 1); }
+APY_API apy_value apy_any(apy_value v) { return apy_every(v, 1, 0); }
 
 /* `object.__repr__(x)` -- the default, which a `__repr__` override needs in
    order to show what it overrode. */
@@ -8612,6 +13935,15 @@ APY_API apy_value apy_setattr(apy_value obj, apy_value name, apy_value value) {
        the default stays callable from within the override -- which is what
        `object.__setattr__(self, name, value)` is for, and the only way an
        override can actually store anything. */
+    /* `C.__name__ = ...` CHANGES WHAT THE CLASS IS CALLED. The name is a
+       field on the type, not an entry in its dict, so storing it as an
+       ordinary attribute left `__name__` reading the old one -- the write
+       appeared to succeed and changed nothing. */
+    if (O(obj)->kind == APY_TYPE_K && O(name)->kind == APY_STR_K
+            && strcmp(APY_CSTR(name), "__name__") == 0) {
+        O(obj)->v.t.name = value;
+        return apy_none();
+    }
     if (O(obj)->kind == APY_INST_K) {
         apy_value hook = apy_class_find(O(obj)->v.o.cls,
                                         apy_name("__setattr__"));
@@ -8625,13 +13957,76 @@ APY_API apy_value apy_setattr(apy_value obj, apy_value name, apy_value value) {
     return apy_default_setattr(obj, name, value);
 }
 
+/* Is this instance restricted to a fixed set of attributes, and is `name`
+   one of them? Answers 1 to allow and 0 to refuse.
+
+   An instance is unrestricted unless EVERY class in its chain declares
+   `__slots__` -- one that does not gives the dict back, and with it the
+   freedom to set anything. */
+static int apy_slot_allows(apy_value cls, apy_value name) {
+    apy_value here = cls;
+    int64_t at;
+    while (here && O(here)->kind == APY_TYPE_K) {
+        at = apy_dict_find(O(here)->v.t.dict, apy_name("__slots__"));
+        if (at < 0) return 1;                  /* no `__slots__`: a dict */
+        here = O(here)->v.t.base;
+    }
+    /* Every class declares one, so the name has to appear in one of them. */
+    here = cls;
+    while (here && O(here)->kind == APY_TYPE_K) {
+        at = apy_dict_find(O(here)->v.t.dict, apy_name("__slots__"));
+        if (at >= 0) {
+            apy_value names = O(O(here)->v.t.dict)->v.d.vals[at];
+            int64_t i, n = apy_raw_len(names);
+            if (apy_error_occurred()) { apy_error_clear(); return 1; }
+            if (O(names)->kind == APY_STR_K)
+                return apy_eq_raw(names, name);
+            for (i = 0; i < n; i++)
+                if (apy_eq_raw(apy_key_at(names, i), name)) return 1;
+        }
+        here = O(here)->v.t.base;
+    }
+    return 0;
+}
+
 APY_API apy_value apy_default_setattr(apy_value obj, apy_value name,
                                       apy_value value) {
+    if (O(obj)->kind == APY_INST_K
+            && !apy_slot_allows(O(obj)->v.o.cls, name))
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute '%s' and no __dict__ "
+                         "for setting new attributes",
+                         apy_kind_name(obj), APY_CSTR(name));
     if (O(obj)->kind == APY_INST_K) {
+        /* A DATA DESCRIPTOR ON THE CLASS TAKES THE WRITE. `c.v = 4` where the
+           class has a `property` runs its setter and stores nothing in the
+           instance dict -- otherwise the next read would find the stored
+           value and the property would never be consulted again. */
+        apy_value found = apy_class_find(O(obj)->v.o.cls, name);
+        if (found) {
+            int handled = apy_descr_set(found, obj, value);
+            if (handled == 0) return 0;
+            if (handled == 1) return apy_none();
+        }
         if (!apy_dict_set(O(obj)->v.o.dict, name, value)) return 0;
         return apy_none();
     }
+    if (O(obj)->kind == APY_EXC_K) {
+        /* `self.code = code` in a user exception's `__init__`. The dict is
+           made on first write, so an exception the runtime raises itself --
+           which is nearly all of them -- costs nothing for this. */
+        if (!O(obj)->v.e.dict) O(obj)->v.e.dict = apy_dict_new(4);
+        if (!apy_dict_set(O(obj)->v.e.dict, name, value)) return 0;
+        return apy_none();
+    }
     if (O(obj)->kind == APY_TYPE_K) return apy_type_set(obj, name, value);
+    if (O(obj)->kind == APY_FUNC_K) {
+        /* A function carries whatever a program hangs on it. The dict is
+           made on first write so an ordinary `def` costs nothing. */
+        if (!O(obj)->v.fn.dict) O(obj)->v.fn.dict = apy_dict_new(4);
+        if (!apy_dict_set(O(obj)->v.fn.dict, name, value)) return 0;
+        return apy_none();
+    }
     return apy_fail2("AttributeError",
                      "'%s' object has no attribute '%s'",
                      apy_kind_name(obj), APY_CSTR(name));
@@ -8670,9 +14065,665 @@ typedef apy_value (*apy_fn7)(apy_value, apy_value, apy_value, apy_value,
 typedef apy_value (*apy_fn8)(apy_value, apy_value, apy_value, apy_value,
                              apy_value, apy_value, apy_value, apy_value,
                              apy_value);
+/* PAST EIGHT. `datetime.replace` declares ten parameters and is ordinary
+   Python, so the old ceiling was a limit of this dispatch rather than of the
+   language. Written out because a call through a function pointer needs the
+   exact arity at the call site -- there is no way to spell "n arguments" in C
+   without varargs, and varargs would change the ABI every backend shares. */
+typedef apy_value (*apy_fn9)(apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value);
+typedef apy_value (*apy_fn10)(apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value);
+typedef apy_value (*apy_fn11)(apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value);
+typedef apy_value (*apy_fn12)(apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value);
+typedef apy_value (*apy_fn13)(apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value);
+typedef apy_value (*apy_fn14)(apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value);
+typedef apy_value (*apy_fn15)(apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value);
+typedef apy_value (*apy_fn16)(apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value, apy_value);
+
+/* One value per selector, so `super().__init__ is super().__init__` holds
+   the way it does for any other attribute reached twice -- and so the repr
+   does not depend on how many times it was asked for. Binding copies it, as
+   binding any function does. */
+static apy_value apy_native(int sel, int64_t arity, const char *name) {
+    static apy_value made[APY_NAT_GEN_CLOSE + 1];
+    apy_obj *o;
+    /* INTERNED PER SELECTOR, so `super().__init__` reached twice is one
+       object as any other attribute would be -- EXCEPT for the one selector
+       whose name and arity vary, where interning handed back whichever was
+       built first and every builtin protocol method then behaved as that one.
+       A fresh object there is also what CPython answers: `[].append is
+       [].append` is False. */
+    if (sel != APY_NAT_KIND && made[sel]) return made[sel];
+    o = apy_alloc(APY_FUNC_K);
+    o->v.fn.code = 0;
+    o->v.fn.native = sel;
+    o->v.fn.arity = arity;
+    o->v.fn.name = apy_lit(name);
+    if (sel == APY_NAT_KIND) return V(o);
+    made[sel] = V(o);
+    return made[sel];
+}
+
+/* `type(name, bases, ns)` as an OBJECT: what `super().__new__` inside a
+   metaclass's `__new__` answers. The class it builds records `mcls` as its
+   metaclass, which is what makes `type(C)` say `Meta`. */
+/* THE C3 LINEARISATION: the order attribute lookup walks.
+
+   With one base it is the base chain and nothing is gained by computing it.
+   With several it is the only order that keeps two promises at once -- a class
+   comes before its bases, and the bases keep the order they were written in --
+   and no simple walk can keep both. `class D(B, C)` over a diamond has to find
+   B's method before C's and C's before A's, which depth-first does not.
+
+   Answers 0 and reports a TypeError when no order satisfies both, which is
+   what CPython does for `class Z(X, Y)` where X and Y disagree. */
+static apy_value apy_c3(apy_value cls, apy_value bases) {
+    apy_value out = apy_tuple_new(8);
+    apy_value queues[9];
+    int64_t heads[9], count = 0, i, j, k;
+    int64_t nbases = (bases && apy_is_seq(bases)) ? O(bases)->v.q.n : 0;
+    apy_seq_push(out, cls);
+    if (nbases > 8) return apy_fail("TypeError", "too many bases");
+    /* THE LISTS TO MERGE: each base's own linearisation, then the list of
+       bases itself -- which is what makes the written order binding. */
+    for (i = 0; i < nbases; i++) {
+        apy_value b = O(bases)->v.q.items[i];
+        if (O(b)->kind != APY_TYPE_K)
+            return apy_fail("TypeError", "a base must be a class");
+        queues[count] = O(b)->v.t.mro ? O(b)->v.t.mro : 0;
+        if (!queues[count]) {
+            /* A base with no recorded MRO is its own chain. */
+            apy_value chain = apy_tuple_new(4);
+            apy_value walk = b;
+            while (walk && O(walk)->kind == APY_TYPE_K) {
+                apy_seq_push(chain, walk);
+                walk = O(walk)->v.t.base;
+            }
+            queues[count] = chain;
+        }
+        heads[count] = 0;
+        count++;
+    }
+    queues[count] = bases ? bases : apy_tuple_new(1);
+    heads[count] = 0;
+    count++;
+    for (;;) {
+        apy_value chosen = 0;
+        int64_t done = 1;
+        for (i = 0; i < count; i++)
+            if (heads[i] < O(queues[i])->v.q.n) { done = 0; break; }
+        if (done) break;
+        /* THE FIRST HEAD THAT IS IN NO TAIL. A candidate appearing in some
+           other list's tail must wait for that list, or the result would put
+           it before something that has to come first. */
+        for (i = 0; i < count && !chosen; i++) {
+            apy_value head;
+            int blocked = 0;
+            if (heads[i] >= O(queues[i])->v.q.n) continue;
+            head = O(queues[i])->v.q.items[heads[i]];
+            for (j = 0; j < count && !blocked; j++)
+                for (k = heads[j] + 1; k < O(queues[j])->v.q.n; k++)
+                    if (O(queues[j])->v.q.items[k] == head) { blocked = 1; break; }
+            if (!blocked) chosen = head;
+        }
+        if (!chosen)
+            return apy_fail("TypeError",
+                            "Cannot create a consistent method resolution "
+                            "order (MRO) for bases");
+        {
+            int64_t already = 0;
+            for (i = 0; i < O(out)->v.q.n; i++)
+                if (O(out)->v.q.items[i] == chosen) { already = 1; break; }
+            if (!already) apy_seq_push(out, chosen);
+        }
+        for (i = 0; i < count; i++)
+            if (heads[i] < O(queues[i])->v.q.n
+                && O(queues[i])->v.q.items[heads[i]] == chosen)
+                heads[i]++;
+    }
+    return out;
+}
+
+static apy_value apy_type_from_ns(apy_value mcls, apy_value name,
+                                  apy_value bases, apy_value ns) {
+    apy_value base = 0, cls;
+    int64_t i;
+    if (bases && apy_is_seq(bases) && O(bases)->v.q.n > 0)
+        base = O(bases)->v.q.items[0];
+    cls = apy_type_new(name, base ? base : apy_none());
+    if (!cls) return 0;
+    if (mcls && O(mcls)->kind == APY_TYPE_K) O(cls)->v.t.meta = mcls;
+    if (bases && apy_is_seq(bases) && O(bases)->v.q.n > 0) {
+        apy_value order;
+        O(cls)->v.t.bases = bases;
+        order = apy_c3(cls, bases);
+        if (!order) return 0;
+        O(cls)->v.t.mro = order;
+    }
+    /* The namespace is COPIED IN, not adopted: `__prepare__` may hand back a
+       mapping the program goes on using, and a class that shared it would see
+       later writes to it. */
+    if (ns && O(ns)->kind == APY_DICT_K)
+        for (i = 0; i < O(ns)->v.d.n; i++)
+            apy_dict_set(O(cls)->v.t.dict, O(ns)->v.d.keys[i],
+                         O(ns)->v.d.vals[i]);
+    return cls;
+}
+
+/* `type` AS A CLASS OBJECT, so `class Meta(type)` has a real base rather
+   than a special case. Its dict holds the two natives a metaclass reaches
+   through `super()`, which is what makes `super().__new__(mcls, name, bases,
+   ns)` build a class instead of an instance. Interned: `Meta.__base__ is
+   type` has to hold, and two of them would make it False. */
+/* PEP 3115: the mapping a class body is executed into. A metaclass may
+   supply one through `__prepare__`, which is how a body's bindings can be
+   seen in order or pre-seeded; a metaclass without one gets a plain dict.
+
+   Asked for even when there is no `__prepare__`, so the body always writes
+   into a mapping rather than into the type -- one lowering for both. */
+APY_API apy_value apy_prepare(apy_value meta, apy_value name, apy_value bases) {
+    apy_value hook, args[2], got;
+    if (!meta || O(meta)->kind != APY_TYPE_K) return apy_dict_new(8);
+    hook = apy_class_find(meta, apy_name("__prepare__"));
+    if (!hook) return apy_dict_new(8);
+    /* AN IMPLICIT CLASSMETHOD, like `__init_subclass__`: it receives the
+       metaclass, and a program writes `@classmethod` above it because
+       CPython wants that spelling -- the descriptor is unwrapped here. */
+    if (O(hook)->kind == APY_PROP_K && O(hook)->v.p.get) {
+        /* THE METACLASS IS ITS FIRST ARGUMENT, which is what `@classmethod`
+           on it means -- unwrapping the descriptor without supplying that
+           called a three-parameter function with two. */
+        apy_value three[3];
+        three[0] = meta;
+        three[1] = name;
+        three[2] = bases;
+        got = apy_call_n(O(hook)->v.p.get, three, 3);
+    } else {
+        args[0] = name;
+        args[1] = bases;
+        got = apy_call_n(hook, args, 2);
+    }
+    if (!got) return 0;
+    if (O(got)->kind != APY_DICT_K)
+        return apy_fail("TypeError",
+                        "__prepare__() must return a mapping");
+    return got;
+}
+
+/* `type(name, bases, ns)` -- the three-argument form, which is the `class`
+   statement written out. The same builder a metaclass's `super().__new__`
+   reaches, with no metaclass recorded: one made this way IS a plain `type`. */
+APY_API apy_value apy_type_make(apy_value name, apy_value bases,
+                                apy_value ns) {
+    return apy_type_from_ns(0, name, bases, ns);
+}
+
+/* THE METACLASS A `class` STATEMENT SHOULD USE: the one written, or the one
+   its base already has. A subclass of a class with a metaclass has the same
+   metaclass -- that is what makes `class Shape(ABC)` collect its own abstract
+   methods without repeating `metaclass=ABCMeta`. */
+/* PEP 560: WHAT A NON-CLASS BASE CONTRIBUTES.
+
+   `class C(Fake())` asks the object for `__mro_entries__(bases)` and inherits
+   whatever it answers -- which is how a generic alias resolves to its origin
+   and how a library builds a base at run time. A class contributes itself,
+   which is the ordinary case and costs one test. */
+APY_API apy_value apy_mro_entries(apy_value written, apy_value bases) {
+    apy_value hook, got;
+    if (O(written)->kind == APY_TYPE_K) return written;
+    if (O(written)->kind != APY_INST_K)
+        return apy_fail2("TypeError", "bases must be types, not '%s'%s",
+                         apy_kind_name(written), "");
+    hook = apy_class_find(O(written)->v.o.cls, apy_name("__mro_entries__"));
+    if (!hook)
+        return apy_fail2("TypeError", "bases must be types, not '%s'%s",
+                         apy_kind_name(written), "");
+    got = apy_call_n(apy_bind(hook, written), &bases, 1);
+    if (!got) return 0;
+    /* THE FIRST ENTRY. `__mro_entries__` answers a tuple because one object
+       may contribute several bases; this runtime linearises from a flat list,
+       so the rest would need splicing into the caller's tuple -- which is
+       what the caller does, one entry at a time. */
+    if (apy_is_seq(got) && O(got)->v.q.n > 0) return O(got)->v.q.items[0];
+    return apy_object_class();
+}
+
+APY_API apy_value apy_meta_for(apy_value given, apy_value bases) {
+    int64_t i;
+    if (given && O(given)->kind == APY_TYPE_K) return given;
+    if (bases && apy_is_seq(bases))
+        for (i = 0; i < O(bases)->v.q.n; i++) {
+            apy_value base = O(bases)->v.q.items[i];
+            if (O(base)->kind == APY_TYPE_K && O(base)->v.t.meta)
+                return O(base)->v.t.meta;
+        }
+    return apy_none();
+}
+
+/* Build the class a `class` statement describes.
+
+   THROUGH THE METACLASS when there is one, which is what makes `ABCMeta`
+   able to refuse an instantiation and `EnumMeta` able to rewrite the body.
+   Without one this is the plain construction, and the two paths meet here so
+   the lowering does not have to know which it is -- it cannot, because
+   whether a base carries a metaclass is a run-time question. */
+APY_API apy_value apy_class_build_kw(apy_value meta, apy_value name,
+                                     apy_value bases, apy_value ns,
+                                     apy_value kw) {
+    apy_value use = apy_meta_for(meta, bases);
+    if (use && O(use)->kind == APY_TYPE_K) {
+        apy_value argv[3];
+        argv[0] = name;
+        argv[1] = bases;
+        argv[2] = ns;
+        /* THE CLASS KEYWORDS GO TO THE METACLASS -- `class C(metaclass=M,
+           kind="x")` is `M(name, bases, ns, kind="x")`. Only when there IS
+           one: without a metaclass they are for `__init_subclass__`, which
+           the caller announces separately, and handing them to the plain
+           construction would make them an arity error. */
+        if (kw && O(kw)->kind == APY_DICT_K && O(kw)->v.d.n)
+            return apy_call_kw(use, (apy_value)(uintptr_t)argv, 3, kw);
+        return apy_call_n(use, argv, 3);
+    }
+    return apy_type_from_ns(0, name, bases, ns);
+}
+
+APY_API apy_value apy_class_build(apy_value meta, apy_value name,
+                                  apy_value bases, apy_value ns) {
+    return apy_class_build_kw(meta, name, bases, ns, 0);
+}
+
+/* `object` AS A CLASS OBJECT -- what `C.__base__` answers for a class with
+   no written base, and what `C.__bases__` holds. Its dict carries the same
+   defaults `super()` falls back to.
+
+   NOT INSTALLED AS AN ACTUAL BASE POINTER on every class. It is the honest
+   ANSWER to a question about the hierarchy; making it a real link would put
+   `__eq__` and friends into every `apy_class_find` walk, which changes what
+   `hasattr` says about classes that define none of them. */
+APY_API apy_value apy_object_class(void) {
+    static apy_value cls = 0;
+    static const char *names[] = {"__init__", "__new__", "__repr__", "__str__",
+                                  "__eq__", "__ne__", "__hash__",
+                                  "__getattribute__", "__setattr__",
+                                  "__delattr__"};
+    size_t i;
+    if (cls) return cls;
+    cls = apy_type_new(apy_lit("object"), 0);
+    for (i = 0; i < sizeof names / sizeof names[0]; i++)
+        apy_dict_set(O(cls)->v.t.dict, apy_name(names[i]),
+                     apy_object_default(names[i]));
+    return cls;
+}
+
+APY_API apy_value apy_type_class(void) {
+    static apy_value cls = 0;
+    if (cls) return cls;
+    cls = apy_type_new(apy_lit("type"), 0);
+    apy_dict_set(O(cls)->v.t.dict, apy_name("__new__"),
+                 apy_native(APY_NAT_TYPE_NEW, 4, "__new__"));
+    apy_dict_set(O(cls)->v.t.dict, apy_name("__init__"),
+                 apy_native(APY_NAT_TYPE_INIT, 4, "__init__"));
+    /* What `C(...)` MEANS, reachable by name so a metaclass's own `__call__`
+       can delegate to it. */
+    apy_dict_set(O(cls)->v.t.dict, apy_name("__call__"),
+                 apy_native(APY_NAT_TYPE_CALL, 1, "__call__"));
+    return cls;
+}
+
+/* `__class__` for a kind with no attributes of its own -- a generic alias,
+   a slice, a view. INTERNED per kind name, because the object a program
+   compares or reads `__name__` off has to be the same one each time. */
+static apy_value apy_kind_class(apy_value obj) {
+    static apy_value classes = 0;
+    apy_value key = apy_lit(apy_kind_name(obj)), found;
+    if (!classes) classes = apy_dict_new(8);
+    found = apy_dict_get_or(classes, key, 0);
+    if (found) return found;
+    found = apy_type_new(key, 0);
+    apy_dict_set(classes, key, found);
+    return found;
+}
+
+static apy_value apy_instantiate(apy_value f, apy_value *argv, int64_t argc,
+                                 apy_value kwrest, int bound);
+static apy_value apy_call_nk(apy_value f, apy_value *argv, int64_t argc,
+                             apy_value kwrest, int bound);
+
+/* A BUILTIN'S PROTOCOL METHODS, AS VALUES.
+
+   `[].append` and `{}.keys` are lowered at the call site by the frontend,
+   which means they exist as CALLS and never as attributes -- so
+   `hasattr([1], "__iter__")` answered False for the most iterable object in
+   the language, and every structural type test written against
+   `collections.abc` said no.
+
+   This does not make the whole method table reachable by name; it makes the
+   PROTOCOL reachable, which is the part a program asks about rather than
+   calls. Answers 0 for a name the kind does not have -- that is what keeps
+   `hasattr` honest -- and `None` where CPython HAS the attribute and sets it
+   to None, which is how a mutable container says it cannot be hashed. */
+/* One protocol method as a value, bound to `obj` when there IS one. A TYPE
+   asked the same question has no receiver -- `dict.keys` is unbound in
+   CPython too, and `dict.keys(d)` is how it is called. */
+static apy_value apy_kind_method(apy_value obj, int64_t arity,
+                                 const char *name, int bind) {
+    apy_value fn = apy_native(APY_NAT_KIND, arity, name);
+    return bind ? apy_bind(fn, obj) : fn;
+}
+
+/* An EMPTY VALUE of the kind a builtin type names, so the table above can
+   answer for the type without a second copy of it. Nothing is done with the
+   prototype but ask its kind, and the natives it yields are unbound. */
+static apy_value apy_kind_prototype(const char *type_name) {
+    if (strcmp(type_name, "list") == 0)  return apy_list_new(1);
+    if (strcmp(type_name, "tuple") == 0) return apy_tuple_new(1);
+    if (strcmp(type_name, "dict") == 0)  return apy_dict_new(1);
+    if (strcmp(type_name, "set") == 0)   return apy_set_new(1);
+    if (strcmp(type_name, "frozenset") == 0) return apy_frozenset_new(1);
+    if (strcmp(type_name, "str") == 0)   return apy_lit("");
+    if (strcmp(type_name, "bytes") == 0) return apy_bytes_copy("", 0);
+    if (strcmp(type_name, "int") == 0 || strcmp(type_name, "bool") == 0)
+        return apy_from_int(0);
+    if (strcmp(type_name, "float") == 0) return apy_from_float(0.0);
+    return 0;
+}
+
+static apy_value apy_kind_attr_of(apy_value obj, const char *want,
+                                  int bind) {
+    int k = O(obj)->kind;
+    int seq = apy_is_seq(obj), set = apy_is_set(obj);
+    int text = k == APY_STR_K || k == APY_BYTES_K;
+    int dict = k == APY_DICT_K;
+    int walks = seq || set || text || dict || k == APY_MVIEW_K
+                || k == APY_VIEW_K;
+    int mutable_ = k == APY_LIST_K || k == APY_DICT_K || k == APY_SET_K
+                   || (k == APY_BYTES_K && O(obj)->v.s.mut);
+
+    if (strcmp(want, "__hash__") == 0) {
+        /* THE ATTRIBUTE EXISTS EITHER WAY. `[].__hash__ is None` is how a
+           program asks whether a list can be a dict key, and answering "no
+           such attribute" is a different claim from the one CPython makes. */
+        if (mutable_) return apy_none();
+        return apy_kind_method(obj, 1, "__hash__", bind);
+    }
+    if (strcmp(want, "__len__") == 0 && walks)
+        return apy_kind_method(obj, 1, "__len__", bind);
+    if (strcmp(want, "__iter__") == 0
+            && (walks || k == APY_GEN_K || k == APY_ITER_K))
+        return apy_kind_method(obj, 1, "__iter__", bind);
+    if (strcmp(want, "__next__") == 0
+            && (k == APY_GEN_K || k == APY_ITER_K))
+        return apy_kind_method(obj, 1, "__next__", bind);
+    if (strcmp(want, "__contains__") == 0 && walks)
+        return apy_kind_method(obj, 2, "__contains__", bind);
+    if (strcmp(want, "__getitem__") == 0
+            && (seq || text || dict || k == APY_MVIEW_K))
+        return apy_kind_method(obj, 2, "__getitem__", bind);
+    if (strcmp(want, "__setitem__") == 0
+            && (k == APY_LIST_K || dict
+                || (k == APY_BYTES_K && O(obj)->v.s.mut)))
+        return apy_kind_method(obj, 3, "__setitem__", bind);
+    if (dict && (strcmp(want, "keys") == 0 || strcmp(want, "values") == 0
+                 || strcmp(want, "items") == 0))
+        return apy_kind_method(obj, 1, want, bind);
+    if ((seq || text) && (strcmp(want, "index") == 0
+                          || strcmp(want, "count") == 0))
+        return apy_kind_method(obj, 2, want, bind);
+    if (k == APY_LIST_K && strcmp(want, "append") == 0)
+        return apy_kind_method(obj, 2, "append", bind);
+    if (k == APY_LIST_K && strcmp(want, "insert") == 0)
+        return apy_kind_method(obj, 3, "insert", bind);
+    if (k == APY_SET_K && (strcmp(want, "add") == 0
+                           || strcmp(want, "discard") == 0))
+        return apy_kind_method(obj, 2, want, bind);
+    if (set && strcmp(want, "isdisjoint") == 0)
+        return apy_kind_method(obj, 2, "isdisjoint", bind);
+    /* PEP 688: whatever can be handed to `memoryview` HAS `__buffer__`. It is
+       a protocol a program asks about far more often than it calls, and
+       answering False for `bytes` said this runtime has no buffers at all. */
+    if (strcmp(want, "__buffer__") == 0
+            && (k == APY_BYTES_K || k == APY_MVIEW_K))
+        return apy_kind_method(obj, 2, "__buffer__", bind);
+    if (k == APY_RANGE_K) {
+        /* THE THREE NUMBERS A RANGE IS, read back. */
+        if (strcmp(want, "start") == 0)
+            return apy_from_int(O(obj)->v.rg.start);
+        if (strcmp(want, "stop") == 0)
+            return apy_from_int(O(obj)->v.rg.stop);
+        if (strcmp(want, "step") == 0)
+            return apy_from_int(O(obj)->v.rg.step);
+        if (strcmp(want, "index") == 0 || strcmp(want, "count") == 0)
+            return apy_kind_method(obj, 2, want, bind);
+        if (strcmp(want, "__len__") == 0)
+            return apy_kind_method(obj, 1, "__len__", bind);
+        if (strcmp(want, "__iter__") == 0)
+            return apy_kind_method(obj, 1, "__iter__", bind);
+        if (strcmp(want, "__contains__") == 0)
+            return apy_kind_method(obj, 2, "__contains__", bind);
+        if (strcmp(want, "__getitem__") == 0)
+            return apy_kind_method(obj, 2, "__getitem__", bind);
+    }
+    return 0;
+}
+
+static apy_value apy_kind_attr(apy_value obj, const char *want) {
+    return apy_kind_attr_of(obj, want, 1);
+}
+
+static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
+    switch (O(f)->v.fn.native) {
+    case APY_NAT_POSITIONS:
+        /* `code.co_positions()` -- what `apy_code_of` recorded, handed back
+           as it stands. A method rather than an attribute because that is how
+           CPython spells it, and a program calls it. */
+        if (n < 1) return apy_fail("TypeError", "unbound builtin method");
+        return apy_getattr(a[0], apy_lit("_positions"));
+    case APY_NAT_TASK_CANCEL:
+        return n < 1 ? 0 : apy_task_cancel(a[0]);
+    case APY_NAT_TASK_RESULT:
+        return n < 1 ? 0 : apy_task_result(a[0]);
+    case APY_NAT_TASK_DONE:
+        return n < 1 ? 0 : apy_task_done(a[0]);
+    case APY_NAT_TASK_CANCELLED:
+        return n < 1 ? 0 : apy_task_cancelled(a[0]);
+    case APY_NAT_TG_ENTER:
+        /* THE GROUP ITSELF is what `async with ... as tg` binds. */
+        return n < 1 ? 0 : apy_coro_value(a[0]);
+    case APY_NAT_TG_CREATE: {
+        apy_value t;
+        if (n < 2) return apy_fail("TypeError",
+                                   "create_task() takes a coroutine");
+        t = apy_asyncio_create_task(a[1]);
+        if (!t) return 0;
+        apy_seq_push(apy_getattr(a[0], apy_lit("_tasks")), t);
+        return t;
+    }
+    case APY_NAT_TG_EXIT: {
+        apy_value g;
+        if (n < 1) return 0;
+        g = apy_gen_new(0, 1);
+        O(g)->v.g.coro = 1;
+        O(g)->v.g.builtin = APY_CORO_TGWAIT;
+        O(g)->v.g.slots[0] = apy_getattr(a[0], apy_lit("_tasks"));
+        if (!O(g)->v.g.slots[0]) return 0;
+        return g;
+    }
+    case APY_NAT_INIT:     return apy_none();
+    case APY_NAT_EXC_INIT: {
+        /* `BaseException.__init__(*args)`: it SETS THE MESSAGE AND `args`,
+           which is the whole of what it does and the reason a class writing
+           `super().__init__(f"{code}: {message}")` prints that text. */
+        apy_value exc, tuple;
+        int64_t i;
+        if (n < 1) return apy_fail("TypeError", "unbound builtin method");
+        exc = a[0];
+        if (O(exc)->kind != APY_EXC_K) return apy_none();
+        tuple = apy_tuple_new(n > 1 ? n - 1 : 1);
+        for (i = 1; i < n; i++) apy_seq_push(tuple, a[i]);
+        O(exc)->v.e.arg = n > 1 ? a[1] : apy_none();
+        O(exc)->v.e.has_arg = n > 1;
+        O(exc)->v.e.argv = tuple;
+        /* The text is the ARGUMENT again, not something already rendered --
+           see `rendered` on the cell for what that flag stops twice-over. */
+        O(exc)->v.e.rendered = 0;
+        return apy_none();
+    }
+    case APY_NAT_NEW:
+        /* `object.__new__(cls)`. The CLASS is the argument, not an instance:
+           it is an implicit staticmethod, which is why a bound one still
+           receives the class in `a[0]`. */
+        if (n < 1 || O(a[0])->kind != APY_TYPE_K)
+            return apy_fail("TypeError", "object.__new__(): not a type");
+        return apy_instance_new(a[0]);
+    case APY_NAT_REPR:
+    case APY_NAT_STR:      return n < 1 ? 0 : apy_default_repr(a[0]);
+    case APY_NAT_EQ:       return n < 2 ? 0 : apy_default_eq(a[0], a[1]);
+    case APY_NAT_NE: {
+        apy_value r = n < 2 ? 0 : apy_default_eq(a[0], a[1]);
+        return r ? apy_from_bool(!apy_truth(r)) : r;
+    }
+    case APY_NAT_HASH:     return n < 1 ? 0 : apy_default_hash(a[0]);
+    case APY_NAT_GETATTR:  return n < 2 ? 0 : apy_default_getattr(a[0], a[1]);
+    case APY_NAT_SETATTR:
+        return n < 3 ? 0 : apy_default_setattr(a[0], a[1], a[2]);
+    case APY_NAT_DELATTR:  return n < 2 ? 0 : apy_default_delattr(a[0], a[1]);
+    case APY_NAT_TYPE_NEW:
+        if (n < 4)
+            return apy_fail("TypeError",
+                            "type.__new__() takes 4 arguments");
+        return apy_type_from_ns(a[0], a[1], a[2], a[3]);
+    case APY_NAT_TYPE_INIT:
+    case APY_NAT_INIT_SUBCLASS: return apy_none();
+    /* THE DESCRIPTOR PROTOCOL AS VALUES. A property answers `hasattr(p,
+       "__get__")` with True in CPython because the methods exist; here they
+       existed as runtime behaviour with nothing naming them, so a program
+       that ASKS -- and `enum` asks, to tell a member from a method -- got
+       False for a descriptor. */
+    case APY_NAT_KIND: {
+        /* ONE SELECTOR FOR THE LOT, dispatched on the name it carries: the
+           bodies are all one existing runtime entry point, and a selector per
+           name would be twenty enum members that differ only in which. */
+        const char *w = APY_CSTR(O(f)->v.fn.name);
+        if (n < 1) return apy_fail("TypeError", "unbound builtin method");
+        if (strcmp(w, "__hash__") == 0) return apy_hash(a[0]);
+        if (strcmp(w, "__len__") == 0) return apy_len(a[0]);
+        if (strcmp(w, "__iter__") == 0) return apy_iter(a[0]);
+        if (strcmp(w, "__next__") == 0) return apy_next(a[0], 0, 0);
+        if (strcmp(w, "keys") == 0)
+            return apy_dict_parts(a[0], APY_PART_KEYS);
+        if (strcmp(w, "values") == 0)
+            return apy_dict_parts(a[0], APY_PART_VALUES);
+        if (strcmp(w, "items") == 0)
+            return apy_dict_parts(a[0], APY_PART_ITEMS);
+        if (n < 2) return apy_fail("TypeError",
+                                   "builtin method takes an argument");
+        /* `x in obj` -- the NEEDLE FIRST, which is the order `apy_contains`
+           takes and the reverse of the method's. */
+        if (strcmp(w, "__contains__") == 0) return apy_contains(a[1], a[0]);
+        if (strcmp(w, "__getitem__") == 0) return apy_getitem(a[0], a[1]);
+        if (O(a[0])->kind == APY_RANGE_K
+                && (strcmp(w, "index") == 0 || strcmp(w, "count") == 0)) {
+            int64_t want, at;
+            if (!apy_is_int_like(a[1]))
+                return strcmp(w, "count") == 0 ? apy_from_int(0)
+                    : apy_fail("ValueError", "value is not in range");
+            if (!apy_index_arg(a[1], &want, APY_IDX_SIZE)) return 0;
+            at = apy_range_find(a[0], want);
+            if (strcmp(w, "count") == 0) return apy_from_int(at >= 0 ? 1 : 0);
+            if (at < 0) return apy_fail("ValueError",
+                                        "value is not in range");
+            return apy_from_int(at);
+        }
+        if (strcmp(w, "index") == 0) return apy_index_of(a[0], a[1]);
+        if (strcmp(w, "count") == 0) return apy_count_of(a[0], a[1]);
+        if (strcmp(w, "append") == 0) return apy_seq_push(a[0], a[1]);
+        if (strcmp(w, "add") == 0) return apy_set_add(a[0], a[1]);
+        if (strcmp(w, "discard") == 0) return apy_set_discard(a[0], a[1]);
+        if (strcmp(w, "isdisjoint") == 0)
+            return apy_set_isdisjoint(a[0], a[1]);
+        /* `b.__buffer__(flags)` answers a memoryview over it, which is what
+           the protocol is for and what `memoryview(b)` already does. */
+        if (strcmp(w, "__buffer__") == 0) return apy_memoryview(a[0]);
+        if (n < 3) return apy_fail("TypeError",
+                                   "builtin method takes two arguments");
+        if (strcmp(w, "__setitem__") == 0)
+            return apy_setitem(a[0], a[1], a[2]);
+        if (strcmp(w, "insert") == 0)
+            return apy_list_insert(a[0], a[1], a[2]);
+        return apy_fail("TypeError", "not callable");
+    }
+    case APY_NAT_DESCR_GET:
+        if (n < 2) return apy_fail("TypeError",
+                                   "__get__() takes at least 2 arguments");
+        return apy_descr_get(a[0], a[1], n > 2 ? a[2] : 0);
+    case APY_NAT_DESCR_SET:
+        if (n < 3) return apy_fail("TypeError",
+                                   "__set__() takes 3 arguments");
+        return apy_descr_set(a[0], a[1], a[2]) ? apy_none() : 0;
+    case APY_NAT_DESCR_DEL:
+        if (n < 2) return apy_fail("TypeError",
+                                   "__delete__() takes 2 arguments");
+        return apy_descr_set(a[0], a[1], 0) ? apy_none() : 0;
+    case APY_NAT_HAS_DEFAULT: {
+        /* `T.has_default()` -- whether a default was written. */
+        apy_value held;
+        if (n < 1) return apy_from_bool(0);
+        held = apy_dict_get_or(O(a[0])->v.o.dict, apy_lit("__default__"), 0);
+        return apy_from_bool(held && O(held)->kind != APY_NONE_K);
+    }
+    case APY_NAT_TYPE_CALL:
+        /* Only reached for a native called with no keywords; the path that
+           carries them intercepts this selector where the dict is in hand. */
+        if (n < 1) return apy_fail("TypeError", "type.__call__() needs a type");
+        return apy_instantiate(a[0], a + 1, n - 1, 0, 0);
+    case APY_NAT_GEN_SEND:
+        return n < 2 ? 0 : apy_gen_send(a[0], a[1]);
+    case APY_NAT_GEN_THROW:
+        return n < 2 ? 0 : apy_gen_throw(a[0], a[1]);
+    case APY_NAT_GEN_CLOSE:
+        return n < 1 ? 0 : apy_gen_close(a[0]);
+    default:
+        return apy_fail("TypeError", "not callable");
+    }
+}
+
+/* The object defaults, by name. `super()` on a class whose base chain has run
+   out looks here, which is what makes `super().__init__()` in a class with no
+   base do what CPython's `object.__init__` does rather than fail. */
+static apy_value apy_object_default(const char *want) {
+    if (strcmp(want, "__init__") == 0)
+        return apy_native(APY_NAT_INIT, 1, "__init__");
+    if (strcmp(want, "__new__") == 0)
+        return apy_native(APY_NAT_NEW, 1, "__new__");
+    if (strcmp(want, "__repr__") == 0)
+        return apy_native(APY_NAT_REPR, 1, "__repr__");
+    if (strcmp(want, "__str__") == 0)
+        return apy_native(APY_NAT_STR, 1, "__str__");
+    if (strcmp(want, "__eq__") == 0)
+        return apy_native(APY_NAT_EQ, 2, "__eq__");
+    if (strcmp(want, "__ne__") == 0)
+        return apy_native(APY_NAT_NE, 2, "__ne__");
+    if (strcmp(want, "__hash__") == 0)
+        return apy_native(APY_NAT_HASH, 1, "__hash__");
+    if (strcmp(want, "__getattribute__") == 0)
+        return apy_native(APY_NAT_GETATTR, 2, "__getattribute__");
+    if (strcmp(want, "__setattr__") == 0)
+        return apy_native(APY_NAT_SETATTR, 3, "__setattr__");
+    if (strcmp(want, "__delattr__") == 0)
+        return apy_native(APY_NAT_DELATTR, 2, "__delattr__");
+    /* Every class has one, and a user hook ends by calling it: `object`'s is
+       the no-op that terminates the chain. */
+    if (strcmp(want, "__init_subclass__") == 0)
+        return apy_native(APY_NAT_INIT_SUBCLASS, 1, "__init_subclass__");
+    return 0;
+}
 
 static apy_value apy_invoke(apy_value f, apy_value *a, int64_t n) {
     uintptr_t c = O(f)->v.fn.code;
+    /* A NATIVE has no code pointer to call; the selector is the whole of it.
+       Tested first, because calling through a null `code` is the crash this
+       replaced. */
+    if (O(f)->v.fn.native) return apy_native_call(f, a, n);
     switch (n) {
     case 0: return ((apy_fn0)c)(f);
     case 1: return ((apy_fn1)c)(f, a[0]);
@@ -8684,8 +14735,16 @@ static apy_value apy_invoke(apy_value f, apy_value *a, int64_t n) {
     case 7: return ((apy_fn7)c)(f, a[0], a[1], a[2], a[3], a[4], a[5], a[6]);
     case 8: return ((apy_fn8)c)(f, a[0], a[1], a[2], a[3], a[4], a[5], a[6],
                                 a[7]);
+    case 9: return ((apy_fn9)c)(f, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8]);
+    case 10: return ((apy_fn10)c)(f, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9]);
+    case 11: return ((apy_fn11)c)(f, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10]);
+    case 12: return ((apy_fn12)c)(f, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11]);
+    case 13: return ((apy_fn13)c)(f, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12]);
+    case 14: return ((apy_fn14)c)(f, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13]);
+    case 15: return ((apy_fn15)c)(f, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14]);
+    case 16: return ((apy_fn16)c)(f, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15]);
     default:
-        return apy_fail("TypeError", "a function of more than 8 parameters "
+        return apy_fail("TypeError", "a function of more than 16 parameters "
                                      "is not supported");
     }
 }
@@ -8714,29 +14773,99 @@ static apy_value apy_arity_error(apy_value f, int64_t got) {
    into `rest` FIRST -- a kw dict sitting in `argv` would be swallowed by that
    packing and arrive as one more element of `rest`. Only this function knows
    where the boundary is, so only it can put the dict past it. */
+/* `C(...)` -- allocate, then run `__init__` if there is one. The instance is
+   what the call yields whatever `__init__` returns, which is why its result is
+   discarded rather than propagated.
+
+   SEPARATE FROM `apy_call_nk` because `type.__call__` is exactly this and
+   nothing else: a metaclass that overrides `__call__` and ends by delegating
+   upward has to reach the default without re-entering the hook. */
+static apy_value apy_instantiate(apy_value f, apy_value *argv, int64_t argc,
+                                 apy_value kwrest, int bound) {
+    apy_value self;
+    apy_value init;
+    apy_value maker = apy_class_find(f, apy_name("__new__"));
+    if (maker) {
+        /* `__new__` IS AN IMPLICIT STATICMETHOD: it receives the CLASS as
+           its first argument, not an instance, so it is called unbound
+           with the class pushed in front. It was ignored entirely before
+           -- the instance was allocated and `__new__` never ran, which is
+           a wrong answer rather than a missing feature. */
+        apy_value pushed[17];
+        int64_t j;
+        pushed[0] = f;
+        for (j = 0; j < argc && j + 1 < 17; j++) pushed[j + 1] = argv[j];
+        self = apy_call_nk(maker, pushed,
+                           argc + 1 < 17 ? argc + 1 : 17, kwrest, 0);
+        if (!self) return 0;
+        /* `__init__` RUNS ONLY IF `__new__` RETURNED ONE OF THESE.
+           Returning something else is how a `__new__` deliberately
+           bypasses initialisation, and CPython honours that. */
+        /* `__init__` RUNS WHEN `__new__` ANSWERED AN INSTANCE OF THIS
+           CLASS -- and for a METACLASS the thing it answered is a class
+           whose metaclass is this one, which is the same test through
+           `apy_type_of`. Comparing only against `v.o.cls` skipped a
+           metaclass's `__init__` entirely. */
+        if (apy_type_of(self) != f)
+            return self;
+    } else {
+        self = apy_instance_new(f);
+        if (!self) return 0;
+    }
+    init = apy_class_find(f, apy_name("__init__"));
+    if (init) {
+        apy_value bound_init = apy_bind(init, self);
+        /* A NATIVE `__init__` TAKES NO KEYWORDS. `type.__init__` is the one
+           that matters: `class C(metaclass=M, kind="x")` hands the keywords
+           to `M.__new__`, and CPython's `type.__init__` ignores them rather
+           than reporting one it does not declare. */
+        if (O(init)->kind == APY_FUNC_K && O(init)->v.fn.native) kwrest = 0;
+        if (!apy_call_nk(bound_init, argv, argc, kwrest, bound)) return 0;
+    } else if (argc != 0) {
+        char buf[128];
+        snprintf(buf, sizeof buf,
+                 "%s() takes no arguments", APY_CSTR(O(f)->v.t.name));
+        return apy_fail("TypeError", buf);
+    }
+    return self;
+}
+
 static apy_value apy_call_nk(apy_value f, apy_value *argv, int64_t argc,
                              apy_value kwrest, int bound) {
-    apy_value slots[9];
+    apy_value slots[17];
     int64_t i, n = 0;
 
-    if (O(f)->kind == APY_TYPE_K) {
-        /* `C(...)` -- allocate, then run `__init__` if there is one. The
-           instance is what the call yields whatever `__init__` returns, which
-           is why its result is discarded rather than propagated. */
-        apy_value self = apy_instance_new(f);
-        apy_value init;
-        if (!self) return 0;
-        init = apy_class_find(f, apy_name("__init__"));
-        if (init) {
-            apy_value bound_init = apy_bind(init, self);
-            if (!apy_call_nk(bound_init, argv, argc, kwrest, bound)) return 0;
-        } else if (argc != 0) {
-            char buf[128];
-            snprintf(buf, sizeof buf,
-                     "%s() takes no arguments", APY_CSTR(O(f)->v.t.name));
-            return apy_fail("TypeError", buf);
+    if (O(f)->kind == APY_TYPE_K && O(f)->v.t.meta) {
+        /* THE METACLASS DECIDES WHAT CALLING THE CLASS DOES, if it says so:
+           `type(C).__call__(C, ...)` is what `C(...)` means, and it is how
+           `ABCMeta` refuses to instantiate a class with abstract methods.
+           Only when a `__call__` is actually written -- the default is the
+           allocate-and-init below, and routing every class through a lookup
+           that almost never finds anything would cost every instantiation. */
+        apy_value hook = apy_class_find(O(f)->v.t.meta, apy_name("__call__"));
+        if (hook) {
+            apy_value pushed[17];
+            int64_t j;
+            pushed[0] = f;
+            for (j = 0; j < argc && j + 1 < 17; j++) pushed[j + 1] = argv[j];
+            return apy_call_nk(hook, pushed, argc + 1 < 17 ? argc + 1 : 17,
+                               kwrest, 0);
         }
-        return self;
+    }
+    if (O(f)->kind == APY_TYPE_K)
+        return apy_instantiate(f, argv, argc, kwrest, bound);
+    if (O(f)->kind == APY_FUNC_K
+            && O(f)->v.fn.native == APY_NAT_TYPE_CALL) {
+        /* `type.__call__(cls, ...)` -- THE ORDINARY INSTANTIATION, with the
+           metaclass hook deliberately skipped. This is what a metaclass's
+           `__call__` ends with, and consulting the hook again from here
+           would be that same `__call__` calling itself forever. */
+        apy_value cls = O(f)->v.fn.bound;
+        if (cls) return apy_instantiate(cls, argv, argc, kwrest, 0);
+        if (argc < 1)
+            return apy_fail("TypeError",
+                            "type.__call__() takes at least 1 argument");
+        return apy_instantiate(argv[0], argv + 1, argc - 1, kwrest, 0);
     }
     if (O(f)->kind == APY_INST_K) {
         /* A callable instance: `x(...)` is `type(x).__call__(x, ...)`. */
@@ -8769,7 +14898,7 @@ static apy_value apy_call_nk(apy_value f, apy_value *argv, int64_t argc,
         int64_t take = argc;
         if (n + argc > byslot) take = byslot - n;
         if (take < 0) take = 0;
-        for (i = 0; i < take && n < 9; i++) slots[n++] = argv[i];
+        for (i = 0; i < take && n < 17; i++) slots[n++] = argv[i];
         /* A missing trailing argument comes from the default the `def`
            evaluated, which lives in the function object -- see the comment on
            `fn` in `struct apy_obj`. */
@@ -8781,11 +14910,11 @@ static apy_value apy_call_nk(apy_value f, apy_value *argv, int64_t argc,
         if (O(f)->v.fn.vararg) {
             apy_value rest = apy_tuple_new(argc - take + 1);
             for (i = take; i < argc; i++) apy_seq_push(rest, argv[i]);
-            if (n < 9) slots[n++] = rest;
+            if (n < 17) slots[n++] = rest;
         }
         /* `**kw` is the LAST parameter and is passed even when empty: `def
            f(**kw)` called as `f()` binds `{}`, not nothing. */
-        if (O(f)->v.fn.kwarg && n < 9)
+        if (O(f)->v.fn.kwarg && n < 17)
             slots[n++] = kwrest ? kwrest : apy_dict_new(1);
     }
     if (n != O(f)->v.fn.arity) return apy_arity_error(f, argc);
@@ -8813,8 +14942,20 @@ APY_API apy_value apy_call(apy_value f, apy_value argv, int64_t argc) {
 static apy_value apy_call_target(apy_value f, int64_t *skip) {
     *skip = 0;
     if (O(f)->kind == APY_TYPE_K) {
+        /* `__new__` DECLARES THE KEYWORDS when a class writes one and leaves
+           `__init__` to the default -- which is exactly a metaclass taking
+           class keywords: `M.__new__(mcls, name, bases, ns, kind=None)` with
+           `type.__init__` behind it. Reading the names off `__init__` there
+           matched them against a native that declares none. */
         apy_value init = apy_class_find(f, apy_name("__init__"));
-        if (!init || O(init)->kind != APY_FUNC_K) return 0;
+        apy_value maker = apy_class_find(f, apy_name("__new__"));
+        if ((!init || O(init)->v.fn.native) && maker
+                && O(maker)->kind == APY_FUNC_K && !O(maker)->v.fn.native) {
+            *skip = 1;
+            return maker;
+        }
+        if (!init || O(init)->kind != APY_FUNC_K || O(init)->v.fn.native)
+            return 0;
         *skip = 1;
         return init;
     }
@@ -8844,8 +14985,8 @@ static apy_value apy_call_target(apy_value f, int64_t *skip) {
 APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
                               apy_value kwd) {
     apy_value *raw = (apy_value *)buf;
-    apy_value slots[9], rest = 0;
-    char filled[9];
+    apy_value slots[17], rest = 0;
+    char filled[17];
     int64_t skip = 0, declared, want, bypos, i, k, kwn;
     apy_value target = apy_call_target(f, &skip);
 
@@ -8859,7 +15000,7 @@ APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
                                      - (O(target)->v.fn.kwarg ? 1 : 0);
     want = declared - skip;
     if (want < 0) want = 0;
-    if (want > 9) want = 9;
+    if (want > 17) want = 17;
     /* Positions reach only as far as the keyword-only tail; names reach all
        of it, which is why `want` stays whole and only `bypos` shrinks. */
     bypos = want - O(target)->v.fn.kwonly;
@@ -8885,12 +15026,17 @@ APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
                 at = i;
                 break;
             }
-        if (at >= 0 && argc <= bypos && !filled[at]) {
+        /* NOT CONDITIONAL ON THERE BEING NO SURPLUS. Surplus positionals
+           belong to `*rest`; they do not stop a keyword from naming a
+           parameter, and least of all a keyword-only one, which no position
+           could have filled. Requiring `argc <= bypos` here sent `c=3` in
+           `d(1, 2, c=3, z=4)` into `**kw` and left `c` on its default. */
+        if (at >= 0 && !filled[at]) {
             slots[at] = val;
             filled[at] = 1;
             continue;
         }
-        if (at >= 0 && argc <= bypos) {
+        if (at >= 0) {
             char b[160];
             snprintf(b, sizeof b, "%s() got multiple values for argument '%s'",
                      APY_CSTR(O(target)->v.fn.name), APY_CSTR(nm));
@@ -8936,10 +15082,23 @@ APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
         slots[i] = O(target)->v.fn.defaults[d];
     }
     if (argc > bypos) {
-        /* `*rest` swallows the surplus; copy them back after the named ones,
-           which are now complete. */
-        for (i = bypos; i < argc && i < 9; i++) slots[i] = raw[i];
-        want = argc < 9 ? argc : 9;
+        if (O(target)->v.fn.vararg) {
+            /* AFTER the declared parameters, not over the keyword-only ones
+               at the end of them -- those were just filled by name, and
+               writing the surplus into their slots discarded what the
+               keywords supplied. `apy_call_nk` with `bound` set takes the
+               first `declared` as parameters and everything past them as
+               `*rest`, which is exactly this layout. */
+            int64_t j;
+            for (j = 0; bypos + j < argc && want + j < 17; j++)
+                slots[want + j] = raw[bypos + j];
+            want += j;
+        } else {
+            /* No `*rest` to swallow them, so this is an arity error -- left
+               to `apy_call_nk`, which words it. */
+            for (i = bypos; i < argc && i < 9; i++) slots[i] = raw[i];
+            want = argc < 9 ? argc : 9;
+        }
     }
     return apy_call_nk(f, slots, want, rest, 1);
 }
@@ -8954,6 +15113,25 @@ APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
    `apy_call_n` then binds them against the callee's own signature -- defaults,
    `*rest`, arity mismatch and all -- so a spread call reports a wrong count
    exactly as a direct one does, at run time rather than at compile time. */
+/* `f(*xs, **kw)`. The keyword half travels SEPARATELY, for the reason it does
+   everywhere else here: only the binder knows where the positional arguments
+   stop, so a dict appended to the list would arrive as one more positional.
+   Dropping it made `f(*xs, **kw)` ignore every keyword in silence. */
+APY_API apy_value apy_call_spread_kw(apy_value f, apy_value args,
+                                     apy_value kwd) {
+    int64_t n = O(args)->v.q.n;
+    apy_value *argv = (apy_value *)malloc(sizeof(apy_value)
+                                          * (size_t)(n ? n : 1));
+    apy_value r;
+    if (!argv) { fputs("asmpython: out of memory\n", stderr); exit(1); }
+    memcpy(argv, O(args)->v.q.items, sizeof(apy_value) * (size_t)n);
+    r = (kwd && O(kwd)->kind == APY_DICT_K && O(kwd)->v.d.n)
+        ? apy_call_kw(f, (apy_value)argv, n, kwd)
+        : apy_call_n(f, argv, n);
+    free(argv);
+    return r;
+}
+
 APY_API apy_value apy_call_spread(apy_value f, apy_value args) {
     int64_t n = O(args)->v.q.n;
     apy_value *argv = (apy_value *)malloc(sizeof(apy_value) * (size_t)(n ? n : 1));
@@ -8969,8 +15147,13 @@ APY_API apy_value apy_call_spread(apy_value f, apy_value args) {
    Used to flatten a starred argument into the list a spread call builds. */
 APY_API apy_value apy_extend(apy_value seq, apy_value other) {
     int64_t i;
+    /* Drain anything that is iterable but not indexable -- a generator, a
+       user object with `__iter__` -- so `[*gen]` and `f(*gen)` work. Both
+       walks below are by index and neither can step a cursor. */
+    other = apy_iterable(other);
+    if (!other) return 0;
     if (O(other)->kind == APY_STR_K || O(other)->kind == APY_BYTES_K
-        || O(other)->kind == APY_DICT_K) {
+        || O(other)->kind == APY_DICT_K || O(other)->kind == APY_RANGE_K) {
         int64_t n = apy_raw_len(other);
         for (i = 0; i < n; i++) {
             apy_value item = O(other)->kind == APY_DICT_K
@@ -9018,7 +15201,26 @@ static apy_value apy_type_of(apy_value v) {
     const char *key;
     int i;
     if (O(v)->kind == APY_INST_K) return O(v)->v.o.cls;
-    key = O(v)->kind == APY_TYPE_K ? "type" : apy_kind_name(v);
+    /* AN EXCEPTION OF A CLASS THE PROGRAM WROTE answers that class, so
+       `type(e).__name__` and `type(e) is AppError` say what the source does.
+       Without a class it falls through to the name-keyed table below, which
+       is what every exception the runtime raises itself has. */
+    if (O(v)->kind == APY_EXC_K && O(v)->v.e.cls) return O(v)->v.e.cls;
+    /* `type(C)` IS THE METACLASS when one made it. An ordinary class has no
+       metaclass recorded and reads as `type`, which is what it is. */
+    if (O(v)->kind == APY_TYPE_K && O(v)->v.t.meta) return O(v)->v.t.meta;
+    if (O(v)->kind == APY_TYPE_K) return apy_type_class();
+    key = apy_kind_name(v);
+    /* THE SAME OBJECT THE NAME ANSWERS, when the program names that builtin
+       type anywhere -- so `type(1) is int` holds. The frontend registers each
+       one at the top of the entry, before any statement, which is what takes
+       the evaluation order out of it: registering lazily made the answer
+       depend on whether `type(1)` or `int` was reached first. */
+    if (apy_canonical_types) {
+        apy_value found = apy_dict_get_or(apy_canonical_types,
+                                          apy_lit(key), 0);
+        if (found) return found;
+    }
     for (i = 0; i < apy_type_count; i++)
         if (strcmp(apy_type_keys[i], key) == 0) return apy_type_names[i];
     if (apy_type_count >= 64) return apy_type_new(apy_lit(key), 0);
@@ -9035,6 +15237,33 @@ APY_API apy_value apy_type_object(apy_value v) { return apy_type_of(v); }
    because the error text is specific: a value with neither method is
    reported as not being a context manager, naming the one it lacks, which is
    what CPython says and what tells the reader which half to write. */
+/* `__aenter__` / `__aexit__`. Each ANSWERS A COROUTINE rather than a value:
+   `async with` awaits what these return, which is the whole difference from
+   the synchronous pair and the reason they cannot share an entry point. */
+APY_API apy_value apy_aenter(apy_value cm) {
+    apy_value m = apy_dunder(cm, "__aenter__");
+    if (!m)
+        return apy_fail2("TypeError",
+                         "'%s' object does not support the asynchronous "
+                         "context manager protocol%s", apy_kind_name(cm), "");
+    return apy_call_n(m, NULL, 0);
+}
+
+APY_API apy_value apy_aexit(apy_value cm, apy_value exc) {
+    apy_value m = apy_dunder(cm, "__aexit__"), argv[3];
+    if (!m)
+        return apy_fail2("TypeError",
+                         "'%s' object does not support the asynchronous "
+                         "context manager protocol%s", apy_kind_name(cm), "");
+    /* All three from the one value, as `apy_exit` does it: the TYPE is what
+       `et.__name__` reads, the VALUE is the exception, the traceback is None
+       because there are none here. */
+    argv[0] = O(exc)->kind == APY_EXC_K ? apy_exc_type(exc) : apy_none();
+    argv[1] = exc;
+    argv[2] = apy_none();
+    return apy_call_n(m, argv, 3);
+}
+
 APY_API apy_value apy_enter(apy_value cm) {
     apy_value m = apy_dunder(cm, "__enter__");
     if (!m)
@@ -9069,9 +15298,19 @@ APY_API apy_value apy_exit(apy_value cm, apy_value exc) {
 }
 
 
-/* Is `cls` reachable from `of` by base pointers? The `isinstance` rule for
-   user classes, and the only thing single inheritance makes cheap. */
+/* Is `cls` anywhere in `of`'s order? The `isinstance` rule for user classes.
+
+   THROUGH THE MRO WHEN THERE IS ONE, for the same reason attribute lookup is:
+   `isinstance(D(), C)` for `class D(B, C)` is True and the base chain from D
+   reaches only B and A. */
 static int apy_type_is_sub(apy_value of, apy_value cls) {
+    if (of && O(of)->kind == APY_TYPE_K && O(of)->v.t.mro) {
+        apy_value order = O(of)->v.t.mro;
+        int64_t i;
+        for (i = 0; i < O(order)->v.q.n; i++)
+            if (O(order)->v.q.items[i] == cls) return 1;
+        return 0;
+    }
     while (of && O(of)->kind == APY_TYPE_K) {
         if (of == cls) return 1;
         of = O(of)->v.t.base;
@@ -9120,8 +15359,21 @@ static apy_value apy_method1(apy_value v, const char *name, apy_value arg) {
 static apy_value apy_binary_dunder(apy_value a, apy_value b,
                                    const char *name, const char *rname) {
     apy_value r = apy_method1(a, name, b);
-    if (r || apy_error_occurred()) return r;
-    return apy_method1(b, rname, a);
+    if (apy_error_occurred()) return r;
+    /* `NotImplemented` MEANS "ASK THE OTHER OPERAND", not "the answer is
+       NotImplemented". Returning it as the result made `Left() == Right()`
+       answer the sentinel instead of falling back to Right's `__eq__`, and a
+       program printing it saw a word where its answer should have been. */
+    if (r && O(r)->kind != APY_NOTIMPL_K) return r;
+    {
+        apy_value other = apy_method1(b, rname, a);
+        if (apy_error_occurred()) return other;
+        if (other && O(other)->kind != APY_NOTIMPL_K) return other;
+        /* NEITHER SIDE ANSWERED. Nothing is returned and no error is set,
+           which is how every caller here spells "fall back to the default" --
+           identity for `==`, a TypeError for arithmetic. */
+        return 0;
+    }
 }
 
 /* True when either operand is an instance, which is the guard every operator
@@ -9142,9 +15394,33 @@ OBJECT_NAMES = (
     #: it dispatches on.
     "apy_cell_new", "apy_cell_get", "apy_cell_set",
     "apy_func_new", "apy_func_cell", "apy_func_default", "apy_env_cell",
+    "apy_func_kwdefaults",
     "apy_call",
     "apy_type_new", "apy_type_set", "apy_instance_new",
-    "apy_getattr", "apy_setattr", "apy_super", "apy_type_object",
+    "apy_type_builtin",
+    "apy_getattr", "apy_getattr_default", "apy_setattr",
+    "apy_super", "apy_type_object", "apy_type_class",
+    "apy_prepare", "apy_type_make", "apy_object_class",
+    "apy_class_build", "apy_class_build_kw", "apy_meta_for",
+    "apy_mro_entries",
+    "apy_check_slots",
+    "apy_name_or", "apy_print_seq_with", "apy_unpack_check",
+    "apy_call_spread_kw",
+    #: `typing`, which is inert at run time -- a special form is an object a
+    #: program names and never inspects, and the decorators mark and return.
+    "apy_typing_form", "apy_typing_final", "apy_typing_override",
+    "apy_type_alias", "apy_typevar", "apy_typevar_default",
+    "apy_import",
+    "apy_get_origin", "apy_get_args",
+    "apy_typing_mark",
+    #: asyncio. A coroutine is a generator, so these drive the same frame the
+    #: generator entry points do.
+    "apy_coro_mark", "apy_await_step", "apy_asyncio_run", "apy_asyncio_sleep",
+    "apy_asyncio_gather", "apy_agen_mark", "apy_agen_step",
+    "apy_suspend_value", "apy_func_coro",
+    #: `inspect`, the three questions a program asks it about coroutines.
+    "apy_inspect_iscoroutine", "apy_inspect_isgenerator",
+    "apy_inspect_isasyncgen", "apy_inspect_iscoroutinefunction",
     "apy_is_instance", "apy_exc_register",
     "apy_range", "apy_sorted", "apy_min", "apy_max", "apy_sum", "apy_reversed", "apy_enumerate", "apy_zip2", "apy_abs", "apy_round", "apy_isinstance", "apy_slice", "apy_list_pop", "apy_index_of", "apy_count_of", "apy_list_remove", "apy_dict_parts", "apy_dict_get_or",
     "apy_list_new", "apy_tuple_new", "apy_seq_push", "apy_getitem",
@@ -9161,7 +15437,8 @@ OBJECT_NAMES = (
     "apy_to_int", "apy_to_float", "apy_to_bool",
     "apy_error_occurred", "apy_error_type", "apy_error_message",
     "apy_error_clear", "apy_fatal_if_error",
-    "apy_make_exc", "apy_raise", "apy_error_matches", "apy_error_value",
+    "apy_make_exc", "apy_make_excn", "apy_raise", "apy_error_matches",
+    "apy_error_value",
     # set and frozenset
     "apy_set_new", "apy_frozenset_new", "apy_set_push",
     "apy_to_set", "apy_to_frozenset",
@@ -9190,6 +15467,34 @@ OBJECT_NAMES = (
     "apy_str_find", "apy_str_find2", "apy_str_find3",
     "apy_str_rfind", "apy_str_rfind2", "apy_str_rfind3", "apy_str_rindex",
     "apy_str_count2", "apy_str_count3",
+    "apy_str_maketrans", "apy_str_translate", "apy_str_like",
+    "apy_pop_or", "apy_dict_popitem",
+    #: `match`: the predicates a `case` pattern needs and nothing else does.
+    "apy_match_seq", "apy_match_map", "apy_match_args", "apy_match_rest",
+    #: `slice` as an object, for a user `__getitem__` and for `c[1:2, 3]`.
+    "apy_slice_new", "apy_slice_indices", "apy_matmul", "apy_alias_new",
+    "apy_func_is_type", "apy_func_annotate", "apy_func_qualname",
+    "apy_func_builtin",
+    "apy_ascii", "apy_notimplemented", "apy_id",
+    "apy_hex_of", "apy_float_fromhex",
+    #: `d.keys()` and friends -- a window on the dict, not a copy.
+    "apy_dict_view", "apy_view_items",
+    #: `async with` -- each answers a COROUTINE, which the caller awaits.
+    "apy_aenter", "apy_aexit", "apy_dir",
+    #: PEP 654 -- several exceptions raised as one.
+    "apy_excgroup_new", "apy_group_split", "apy_group_subgroup",
+    "apy_group_dispatch",
+    "apy_template_new", "apy_interpolation_new", "apy_exc_class_bind",
+    "apy_ns_get", "apy_aiter", "apy_asyncio_create_task",
+    "apy_pos_add", "apy_at", "apy_code_of",
+    "apy_task_cancel", "apy_task_result", "apy_task_done",
+    "apy_task_cancelled", "apy_asyncio_wait_for",
+    "apy_asyncio_taskgroup",
+    "apy_init_subclass",
+    "apy_split_of",
+    #: descriptors: `property`, `classmethod`, `staticmethod`.
+    "apy_descr_new", "apy_prop_setter", "apy_prop_getter",
+    "apy_prop_deleter", "apy_set_names",
     "apy_str_ljust", "apy_str_ljust_fill", "apy_str_rjust",
     "apy_str_rjust_fill", "apy_str_center", "apy_str_center_fill",
     "apy_str_zfill",
@@ -9204,6 +15509,12 @@ OBJECT_NAMES = (
 #: opaque to every backend.
 _IR_TYPES = {"apy_value": "ptr", "int64_t": "i64", "double": "f64",
              "void": "void"}
+
+
+#: THE C A BACKEND ACTUALLY SEES: the runtime with the generated Unicode
+#: table spliced in at its marker. One file, as it always was -- the split is
+#: only so this module stays readable.
+_WITH_TABLE = OBJECTS_C.replace("/* @UNICODE_TABLE@ */", UNICODE_C)
 
 
 def signatures() -> dict:
@@ -9223,7 +15534,7 @@ def signatures() -> dict:
     import re
     out = {}
     for m in re.finditer(r"APY_API\s+([\w ]+?)\s+(apy_\w+)\(([^)]*)\)\s*\{",
-                         OBJECTS_C):
+                         _WITH_TABLE):
         ret, name, raw = m.group(1).strip(), m.group(2), m.group(3).strip()
         if name in out:
             continue
@@ -9246,4 +15557,4 @@ def objects_c(*, static: bool = False) -> str:
     unit; external for the linked runtime, where the IR's calls have to resolve
     across object files.
     """
-    return OBJECTS_C.replace(_API_TOKEN, "static" if static else "")
+    return _WITH_TABLE.replace(_API_TOKEN, "static" if static else "")

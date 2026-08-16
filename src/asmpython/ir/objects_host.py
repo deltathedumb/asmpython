@@ -82,9 +82,28 @@ class Exc:
     """
 
     __slots__ = ("name", "arg", "has_arg", "context", "cause", "suppress",
-                 "notes", "rendered")
+                 "notes", "rendered", "subs", "argv", "dict", "cls", "pos")
 
     def __init__(self, name: str, arg, has_arg: bool = True) -> None:
+        #: THE CLASS THE PROGRAM WROTE, and this exception's own attributes --
+        #: both empty for the exceptions the runtime raises itself, which have
+        #: neither.
+        #:
+        #: `raise` and `except` match on the NAME and always did; what these
+        #: add is everything a class body puts on an exception that a name
+        #: alone cannot hold. `self.code = 404` goes in `dict` and `def
+        #: summary(self)` is found through `cls`, so a user exception is an
+        #: ordinary object in every way except how it is caught.
+        self.dict: dict = {}
+        self.cls = None
+        #: WHERE IT WAS RAISED, as an index into the position table, or -1
+        #: for one that never was -- which is what makes
+        #: `ValueError("x").__traceback__` None. See `_apy_raise`.
+        self.pos = -1
+        #: EVERY argument, when there is more than one. `OSError(2, "No such
+        #: file")` carries both and reads them back as `errno`/`strerror`; one
+        #: field could hold only the first, so a program passing two lost one.
+        self.argv = None
         #: CHAINING. `context` is whatever was being handled when this one was
         #: raised, set implicitly; `cause` is what `raise X from Y` said. They
         #: are separate because `raise ... from None` SUPPRESSES the context
@@ -93,6 +112,10 @@ class Exc:
         self.cause = None
         self.suppress = False
         self.notes = None
+        #: THE EXCEPTIONS AN `ExceptionGroup` CARRIES, or None for an ordinary
+        #: one. A group is an exception like any other; this is the only thing
+        #: that distinguishes it.
+        self.subs = None
         #: WHETHER `arg` is the already-formatted message rather than the
         #: object the program raised -- see the C's `rendered`.
         self.rendered = False
@@ -146,14 +169,85 @@ class ObjectHost:
         self._small: dict[int, int] = {}
         #: `type(x)` results, interned by kind name -- see `_type_of`.
         self._types: dict = {}
+        #: Builtin type thunks, by name -- see `_apy_func_is_type`. One per
+        #: name, so `int == int` is True.
+        self._type_thunks: dict = {}
+        #: `member_descriptor`, the class a slot read through its own class
+        #: answers -- see the `__slots__` branch in `_apy_getattr`.
+        self._member_class = None
+        #: `code`, the class `f.__code__` answers -- see `_code_class`.
+        self._code_cls = None
+        #: `asyncio.TaskGroup` -- see `_taskgroup_class`.
+        self._taskgroup_cls = None
+        #: PEP 657's three classes, and the code objects made from them.
+        self._tb_code_cls = None
+        self._tb_frame_cls = None
+        self._tb_cls = None
+        self._code_objects: dict = {}
+        #: PEP 657. One (function, line, end_line, col, end_col) per statement
+        #: lowered, in source order; the index is what `apy_at` stores.
+        #:
+        #: ONE POSITION PER STATEMENT, not one per operation -- the frontend
+        #: sets a span per statement and that is the granularity it has.
+        #:
+        #: PER HOST, like every other table here. The C keeps this in file
+        #: statics and each compiled program is its own process, so one table
+        #: is one program; this file runs MANY programs in one process, and a
+        #: module-level list handed the second one the first's rows -- a
+        #: traceback then reported a line six too small, which is a wrong
+        #: answer and not a crash.
+        self.positions: list = []
+        #: Every task the program handed to the loop -- see
+        #: `_apy_asyncio_create_task`. PER HOST, for the reason `positions`
+        #: is: one process runs many programs here, and a shared list would
+        #: let the second one step what the first left unfinished.
+        self.tasks: list = []
+        #: EVERY ASYNC GENERATOR MADE DURING A RUN, so the loop can close the
+        #: ones a program abandoned. Per host for the reason `tasks` is: one
+        #: process runs many programs, and a shared list let one program's
+        #: `asyncio.run` close what another had left suspended.
+        self.live_agens: list = []
+        #: Which statement is running, and where the last failure happened.
+        #: Two because a handler's own statements move the first, and what a
+        #: traceback reports is where the exception came from.
+        self.pos_here = -1
+        self.pos_err = -1
+        #: PEP 750's two classes -- see `_template_class`.
+        self._template_cls = None
+        self._interp_cls = None
+        #: `object`'s defaults as callable values -- see `_object_default`.
+        self._defaults: dict = {}
+        #: `typing` forms, by name -- see `_apy_typing_form` for why one per
+        #: name. Per host, like every other table here: a handle indexes THIS
+        #: host's cells, and a shared one would hand a second run the first's.
+        self._forms: dict = {}
+        #: The containers `_text` is inside, by id. A container that holds
+        #: itself would otherwise recur until Python's own limit fired.
+        self._rendering: set = set()
         #: `class MyError(ValueError):` -> its base name. See
         #: `_apy_exc_register`.
+        #: `class AppError(Exception):` WITH A BODY -> the class its name
+        #: stands for. See `_apy_exc_class_bind`.
+        self.exc_class: dict = {}
+        #: (kept beside `user_exc`, which holds the same names' bases)
         self.user_exc: dict = {}
         self._none = self._new(None)
         #: `...`, as one cell -- see `apy_ellipsis`.
         self._ellipsis = self._new(Ellipsis)
+        #: `NotImplemented`, AS ONE CELL. `_new` mints a fresh handle every
+        #: call and `x is NotImplemented` compares handles, so a new one per
+        #: mention would answer False -- the same identity trap the suspend
+        #: token fell into.
+        self._notimplemented = self._new(NotImplemented)
         #: The exhaustion sentinel -- see `apy_stop`.
         self._stop = self._new(_STOP)
+        #: THE SUSPENSION TOKEN, AS ONE CELL. `_new` mints a fresh handle
+        #: every call, and the lowered code compares against this by IDENTITY
+        #: -- `async for` tells "suspended" from "produced an item" that way.
+        #: A new handle per suspension compared unequal to every other, so the
+        #: loop took the token for an item and never terminated. The C
+        #: interns it for exactly this reason.
+        self._suspend = self._new(_SUSPEND)
         self._true = self._new(True)
         self._false = self._new(False)
         self.err: tuple[str, str] | None = None
@@ -167,9 +261,25 @@ class ObjectHost:
         self.handling = None
 
     # ── the handle table ────────────────────────────────────────────────────
+    #: Kinds whose handle is INTERNED, so `is` answers about the object rather
+    #: than about which handle it came back through. The mutable containers
+    #: are here for the same reason the object kinds are: `xs.append(xs)` then
+    #: `xs[1] is xs` is True in a compiled program. A str or a tuple is left
+    #: out -- compared by value everywhere that matters, and interning them
+    #: would keep every one alive for the run.
+    _INTERNED = (list, dict, set, bytearray, memoryview)
+
     def _new(self, obj) -> int:
         self._cells.append(obj)
-        return len(self._cells) - 1
+        made = len(self._cells) - 1
+        # RECORDED HERE, not only in `_value`. An object first handed out by
+        # `_new` and later reached through `_value` got two handles and
+        # compared unequal to itself.
+        if isinstance(obj, self._INTERNED) or type(obj).__name__ in (
+                "Instance", "Class", "Exc", "Func", "Gen", "Iterator",
+                "Alias"):
+            self._identity.setdefault(id(obj), made)
+        return made
 
     def _get(self, h, where: str):
         h = int(h)
@@ -206,17 +316,42 @@ class ObjectHost:
         """A handle for a computed result, interning what the C interns."""
         if obj is None:
             return self._none
+        if obj is NotImplemented:
+            # Interned for the same reason `_STOP` is: a dunder returning it
+            # is compared by identity to decide whether to ask the other
+            # operand.
+            return self._notimplemented
+        if obj is _STOP:
+            # `apy_stop` IS ONE CELL IN THE C, so identity has to survive a
+            # round trip through a frame slot: a loop that stores the step's
+            # answer and then compares the SLOT against `apy_stop()` got a
+            # fresh handle back and never saw the end of the sequence.
+            return self._stop
+        if obj is _SUSPEND:
+            # THE SUSPENSION TOKEN IS INTERNED IN THE C, and the lowered code
+            # compares against it by identity -- that is how `async for` tells
+            # "suspended on an await" from "produced an item". A fresh handle
+            # per suspension compared unequal to every other, so the loop took
+            # the token for an item and ran forever.
+            return self._suspend
         if obj is True or obj is False:
             return self._bool(obj)
         if isinstance(obj, int):
             return self._int(obj)
-        if isinstance(obj, (Instance, Class, Exc, Func, Gen, Iterator)):
+        if isinstance(obj, (Instance, Class, Exc, Func, Gen, Iterator,
+                            list, dict, set, Alias)):
             # ONE HANDLE PER OBJECT, so `is` answers about the object and not
             # about which handle it came back through. The C compares
             # pointers, so a fresh handle for the same instance made
             # `m.__self__ is obj` False here and True in a compiled program --
             # the paths disagreeing about identity, which is the one thing
             # identity must not depend on.
+            #
+            # MUTABLE CONTAINERS TOO. `xs.append(xs)` then `xs[1] is xs` is
+            # True in a compiled program and was False here, because reading
+            # an element minted a second handle for the same list. Only the
+            # mutable ones: a str or a tuple is compared by value everywhere
+            # that matters, and interning them would keep every one alive.
             got = self._identity.get(id(obj))
             if got is not None and self._cells[got] is obj:
                 return got
@@ -230,6 +365,9 @@ class ObjectHost:
         # First writer wins, as `apy_fail` does. A second failure downstream of
         # the first must not overwrite the report of what actually went wrong.
         if self.err is None:
+            # WHERE IT HAPPENED, taken at the moment the flag goes up: by the
+            # time a handler asks, its own statements have moved the cursor.
+            self.pos_err = self.pos_here
             self.err = (kind, msg)
             self.err_value = None
         return 0
@@ -275,15 +413,38 @@ class ObjectHost:
             # every TypeError about a user object name the user's type.
             return v.cls.name
         if isinstance(v, Class):
-            return "type"
+            # `type(C).__name__` IS THE METACLASS'S NAME when one made it.
+            return v.meta.name if v.meta is not None else "type"
         if isinstance(v, Func):
-            return "function"
+            # A BUILTIN reached as a value is not a plain function:
+            # `type(print).__name__` is `builtin_function_or_method`.
+            if getattr(v, "is_type", False):
+                return "type"
+            return "builtin_function_or_method"                 if getattr(v, "builtin", False) else "function"
         if isinstance(v, Cell):
             return "cell"
         if isinstance(v, Super):
             return "super"
+        if isinstance(v, Alias):
+            # A UNION IS NOT A GENERIC ALIAS to a program that asks:
+            # `type(int | str).__name__` is how it tells the two apart.
+            return "Union" if isinstance(v.origin, Instance)                 else "types.GenericAlias"
+        if isinstance(v, Func) and getattr(v, "is_type", False):
+            return "type"
+        if isinstance(v, _VIEW_TYPES):
+            return type(v).__name__
+        if isinstance(v, slice):
+            return "slice"
+        if isinstance(v, Descr):
+            return ("classmethod" if v.kind == PROP_CLASSMETHOD else
+                    "staticmethod" if v.kind == PROP_STATICMETHOD else
+                    "property")
         if isinstance(v, Gen):
-            return "generator"
+            # All three share every field; only the name differs, and a
+            # program reads it to tell them apart.
+            if v.agen:
+                return "async_generator"
+            return "coroutine" if v.coro else "generator"
         if isinstance(v, Iterator):
             # A CURSOR names what MADE it: `map(str, xs)` is a `map`, which is
             # what `type(...).__name__` answers and what tells a reader why it
@@ -297,15 +458,45 @@ class ObjectHost:
     def _text(self, v, quoted: bool) -> str:
         if isinstance(v, Class):
             return f"<class '{v.name}'>"
+        if isinstance(v, Alias):
+            # THE UNION IS THE ONLY FORM THAT PRINTS WITH BARS. PEP 604 made
+            # `int | str` the spelling for that one; every other form keeps
+            # the subscript it was written with, and testing "the origin is an
+            # instance" made `Annotated[int, 'x']` print as a union.
+            if _form_name(v.origin) == "Union":
+                return " | ".join(_alias_part(x) for x in v.args)
+            # `list[int]`, not `list[<class 'int'>]` -- see `_alias_part`.
+            inner = ", ".join(_alias_part(x) for x in v.args)                 if isinstance(v.args, (list, tuple)) else _alias_part(v.args)
+            return f"{_alias_part(v.origin)}[{inner}]"
         if isinstance(v, Func):
+            # A BUILTIN TYPE NAME PRINTS AS A CLASS. `print(int)` says
+            # `<class 'int'>` and it reaches here as a callable thunk, so the
+            # flag -- not the kind -- decides what it is called.
+            if getattr(v, "is_type", False):
+                return f"<class '{v.name}'>"
             kind = "bound method" if v.bound is not None else "function"
             return f"<{kind} {v.name} at 0x{id(v):x}>"
         if isinstance(v, Instance):
+            # A TYPING FORM PRINTS AS `typing.Name`. It is an instance with no
+            # `__repr__`, so the default `<_SpecialForm object at 0x...>` came
+            # out -- an address where CPython prints the name a program wrote.
+            form = _form_name(v)
+            if form is not None:
+                return "typing." + form
             # `repr()` and `str()` reach `Instance.__repr__`/`__str__`, which
             # dispatch to the user's methods; the str/repr asymmetry lives
             # there so that a container printing its elements gets it too.
             return repr(v) if quoted else str(v)
         if isinstance(v, Exc):
+            # MORE THAN ONE ARGUMENT PRINTS AS THE TUPLE. `str(ValueError(
+            # 'a','b'))` is `('a', 'b')` and its repr is `ValueError('a',
+            # 'b')` -- CPython shows the whole of `args` once there is more
+            # than one, and rendering only the first dropped the rest.
+            argv = getattr(v, "argv", None)
+            if argv is not None and len(argv) > 1:
+                shown = self._text(tuple(argv), True)
+                # The tuple's own parentheses ARE the call's.
+                return f"{v.name}{shown}" if quoted else shown
             # `str(e)` is the argument alone, `repr(e)` is `ValueError('x')`.
             if not quoted:
                 # `str(KeyError('k'))` is `"'k'"` -- the REPR of the argument.
@@ -313,21 +504,147 @@ class ObjectHost:
                 # empty is still visible in the report.
                 return ("" if not v.has_arg else self._text(
                     v.arg, not v.rendered and v.name == "KeyError"))
-            shown = "" if not v.has_arg else self._text(v.arg, True)
+            # A KeyError REBUILT FROM A FAILED LOOKUP already holds the
+            # repr of the key -- that is what `rendered` records -- so
+            # repr'ing it again gave `KeyError("'k'")` where CPython says
+            # `KeyError('k')`. Every other type stores the plain message and
+            # does want the quotes. `e.args[0]` is still the repr text; see
+            # the C for why that half needs the key retained.
+            twice = v.rendered and v.name == "KeyError"
+            shown = "" if not v.has_arg else self._text(v.arg, not twice)
             return f"{v.name}({shown})"
-        if isinstance(v, (list, tuple, dict)):
+        if isinstance(v, range):
+            # `range(0, 10, 2)` -- and `range(0, 3)` when the step is 1, which
+            # is how CPython prints one. Before the container branch, which
+            # would render its ELEMENTS and undo the laziness.
+            if v.step == 1:
+                return f"range({v.start}, {v.stop})"
+            return f"range({v.start}, {v.stop}, {v.step})"
+        if isinstance(v, (list, tuple, dict, set, frozenset)):
             # A container always shows its ELEMENTS with repr, whichever of
             # str/repr was asked of the container -- `print(['a'])` is `['a']`.
-            # Python's own repr does exactly that, including the trailing comma
-            # in a one-element tuple, so recursion through `_text` would only
-            # be a chance to disagree with it.
-            return repr(v)
+            #
+            # RECURSED THROUGH `_text`, not handed to Python's `repr`. Every
+            # object this file defines -- a user instance, an exception, a
+            # builtin type used as a value -- has a repr that only `_text`
+            # knows, and Python's printed its ADDRESS instead. Worse, `repr()`
+            # on an `Instance` reaches the user's `__repr__` outside the
+            # bridge's guard, so `print([P(1)])` raised out of the interpreter
+            # rather than printing. Handing the job to Python looked like it
+            # could not disagree with CPython, and it disagreed with it for
+            # every element that was not a plain Python value.
+            here = id(v)
+            if here in self._rendering:
+                # `xs.append(xs)`. CPython prints the ellipsis rather than
+                # recurring, and that was Python's repr doing it for us.
+                return ("[...]" if isinstance(v, list)
+                        else "(...)" if isinstance(v, tuple) else "{...}")
+            self._rendering.add(here)
+            try:
+                if isinstance(v, dict):
+                    return "{" + ", ".join(
+                        f"{self._text(k, True)}: {self._text(x, True)}"
+                        for k, x in v.items()) + "}"
+                body = ", ".join(self._text(x, True) for x in v)
+                if isinstance(v, tuple):
+                    # The TRAILING COMMA in a one-element tuple, which is what
+                    # tells `(1,)` from `(1)`.
+                    return f"({body},)" if len(v) == 1 else f"({body})"
+                if isinstance(v, list):
+                    return f"[{body}]"
+                if isinstance(v, frozenset):
+                    return f"frozenset({{{body}}})" if v else "frozenset()"
+                # An empty set has no braces form -- `{}` is a dict.
+                return "{" + body + "}" if v else "set()"
+            finally:
+                self._rendering.discard(here)
         if isinstance(v, str):
             return repr(v) if quoted else v
         return repr(v)
 
     # ── calling compiled code ───────────────────────────────────────────────
+    def _template_class(self):
+        """`Template`, interned so `type(a) is type(b)` for two t-strings."""
+        if self._template_cls is None:
+            self._template_cls = Class("Template")
+        return self._template_cls
+
+    def _interp_class(self):
+        """`Interpolation`, interned for the reason `Template` is."""
+        if self._interp_cls is None:
+            self._interp_cls = Class("Interpolation")
+        return self._interp_cls
+
+    def _traceback_code_class(self):
+        """`code`, as a traceback names it. A METHOD for `co_positions`,
+        because that is how CPython spells it and a program calls it."""
+        if self._tb_code_cls is None:
+            cls = Class("code")
+            cls.dict["co_positions"] = Native(
+                "co_positions", lambda c: c.dict["_positions"])
+            self._tb_code_cls = cls
+        return self._tb_code_cls
+
+    def _traceback_frame_class(self):
+        if self._tb_frame_cls is None:
+            self._tb_frame_cls = Class("frame")
+        return self._tb_frame_cls
+
+    def _traceback_class(self):
+        if self._tb_cls is None:
+            self._tb_cls = Class("traceback")
+        return self._tb_cls
+
+    def _taskgroup_class(self):
+        """`TaskGroup`, interned so two groups share a type."""
+        if self._taskgroup_cls is None:
+            cls = Class("TaskGroup")
+            cls.dict["__aenter__"] = Native(
+                "__aenter__",
+                lambda g: _coro_value(self, g))
+            cls.dict["__aexit__"] = Native(
+                "__aexit__",
+                lambda g, *rest: _tgexit_coro(g))
+            cls.dict["create_task"] = Native(
+                "create_task",
+                lambda g, coro: self._get(
+                    _tg_create(self, g, coro), "create_task"))
+            self._taskgroup_cls = cls
+        return self._taskgroup_cls
+
+    def _code_class(self):
+        """The class `f.__code__` answers, interned so two of them share a
+        type the way CPython has it."""
+        if self._code_cls is None:
+            self._code_cls = Class("code")
+        return self._code_cls
+
+    def _member_descriptor_class(self):
+        """The class a slot read through its own class answers, interned so
+        `type(A.v) is type(B.w)` the way CPython has it."""
+        if self._member_class is None:
+            self._member_class = Class("member_descriptor")
+        return self._member_class
+
     def _no_attr(self, obj, name: str) -> int:
+        # Every builtin kind's lookup ends here, which is why the protocol
+        # table is consulted HERE rather than in each of a dozen branches: a
+        # kind that HAS `__iter__` reaches this line for it exactly as one
+        # that has nothing does.
+        found = _kind_attr(self, obj, name)
+        if found is not None:
+            return found
+        # THE TYPE ITSELF answers for its instances: `issubclass(dict,
+        # Mapping)` is a question about what a dict CAN DO, asked of `dict`
+        # and never of one.
+        if isinstance(obj, Func) and getattr(obj, "is_type", False):
+            proto = _KIND_PROTOTYPES.get(obj.name)
+            if proto is not None and _kind_attr(self, proto, name) is not None:
+                # UNBOUND, because `dict.keys` is unbound in CPython too and
+                # `dict.keys(d)` is how it is called -- binding it to the
+                # prototype would answer for an empty dict, and a mutating
+                # method would write into the prototype itself.
+                return self._new(Native(name, _unbound_kind(self, name)))
         return self._fail("AttributeError",
                           f"'{self.kind_name(obj)}' object has no "
                           f"attribute '{name}'")
@@ -342,6 +659,16 @@ class ObjectHost:
         """
         if isinstance(v, Instance):
             return v.cls
+        # AN EXCEPTION OF A CLASS THE PROGRAM WROTE answers that class, so
+        # `type(e).__name__` and `type(e) is AppError` say what the source
+        # does. Without one it falls through to the name-keyed table below,
+        # which is what every exception the runtime raises itself has.
+        if isinstance(v, Exc) and v.cls is not None:
+            return v.cls
+        # `type(C)` IS THE METACLASS when one made it. An ordinary class has
+        # none recorded and reads as `type`, which is what it is.
+        if isinstance(v, Class) and v.meta is not None:
+            return v.meta
         key = "type" if isinstance(v, Class) else self.kind_name(v)
         got = self._types.get(key)
         if got is None:
@@ -373,14 +700,68 @@ class ObjectHost:
         be swallowed into `rest` instead of landing past it.
         """
         if isinstance(f, Class):
-            obj = Instance(f, self)
+            if f.meta is not None:
+                # THE METACLASS DECIDES WHAT CALLING THE CLASS DOES, if it
+                # says so: `type(C).__call__(C, ...)` is what `C(...)` means,
+                # and it is how `ABCMeta` refuses to instantiate a class with
+                # abstract methods. Looked for only when there IS a metaclass
+                # -- the default is the allocate-and-init below.
+                hook = f.meta.lookup("__call__")
+                if isinstance(hook, (Func, Native)):
+                    return self._invoke_obj(hook, [f] + list(args), kwrest)
+            return self._instantiate(f, args, kwrest, bound)
+        if isinstance(f, Native) and f.name == "<type.__call__>":
+            # `type.__call__(cls, ...)` -- the ordinary instantiation with the
+            # metaclass hook deliberately skipped, which is what a metaclass's
+            # own `__call__` delegates to. Consulting the hook from here would
+            # be that `__call__` calling itself forever.
+            if f.bound is not None:
+                return self._instantiate(f.bound, args, kwrest)
+            if not args:
+                self._fail("TypeError", "type.__call__() needs a type")
+                raise _UserFailed
+            return self._instantiate(args[0], args[1:], kwrest)
+        if isinstance(f, Instance):
+            return self._invoke_rest(f, args, kwrest, bound)
+        return self._invoke_rest(f, args, kwrest, bound)
+
+    def _instantiate(self, f, args: list, kwrest=None, bound: bool = False):
+        """`C(...)` -- allocate, then run `__init__` if there is one.
+
+        SEPARATE FROM `_invoke` because `type.__call__` is exactly this and
+        nothing else: a metaclass that overrides `__call__` and ends by
+        delegating upward has to reach the default without re-entering it.
+        """
+        if True:
+            maker = f.find("__new__")
+            if isinstance(maker, (Func, Native)):
+                # `__new__` IS AN IMPLICIT STATICMETHOD: it receives the CLASS
+                # as its first argument, not an instance, so it is called
+                # unbound with the class pushed in front. It was ignored
+                # entirely -- the instance was allocated and `__new__` never
+                # ran, which is a wrong answer rather than a missing feature.
+                obj = self._invoke_obj(maker, [f] + list(args), kwrest, bound)
+                # `__init__` RUNS ONLY IF `__new__` RETURNED ONE OF THESE.
+                # Returning something else is how a `__new__` deliberately
+                # bypasses initialisation, and CPython honours that.
+                # For a METACLASS the thing `__new__` answered is a CLASS
+                # whose metaclass is this one, which is the same test through
+                # `_type_of`. Comparing only against `Instance.cls` skipped a
+                # metaclass's `__init__` entirely.
+                if self._type_of(obj) is not f:
+                    return obj
+            else:
+                obj = Instance(f, self)
             init = f.find("__init__")
-            if isinstance(init, Func):
+            if isinstance(init, (Func, Native)):
                 self._invoke_obj(init.bind(obj), args, kwrest, bound)
             elif args:
                 self._fail("TypeError", f"{f.name}() takes no arguments")
                 raise _UserFailed
             return obj
+
+    def _invoke_rest(self, f, args: list, kwrest=None, bound: bool = False):
+        """Everything `_invoke` dispatches that is not a class."""
         if isinstance(f, Instance):
             # THROUGH `_invoke_obj`, not `_send`: a callable instance's
             # `__call__` may take `**kw`, and `_send` has no way to carry the
@@ -391,7 +772,7 @@ class ObjectHost:
                            f"'{f.cls.name}' object is not callable")
                 raise _UserFailed
             return self._invoke_obj(m.bind(f), args, kwrest, bound)
-        if not isinstance(f, Func):
+        if not isinstance(f, (Func, Native)):
             self._fail("TypeError",
                        f"'{self.kind_name(f)}' object is not callable")
             raise _UserFailed
@@ -408,6 +789,13 @@ class ObjectHost:
         receiver travels in the value and the callee reads its cells out of
         whichever object the call came through.
         """
+        if isinstance(f, Native):
+            # A NATIVE has no compiled body to enter and no signature to match
+            # against: the receiver, if it was bound, is simply the first
+            # argument. Tested here rather than at each call site, so every
+            # route into a callable reaches one the same way.
+            given = ([f.bound] if f.bound is not None else []) + list(args)
+            return f.body(*given)
         slots = [f.bound] if f.bound is not None else []
         declared = f.arity - (1 if f.vararg else 0) - (1 if f.kwarg else 0)
         # WHERE POSITIONS STOP. A keyword-only parameter is declared but not
@@ -502,6 +890,15 @@ def _apy_ellipsis(h, a):
     return h._ellipsis
 
 
+def _apy_notimplemented(h, a):
+    """`NotImplemented` -- ONE CELL, so `x is NotImplemented` answers True.
+
+    Python's own singleton is used rather than a stand-in of this file's, so
+    a dunder returning it is the same object the comparison below tests for.
+    """
+    return h._notimplemented
+
+
 def _apy_from_bool(h, a):
     return h._bool(int(a[0]) != 0)
 
@@ -588,10 +985,21 @@ def _apy_truth(h, a):
 def _apy_len(h, a):
     v = h._get(a[0], "apy_len")
     if isinstance(v, Instance):
+        # A CLASS THAT EXTENDS A BUILTIN has one for everything it did not
+        # write, so a `class D(dict)` whose body says nothing about length
+        # still has one.
+        if v.cls.find("__len__") is None and v.held is not None:
+            return h._int(len(v.held))
         return _user(h, lambda: h._int(len(v)))
-    if isinstance(v, (list, tuple, dict, str, bytes, set, frozenset)):
+    if isinstance(v, _VIEW_TYPES):
+        # THROUGH THE VIEW to the dict: a view has no length of its own, and
+        # taking one when it was made is what a snapshot does.
+        return h._int(len(v))
+    if isinstance(v, (list, tuple, dict, str, bytes, set, frozenset,
+                      bytearray, memoryview, range)):
         # A str's length is in CHARACTERS -- the one place the C resolves the
-        # byte/character distinction, via its `apy_str_chars`.
+        # byte/character distinction, via its `apy_str_chars`. A RANGE's is
+        # arithmetic on its three numbers, in both paths.
         return h._int(len(v))
     return h._fail("TypeError",
                    f"object of type '{h.kind_name(v)}' has no len()")
@@ -600,11 +1008,10 @@ def _apy_len(h, a):
 def _apy_raw_len(h, a):
     """The length as a machine word, for the frontend's own loop bounds.
 
-    A str's is in BYTES, not characters, because the C returns the byte count
-    here and `apy_getitem` indexes bytes to match. `apy_len` -- the builtin --
-    counts characters in both. The two disagreeing is the C's documented
-    limitation, and this file reproduces it rather than quietly being right
-    where the compiled program is wrong.
+    A str's is in CHARACTERS, as `apy_len` is and as indexing now is. It used
+    to be BYTES here to match the C, which indexed bytes -- so every string
+    holding a non-ASCII character was iterated one byte at a time and yielded
+    halves of characters. Both runtimes count characters everywhere now.
     """
     v = h._get(a[0], "apy_raw_len")
     if isinstance(v, Gen):
@@ -623,8 +1030,13 @@ def _apy_raw_len(h, a):
         got = _drain_cursor(h, v)
         return 0 if got is None else len(got)
     if isinstance(v, str):
-        return len(v.encode("utf-8", "surrogateescape"))
-    if isinstance(v, (list, tuple, dict, set, frozenset, bytes)):
+        # IN CHARACTERS, matching `apy_len` and matching what indexing counts.
+        # This answered BYTES while `apy_len` answered characters, and the two
+        # disagreeing was written down as a limitation -- but a `for` loop
+        # takes its bound from here and its elements from the subscript, so a
+        # string with any non-ASCII character in it walked off the end.
+        return len(v)
+    if isinstance(v, (list, tuple, dict, set, frozenset, bytes, range)):
         return len(v)
     # A user object with `__len__`. Together with `apy_key_at` falling through
     # to `__getitem__`, that is the whole `__len__`/`__getitem__` iteration
@@ -719,10 +1131,74 @@ def _apy_seq_push(h, a):
 def _apy_getitem(h, a):
     seq = h._get(a[0], "apy_getitem")
     index = h._get(a[1], "apy_getitem")
+    if isinstance(seq, Instance) and seq.cls is _SPECIAL_FORM_CLASS:
+        # `Literal["a", "b"]`, `TypeGuard[int]` -- PARAMETERISING a typing
+        # form, which is the same thing `list[int]` does to a builtin type.
+        # Above the general instance path, which would look for a
+        # `__getitem__` the form has no reason to define.
+        args = index if isinstance(index, tuple) else (index,)
+        if _form_name(seq) == "Optional":
+            # `Optional[X]` IS `X | None`. 3.14 unified the two spellings, so
+            # a program that prints the annotation sees the union rather than
+            # the form it was written with, and `get_args` answers two arms.
+            arms = []
+            for one in args:
+                arms.extend(_union_arms(one))
+            arms.extend(_union_arms(None))
+            return h._new(Alias(_union_form(h), tuple(arms)))
+        return h._new(Alias(seq, args))
     if isinstance(seq, Instance):
+        if seq.cls.find("__getitem__") is None and seq.held is not None:
+            # A CLASS THAT EXTENDS A BUILTIN IS one for everything it did not
+            # write. `class D(dict)` with only a `__missing__` still has to
+            # answer `d[k]`, and this is the dict it answers from.
+            if isinstance(seq.held, dict):
+                if index in seq.held:
+                    return h._value(seq.held[index])
+                # `__missing__` IS WHAT A dict SUBCLASS IS FOR: a key that is
+                # not there is the class's question to answer.
+                if seq.cls.find("__missing__") is not None:
+                    return _user(h, lambda: h._value(
+                        seq._send("__missing__", index)))
+                return h._fail("KeyError", h._text(index, True))
+            return _apy_getitem(h, [h._new(seq.held), a[1]])
         return _user(h, lambda: h._value(seq[index]))
     if isinstance(seq, dict):
         return _dict_get(h, seq, index)
+    if isinstance(seq, Func) and getattr(seq, "is_type", False):
+        # `list[int]` -- PARAMETERISING a builtin type, not indexing it.
+        args = index if isinstance(index, tuple) else (index,)
+        return h._new(Alias(seq, args))
+    if isinstance(seq, Class):
+        # `C[int]`. A CLASS IS NOT A CONTAINER: subscripting one asks
+        # `__class_getitem__`, an implicit classmethod, and a class without it
+        # is not subscriptable at all -- CPython says so, and parameterising
+        # silently would turn a mistake into an object.
+        hook = seq.find("__class_getitem__")
+        if hook is None and seq.meta is not None:
+            # THE METACLASS DECIDES, if it has an opinion: `Box[int]` where
+            # `Box` inherits `Generic` is `type(Box).__getitem__(Box, int)`,
+            # which is how a generic class is parameterised without every
+            # class in the program becoming subscriptable.
+            m = seq.meta.lookup("__getitem__")
+            if m is not _ABSENT:
+                return _user(h, lambda: h._value(h._invoke(m, [seq, index])))
+        if hook is None:
+            return h._fail("TypeError",
+                           f"type '{seq.name}' is not subscriptable")
+        return _user(h, lambda: h._value(h._invoke(hook, [seq, index])))
+    if isinstance(seq, memoryview):
+        # A SLICE OF A VIEW IS STILL A VIEW -- `mv[1:3][0] = 9` writes to the
+        # original buffer, which a copy here would silently lose.
+        try:
+            return h._new(seq[index])
+        except (TypeError, IndexError) as exc:
+            return h._fail_like(exc)
+    if isinstance(index, slice) and isinstance(seq, (list, tuple, str, bytes)):
+        # `xs[slice(1, 5)]`. `xs[1:5]` never comes this way -- the frontend
+        # slices it directly -- but a slice built as a VALUE has to work as a
+        # subscript too.
+        return h._new(seq[index])
     if not _is_int_like(index) and isinstance(index, Instance)             and index.cls.find("__index__") is not None:
         # `__index__` -- how a user object BECOMES an index. PEP 357, and a
         # separate dunder from `__int__` for a reason: a float has `__int__`
@@ -758,15 +1234,23 @@ def _apy_getitem(h, a):
         if not 0 <= i < len(seq):
             return h._fail("IndexError", "index out of range")
         return h._int(seq[i])
+    if isinstance(seq, range):
+        # ARITHMETIC, not a walk: the element at an index is one
+        # multiplication whatever the range's length.
+        try:
+            return h._new(seq[i])
+        except IndexError:
+            return h._fail("IndexError", "range object index out of range")
     if isinstance(seq, str):
-        # C DECIDES: BYTE indexing. Identical to CPython for ASCII and wrong
-        # for anything else, in both paths equally.
-        raw = seq.encode("utf-8", "surrogateescape")
+        # BY CHARACTER, as the C now indexes. Both paths used to index BYTES,
+        # so `s[1]` on a string with a non-ASCII character in it was the first
+        # HALF of one -- identical to CPython for ASCII and wrong for anything
+        # else, in both paths equally, which is why nothing caught it.
         if i < 0:
-            i += len(raw)
-        if not 0 <= i < len(raw):
+            i += len(seq)
+        if not 0 <= i < len(seq):
             return h._fail("IndexError", "string index out of range")
-        return h._new(raw[i:i + 1].decode("utf-8", "surrogateescape"))
+        return h._new(seq[i])
     return h._fail("TypeError",
                    f"'{h.kind_name(seq)}' object is not subscriptable")
 
@@ -775,6 +1259,9 @@ def _apy_setitem(h, a):
     seq = h._get(a[0], "apy_setitem")
     index = h._get(a[1], "apy_setitem")
     item = h._get(a[2], "apy_setitem")
+    if isinstance(seq, Instance) and seq.cls.find("__setitem__") is None             and seq.held is not None:
+        # A CLASS THAT EXTENDS A BUILTIN writes into the one it carries.
+        return _apy_setitem(h, [h._new(seq.held), a[1], a[2]])
     if isinstance(seq, Instance):
         def store():
             seq[index] = item
@@ -782,6 +1269,28 @@ def _apy_setitem(h, a):
         return _user(h, store)
     if isinstance(seq, dict):
         return _dict_set(h, seq, index, item)
+    if isinstance(index, slice) and isinstance(seq, list):
+        # THE SPAN IS REPLACED, and the replacement need not be the same
+        # length -- `xs[1:3] = [9]` shortens the list. In place, so every
+        # other name bound to it sees the change.
+        if index.step not in (None, 1):
+            return h._fail("ValueError",
+                           "only step 1 slice assignment is supported")
+        try:
+            seq[index] = list(item)
+        except TypeError as exc:
+            return h._fail_like(exc)
+        return h._none
+    if isinstance(seq, (bytearray, memoryview)):
+        # THROUGH to the buffer, which for a memoryview is someone else's --
+        # that write being visible in the original is what a view is for.
+        # Python's own types raise exactly what CPython raises here, so the
+        # bounds, the range and the read-only refusal are not restated.
+        try:
+            seq[int(index)] = int(item)
+        except (TypeError, ValueError, IndexError) as exc:
+            return h._fail_like(exc)
+        return h._none
     if not isinstance(seq, list):
         return h._fail(
             "TypeError",
@@ -804,12 +1313,33 @@ def _apy_setitem(h, a):
 # order-free equality all come free -- and all three are things the C had to
 # be written carefully to get right.
 
-# Hashability is NOT pre-checked here. Python's own dict raises for an
-# unhashable key, with 3.14's exact text -- `cannot use 'tuple' as a dict key
-# (unhashable type: 'list')`, which names the key's kind and then the
-# innermost offender, and which is recursive through tuples. Reproducing that
-# would be three rules to keep in step with CPython for no gain; the C has to
-# because it has no dict of its own, and this does not.
+# Hashability is left to Python's own dict FOR BUILT-IN KINDS, whose message
+# is already 3.14's exact text -- `cannot use 'tuple' as a dict key
+# (unhashable type: 'list')`, naming the key's kind and then the innermost
+# offender, recursive through tuples. Reproducing that would be three rules to
+# keep in step for no gain.
+#
+# A USER OBJECT IS THE EXCEPTION, and the reason is that the message names a
+# TYPE: Python sees the key as an `objects_host.Instance` and says so, leaking
+# this file's internals into a message a program prints -- `cannot use
+# 'asmpython.ir.objects_host.Instance' as a dict key`, where a compiled binary
+# says `OnlyEq2`. So instances are checked here, with the C's wording.
+
+
+def _unhashable_name(v):
+    """The class name of an unhashable USER OBJECT, or None.
+
+    A class defining `__eq__` and not `__hash__` is unhashable -- the same
+    rule `Instance.__hash__` enforces, asked before the container tries.
+    """
+    if isinstance(v, Instance) and v.cls.find("__hash__") is None             and v.cls.find("__eq__") is not None:
+        return v.cls.name
+    if isinstance(v, tuple):
+        for item in v:
+            got = _unhashable_name(item)
+            if got:
+                return got
+    return None
 
 
 def _apy_dict_new(h, a):
@@ -817,6 +1347,10 @@ def _apy_dict_new(h, a):
 
 
 def _dict_set(h, d, key, val):
+    bad = _unhashable_name(key)
+    if bad:
+        return h._fail("TypeError", f"cannot use '{bad}' as a dict key "
+                                    f"(unhashable type: '{bad}')")
     try:
         d[key] = val
     except TypeError as e:
@@ -1028,20 +1562,70 @@ def _apy_str_format(h, a):
         return h._fail_like(exc)
 
 
+#: The codec names the C canonicalises. Kept here so the two agree about
+#: which spellings exist -- a name one accepts and the other refuses is a
+#: divergence in what a program is allowed to write, not in what it computes.
+_CODECS = {
+    "utf-8": "utf-8", "utf8": "utf-8", "u8": "utf-8",
+    "ascii": "ascii", "us-ascii": "ascii", "646": "ascii",
+    "latin-1": "latin-1", "latin1": "latin-1", "iso-8859-1": "latin-1",
+    "l1": "latin-1", "8859": "latin-1",
+    "utf-16": "utf-16", "utf16": "utf-16",
+    "utf-16-le": "utf-16-le", "utf-16le": "utf-16-le",
+    "utf-16-be": "utf-16-be", "utf-16be": "utf-16-be",
+    "utf-32": "utf-32", "utf32": "utf-32",
+    "utf-32-le": "utf-32-le", "utf-32le": "utf-32-le",
+    "utf-32-be": "utf-32-be", "utf-32be": "utf-32-be",
+}
+
+
+def _codec_args(h, a, who):
+    """The encoding and error handler a call named, canonicalised.
+
+    Answers None for a name no codec matches, which is a LookupError and not a
+    silent fall back to UTF-8 -- the C refuses it and so must this.
+    """
+    enc = h._get(a[1], who) if len(a) > 1 else None
+    err = h._get(a[2], who) if len(a) > 2 else None
+    name = _CODECS.get(str(enc).lower().replace("_", "-")) if enc is not None         else "utf-8"
+    handler = str(err) if err is not None else "strict"
+    if handler not in ("strict", "replace", "ignore"):
+        handler = "strict"
+    return (name, handler)
+
+
 def _apy_str_encode(h, a):
-    v = h._get(a[0], "apy_str_encode")   # the encoding is ignored
+    v = h._get(a[0], "apy_str_encode")
     if not isinstance(v, str):
         return h._fail("AttributeError", f"'{h.kind_name(v)}' object has no "
                                          f"attribute 'encode'")
-    return h._new(v.encode("utf-8"))
+    name, handler = _codec_args(h, a, "apy_str_encode")
+    if name is None:
+        return h._fail("LookupError",
+                       f"unknown encoding: {h._get(a[1], 'encode')}")
+    try:
+        return h._new(v.encode(name, handler))
+    except UnicodeEncodeError:
+        return h._fail("UnicodeEncodeError",
+                       f"'{name}' codec can't encode character")
 
 
 def _apy_bytes_decode(h, a):
-    v = h._get(a[0], "apy_bytes_decode")  # the encoding is ignored
-    if not isinstance(v, bytes):
+    v = h._get(a[0], "apy_bytes_decode")
+    if isinstance(v, memoryview):
+        v = bytes(v)
+    if not isinstance(v, (bytes, bytearray)):
         return h._fail("AttributeError", f"'{h.kind_name(v)}' object has no "
                                          f"attribute 'decode'")
-    return h._new(v.decode("utf-8"))
+    name, handler = _codec_args(h, a, "apy_bytes_decode")
+    if name is None:
+        return h._fail("LookupError",
+                       f"unknown encoding: {h._get(a[1], 'decode')}")
+    try:
+        return h._new(bytes(v).decode(name, handler))
+    except UnicodeDecodeError:
+        return h._fail("UnicodeDecodeError",
+                       f"'{name}' codec can't decode byte")
 
 
 def _apy_bytes_hex(h, a):
@@ -1106,6 +1690,427 @@ def _apy_str_expandtabs(h, a):
         return h._fail("AttributeError", f"'{h.kind_name(s)}' object has no "
                                          f"attribute 'expandtabs'")
     return h._new(s.expandtabs(int(width) if _is_int_like(width) else 8))
+
+
+#: The one class every `typing` special form is an instance of, made on first
+#: use and kept -- so `Final.__class__ is Optional.__class__`, as in CPython.
+_SPECIAL_FORM_CLASS = None
+
+
+def _apy_type_class(h, a):
+    """`type` AS A CLASS OBJECT, so `class Meta(type)` has a real base rather
+    than a special case. Its dict holds the two natives a metaclass reaches
+    through `super()`. Interned: `Meta.__base__ is type` has to hold."""
+    made = h._defaults.get("<type>")
+    if made is not None:
+        return made
+    cls = Class("type")
+    cls.dict["__new__"] = Native("__new__", lambda mcls, name, bases, ns:
+                                 _type_from_ns(h, mcls, name, bases, ns))
+    cls.dict["__init__"] = Native("__init__", lambda *a: None)
+    # What `C(...)` MEANS, reachable by name so a metaclass's own `__call__`
+    # can delegate to it. The dict key is what a program spells; the Native's
+    # own name is the marker `_invoke` dispatches on, and it is deliberately
+    # unspellable so no user `__call__` is mistaken for this one.
+    cls.dict["__call__"] = Native("<type.__call__>", lambda *a: None)
+    made = h._new(cls)
+    h._defaults["<type>"] = made
+    return made
+
+
+def _type_from_ns(h, mcls, name, bases, ns):
+    """`type(name, bases, ns)` as an OBJECT: what `super().__new__` inside a
+    metaclass's `__new__` answers."""
+    listed = [b for b in bases if isinstance(b, Class)] \
+        if isinstance(bases, (list, tuple)) else []
+    base = listed[0] if listed else None
+    cls = Class(str(name), base, listed)
+    if listed:
+        order = c3(cls, listed)
+        if order is None:
+            # ANSWERS None, not raises. The flag is set and the caller returns
+            # NULL, which is the convention every runtime entry point here
+            # follows -- raising out of it would escape the interpreter rather
+            # than become an exception the program can catch.
+            h._fail("TypeError",
+                    "Cannot create a consistent method resolution order "
+                    "(MRO) for bases")
+            return None
+        cls.mro = order
+    if isinstance(mcls, Class):
+        cls.meta = mcls
+    # COPIED IN, not adopted: `__prepare__` may hand back a mapping the
+    # program goes on using, and a class sharing it would see later writes.
+    if isinstance(ns, dict):
+        cls.dict.update(ns)
+    return cls
+
+
+def _meta_for(given, bases):
+    """Which metaclass builds this class.
+
+    THE WRITTEN ONE IF THERE IS ONE, otherwise a base's -- a class with no
+    `metaclass=` still has one when its base does, and that cannot be answered
+    where the class is compiled because it is a property of a run-time value.
+    """
+    if isinstance(given, Class):
+        return given
+    if isinstance(bases, (list, tuple)):
+        for base in bases:
+            if isinstance(base, Class) and base.meta is not None:
+                return base.meta
+    return None
+
+
+def _apy_mro_entries(h, a):
+    """PEP 560: WHAT A NON-CLASS BASE CONTRIBUTES.
+
+    `class C(Fake())` asks the object for `__mro_entries__(bases)` and
+    inherits whatever it answers. A class contributes itself, which is the
+    ordinary case and costs one test.
+    """
+    written = h._get(a[0], "apy_mro_entries")
+    if isinstance(written, Class):
+        return a[0]
+    if not isinstance(written, Instance)             or written.cls.find("__mro_entries__") is None:
+        return h._fail("TypeError",
+                       f"bases must be types, not '{h.kind_name(written)}'")
+    got = _user(h, lambda: h._invoke(written.cls.find("__mro_entries__"),
+                                     [written, h._get(a[1],
+                                                      "apy_mro_entries")]),
+                fail=_FAILED)
+    if got is _FAILED:
+        return 0
+    # THE FIRST ENTRY -- see the C for why one and not the tuple.
+    if isinstance(got, (list, tuple)) and got:
+        return h._value(got[0])
+    return _apy_object_class(h, [])
+
+
+def _apy_meta_for(h, a):
+    made = _meta_for(h._get(a[0], "apy_meta_for"),
+                     h._get(a[1], "apy_meta_for"))
+    return h._new(made) if made is not None else h._new(None)
+
+
+def _class_build(h, a, kw):
+    """Build the class a `class` statement describes.
+
+    THROUGH THE METACLASS when there is one, which is what lets `ABCMeta`
+    refuse an instantiation. Without one this is the plain construction, and
+    the two meet here so the lowering does not have to tell them apart.
+    """
+    meta = h._get(a[0], "apy_class_build")
+    name = h._get(a[1], "apy_class_build")
+    bases = h._get(a[2], "apy_class_build")
+    ns = h._get(a[3], "apy_class_build")
+    if not _bases_ok(h, bases):
+        return 0
+    use = _meta_for(meta, bases)
+    if use is not None:
+        # THE CLASS KEYWORDS GO TO THE METACLASS -- `class C(metaclass=M,
+        # kind="x")` is `M(name, bases, ns, kind="x")`. Only when there IS
+        # one: without a metaclass they are for `__init_subclass__`, which the
+        # caller announces separately, and handing them to the plain
+        # construction would make them an arity error.
+        if kw:
+            # THROUGH THE NAME-MATCHING PATH. `_invoke` only fills a `**kw`
+            # parameter, so a keyword naming a declared one was dropped and
+            # the parameter took its default.
+            return _call_kwargs(h, use, [name, bases, ns], dict(kw))
+        return h._new(h._invoke(use, [name, bases, ns]))
+    made = _type_from_ns(h, None, name, bases, ns)
+    return h._new(made) if made is not None else 0
+
+
+def _bases_ok(h, bases) -> bool:
+    """Can these bases be linearised at all? Reported HERE rather than left
+    to `_type_from_ns`, because the metaclass path never reaches it."""
+    listed = [b for b in bases if isinstance(b, Class)]         if isinstance(bases, (list, tuple)) else []
+    if len(listed) < 2:
+        return True
+    if c3(Class("<probe>"), listed) is None:
+        h._fail("TypeError",
+                "Cannot create a consistent method resolution order (MRO) "
+                "for bases")
+        return False
+    return True
+
+
+def _apy_class_build(h, a):
+    return _class_build(h, a, None)
+
+
+def _apy_class_build_kw(h, a):
+    return _class_build(h, a, h._get(a[4], "apy_class_build_kw"))
+
+
+def _apy_object_class(h, a):
+    """`object` AS A CLASS OBJECT -- what `C.__base__` answers for a class
+    with no written base. Its dict carries the same defaults `super()` falls
+    back to.
+
+    NOT INSTALLED AS AN ACTUAL BASE on every class: it is the honest ANSWER to
+    a question about the hierarchy, and making it a real link would put
+    `__eq__` and friends into every lookup.
+    """
+    made = h._defaults.get("<object>")
+    if made is not None:
+        return made
+    cls = Class("object")
+    for nm in ("__init__", "__new__", "__repr__", "__str__", "__eq__",
+               "__ne__", "__hash__"):
+        cls.dict[nm] = _object_default(h, nm)
+    made = h._new(cls)
+    h._defaults["<object>"] = made
+    return made
+
+
+def _apy_type_make(h, a):
+    """`type(name, bases, ns)` -- the three-argument form, which is the
+    `class` statement written out. No metaclass recorded: one made this way
+    IS a plain `type`."""
+    return h._new(_type_from_ns(h, None,
+                                h._get(a[0], "apy_type_make"),
+                                h._get(a[1], "apy_type_make"),
+                                h._get(a[2], "apy_type_make")))
+
+
+def _apy_prepare(h, a):
+    """PEP 3115: the mapping a class body is executed into."""
+    meta = h._get(a[0], "apy_prepare")
+    name = h._get(a[1], "apy_prepare")
+    bases = h._get(a[2], "apy_prepare")
+    if not isinstance(meta, Class):
+        return h._new({})
+    hook = meta.lookup("__prepare__")
+    if hook is _ABSENT:
+        return h._new({})
+    if isinstance(hook, Descr) and hook.get is not None:
+        # THE METACLASS IS ITS FIRST ARGUMENT, which is what `@classmethod`
+        # on it means.
+        got = h._invoke(hook.get, [meta, name, bases])
+    else:
+        got = h._invoke(hook, [name, bases])
+    if not isinstance(got, dict):
+        return h._fail("TypeError", "__prepare__() must return a mapping")
+    return h._new(got)
+
+
+#: The class `None` is an instance of, as a value. Made once and kept,
+#: because `get_args(int | None)[1] is get_args(str | None)[1]` holds in
+#: CPython -- a fresh class per union would answer False.
+_NONE_TYPE = None
+
+
+def _none_type():
+    global _NONE_TYPE
+    if _NONE_TYPE is None:
+        _NONE_TYPE = Class("NoneType")
+    return _NONE_TYPE
+
+
+def _apy_typevar(h, a):
+    """PEP 695's type PARAMETER, and PEP 484's `TypeVar` under one object:
+    both are a name and nothing else at run time."""
+    global _TYPEVAR_CLASS
+    if _TYPEVAR_CLASS is None:
+        _TYPEVAR_CLASS = Class("TypeVar")
+    if "has_default" not in _TYPEVAR_CLASS.dict:
+        # PEP 696: `has_default()` is a METHOD and not an attribute, so the
+        # class needs one. Native, because the whole of it is "is the default
+        # slot filled".
+        _TYPEVAR_CLASS.dict["has_default"] = Native(
+            "has_default",
+            lambda self: self.dict.get("__default__") is not None)
+    made = Instance(_TYPEVAR_CLASS, h)
+    made.dict["__name__"] = str(h._get(a[0], "apy_typevar"))
+    made.dict["__default__"] = None
+    return h._new(made)
+
+
+#: The modules this build resolves at compile time. A name here cannot be
+#: imported DYNAMICALLY either -- there is no import machinery in a produced
+#: binary -- but the error says which of the two reasons it is.
+_KNOWN_MODULES = frozenset({
+    "math", "sys", "typing", "asyncio", "inspect", "__future__", "functools",
+    "itertools", "contextlib", "warnings", "statistics", "abc", "enum",
+    "collections", "collections.abc", "fractions", "decimal", "tomllib",
+    "pathlib", "dataclasses", "contextvars", "numbers", "copy", "types", "os",
+    "datetime", "zoneinfo", "annotationlib",
+})
+
+
+def _apy_import(h, a):
+    """`__import__(name)` -- a DYNAMIC import, which this compiler cannot do.
+
+    Both answers are honest and neither is silently wrong: a module this build
+    does not have is a ModuleNotFoundError exactly as in CPython, and one it
+    does have is an ImportError saying the import cannot be done dynamically.
+    """
+    want = h._get(a[0], "apy_import")
+    want = want if isinstance(want, str) else ""
+    if want in _KNOWN_MODULES:
+        return h._fail("ImportError",
+                       f"cannot import {want!r} dynamically: this build "
+                       f"resolves imports at compile time")
+    return h._fail("ModuleNotFoundError", f"No module named {want!r}")
+
+
+def _apy_typevar_default(h, a):
+    """PEP 696: the DEFAULT a type parameter was written with."""
+    tv = h._get(a[0], "apy_typevar_default")
+    tv.dict["__default__"] = h._get(a[1], "apy_typevar_default")
+    return a[0]
+
+
+def _apy_type_alias(h, a):
+    """PEP 695: `type Alias = list[int]`.
+
+    A NAME plus the thing it stands for, and neither means anything to the
+    runtime beyond being readable back. Its class is interned so
+    `type(Alias).__name__` answers `TypeAliasType`, which is what a program
+    asks to tell an alias from the type it aliases.
+    """
+    global _ALIAS_CLASS
+    if _ALIAS_CLASS is None:
+        _ALIAS_CLASS = Class("TypeAliasType")
+    made = Instance(_ALIAS_CLASS, h)
+    made.dict["__name__"] = h._get(a[0], "apy_type_alias")
+    made.dict["__value__"] = h._get(a[1], "apy_type_alias")
+    made.dict["__type_params__"] = tuple(h._get(a[2], "apy_type_alias") or ())
+    return h._new(made)
+
+
+#: Interned, so two mentions of an alias's class are one object.
+_TYPEVAR_CLASS = None
+_ALIAS_CLASS = None
+
+
+def _apy_typing_form(h, a):
+    """A `typing` special form -- `Final`, `LiteralString`, `Self`.
+
+    A program may name one, annotate with it, and print its class; nothing
+    else about it is observable, so one object carrying its own name covers
+    the lot. The class is `_SpecialForm` because that is what CPython reports.
+
+    INTERNED BY NAME. `get_origin(Literal["a"]) is Literal` is what a
+    program tests, and it is True only if the two mentions are one object.
+    """
+    global _SPECIAL_FORM_CLASS
+    name = str(h._get(a[0], "apy_typing_form"))
+    if _SPECIAL_FORM_CLASS is None:
+        _SPECIAL_FORM_CLASS = Class("_SpecialForm")
+    made = h._forms.get(name)
+    if made is not None:
+        return made
+    inst = Instance(_SPECIAL_FORM_CLASS, h)
+    inst.dict["_name"] = name
+    made = h._new(inst)
+    h._forms[name] = made
+    return made
+
+
+def _apy_get_origin(h, a):
+    """`get_origin(x)` -- what was subscripted, or None."""
+    v = h._get(a[0], "apy_get_origin")
+    return h._value(v.origin) if isinstance(v, Alias) else h._none
+
+
+def _apy_get_args(h, a):
+    """`get_args(x)` -- what it was subscripted WITH, or the empty tuple."""
+    v = h._get(a[0], "apy_get_args")
+    return h._new(tuple(v.args) if isinstance(v, Alias) else ())
+
+
+def _apy_typing_final(h, a):
+    """`@final` on a class. RETURNS ITS ARGUMENT -- a decorator that returned
+    anything else would replace the thing it marks, and the marking is the
+    whole of what it does."""
+    obj = h._get(a[0], "apy_typing_final")
+    if isinstance(obj, (Class, Instance)):
+        obj.dict["__final__"] = True
+    elif isinstance(obj, Func):
+        if obj.dict is None:
+            obj.dict = {}
+        obj.dict["__final__"] = True
+    return a[0]
+
+
+def _apy_typing_override(h, a):
+    """`@override` on a method. Marks and hands the function straight back."""
+    obj = h._get(a[0], "apy_typing_override")
+    if isinstance(obj, Func):
+        if obj.dict is None:
+            obj.dict = {}
+        obj.dict["__override__"] = True
+    elif isinstance(obj, (Class, Instance)):
+        obj.dict["__override__"] = True
+    return a[0]
+
+
+def _apy_typing_mark(h, a):
+    """`@runtime_checkable`, `@no_type_check`. A decorator that marks a thing
+    for a CHECKER and does nothing a running program can see, so the honest
+    implementation hands the argument back untouched."""
+    return a[0]
+
+
+def _apy_str_maketrans(h, a):
+    """`str.maketrans(a, b)` and `str.maketrans(a, b, drop)`.
+
+    The result is an ORDINARY DICT keyed by code point -- the documented
+    shape, not an internal one, so a program may build the same table by hand
+    and hand it to `translate`. None as the third argument is the
+    two-argument form; the frontend always passes three.
+    """
+    first = h._get(a[0], "apy_str_maketrans")
+    second = h._get(a[1], "apy_str_maketrans")
+    drop = h._get(a[2], "apy_str_maketrans")
+    if not isinstance(first, str) or not isinstance(second, str):
+        return h._fail("TypeError", "maketrans() arguments must be strings")
+    if len(first) != len(second):
+        return h._fail("ValueError", "the first two maketrans arguments must "
+                                     "have equal length")
+    out = {}
+    for src, dst in zip(first, second):
+        out[ord(src)] = ord(dst)
+    if isinstance(drop, str):
+        # The third argument names characters to DELETE, recorded as a None
+        # value -- what a hand-written table uses to mean "drop this one".
+        for ch in drop:
+            out[ord(ch)] = None
+    return h._new(out)
+
+
+def _apy_str_translate(h, a):
+    """`s.translate(table)`. A character with no entry is KEPT -- translate
+    maps what it knows and passes the rest through, which is what makes a
+    table holding one key a useful thing to write."""
+    s = h._get(a[0], "apy_str_translate")
+    table = h._get(a[1], "apy_str_translate")
+    if not isinstance(s, str):
+        return h._fail("AttributeError", f"'{h.kind_name(s)}' object has no "
+                                         f"attribute 'translate'")
+    if not isinstance(table, dict):
+        return h._fail("TypeError",
+                       f"'{h.kind_name(table)}' object is not subscriptable")
+    out = []
+    for ch in s:
+        if ord(ch) not in table:
+            out.append(ch)
+            continue
+        to = table[ord(ch)]
+        if to is None:
+            continue
+        if isinstance(to, str):
+            out.append(to)
+        elif _is_int_like(to):
+            out.append(chr(int(to)))
+        else:
+            return h._fail("TypeError",
+                           "character mapping must be in range(0x110000)")
+    return h._new("".join(out))
 
 
 # ── math ────────────────────────────────────────────────────────────────────
@@ -1290,10 +2295,80 @@ def _apy_key_at(h, a):
 
 # ── exceptions ──────────────────────────────────────────────────────────────
 
+def _exc_construct(h, exc, args):
+    """Give a fresh exception its class and, where the class writes one, run
+    its `__init__` over the arguments the `raise` supplied.
+
+    AFTER the defaults are in place, not instead of them: CPython sets `args`
+    in `BaseException.__new__` and only then calls `__init__`, so a class whose
+    `__init__` never calls `super().__init__` still reads back what was passed.
+    One that does call it overwrites them, which is the whole reason
+    `AppError(404, "missing")` can report `('404: missing',)`.
+    """
+    cls = h.exc_class.get(exc.name)
+    if cls is None:
+        return h._new(exc)
+    exc.cls = cls
+    init = cls.find("__init__")
+    if init is None:
+        return h._new(exc)
+
+    def run():
+        h._invoke(init, [exc] + list(args))
+        return h._new(exc)
+
+    return _user(h, run)
+
+
+def _apy_exc_class_bind(h, a):
+    """A user exception class, findable by NAME.
+
+    The hierarchy is a table of names -- that is what makes `except
+    LookupError:` catch a KeyError without either being a value -- so a class
+    with a body has to be findable from the name alone, at the moment an
+    exception of that name is made. Nothing else knows: `apy_make_exc` is
+    handed a string, and the `class` statement that wrote the body may be in
+    another function entirely.
+    """
+    h.exc_class[str(h._get(a[0], "apy_exc_class_bind"))] = h._get(
+        a[1], "apy_exc_class_bind")
+    return h._none
+
+
 def _apy_make_exc(h, a):
     name = h._get(a[0], "apy_make_exc")
     arg = h._get(a[1], "apy_make_exc")
-    return h._new(Exc(str(name), arg))
+    return _exc_construct(h, Exc(str(name), arg), [arg])
+
+
+#: Which OSError subclass an errno names. PEP 3151: `OSError(2, ...)` IS a
+#: FileNotFoundError, so a program can catch the precise failure without
+#: inspecting `errno`. The numbers are the POSIX values CPython maps.
+_ERRNO_CLASS = {
+    1: "PermissionError", 2: "FileNotFoundError", 3: "ProcessLookupError",
+    4: "InterruptedError", 10: "ChildProcessError", 11: "BlockingIOError",
+    13: "PermissionError", 17: "FileExistsError", 20: "NotADirectoryError",
+    21: "IsADirectoryError", 32: "BrokenPipeError",
+    103: "ConnectionAbortedError", 104: "ConnectionResetError",
+    110: "TimeoutError", 111: "ConnectionRefusedError",
+    115: "BlockingIOError",
+}
+
+
+def _apy_make_excn(h, a):
+    """`E(a, b, ...)` -- an exception built from MORE THAN ONE argument."""
+    name = str(h._get(a[0], "apy_make_excn"))
+    addr, count = int(a[1]), int(a[2])
+
+    def cell(i):
+        return h._get(h._interp.mem.read(addr + i * 8, _PTR), "apy_make_excn")
+
+    args = [cell(i) for i in range(count)]
+    if args and name == "OSError" and isinstance(args[0], int)             and not isinstance(args[0], bool):
+        name = _ERRNO_CLASS.get(args[0], name)
+    made = Exc(name, args[0] if args else None, bool(args))
+    made.argv = tuple(args)
+    return _exc_construct(h, made, args)
 
 
 def _apy_raise(h, a):
@@ -1308,6 +2383,10 @@ def _apy_raise(h, a):
     # `except` because only a raise creates a link.
     # Set even when `from` suppressed it: `__suppress_context__` is whether to
     # PRINT the context, not whether to have one.
+    # WHERE IT WAS RAISED. An exception carries no traceback until this
+    # runs, which is what makes `ValueError("x").__traceback__` None and the
+    # same object's traceback real once it has been raised.
+    exc.pos = h.pos_here
     if (exc.context is None
             and h.handling is not None and h.handling is not exc):
         exc.context = h.handling
@@ -1320,6 +2399,7 @@ def _apy_raise(h, a):
             name, msg = h.err
             pending = Exc(name, msg, has_arg=bool(msg))
             pending.rendered = True
+            pending.pos = h.pos_err
         if pending is not exc:
             exc.context = pending
     return h._fail_raised(exc)
@@ -1447,6 +2527,9 @@ def _apy_error_value(h, a):
     # The message is ALREADY formatted -- `'k'` for a KeyError from a failed
     # lookup -- so `str(e)` must not repr it a second time.
     built.rendered = True
+    # THE FAILING STATEMENT, not the one running now: a handler's own
+    # statements have already moved the cursor by the time this is built.
+    built.pos = h.pos_err
     return h._new(built)
 
 
@@ -1508,6 +2591,20 @@ def _result(h, v):
     return h._value(v)
 
 
+#: Operator symbol -> (`__op__`, `__rop__`). Mirrors `APY_OP_DUNDERS` in the
+#: C, and exists for the same reason: the reflected call has to be made
+#: explicitly here, because every user object shares one Python class.
+_OP_DUNDER = {
+    "+": ("__add__", "__radd__"), "-": ("__sub__", "__rsub__"),
+    "*": ("__mul__", "__rmul__"), "/": ("__truediv__", "__rtruediv__"),
+    "//": ("__floordiv__", "__rfloordiv__"), "%": ("__mod__", "__rmod__"),
+    "**": ("__pow__", "__rpow__"), "&": ("__and__", "__rand__"),
+    "|": ("__or__", "__ror__"), "^": ("__xor__", "__rxor__"),
+    "<<": ("__lshift__", "__rlshift__"), ">>": ("__rshift__", "__rrshift__"),
+    "@": ("__matmul__", "__rmatmul__"),
+}
+
+
 def _binop(name, op, sym):
     """One arithmetic binding: Python's operator, the C's dispatch.
 
@@ -1519,9 +2616,40 @@ def _binop(name, op, sym):
     def run(h, a):
         x = h._get(a[0], name)
         y = h._get(a[1], name)
+        # A VIEW BEHAVES AS A SET under `&`, `|`, `-` and `^`, as the C does
+        # it. Converted BEFORE the kind rules run: `_reject` sees a view as
+        # neither a set nor a number and reports an unsupported pair, so the
+        # conversion has to happen first or it never gets the chance.
+        if sym in ("&", "|", "-", "^"):
+            if isinstance(x, _VIEW_TYPES):
+                x = set(x)
+            if isinstance(y, _VIEW_TYPES):
+                y = set(y)
+        # PEP 604: `int | str` IS A TYPE, not an arithmetic operation. The
+        # arms flatten, so `int | str | None` is one three-armed union.
+        if sym == "|" and _is_type_like(x) and _is_type_like(y):
+            arms = _union_arms(x) + _union_arms(y)
+            return h._new(Alias(_union_form(h), tuple(arms)))
         bad = _reject(h, sym, x, y)
         if bad is not None:
             return bad
+        # THE REFLECTED CALL IS MADE HERE, not left to Python's protocol.
+        # Every user object is the same Python class (`Instance`), and Python
+        # SKIPS the reflected method when both operands have the same type --
+        # so `A() + B()` never reached `B.__radd__` and reported an
+        # unsupported pair instead. The C dispatches explicitly; so does this.
+        dunder = _OP_DUNDER.get(sym.split(" ")[0])
+        if dunder and (isinstance(x, Instance) or isinstance(y, Instance)):
+            direct, reflected = dunder
+            for who, other, which in ((x, y, direct), (y, x, reflected)):
+                if not isinstance(who, Instance) or who.cls.find(which) is None:
+                    continue
+                got = _user(h, lambda: who._send(which, other), fail=_FAILED)
+                if got is _FAILED:
+                    return 0
+                if got is not NotImplemented:
+                    return h._value(got)
+            return h._binop_error(sym.split(" ")[0], x, y)
         try:
             return _result(h, op(x, y))
         except _UserFailed:
@@ -1539,15 +2667,113 @@ def _binop(name, op, sym):
     return run
 
 
-def _reject(h, sym: str, x, y):
-    """The C's kind rules, for the cases where they are not Python's."""
-    if sym == "%" and isinstance(x, str):
-        # C DECIDES: `%` on a str is printf-style formatting in Python, and
-        # `'a%d' % 7` succeeds there. The runtime has no formatting; it reports
-        # CPython's message for the failing form, which is what a program
-        # reaching this actually gets.
+def _percent(h, fmt, right):
+    """`"%d %s" % (1, "a")` -- printf-style formatting.
+
+    TRANSLATED INTO THE MINI-LANGUAGE and handed to `format()`, which is what
+    the C does with its own -- `%05.2f` and `{:05.2f}` mean the same thing, so
+    the padding and the presentation types are not written twice.
+
+    NOT Python's own `%`, which is the obvious implementation: an argument may
+    be one of this file's objects, and `"%s" % P(1)` has to reach the user's
+    `__str__` through `_text` rather than printing an address. That is the
+    same mistake the container renderer made.
+    """
+    raw = isinstance(fmt, (bytes, bytearray))
+    text = fmt.decode("latin-1") if raw else fmt
+    many = isinstance(right, tuple)
+    # A MAPPING ON THE RIGHT supplies NAMED fields only, and nothing is
+    # consumed positionally -- so an unused entry is not an error.
+    mapping = isinstance(right, dict)
+    args = right if many else (right,)
+    out, i, at, n = [], 0, 0, len(text)
+    while i < n:
+        if text[i] != "%":
+            out.append(text[i]); i += 1; continue
+        i += 1
+        if i < n and text[i] == "%":
+            out.append("%"); i += 1; continue
+        named = None
+        if i < n and text[i] == "(":
+            # `%(name)s` -- the MAPPING FORM. The key runs to the matching
+            # `)`; what follows is an ordinary spec.
+            if not mapping:
+                return h._fail("TypeError", "format requires a mapping")
+            i += 1
+            key = ""
+            while i < n and text[i] != ")":
+                key += text[i]; i += 1
+            if i < n and text[i] == ")":
+                i += 1
+            if key not in right:
+                return h._fail("KeyError", repr(key))
+            named = right[key]
+        # THE FLAGS ARE COLLECTED, NOT EMITTED: two of them depend on the
+        # conversion, which has not been read yet, and the mini-language fixes
+        # an order (align, sign, `#`, `0`, width) that printf does not.
+        flags, width, prec = set(), "", ""
+        while i < n and text[i] in "-+ 0#":
+            flags.add(text[i]); i += 1
+        while i < n and text[i].isdigit():
+            width += text[i]; i += 1
+        if i < n and text[i] == ".":
+            prec += text[i]; i += 1
+            while i < n and text[i].isdigit():
+                prec += text[i]; i += 1
+        if i >= n:
+            return h._fail("ValueError", "incomplete format")
+        conv = text[i]; i += 1
+        is_text = conv in ("s", "r", "a", "c", "b")
+        # PRINTF RIGHT-ALIGNS A STRING; the mini-language left-aligns one.
+        # The only difference between the two that is not a spelling.
+        spec = "<" if "-" in flags else (">" if is_text else "")
+        spec += "+" if "+" in flags else (" " if " " in flags else "")
+        spec += "#" if "#" in flags else ""
+        spec += "0" if ("0" in flags and "-" not in flags
+                        and not is_text) else ""
+        spec += width + prec
+        if named is None:
+            if at >= len(args):
+                return h._fail("TypeError",
+                               "not enough arguments for format string")
+            value = args[at]; at += 1
+        else:
+            value = named
+        if conv in ("s", "b"):
+            if raw and isinstance(value, (bytes, bytearray)):
+                # `b"%s" % b"ab"` inserts THE BYTES, not their repr.
+                value = bytes(value).decode("latin-1")
+            else:
+                value = h._text(value, False)
+        elif conv == "r":
+            value = h._text(value, True)
+        elif conv == "a":
+            # The same `backslashreplace` the `ascii` builtin uses, so the
+            # two cannot drift on which escape width a code point gets.
+            value = h._text(value, True).encode(
+                "ascii", "backslashreplace").decode("ascii")
+        elif conv == "c":
+            value = chr(int(value)) if _is_int_like(value)                 else h._text(value, False)
+        else:
+            spec += "d" if conv in ("i", "u") else conv
+        try:
+            out.append(format(value, spec))
+        except (ValueError, TypeError) as exc:
+            return h._fail_like(exc)
+    # A MAPPING has nothing to leave unconsumed: its entries are reached by
+    # name, and an unused one is ordinary.
+    if not mapping and at < len(args):
         return h._fail("TypeError",
                        "not all arguments converted during string formatting")
+    joined = "".join(out)
+    return h._new(joined.encode("latin-1") if raw else joined)
+
+
+def _reject(h, sym: str, x, y):
+    """The C's kind rules, for the cases where they are not Python's."""
+    if sym == "%" and isinstance(x, (str, bytes, bytearray)):
+        # `%` on a str or on bytes is PRINTF-STYLE FORMATTING, not arithmetic.
+        return _percent(h, x, y)
     if sym == "+" and isinstance(x, str) and not isinstance(y, str):
         return h._fail("TypeError",
                        f'can only concatenate str (not "{h.kind_name(y)}") '
@@ -1578,6 +2804,44 @@ def _reject(h, sym: str, x, y):
         if not (_is_int_like(x) and _is_int_like(y)):
             return h._binop_error(sym, x, y)
     return None
+
+
+def _is_type_like(v) -> bool:
+    """Is this something `|` should read as a TYPE? A builtin type used as a
+    value, a user class, `None`, or a union already built from either."""
+    if isinstance(v, Func) and getattr(v, "is_type", False):
+        return True
+    if isinstance(v, Class) or v is None:
+        return True
+    return isinstance(v, Alias) and isinstance(v.origin, Instance)
+
+
+def _union_arms(v) -> list:
+    """`v`'s arms. A union contributes its own rather than itself, so unions
+    flatten instead of nesting."""
+    if isinstance(v, Alias) and isinstance(v.origin, Instance):
+        return list(v.args)
+    # `None` IN A UNION IS `NoneType`. `int | None` is written with the VALUE
+    # and holds the TYPE -- `get_args` answers `<class 'NoneType'>` in
+    # CPython, and keeping the singleton answered `None`, a different object
+    # with a different repr.
+    if v is None:
+        return [_none_type()]
+    return [v]
+
+
+def _form_name(v):
+    """The name of a `typing` special form, or None if `v` is not one."""
+    if isinstance(v, Instance) and v.cls is _SPECIAL_FORM_CLASS:
+        got = v.dict.get("_name")
+        return str(got) if got is not None else None
+    return None
+
+
+def _union_form(h):
+    """The `Union` special form every union is built on, interned by name like
+    every other form."""
+    return h._get(_apy_typing_form(h, [h._new("Union")]), "apy_bitor")
 
 
 def _binop_error(h, sym: str, x, y):
@@ -1695,6 +2959,18 @@ def _apy_is(h, a):
 def _apy_contains(h, a):
     needle = h._get(a[0], "apy_contains")
     hay = h._get(a[1], "apy_contains")
+    # `x in gen` CONSUMES the generator up to the match and leaves the rest --
+    # a generator is consumed once. Draining it reported the generator as not
+    # iterable at all.
+    if isinstance(hay, Gen):
+        while True:
+            item, done = _gen_step(h, hay, None)
+            if done is None:
+                return 0
+            if done:
+                return h._new(False)
+            if item == needle or item is needle:
+                return h._new(True)
     if isinstance(hay, Instance) and hay.cls.find("__contains__") is None:
         # No `__contains__`. `in` falls back to ITERATION, which is CPython's
         # rule and the reason a class with only `__getitem__` supports it.
@@ -1728,8 +3004,30 @@ def _apy_contains(h, a):
 
 # ── conversions ─────────────────────────────────────────────────────────────
 
+def _dunder_number(h, v, names):
+    """The first of `names` the class defines, called. None when it has none.
+
+    A CLASS SAYS WHAT ITS NUMBER IS -- answering from the numeric tower
+    instead converts something the class never claimed was a number.
+    """
+    if not isinstance(v, Instance):
+        return None
+    for name in names:
+        if v.cls.find(name) is not None:
+            got = _user(h, lambda: v._send(name), fail=_FAILED)
+            return None if got is _FAILED else got
+    return None
+
+
 def _apy_to_int(h, a):
     v = h._get(a[0], "apy_to_int")
+    # `__int__` first and `__index__` after it: the two are not the same
+    # question, and a class may define only the second.
+    got = _dunder_number(h, v, ("__int__", "__index__"))
+    if got is not None:
+        return h._value(got)
+    if h.err is not None:
+        return 0
     if not isinstance(v, (int, float, str)):
         return h._fail("TypeError",
                        f"int() argument must be a string, a bytes-like "
@@ -1748,6 +3046,14 @@ def _apy_to_int(h, a):
 
 
 def _apy_to_float(h, a):
+    _v = h._get(a[0], "apy_to_float")
+    # `__float__`, and `__index__` after it: an object that can be an integer
+    # can be a float, which is the rule CPython follows too.
+    _got = _dunder_number(h, _v, ("__float__", "__index__"))
+    if _got is not None:
+        return h._value(float(_got) if isinstance(_got, int) else _got)
+    if h.err is not None:
+        return 0
     v = h._get(a[0], "apy_to_float")
     if not isinstance(v, (int, float, str)):
         return h._fail("TypeError",
@@ -1916,41 +3222,114 @@ class Cell:
         self.slot = initial
 
 
-class Class:
-    """A user class: its name, its base, and what its body bound.
+#: "no such attribute", told apart from an attribute whose VALUE is None.
+_ABSENT = object()
 
-    SINGLE INHERITANCE, as a chain of `base` pointers -- which is what makes
-    the lookup below a walk rather than a linearisation, and what the C's
-    `apy_type_is_sub` reproduces exactly.
+
+class Class:
+    """A user class: its name, its bases, and what its body bound.
+
+    MULTIPLE INHERITANCE through the C3 linearisation in `c3`. `base` is the
+    FIRST base and stays for everything that asks a single question; `mro` is
+    the order every lookup walks, and it is None for a class built with one
+    base or none, where the chain and the order are the same walk.
     """
 
-    __slots__ = ("name", "base", "dict")
+    __slots__ = ("name", "base", "dict", "meta", "bases", "mro", "builtin")
 
-    def __init__(self, name: str, base=None) -> None:
+    def __init__(self, name: str, base=None, bases=None) -> None:
         self.name = name
         self.base = base
         self.dict: dict = {}
+        #: The METACLASS that made this class, or None for an ordinary
+        #: `class`, which reads as `type`. `type(C)` answers it, and a
+        #: metaclass's `__instancecheck__` is reached through it.
+        self.meta = None
+        self.bases = list(bases) if bases else ([base] if base else [])
+        self.mro = None
+        #: `class D(dict)` -- the BUILTIN KIND this class extends, as the
+        #: Python type, or None. Recorded rather than derived: the base list
+        #: holds only classes and a builtin is not one.
+        self.builtin = None
+
+    def builtin_kind(self):
+        """The builtin this class extends, looked up the whole chain: a
+        subclass of a subclass of `dict` is still a dict."""
+        for here in self.order():
+            if here.builtin is not None:
+                return here.builtin
+        return None
+
+    def order(self) -> list:
+        """The classes a lookup walks, in order, starting with this one."""
+        if self.mro is not None:
+            return self.mro
+        out, here = [], self
+        while isinstance(here, Class):
+            out.append(here)
+            here = here.base
+        return out
 
     def find(self, name: str):
         """The attribute, searching this class and then its bases. None when
-        no class in the chain has it -- the caller decides whether that is an
+        no class in the order has it -- the caller decides whether that is an
         error, because an instance still has its own dict to try."""
-        here = self
-        while isinstance(here, Class):
+        for here in self.order():
             if name in here.dict:
                 return here.dict[name]
-            here = here.base
         return None
 
+    def lookup(self, name: str):
+        """The attribute, or `_ABSENT` when no class in the order has it.
+
+        Distinguished from `find`, which answers None for BOTH a missing name
+        and one bound to None -- so a class attribute written `_one = None`,
+        which is how every lazily-filled slot starts, was invisible.
+        """
+        for here in self.order():
+            if name in here.dict:
+                return here.dict[name]
+        return _ABSENT
+
     def is_sub(self, other) -> bool:
-        """Is `other` reachable by base pointers? The `isinstance` rule for
-        user classes, and the only thing single inheritance makes cheap."""
-        here = self
-        while isinstance(here, Class):
-            if here is other:
-                return True
-            here = here.base
-        return False
+        """Is `other` anywhere in this class's order? The `isinstance` rule
+        for user classes."""
+        return any(here is other for here in self.order())
+
+
+def c3(cls, bases):
+    """THE C3 LINEARISATION: the order attribute lookup walks.
+
+    With one base it is the base chain and nothing is gained by computing it.
+    With several it is the only order that keeps two promises at once -- a
+    class comes before its bases, and the bases keep the order they were
+    written in -- and no simple walk keeps both.
+
+    Answers None when no order satisfies both, which is what CPython refuses
+    for `class Z(X, Y)` where X and Y disagree.
+    """
+    queues = [list(b.order()) for b in bases] + [list(bases)]
+    out = [cls]
+    while any(queues):
+        chosen = None
+        for queue in queues:
+            if not queue:
+                continue
+            head = queue[0]
+            # A CANDIDATE IN SOME OTHER LIST'S TAIL MUST WAIT for that list,
+            # or the result would put it before something that comes first.
+            if any(head in other[1:] for other in queues):
+                continue
+            chosen = head
+            break
+        if chosen is None:
+            return None
+        if chosen not in out:
+            out.append(chosen)
+        for queue in queues:
+            if queue and queue[0] is chosen:
+                del queue[0]
+    return out
 
 
 class Instance:
@@ -1961,12 +3340,17 @@ class Instance:
     second source of truth.
     """
 
-    __slots__ = ("cls", "dict", "h")
+    __slots__ = ("cls", "dict", "h", "held")
 
     def __init__(self, cls, h) -> None:
         self.cls = cls
         self.dict: dict = {}
         self.h = h
+        # AN INSTANCE OF A BUILTIN-EXTENDING CLASS CARRIES ONE. `class
+        # D(dict)` with only a `__missing__` in its body still has to BE a
+        # dict for everything it did not write, and this is that dict.
+        kind = cls.builtin_kind() if isinstance(cls, Class) else None
+        self.held = kind() if kind is not None else None
 
     # -- the dunder bridge --------------------------------------------------
     def _send(self, name: str, *args):
@@ -1978,7 +3362,11 @@ class Instance:
         returns None is an error.
         """
         m = self.cls.find(name)
-        if m is None or not isinstance(m, Func):
+        # A NATIVE COUNTS. A class the RUNTIME builds -- `asyncio.TaskGroup`
+        # is one -- has natives in its dict rather than compiled functions,
+        # and refusing them here reported every protocol method on such a
+        # class as absent: `async with TaskGroup()` awaited NotImplemented.
+        if m is None or not isinstance(m, (Func, Native)):
             return NotImplemented
         return self.h._invoke_obj(m.bind(self), list(args))
 
@@ -2095,8 +3483,11 @@ class Func:
     never saw, and every method call is one of those.
     """
 
-    __slots__ = ("code", "arity", "name", "cells", "bound", "defaults",
-                 "vararg", "pnames", "kwarg", "kwonly", "posonly", "doc")
+    __slots__ = ("annotate", "qualname", "code", "arity", "name", "cells",
+                 "bound",
+                 "defaults",
+                 "vararg", "pnames", "kwarg", "kwonly", "posonly", "doc",
+                 "dict", "coro", "is_type", "builtin", "nkwdefault")
 
     def __init__(self, code, arity, name, ncells, ndefaults=0,
                  vararg=False) -> None:
@@ -2107,6 +3498,15 @@ class Func:
         self.bound = None
         self.defaults = [None] * ndefaults
         self.vararg = vararg
+        #: ARBITRARY ATTRIBUTES set on the function itself, or None until one
+        #: is. Mirrors `v.fn.dict` in the C so both paths answer the same.
+        self.dict = None
+        #: WHETHER CALLING THIS BUILDS A COROUTINE -- an `async def`.
+        self.coro = False
+        #: WHETHER THIS IS A BUILTIN TYPE NAME used as a value -- `int`,
+        #: `str`, `list`. It stays callable; the flag is what makes
+        #: `print(int)` say `<class 'int'>`.
+        self.is_type = False
         #: WHETHER the last declared parameter is `**kw`.
         self.kwarg = False
         #: How many TRAILING declared parameters are keyword-only. A position
@@ -2123,6 +3523,38 @@ class Func:
         #: The DOCSTRING, or None. Recorded because `f.__doc__` is the one
         #: piece of a `def` a program routinely reads back.
         self.doc = None
+        #: PEP 649: the thunk that BUILDS `__annotations__`, or None. Lazy
+        #: because an annotation may name something that does not exist yet.
+        self.annotate = None
+        #: PEP 3155: the QUALIFIED name -- `C.m` -- or None for the plain one.
+        self.qualname = None
+        #: WHETHER THIS IS A BUILTIN reached as a value -- `print`, `len`.
+        self.builtin = False
+
+    def __eq__(self, other) -> bool:
+        """A BOUND METHOD IS A FRESH OBJECT PER ACCESS -- `c.m is c.m` is
+        False -- and two of them are EQUAL when they wrap the same function
+        and the same receiver, which is what CPython compares.
+
+        Only bound ones: two closures over the same `def` are distinct objects
+        with distinct cells, and CPython calls those unequal. Without this the
+        host answered identity and disagreed with the C, which compares the
+        pair explicitly.
+        """
+        if self is other:
+            return True
+        if not isinstance(other, Func):
+            return NotImplemented
+        return (self.bound is not None and other.bound is not None
+                and self.code == other.code and self.bound is other.bound)
+
+    def __hash__(self) -> int:
+        # Defined because `__eq__` is: without it a Func is unhashable, and
+        # one goes into a dict or a set wherever a program keys on a method.
+        # Bound methods that compare equal must hash equal, so the receiver's
+        # identity is what it hashes on.
+        return hash((self.code, id(self.bound) if self.bound is not None
+                     else id(self)))
 
     def bind(self, receiver) -> "Func":
         out = Func(self.code, self.arity, self.name, 0)
@@ -2136,8 +3568,174 @@ class Func:
         out.posonly = self.posonly
         out.pnames = self.pnames
         out.doc = self.doc
+        out.annotate = self.annotate
+        out.qualname = self.qualname
+        out.builtin = self.builtin
         out.bound = receiver
         return out
+
+
+class Native:
+    """A callable the RUNTIME owns, standing for one of `object`'s defaults.
+
+    Every callable here used to be compiled code, which meant a `super()`
+    whose base chain had run out had nothing to hand back -- the default
+    behaviours existed and no VALUE named them, so `super().__init__()` in a
+    class with no explicit base was an AttributeError. This is the value.
+
+    Interned per name by `_object_default`, so `super().__init__` reached
+    twice is the same object, as any other attribute would be.
+    """
+
+    __slots__ = ("name", "body", "bound")
+
+    def __init__(self, name: str, body) -> None:
+        self.name = name
+        self.body = body
+        self.bound = None
+
+    def bind(self, receiver) -> "Native":
+        out = Native(self.name, self.body)
+        out.bound = receiver
+        return out
+
+    def __call__(self, *args):
+        return self.body(*args)
+
+
+#: An EMPTY VALUE of the kind a builtin type names, so `_kind_attr` can
+#: answer for the type without a second copy of it. Nothing is done with the
+#: prototype but ask its kind.
+_KIND_PROTOTYPES = {"list": [], "tuple": (), "dict": {}, "set": set(),
+                    "frozenset": frozenset(), "str": "", "bytes": b"",
+                    "int": 0, "bool": False, "float": 0.0}
+
+
+def _unbound_kind(h, want: str):
+    """`dict.keys` as a value: the receiver is its first argument."""
+    def body(recv, *rest):
+        found = _kind_attr(h, recv, want)
+        if found is None:
+            h._fail("TypeError", f"descriptor '{want}' needs an argument")
+            raise _UserFailed
+        return h._get(found, want).body(*rest)
+    return body
+
+
+def _kind_attr(h, obj, want: str):
+    """A BUILTIN'S PROTOCOL METHODS, AS VALUES.
+
+    `[].append` and `{}.keys` are lowered at the call site by the frontend,
+    which means they exist as CALLS and never as attributes -- so
+    `hasattr([1], "__iter__")` answered False for the most iterable object in
+    the language, and every structural type test written against
+    `collections.abc` said no.
+
+    This does not make the whole method table reachable by name; it makes the
+    PROTOCOL reachable, which is the part a program asks about rather than
+    calls. Answers None for a name the kind does not have -- that is what
+    keeps `hasattr` honest -- and the None VALUE where CPython has the
+    attribute set to None, which is how a mutable container says it cannot be
+    hashed.
+    """
+    # A RANGE IS INDEXABLE AND WALKABLE but is not a list: `+` and `*` do
+    # not apply to one, so it is its own case rather than part of `seq`.
+    rng = isinstance(obj, range)
+    seq = isinstance(obj, (list, tuple))
+    text = isinstance(obj, (str, bytes, bytearray))
+    dict_ = isinstance(obj, dict)
+    set_ = isinstance(obj, (set, frozenset))
+    walks = seq or text or dict_ or set_ or rng         or isinstance(obj, _VIEW_TYPES)
+    mutable = isinstance(obj, (list, dict, set, bytearray))
+
+    def made(name, body):
+        return h._new(Native(name, body))
+
+    if want == "__hash__":
+        # THE ATTRIBUTE EXISTS EITHER WAY. `[].__hash__ is None` is how a
+        # program asks whether a list can be a dict key, and answering "no
+        # such attribute" is a different claim from the one CPython makes.
+        return h._none if mutable else made("__hash__", lambda: hash(obj))
+    if want == "__len__" and walks:
+        return made("__len__", lambda: len(obj))
+    if want == "__iter__" and (walks or isinstance(obj, (Gen, Iterator))):
+        return made("__iter__", lambda: _apy_iter(h, [h._new(obj)]))
+    if want == "__next__" and isinstance(obj, (Gen, Iterator)):
+        return made("__next__", lambda: _apy_next(h, [h._new(obj), 0, 0]))
+    if want == "__contains__" and walks:
+        return made("__contains__", lambda x: x in obj)
+    if want == "__getitem__" and (seq or text or dict_):
+        return made("__getitem__", lambda i: obj[i])
+    if want == "__setitem__" and (isinstance(obj, (list, dict, bytearray))):
+        return made("__setitem__", lambda i, v: obj.__setitem__(i, v))
+    if dict_ and want in ("keys", "values", "items"):
+        return made(want, lambda: list(getattr(obj, want)()))
+    if (seq or text) and want in ("index", "count"):
+        return made(want, lambda x: getattr(obj, want)(x))
+    if isinstance(obj, list) and want == "append":
+        return made("append", lambda x: obj.append(x))
+    if isinstance(obj, list) and want == "insert":
+        return made("insert", lambda i, x: obj.insert(i, x))
+    if isinstance(obj, set) and want in ("add", "discard"):
+        return made(want, lambda x: getattr(obj, want)(x))
+    if set_ and want == "isdisjoint":
+        return made("isdisjoint", lambda o: obj.isdisjoint(o))
+    # PEP 688: whatever can be handed to `memoryview` HAS `__buffer__`. It is
+    # a protocol a program asks about far more often than it calls, and
+    # answering False for `bytes` said this runtime has no buffers at all.
+    if want == "__buffer__" and isinstance(obj, (bytes, bytearray,
+                                                 memoryview)):
+        return made("__buffer__", lambda flags=0: memoryview(obj))
+    if rng:
+        # THE THREE NUMBERS A RANGE IS, read back -- and `index`/`count`,
+        # which are arithmetic on them rather than a walk.
+        if want in ("start", "stop", "step"):
+            return h._value(getattr(obj, want))
+        if want in ("index", "count"):
+            return made(want, lambda x, _w=want: getattr(obj, _w)(x))
+        if want == "__len__":
+            return made("__len__", lambda: len(obj))
+        if want == "__iter__":
+            return made("__iter__", lambda: _apy_iter(h, [h._new(obj)]))
+        if want == "__contains__":
+            return made("__contains__", lambda x: x in obj)
+        if want == "__getitem__":
+            return made("__getitem__", lambda i: obj[i])
+    return None
+
+
+def _object_default(h, name: str):
+    """`object`'s own version of a dunder, as a callable value.
+
+    The bodies are the ones the C reaches through `apy_default_*`; what was
+    missing in both runtimes was a value naming them.
+    """
+    made = h._defaults.get(name)
+    if made is not None:
+        return made
+    if name == "__init__":
+        body = lambda *a: None
+    elif name == "__new__":
+        # An implicit STATICMETHOD: the argument is the class.
+        body = lambda cls, *a: Instance(cls, h)
+    elif name in ("__repr__", "__str__"):
+        body = lambda v, *a: (f"<{v.cls.name} object at 0x{id(v):x}>"
+                              if isinstance(v, Instance) else h._text(v, True))
+    elif name == "__eq__":
+        body = lambda a, b, *r: a is b
+    elif name == "__ne__":
+        body = lambda a, b, *r: a is not b
+    elif name == "__hash__":
+        body = lambda v, *a: id(v)
+    elif name == "__init_subclass__":
+        # Every class has one, and a user hook ends by calling it: `object`'s
+        # is the no-op that terminates the chain.
+        body = lambda *a, **kw: None
+    else:
+        return None
+    made = Native(name, body)
+    h._defaults[name] = made
+    return made
 
 
 class Super:
@@ -2240,6 +3838,17 @@ def _apy_func_kwonly(h, a):
     return a[0]
 
 
+def _apy_func_kwdefaults(h, a):
+    """How many of the TRAILING DEFAULTS are the keyword-only parameters'.
+
+    Not derivable from `kwonly`: one of those may be REQUIRED, and `def f(a,
+    b=1, *args, c)` has one keyword-only parameter and one default that is not
+    its -- so splitting on `kwonly` reported `b`'s default as `c`'s.
+    """
+    h._get(a[0], "apy_func_kwdefaults").nkwdefault = int(a[1])
+    return a[0]
+
+
 def _apy_func_kwarg(h, a):
     h._get(a[0], "apy_func_kwarg").kwarg = int(a[1]) != 0
     return a[0]
@@ -2278,6 +3887,53 @@ def _apy_type_set(h, a):
     return h._none
 
 
+def _apy_init_subclass(h, a):
+    """`__init_subclass__` -- the hook a base runs when a subclass is created.
+
+    CALLED ON THE BASE, NOT THE NEW CLASS, and with the new class as its
+    argument: a class does not announce its own creation to itself. Run after
+    the body has been filled, because the hook routinely reads what it bound.
+    """
+    cls = h._get(a[0], "apy_init_subclass")
+    if not isinstance(cls, Class) or not isinstance(cls.base, Class):
+        return h._none
+    hook = cls.base.find("__init_subclass__")
+    if hook is None:
+        return h._none
+    # THE CLASS KEYWORDS TRAVEL WITH IT: `class A(Base, tag="a")` is how a
+    # program configures the hook, and dropping them left every subclass
+    # looking identically unconfigured.
+    kwd = h._get(a[1], "apy_init_subclass") if len(a) > 1 else {}
+    # Whatever it answers is discarded -- it is called for its effect.
+    # MATCHED BY NAME against the hook's declared parameters, as the C's
+    # `apy_call_kw` does. `_invoke` alone puts every keyword into `**kw`, so
+    # `def __init_subclass__(cls, tag=None, **kw)` saw `tag` in `kw` and left
+    # the parameter on its default -- the wrong answer this whole path is
+    # about.
+    names = list(getattr(hook, "pnames", None) or [])
+    extra = dict(kwd)
+    args = [cls]
+    for pname in names[1:]:
+        if pname is None or pname not in extra:
+            break
+        args.append(extra.pop(pname))
+    if _user(h, lambda: (h._invoke(hook, args, kwrest=extra), 1)[1]) == 0:
+        return 0
+    return h._none
+
+
+#: The C's kind enum, as the Python types the host uses. The two lists must
+#: agree -- a wrong number gives an instance the wrong kind of storage.
+_BUILTIN_KINDS = {4: str, 5: list, 6: tuple, 7: dict, 9: set}
+
+
+def _apy_type_builtin(h, a):
+    """`class D(dict)` -- which builtin kind this class extends."""
+    cls = h._get(a[0], "apy_type_builtin")
+    cls.builtin = _BUILTIN_KINDS.get(int(a[1]))
+    return a[0]
+
+
 def _apy_instance_new(h, a):
     cls = h._get(a[0], "apy_instance_new")
     if not isinstance(cls, Class):
@@ -2286,8 +3942,38 @@ def _apy_instance_new(h, a):
     return h._new(Instance(cls, h))
 
 
-def _apy_type_object(h, a):
-    return h._new(h._type_of(h._get(a[0], "apy_type_object")))
+def _apy_aenter(h, a):
+    """`async with cm:` -- the `__aenter__` half.
+
+    ANSWERS A COROUTINE rather than a value: the caller awaits it, which is
+    the whole difference from `__enter__` and the reason these cannot share an
+    entry point.
+    """
+    cm = h._get(a[0], "apy_aenter")
+    if not isinstance(cm, Instance) or cm.cls.find("__aenter__") is None:
+        return h._fail("TypeError",
+                       f"'{h.kind_name(cm)}' object does not support the "
+                       f"asynchronous context manager protocol")
+    return _user(h, lambda: h._value(cm._send("__aenter__")))
+
+
+def _apy_aexit(h, a):
+    """`__aexit__(type, value, traceback)`, answering a coroutine.
+
+    All three arguments come from the one value, as `apy_exit` does it: the
+    TYPE is what `et.__name__` reads, the VALUE is the exception itself, and
+    the traceback is None because there are none here.
+    """
+    cm = h._get(a[0], "apy_aexit")
+    exc = h._get(a[1], "apy_aexit")
+    if not isinstance(cm, Instance) or cm.cls.find("__aexit__") is None:
+        return h._fail("TypeError",
+                       f"'{h.kind_name(cm)}' object does not support the "
+                       f"asynchronous context manager protocol")
+    kind = h._type_of(exc) if isinstance(exc, Exc) else None
+    return _user(h, lambda: h._value(
+        cm._send("__aexit__", kind, exc if isinstance(exc, Exc) else None,
+                 None)))
 
 
 def _apy_enter(h, a):
@@ -2326,6 +4012,22 @@ def _apy_exit(h, a):
     return _user(h, lambda: h._value(cm._send("__exit__", *args)))
 
 
+def _exc_init(*args):
+    """`BaseException.__init__(*args)`: it SETS THE MESSAGE AND `args`, which
+    is the whole of what it does and the reason a class writing
+    `super().__init__(f"{code}: {message}")` prints that text."""
+    if not args or not isinstance(args[0], Exc):
+        return None
+    exc, rest = args[0], list(args[1:])
+    exc.arg = rest[0] if rest else None
+    exc.has_arg = bool(rest)
+    exc.argv = tuple(rest)
+    # The text is the ARGUMENT again, not something already rendered -- see
+    # `Exc.rendered` for what that flag stops twice over.
+    exc.rendered = False
+    return None
+
+
 def _apy_super(h, a):
     frm = h._get(a[0], "apy_super")
     if not isinstance(frm, Class):
@@ -2349,6 +4051,29 @@ def _apy_getattr(h, a):
     return _apy_default_getattr(h, a)
 
 
+def _apy_getattr_default(h, a):
+    """`getattr(x, 'a', fallback)`. A MISS IS NOT AN ERROR HERE, which is the
+    whole difference from the two-argument form -- so the pending
+    AttributeError is dropped and the fallback answered.
+
+    ONLY an AttributeError is swallowed: a `__getattr__` that raised something
+    of its own is the program's error and has to survive, or every failure
+    inside a property would turn into a silent default.
+    """
+    before = h.err
+    got = _apy_getattr(h, a[:2])
+    if got:
+        return got
+    if h.err is not None and h.err is not before and h.err[0] == "AttributeError":
+        h.err = before
+        h.err_value = None
+        # The HANDLE, not the unwrapped Python object: every host binding
+        # answers a machine word, and `_get` would hand back the value behind
+        # it for the caller to try to write into memory as an integer.
+        return a[2]
+    return 0
+
+
 def _apy_default_getattr(h, a):
     """The DEFAULT lookup: instance dict, then class, then `__getattr__`.
 
@@ -2359,28 +4084,84 @@ def _apy_default_getattr(h, a):
     obj = h._get(a[0], "apy_getattr")
     name = str(h._get(a[1], "apy_getattr"))
     if isinstance(obj, Instance):
+        # A DATA DESCRIPTOR ON THE CLASS BEATS THE INSTANCE DICT -- the one
+        # place "instance wins" does not hold, and what makes a property a
+        # property. A NON-data one loses to it instead.
+        klass_found = obj.cls.find(name)
+        if klass_found is not None and _is_data_descriptor(klass_found):
+            return _descr_get(h, klass_found, obj, obj.cls)
         # The INSTANCE DICT WINS over the class, so `self.x = 1` shadows a
         # class attribute of the same name.
         if name in obj.dict:
             return h._value(obj.dict[name])
         found = obj.cls.find(name)
         if found is not None:
+            # A NON-DATA descriptor is asked HERE, after the instance dict
+            # has missed -- `staticmethod`, `classmethod`, or a user class
+            # with only `__get__`.
+            if _is_descriptor(found):
+                return _descr_get(h, found, obj, obj.cls)
             # A function on the class becomes a BOUND METHOD, and a fresh one
             # per access -- which is what CPython does and what
             # `datamodel/method-objects-are-created-per-access` measures.
-            return h._new(found.bind(obj)) if isinstance(found, Func) \
-                else h._value(found)
+            # A NATIVE BINDS TOO: the runtime's own methods take the receiver
+            # as their first argument exactly as a written method does, so
+            # leaving one unbound called it with nothing.
+            return h._new(found.bind(obj)) \
+                if isinstance(found, (Func, Native)) else h._value(found)
         if name == "__class__":
             return h._value(obj.cls)
         # THE INSTANCE'S OWN attributes, and the real dict rather than a copy:
         # `obj.__dict__["x"] = 1` is how a program sets an attribute
         # dynamically, and a copy would accept the write and lose it.
+        # ABSENT under `__slots__`, which is the point of declaring it --
+        # `hasattr(p, "__dict__")` is how a program checks.
         if name == "__dict__":
+            if not _slot_allows(obj.cls, "__dict__"):
+                return h._no_attr(obj, name)
             return h._new(obj.dict)
         # `__getattr__` -- the LAST resort, asked only after the instance dict
         # and the class have both missed. That ordering is the whole protocol.
         if obj.cls.find("__getattr__") is not None:
             return _user(h, lambda: h._value(obj._send("__getattr__", name)))
+        return h._no_attr(obj, name)
+    if isinstance(obj, slice):
+        # `s.start`, `s.stop`, `s.step` -- what a `__getitem__` reads off the
+        # slice it was handed. None where the bound was omitted.
+        if name in ("start", "stop", "step"):
+            return h._value(getattr(obj, name))
+        return h._no_attr(obj, name)
+    if isinstance(obj, Descr):
+        # `p.fget` / `p.fset` -- the functions a property was built from. A
+        # subclass overriding a property reaches the base getter through
+        # `fget`, the only way to extend rather than replace it. None where
+        # there is no such half, as CPython answers.
+        if name == "fget":
+            return h._value(obj.get) if obj.get is not None else h._none
+        if name == "fset":
+            return h._value(obj.set) if obj.set is not None else h._none
+        if name == "fdel":
+            return h._value(obj.del_) if obj.del_ is not None else h._none
+        if name == "__func__" and obj.get is not None:
+            return h._value(obj.get)
+        # THE PROTOCOL ITSELF, as values. `hasattr(p, "__get__")` is how a
+        # program asks whether something is a descriptor, and a property that
+        # answered False to it was reported as an ordinary attribute.
+        if name == "__get__":
+            # A NATIVE'S BODY ANSWERS A RAW VALUE, and `_descr_get` answers a
+            # HANDLE -- the two conventions meet here, and returning the
+            # handle unchanged handed the program the integer index.
+            def _read(inst, cls=None, _d=obj):
+                got = _descr_get(h, _d, inst, cls)
+                return h._get(got, "__get__") if got else None
+            return h._new(Native("__get__", _read))
+        if name == "__set__":
+            return h._new(Native("__set__", lambda inst, value:
+                                 _descr_write(h, obj, inst, value)))
+        if name == "__delete__":
+            return h._new(Native("__delete__", lambda inst:
+                                 _descr_write(h, obj, inst, None,
+                                              delete=True)))
         return h._no_attr(obj, name)
     if isinstance(obj, Class):
         if name == "__name__":
@@ -2390,22 +4171,197 @@ def _apy_default_getattr(h, a):
         # proxy in CPython and is not writable.
         if name == "__dict__":
             return h._new(dict(obj.dict))
-        if name == "__bases__":
-            return h._new((obj.base,) if obj.base is not None else ())
-        found = obj.find(name)
+        # A SLOT NAME reached through the class is a DESCRIPTOR, not a
+        # missing attribute: `__slots__` declares storage, and the class dict
+        # holds nothing for it.
+        _slots = obj.dict.get("__slots__")
+        if _slots is not None and name not in obj.dict:
+            _names = [_slots] if isinstance(_slots, str) else list(_slots)
+            if name in _names:
+                return h._new(Instance(
+                    h._member_descriptor_class(), h))
+        # THE HIERARCHY, as a program reads it back. `object` is the root
+        # of every chain even though no class links to it, so a class with no
+        # written base still has one base and only `object` itself has none.
+        # Answering the empty tuple there said the chain stopped at the class.
+        # PEP 3155. A class nested in another would qualify differently;
+        # only the top-level spelling is recorded, which is the same limit the
+        # frontend's own keys have for classes.
+        if name == "__qualname__":
+            return h._new(obj.name)
+        # PEP 649 for a CLASS: `C.__annotations__` is built on access by the
+        # thunk the body left in the dict, for the same reason a function's
+        # is -- an annotation may name something that does not exist yet.
+        if name == "__annotations__":
+            thunk = obj.dict.get("__annotate__")
+            if thunk is None:
+                return h._new({})
+            return _user(h, lambda: h._value(h._invoke(thunk, [])))
+        if name in ("__bases__", "__base__", "__mro__"):
+            root = h._get(_apy_object_class(h, []), "apy_getattr")
+            # AN EXCEPTION TYPE'S PARENT IS IN THE NAME TABLE, not in a base
+            # pointer -- the builtin hierarchy is a table because `raise` and
+            # `except` match on the name. So the walk had to ask the table, or
+            # `Exception.__bases__` answered `object`.
+            if obj.base is None and obj is not root:
+                chain = _exc_chain(h, obj.name)
+                # `_exc_chain` walks all the way to `object`, and the root is
+                # appended below -- keeping both listed it twice.
+                if chain and chain[-1] == "object":
+                    chain = chain[:-1]
+                if len(chain) > 1:
+                    types = [h._get(_apy_exc_type(h, [h._new(nm)]),
+                                    "apy_getattr") for nm in chain[1:]]
+                    if name == "__base__":
+                        return h._value(types[0])
+                    if name == "__bases__":
+                        return h._new((types[0],))
+                    return h._new(tuple([obj] + types + [root]))
+            if name == "__mro__":
+                # THE RECORDED ORDER when the class has one -- that IS the
+                # answer, and rebuilding it from the base chain would give a
+                # different one for a class with several bases.
+                if obj.mro is not None:
+                    return h._new(tuple(obj.mro + [root]))
+                walk, out = obj, []
+                while isinstance(walk, Class) and walk is not root:
+                    out.append(walk)
+                    walk = walk.base
+                return h._new(tuple(out + [root]))
+            if obj is root:
+                return h._new(() if name == "__bases__" else None)
+            # ALL OF THEM for `__bases__`, in the order written; `__base__`
+            # is the first alone.
+            if name == "__bases__" and len(obj.bases) > 1:
+                return h._new(tuple(obj.bases))
+            one = obj.base if obj.base is not None else root
+            # `h._value`, not `h._new`: `B.__base__ is A` compares handles, so
+            # minting a fresh one for a class that already has a handle makes
+            # it False. The C compares pointers and cannot make that mistake.
+            return h._new((one,)) if name == "__bases__" else h._value(one)
+        # DEFINING `__eq__` AND NOT `__hash__` SETS `__hash__` TO None, and a
+        # program reads it back: `C.__hash__ is None` is how it asks whether
+        # instances are hashable. `Instance.__hash__` already refuses to hash
+        # one; without this the two disagreed about the same class.
+        if (name == "__hash__" and obj.find("__hash__") is None
+                and obj.find("__eq__") is not None):
+            return h._none
+        # THROUGH THE CLASS, a descriptor is asked with no instance:
+        # `C.make()` binds the class, `C.plain` hands the plain function back,
+        # and `Base.v` is the property object itself.
+        klass_d = obj.find(name)
+        if klass_d is not None and _is_descriptor(klass_d):
+            return _descr_get(h, klass_d, None, obj)
+        found = obj.lookup(name)
         # Through the CLASS a method is UNBOUND: `C.m(x)` passes x as self.
-        if found is not None:
+        if found is not _ABSENT:
             return h._value(found)
+        # AN ATTRIBUTE OF THE CLASS'S OWN TYPE. `Quacks.register(Duck)` is a
+        # method the METACLASS defines, and the class is its receiver -- the
+        # same relationship an instance has to its class, one level up. Asked
+        # LAST, because a name the class itself binds wins over one its
+        # metaclass does.
+        if obj.meta is not None:
+            m = obj.meta.lookup(name)
+            if m is not _ABSENT:
+                if _is_descriptor(m):
+                    return _descr_get(h, m, obj, obj)
+                if isinstance(m, (Func, Native)):
+                    return h._new(m.bind(obj))
+                return h._value(m)
         return h._fail("AttributeError",
                        f"type object '{obj.name}' has no attribute '{name}'")
     if isinstance(obj, Super):
-        base = obj.frm.base
-        found = base.find(name) if base is not None else None
+        found = None
+        # THE RECEIVER'S ORDER, PAST THE DEFINING CLASS. This is what makes a
+        # diamond work: inside B's method, `super()` on a D instance must
+        # reach C and not A, and only the RECEIVER's order knows that C sits
+        # between them. With a single base this is the base chain again, which
+        # is what the fallback below still walks.
+        host = h._type_of(obj.recv) if obj.recv is not None else None
+        if isinstance(host, Class) and host.mro is not None:
+            order = host.order()
+            at = next((i for i, k in enumerate(order) if k is obj.frm), -1)
+            if at >= 0:
+                for here in order[at + 1:]:
+                    if name in here.dict:
+                        found = here.dict[name]
+                        break
         if found is None:
-            return h._fail("AttributeError",
-                           f"'super' object has no attribute '{name}'")
-        return h._new(found.bind(obj.recv)) if isinstance(found, Func) \
-            else h._value(found)
+            base = obj.frm.base
+            found = base.find(name) if base is not None else None
+        # THE BASE CHAIN HAS RUN OUT OF PYTHON and the receiver is an
+        # exception, so what `super().__init__(msg)` means is
+        # `BaseException.__init__` -- which is not a function anywhere in that
+        # chain, because the hierarchy above a user exception class is a table
+        # of names rather than classes. AFTER the walk, not before: a subclass
+        # writing `super().__init__(...)` must reach its own base's `__init__`
+        # first, and intercepting early sent every one of them straight past
+        # it. Falling through instead would find `object`'s, which takes the
+        # message and does nothing with it.
+        if found is None and isinstance(obj.recv, Exc) and name == "__init__":
+            return h._new(Native("__init__", _exc_init).bind(obj.recv))
+        if found is None:
+            # THE BASE CHAIN HAS RUN OUT, which means `object` -- and every
+            # class has one. `super().__init__()` inside a class with no
+            # explicit base is ordinary Python and was an AttributeError.
+            found = _object_default(h, name)
+            if found is None:
+                return h._fail("AttributeError",
+                               f"'super' object has no attribute '{name}'")
+        # A NATIVE BINDS TOO. `object`'s defaults take the receiver as their
+        # first argument exactly as a written method does, so leaving one
+        # unbound called it with nothing.
+        #
+        # EXCEPT `__new__`, which is an implicit STATICMETHOD: it receives the
+        # class as an ordinary first argument that the caller writes out --
+        # `super().__new__(cls)`. Binding it put the receiver in front of that
+        # and every argument landed one place late.
+        if name == "__new__":
+            return h._value(found)
+        return h._new(found.bind(obj.recv)) \
+            if isinstance(found, (Func, Native)) else h._value(found)
+    if isinstance(obj, Gen):
+        # THE THREE METHODS, AS VALUES. They are dispatched by name at the
+        # call site, so nothing needed a value for them -- until a program
+        # asked `hasattr(g, "close")`, which every duck-typed consumer does,
+        # and got False for a method it can plainly call.
+        # A TASK'S OWN METHODS. A task is a generator cell like any other
+        # here, so these sit beside `send` and `throw` rather than on a class
+        # of their own.
+        if obj.builtin == _CORO_TASK and name in (
+                "cancel", "result", "done", "cancelled"):
+            fn = {"cancel": _apy_task_cancel, "result": _apy_task_result,
+                  "done": _apy_task_done,
+                  "cancelled": _apy_task_cancelled}[name]
+            return h._new(Native(
+                name, lambda g, _fn=fn: h._get(_fn(h, [h._value(g)]), name)
+            ).bind(obj))
+        if name in ("send", "throw", "close"):
+            body = {"send": lambda g, v: h._get(
+                        _apy_gen_send(h, [h._value(g), h._value(v)]), name),
+                    "throw": lambda g, e: h._get(
+                        _apy_gen_throw(h, [h._value(g), h._value(e)]), name),
+                    "close": lambda g: h._get(
+                        _apy_gen_close(h, [h._value(g)]), name)}[name]
+            return h._new(Native(name, body).bind(obj))
+        return h._no_attr(obj, name)
+    if isinstance(obj, Alias):
+        # `list[int].__origin__` is `list` and `.__args__` is `(int,)`. A
+        # program that inspects an annotation reads exactly these two.
+        if name == "__origin__":
+            return h._value(obj.origin)
+        if name == "__args__":
+            return h._new(tuple(obj.args))
+        return h._no_attr(obj, name)
+    if isinstance(obj, memoryview):
+        # `itemsize` and `format` are the one-byte unsigned format's, which is
+        # what a bytes-like source always has -- Python's own view reports the
+        # same for the same reason, so these are read off it rather than
+        # written out.
+        if name in ("readonly", "nbytes", "itemsize", "format", "obj"):
+            return h._value(getattr(obj, name))
+        return h._no_attr(obj, name)
     if isinstance(obj, complex):
         # `.real` and `.imag` are floats, not complexes -- `(1+2j).real` is
         # `1.0`. `h._value` would keep whatever Python's attribute gives,
@@ -2413,7 +4369,62 @@ def _apy_default_getattr(h, a):
         if name in ("real", "imag"):
             return h._new(getattr(obj, name))
         return h._no_attr(obj, name)
+    if isinstance(obj, (int, float)):
+        # EVERY NUMBER HAS `real` AND `imag`, not only a complex one -- that
+        # is what makes the numeric tower uniform. An int's imaginary part is
+        # the INT zero, not the float, which `type()` on it can tell apart, so
+        # Python's own attribute is used rather than a literal 0.
+        if name in ("real", "imag"):
+            return h._value(getattr(obj, name))
     if isinstance(obj, Func):
+        # WHAT A PROGRAM PUT THERE WINS over the built-in attributes below,
+        # as it does in the C: `f.__name__ = 'other'` has to read back as it
+        # was written, not as the function was defined.
+        if obj.dict is not None and name in obj.dict:
+            return h._value(obj.dict[name])
+        # `f.__code__` -- ENOUGH OF ONE to answer what a program asks a
+        # function about its own signature. Not a real code object: there is
+        # no bytecode here to describe, and `co_argcount` and `co_varnames`
+        # are what introspection actually reads.
+        if name == "__code__":
+            declared = obj.arity - (1 if obj.vararg else 0)                 - (1 if obj.kwarg else 0)
+            code = Instance(h._code_class(), h)
+            code.dict["co_argcount"] = declared - obj.kwonly
+            code.dict["co_posonlyargcount"] = obj.posonly
+            code.dict["co_kwonlyargcount"] = obj.kwonly
+            # `*rest` AND `**kw` COME LAST, after every declared parameter --
+            # where CPython puts them and where a signature rebuilt from this
+            # expects to find them. Omitted before, so the rebuilt signature
+            # had no variadic parts at all.
+            code.dict["co_varnames"] = tuple(
+                n for n in (obj.pnames or ())[:obj.arity] if n)
+            # 0x04 is `*rest` and 0x08 is `**kw`, which is how a signature
+            # knows the variadic parts exist without a second field.
+            code.dict["co_flags"] = ((4 if obj.vararg else 0)
+                                     | (8 if obj.kwarg else 0))
+            code.dict["co_name"] = obj.name
+            return h._new(code)
+        # `f.__defaults__` is the POSITIONAL defaults as a tuple and
+        # `__kwdefaults__` the keyword-only ones as a dict -- each None rather
+        # than empty when there are none, which is how a program tells "no
+        # defaults" from "a default that is falsey". They are stored as one
+        # trailing run, keyword-only last.
+        if name in ("__defaults__", "__kwdefaults__"):
+            nd = len(obj.defaults or ())
+            # THE RECORDED COUNT, not the number of keyword-only parameters.
+            at_kw = min(getattr(obj, "nkwdefault", 0) or 0, nd)
+            npos = nd - at_kw
+            declared = obj.arity - (1 if obj.vararg else 0)                 - (1 if obj.kwarg else 0)
+            if name == "__defaults__":
+                return h._new(tuple(obj.defaults[:npos])) if npos > 0                     else h._none
+            if at_kw <= 0 or not obj.pnames:
+                return h._none
+            return h._new({obj.pnames[declared - at_kw + i]:
+                           obj.defaults[npos + i] for i in range(at_kw)})
+        if name == "__qualname__":
+            # PEP 3155. The frontend's key is already the qualified name.
+            return h._value(obj.qualname if obj.qualname is not None
+                            else obj.name)
         if name in ("__name__", "__qualname__"):
             # No qualified name is recorded -- a nested `def` knows its own
             # name and not its enclosing scope's -- so the plain one is what
@@ -2440,14 +4451,57 @@ def _apy_default_getattr(h, a):
             return h._no_attr(obj, name)
         if name == "__doc__":
             return h._value(obj.doc)
-        # Annotations are erased by analysis, which is the whole point of the
-        # two-path design -- so this is empty rather than absent.
+        # PEP 649: `__annotations__` is BUILT ON ACCESS, by the thunk the
+        # `def` recorded. Evaluating them at the `def` would make
+        # `def f(x: Undefined)` an error where Python accepts it -- only
+        # reading them is. A function with none answers the empty dict.
+        if name == "__annotate__":
+            return h._value(obj.annotate)
         if name == "__annotations__":
-            return h._new({})
+            if obj.annotate is None:
+                return h._new({})
+            return _user(h, lambda: h._value(h._invoke(obj.annotate, [])))
         return h._no_attr(obj, name)
     if isinstance(obj, Exc):
+        # WHAT THE PROGRAM STORED WINS over what the kind offers.
+        # `value`, `message` and `exceptions` are answered for every
+        # exception here -- one cell serves them all -- but in CPython
+        # they belong to StopIteration and ExceptionGroup alone, so a
+        # class of its own setting `self.value` owns that name and
+        # nothing should take it. It did: `raise _Returned(42)` then
+        # `caught.value` gave back the MESSAGE rather than the 42, which
+        # is a wrong answer and not a missing feature.
+        #
+        # THE DUNDERS AND `args` ARE NOT IN THIS, because those really
+        # are BaseException's and writing one means writing through it.
+        if name in obj.dict and not name.startswith('_') \
+                and name != 'args':
+            return h._value(obj.dict[name])
+        # `g.exceptions` -- what an `ExceptionGroup` carries. Absent on an
+        # ordinary exception, which is how a program tells the two apart
+        # without asking about the type.
+        # `g.message` -- the text an ExceptionGroup was built with, which is
+        # its FIRST argument and separate from the exceptions it carries.
+        # Present only on a group, like `exceptions`.
+        if name == "message":
+            if obj.subs is None:
+                return h._no_attr(obj, name)
+            return h._value(obj.arg if obj.has_arg else "")
+        if name == "exceptions":
+            if not getattr(obj, "subs", None):
+                return h._no_attr(obj, name)
+            return h._new(list(obj.subs))
         if name == "args":
+            if getattr(obj, "argv", None) is not None:
+                return h._new(tuple(obj.argv))
             return h._new(() if not obj.has_arg else (obj.arg,))
+        # PEP 3151: `OSError(2, "No such file")` READS BOTH BACK. They are
+        # positions in `args`, not fields, which is why they are answered from
+        # it rather than stored twice.
+        if name in ("errno", "strerror"):
+            argv = getattr(obj, "argv", None) or ()
+            at = 0 if name == "errno" else 1
+            return h._value(argv[at]) if len(argv) > at else h._none
         # Both are None when unset, never absent: `e.__cause__` is an
         # attribute every exception has, and code that reads it to decide
         # whether to print "the direct cause" would get an AttributeError.
@@ -2470,9 +4524,33 @@ def _apy_default_getattr(h, a):
         # is the test programs actually write. An empty tuple is the least
         # dishonest stand-in.
         if name == "__traceback__":
+            # A REAL TRACEBACK where the position table exists, and the old
+            # empty-tuple stand-in where it does not -- a program that never
+            # asks about positions gets none recorded, and `e.__traceback__ is
+            # not None` still has to answer True.
+            if getattr(obj, "pos", -1) >= 0:
+                return h._new(_traceback_of(h, obj))
+            # NEVER RAISED, so there is nothing to point at -- which is what
+            # CPython answers, and how a program tells a caught exception from
+            # one it merely built.
+            if h.positions:
+                return h._none
+            # No positions recorded at all: the old stand-in, which is not
+            # None because an exception that WAS raised has a traceback and
+            # nothing here can tell the two apart without them.
             return h._new(())
         if name == "__class__":
             return h._new(h._type_of(obj))
+        # THIS EXCEPTION'S OWN ATTRIBUTES, then its class's -- the ordinary
+        # two-step, arriving late because the fixed names above are what
+        # BaseException itself defines and a class body cannot shadow.
+        if name in obj.dict:
+            return h._value(obj.dict[name])
+        if obj.cls is not None:
+            found = obj.cls.find(name)
+            if found is not None:
+                return h._new(found.bind(obj)) \
+                    if isinstance(found, (Func, Native)) else h._value(found)
         return h._no_attr(obj, name)
     return h._no_attr(obj, name)
 
@@ -2515,14 +4593,76 @@ def _apy_setattr(h, a):
     return _apy_default_setattr(h, a)
 
 
+def _slot_allows(cls, name: str) -> bool:
+    """Is this instance restricted to a fixed set of attributes, and is `name`
+    one of them?
+
+    An instance is unrestricted unless EVERY class in its chain declares
+    `__slots__` -- one that does not gives the dict back, and with it the
+    freedom to set anything.
+    """
+    here = cls
+    while isinstance(here, Class):
+        if "__slots__" not in here.dict:
+            return True                        # no `__slots__`: a dict
+        here = here.base
+    here = cls
+    while isinstance(here, Class):
+        declared = here.dict.get("__slots__")
+        if isinstance(declared, str):
+            if declared == name:
+                return True
+        elif declared is not None:
+            try:
+                if name in declared:
+                    return True
+            except TypeError:
+                return True
+        here = here.base
+    return False
+
+
 def _apy_default_setattr(h, a):
     obj = h._get(a[0], "apy_setattr")
     name = str(h._get(a[1], "apy_setattr"))
+    if isinstance(obj, Instance) and not _slot_allows(obj.cls, name):
+        return h._fail("AttributeError",
+                       f"'{h.kind_name(obj)}' object has no attribute "
+                       f"'{name}' and no __dict__ for setting new attributes")
     value = h._get(a[2], "apy_setattr")
     if isinstance(obj, Instance):
+        # A DATA DESCRIPTOR ON THE CLASS TAKES THE WRITE -- otherwise the next
+        # read would find the stored value and the property would never be
+        # consulted again.
+        klass_d = obj.cls.find(name)
+        if klass_d is not None:
+            handled = _descr_set(h, klass_d, obj, value)
+            if handled == 0:
+                return 0
+            if handled == 1:
+                return h._none
+        obj.dict[name] = value
+        return h._none
+    if isinstance(obj, Exc):
+        # `self.code = code` in a user exception's `__init__`.
         obj.dict[name] = value
         return h._none
     if isinstance(obj, Class):
+        # `C.__name__ = ...` CHANGES WHAT THE CLASS IS CALLED. The name is a
+        # field on the class, not an entry in its dict, so storing it as an
+        # ordinary attribute left `__name__` reading the old one -- the write
+        # appeared to succeed and changed nothing.
+        if name == "__name__":
+            obj.name = str(value)
+            return h._none
+        obj.dict[name] = value
+        return h._none
+    if isinstance(obj, Func):
+        # A function carries whatever a program hangs on it, as it does in the
+        # C -- `f.__override__ = True` is a decorator doing exactly that. The
+        # dict is made on first write so an ordinary `def` costs nothing.
+        if obj.dict is None:
+            obj.dict = {}
         obj.dict[name] = value
         return h._none
     return h._no_attr(obj, name)
@@ -2561,9 +4701,29 @@ def _apy_call_kw(h, a):
     f = h._get(a[0], "apy_call_kw")
     args = [cell(i) for i in range(argc)]
     kwargs = dict(h._get(a[3], "apy_call_kw"))
+    return _call_kwargs(h, f, args, kwargs)
+
+
+def _call_kwargs(h, f, args, kwargs):
+    """One call whose keywords are matched by NAME against the callee.
+
+    Split out of `apy_call_kw` because `apy_class_build_kw` needs exactly this
+    and reads its arguments from somewhere else: `class C(metaclass=M,
+    kind="x")` is `M(name, bases, ns, kind="x")`, and the names have to land
+    on `M.__new__`'s parameters the same way any other call's do.
+    """
     target, skip = f, 0
     if isinstance(f, Class):
+        # `__new__` DECLARES THE KEYWORDS when a class writes one and leaves
+        # `__init__` to the default -- which is exactly a metaclass taking
+        # class keywords: `M.__new__(mcls, name, bases, ns, kind=None)` with
+        # `type.__init__` behind it. Reading the names off `__init__` there
+        # matched them against a native that declares none.
         target, skip = f.find("__init__"), 1
+        if not isinstance(target, Func):
+            maker = f.find("__new__")
+            if isinstance(maker, Func):
+                target = maker
     elif isinstance(f, Instance):
         target, skip = f.cls.find("__call__"), 1
     elif isinstance(f, Func) and f.bound is not None:
@@ -2582,7 +4742,14 @@ def _apy_call_kw(h, a):
     # as far as the keyword-only tail, which is the whole of `*` in a
     # signature.
     bypos = max(0, want - target.kwonly)
+    # PADDED TO `want`, so a keyword-only parameter nobody named still has a
+    # slot for its default. Sizing it from the highest keyword bound left the
+    # tail off entirely.
     slots = list(args[:bypos])
+    slots += [_MISSING] * max(0, want - len(slots))
+    # The surplus belongs to `*rest`. It is kept OUT of `slots` so it cannot
+    # overwrite the keyword-only tail, and appended after them below -- which
+    # is the layout `_invoke(bound=True)` reads.
     extra = args[bypos:]
     rest = {} if target.kwarg else None
     for name, value in kwargs.items():
@@ -2595,7 +4762,10 @@ def _apy_call_kw(h, a):
         posonly_hit = 0 <= at + skip < target.posonly
         if posonly_hit:
             at = -1
-        if at < 0 or extra:
+        # NOT `or extra`. Surplus positionals belong to `*rest`; they do
+        # not stop a keyword from naming a parameter, and least of all a
+        # keyword-only one, which no position could have filled.
+        if at < 0:
             if rest is None:
                 if posonly_hit:
                     return h._fail(
@@ -2607,7 +4777,7 @@ def _apy_call_kw(h, a):
                                f"argument '{name}'")
             rest[name] = value
             continue
-        if at < len(slots) and slots[at] is not _MISSING:
+        if 0 <= at < len(slots) and slots[at] is not _MISSING:
             return h._fail("TypeError", f"{target.name}() got multiple values "
                                         f"for argument '{name}'")
         while len(slots) <= at:
@@ -2644,6 +4814,16 @@ def _gen_cache(h, g):
     return g.cache
 
 
+#: Python's own dict views. `d.keys()` answers one of these rather than a
+#: class of this file's: they are already live, already set-like, and already
+#: iterate the way the C's do, so the two cannot drift.
+_VIEW_TYPES = (type({}.keys()), type({}.values()), type({}.items()))
+
+#: Distinguishes "the user's method failed" from "it answered handle 0".
+#: `_user` defaults to 0 on failure, and 0 is a real handle.
+_FAILED = object()
+
+
 def _seq_items(h, v, where: str):
     """The elements of a sequence, or the KEYS of a dict -- what `apy_key_at`
     walks, so that every consumer of a container agrees on what iterating it
@@ -2664,8 +4844,36 @@ def _seq_items(h, v, where: str):
         return None if got is None else list(got)
     if isinstance(v, dict):
         return list(v)
-    if isinstance(v, (list, tuple, set, frozenset, str, bytes)):
+    if isinstance(v, (list, tuple, set, frozenset, str, bytes, range)):
         return list(v)
+    if isinstance(v, _VIEW_TYPES):
+        # READ WHEN WALKED, which is what makes a view live: the keys are the
+        # ones the dict has now, not the ones it had when the view was made.
+        return list(v)
+    if isinstance(v, Instance):
+        # THROUGH `_apy_iterable`, NOT A SECOND COPY OF THE RULES. It already
+        # knows the whole protocol -- `__iter__`, the iterator check, the
+        # `__len__`-bounded `__getitem__` walk -- and restating any of it here
+        # is how the two drift. They did: one copy accepted a non-iterator.
+        walked = _apy_iterable(h, [h._new(v)])
+        if walked == 0:
+            return None
+        got = h._get(walked, where)
+        # `_apy_iterable` answers the object unchanged when the index walk is
+        # already the right thing, which for an Instance means `__len__` plus
+        # `__getitem__`.
+        if got is v:
+            limit = _user(h, lambda: v._send("__len__"), fail=_FAILED)
+            if limit is _FAILED:
+                return None
+            out = []
+            for i in range(int(limit)):
+                item = _apy_getitem(h, [h._new(v), h._int(i)])
+                if item == 0:
+                    return None
+                out.append(h._get(item, where))
+            return out
+        return list(got) if isinstance(got, (list, tuple)) else got
     h._fail("TypeError", f"'{h.kind_name(v)}' object is not iterable")
     return None
 
@@ -2711,6 +4919,17 @@ def _apy_sum(h, a):
 
 
 def _apy_sum_from(h, a):
+    # `sum` REFUSES STRINGS, and it is not an oversight in CPython: joining
+    # this way is quadratic and `''.join(...)` is the answer. Python's own
+    # `sum` refuses too, but with `start` first in the message -- the C names
+    # the sequence type, so the check is made here to keep the two identical.
+    start = h._get(a[1], "apy_sum_from")
+    if isinstance(start, str):
+        return h._fail("TypeError",
+                       "sum() can't sum strings [use ''.join(seq) instead]")
+    if isinstance(start, (bytes, bytearray)):
+        return h._fail("TypeError",
+                       "sum() can't sum bytes [use b''.join(seq) instead]")
     items = _seq_items(h, h._get(a[0], "apy_sum_from"), "apy_sum_from")
     if items is None:
         return 0
@@ -2770,7 +4989,22 @@ def _apy_reversed(h, a):
     """`reversed(xs)` -- a LIST, not a cursor, because reversing needs the
     length: there is nothing to reverse until the source has been walked, so
     the laziness the other four have is not available here."""
-    items = _seq_items(h, h._get(a[0], "apy_reversed"), "apy_reversed")
+    v = h._get(a[0], "apy_reversed")
+    # `__reversed__` WINS OVER THE INDEX WALK. A class may define both it and
+    # `__getitem__`, and they need not agree -- the hook is the answer the
+    # class chose.
+    if isinstance(v, Instance) and v.cls.find("__reversed__") is not None:
+        got = _user(h, lambda: v._send("__reversed__"), fail=_FAILED)
+        if got is _FAILED:
+            return None if False else 0
+        items = _seq_items(h, got, "apy_reversed")
+        return 0 if items is None else h._new(list(items))
+    # A SET HAS NO ORDER TO REVERSE. It has a length and could be walked, which
+    # is exactly why this refuses explicitly rather than answering confidently.
+    if isinstance(v, (set, frozenset)):
+        return h._fail("TypeError",
+                       f"'{h.kind_name(v)}' object is not reversible")
+    items = _seq_items(h, v, "apy_reversed")
     if items is None:
         return 0
     return h._new(list(reversed(items)))
@@ -2804,10 +5038,18 @@ def _zip_two(h, a):
 
 
 def _apy_range(h, a):
+    """`range(...)` as A LAZY SEQUENCE, which is Python's own `range`.
+
+    Materialised into a list before, so `type(range(3)).__name__` said `list`
+    and `range(10**9)` would have built a billion elements. Python's `range`
+    IS the object the C's `APY_RANGE_K` reproduces -- length, indexing,
+    slicing, membership and equality are all arithmetic on three numbers in
+    both -- so using it here is the closest the two paths can be.
+    """
     start, stop, step = int(a[0]), int(a[1]), int(a[2])
     if step == 0:
         return h._fail("ValueError", "range() arg 3 must not be zero")
-    return h._new(list(range(start, stop, step)))
+    return h._new(range(start, stop, step))
 
 
 def _apy_abs(h, a):
@@ -2823,6 +5065,14 @@ def _apy_abs(h, a):
 
 
 def _apy_round(h, a):
+    _v = h._get(a[0], "apy_round")
+    # `__round__` WITH NO DIGITS. A class defining it decides what rounding
+    # itself means.
+    _got = _dunder_number(h, _v, ("__round__",))
+    if _got is not None:
+        return h._value(_got)
+    if h.err is not None:
+        return 0
     v = h._get(a[0], "apy_round")
     if isinstance(v, bool) or isinstance(v, int):
         return h._int(int(v))
@@ -2840,6 +5090,12 @@ def _apy_round_to(h, a):
     precision: this one answers a float where that one answers an int."""
     v = h._get(a[0], "apy_round_to")
     nd = h._get(a[1], "apy_round_to")
+    # `__round__(ndigits)` -- the two-argument form, a different call into the
+    # same hook. Asked BEFORE the None check, because a class may well be
+    # rounded to no digits through it.
+    if isinstance(v, Instance) and v.cls.find("__round__") is not None:
+        got = _user(h, lambda: v._send("__round__", nd), fail=_FAILED)
+        return 0 if got is _FAILED else h._value(got)
     if nd is None:
         return _apy_round(h, a)
     if isinstance(nd, bool) or not isinstance(nd, int):
@@ -2853,9 +5109,31 @@ def _apy_round_to(h, a):
     return h._new(round(v, nd))
 
 
+def _meta_check(h, cls, other, hook_name):
+    """`__instancecheck__` / `__subclasscheck__` on the metaclass, if it has
+    one. Asked BEFORE anything structural, which is what lets a metaclass
+    claim a class it has no relationship to -- and answers a BOOL whatever the
+    hook returned, as CPython does."""
+    if not isinstance(cls, Class) or cls.meta is None:
+        return None
+    hook = cls.meta.lookup(hook_name)
+    if hook is _ABSENT:
+        return None
+    return h._new(bool(h._invoke(hook, [cls, other])))
+
+
 def _apy_is_subclass(h, a):
     x = h._get(a[0], "apy_is_subclass")
     y = h._get(a[1], "apy_is_subclass")
+    # BUILTIN TYPES REACHED AS VALUES: `issubclass(bool, int)`. Each side is a
+    # callable thunk carrying its name, so the question is asked of the names
+    # -- the same rule `isinstance` uses.
+    if isinstance(x, Func) and getattr(x, "is_type", False)             and isinstance(y, Func) and getattr(y, "is_type", False):
+        return h._new(x.name == y.name or y.name == "object"
+                      or (x.name == "bool" and y.name == "int"))
+    decided = _meta_check(h, y, x, "__subclasscheck__")
+    if decided is not None:
+        return decided
     if not isinstance(x, Class):
         return h._fail("TypeError", "issubclass() arg 1 must be a class")
     if not isinstance(y, Class):
@@ -2874,9 +5152,43 @@ def _apy_is_subclass(h, a):
 
 def _apy_exc_type(h, a):
     """A builtin exception NAME as a value. Interned by `_type_of`, so the
-    same name is the same object and `type(e) is ValueError` holds."""
-    return h._new(h._type_of(Exc(str(h._get(a[0], "apy_exc_type")), None,
-                                 False)))
+    same name is the same object and `type(e) is ValueError` holds.
+
+    `h._value`, not `h._new`: `is` compares HANDLES, and minting a fresh one
+    for an object that already has a handle makes `OSError is OSError` False
+    -- which is exactly what `IOError is OSError` asks after the alias rewrite
+    points both spellings at the one name.
+    """
+    name = str(h._get(a[0], "apy_exc_type"))
+    # THE CLASS THE PROGRAM WROTE, when it wrote one. `except AppError:`,
+    # `isinstance(e, AppError)` and `super()` inside its own method must all
+    # reach the SAME object, or a method found through one would be missing
+    # through another.
+    if name in h.exc_class:
+        return h._value(h.exc_class[name])
+    return h._value(h._type_of(Exc(name, None, False)))
+
+
+def _apy_id(h, a):
+    """`id(x)` -- a number that is distinct for distinct live objects.
+
+    THE HANDLE, not Python's `id()`. A handle already names one cell of this
+    host, which is exactly the identity `is` compares, and Python's own id
+    would answer about the box a small int is cached in rather than about the
+    value the program is holding.
+    """
+    return h._int(int(a[0]))
+
+
+def _apy_dict_get(h, a):
+    """`d[k]` for a dict, with the KeyError a miss raises.
+
+    Not `dict.get`, which has a default and never raises: this is the
+    subscript, reached by name from code that already knows it holds a dict.
+    """
+    d = h._get(a[0], "apy_dict_get")
+    key = h._get(a[1], "apy_dict_get")
+    return _dict_get(h, d, key)
 
 
 def _apy_vars(h, a):
@@ -2902,6 +5214,15 @@ def _apy_delattr(h, a):
 def _apy_default_delattr(h, a):
     obj = h._get(a[0], "apy_delattr")
     name = str(h._get(a[1], "apy_delattr"))
+    if isinstance(obj, Instance):
+        # A DATA DESCRIPTOR OWNS THE DELETION. `del obj.v` on a property runs
+        # its `@v.deleter`; without this it looked in the instance dict, found
+        # nothing there -- a property never puts anything there -- and reported
+        # a missing attribute for one the class plainly defines.
+        found = obj.cls.lookup(name)
+        if isinstance(found, Descr) and found.del_ is not None:
+            return _user(h, lambda: h._value(
+                h._invoke(found.del_, [obj])))
     if not isinstance(obj, Instance) or name not in obj.dict:
         return h._fail("AttributeError",
                        f"'{h.kind_name(obj)}' object has no attribute "
@@ -2928,12 +5249,575 @@ def _apy_iter_until(h, a):
     return h._new(Iterator(out))
 
 
+# ── match ───────────────────────────────────────────────────────────────────
+# The predicates a `case` pattern needs that nothing else does. Class and value
+# patterns reuse `apy_isinstance` and `apy_eq`; these are the parts with rules
+# of their own.
+
+
+def _apy_match_seq(h, a):
+    """Does a SEQUENCE pattern -- `case [a, b]` -- apply to this value?
+
+    A str is NOT a sequence for matching, and neither is bytes. `case [x, y]`
+    against "ab" must not bind 'a' and 'b': Python excludes them because
+    matching a string element-wise is almost never what was meant, and the
+    loop that did it would silently succeed.
+    """
+    v = h._get(a[0], "apy_match_seq")
+    return 1 if isinstance(v, (list, tuple)) else 0
+
+
+def _apy_match_map(h, a):
+    """Does a MAPPING pattern -- `case {"k": v}` -- apply?"""
+    return 1 if isinstance(h._get(a[0], "apy_match_map"), dict) else 0
+
+
+def _apy_match_args(h, a):
+    """`cls.__match_args__`, or an empty tuple.
+
+    POSITIONAL SUB-PATTERNS ARE ATTRIBUTE NAMES: `case Point(0, y)` means
+    "attribute `x` equals 0, bind attribute `y`", and the class says which
+    attributes those are. A class without the declaration accepts no
+    positional patterns, which the length check that follows reports.
+    """
+    cls = h._get(a[0], "apy_match_args")
+    if isinstance(cls, Class):
+        got = cls.find("__match_args__")
+        if isinstance(got, (tuple, list)):
+            return h._value(tuple(got))
+    return h._new(())
+
+
+def _apy_match_rest(h, a):
+    """What `**rest` in a mapping pattern binds: the dict MINUS the keys the
+    pattern named. A copy, because the subject must not change shape because
+    something matched it."""
+    d = h._get(a[0], "apy_match_rest")
+    used = h._get(a[1], "apy_match_rest")
+    if not isinstance(d, dict):
+        return h._new({})
+    drop = list(used) if isinstance(used, (list, tuple)) else []
+    return h._new({k: v for k, v in d.items()
+                   if not any(k == u for u in drop)})
+
+
+# ── slice ───────────────────────────────────────────────────────────────────
+# `a:b:c` AS A VALUE. Built only where one is needed as an object -- a user
+# `__getitem__` receives it, and `c[1:2, 3]` puts one in a tuple. Slicing a
+# list or a str still goes straight through without allocating.
+#
+# Python's own `slice` is used rather than a class of this file's own, so its
+# repr, its `.indices` and its equality all come free and match the C by
+# construction.
+
+
+def _apy_slice_new(h, a):
+    """`slice(start, stop, step)`. Each may be None -- an omitted bound is not
+    the same as any number, which is why the three are kept rather than
+    resolved to indices here."""
+    return h._new(slice(h._get(a[0], "apy_slice_new"),
+                        h._get(a[1], "apy_slice_new"),
+                        h._get(a[2], "apy_slice_new")))
+
+
+def _apy_slice_indices(h, a):
+    """`s.indices(n)` -- the (start, stop, step) a walk over a sequence of that
+    length would really use, with omitted and negative bounds resolved."""
+    sl = h._get(a[0], "apy_slice_indices")
+    if not isinstance(sl, slice):
+        return h._fail("AttributeError",
+                       f"'{h.kind_name(sl)}' object has no attribute "
+                       f"'indices'")
+    try:
+        return h._new(sl.indices(int(h._get(a[1], "apy_slice_indices"))))
+    except (TypeError, ValueError) as exc:
+        return h._fail_like(exc)
+
+
+def _apy_dir(h, a):
+    """`dir(x)` -- the names it answers to, SORTED.
+
+    `__dir__` overrides the whole computation, and its answer is sorted but
+    NOT deduplicated: CPython sorts what the method returned and hands it
+    back, so `["b", "a", "a"]` becomes `["a", "a", "b"]`. Deduplicating would
+    be tidier and would disagree.
+
+    Without the hook it is the instance's own attributes plus every class in
+    the chain -- which IS deduplicated, because a subclass overriding a method
+    must not make it appear twice.
+    """
+    v = h._get(a[0], "apy_dir")
+    if isinstance(v, Instance) and v.cls.find("__dir__") is not None:
+        got = _user(h, lambda: v._send("__dir__"))
+        if got == 0:
+            return 0
+        return h._new(sorted(got))
+    names = []
+    def add(seq):
+        for n in seq:
+            if n not in names:
+                names.append(n)
+    if isinstance(v, Instance):
+        add(v.dict)
+        cls = v.cls
+        while isinstance(cls, Class):
+            add(cls.dict)
+            cls = cls.base
+    elif isinstance(v, Class):
+        cls = v
+        while isinstance(cls, Class):
+            add(cls.dict)
+            cls = cls.base
+    # A built-in kind answers an empty list rather than a made-up one: the
+    # method table lives in the frontend, not anywhere this can enumerate.
+    return h._new(sorted(names))
+
+
+# ── exception groups ────────────────────────────────────────────────────────
+# PEP 654. A group IS an exception -- it has a name and a message and
+# propagates the same way -- and what distinguishes it is the exceptions it
+# carries.
+
+
+def _apy_excgroup_new(h, a):
+    """`ExceptionGroup(msg, [excs])`."""
+    msg = h._get(a[0], "apy_excgroup_new")
+    excs = h._get(a[1], "apy_excgroup_new")
+    if not isinstance(excs, (list, tuple)):
+        return h._fail("TypeError",
+                       "second argument (exceptions) must be a sequence")
+    if not excs:
+        return h._fail("ValueError",
+                       "second argument (exceptions) must be a non-empty "
+                       "sequence")
+    g = Exc("ExceptionGroup", msg)
+    g.subs = list(excs)
+    return h._new(g)
+
+
+def _group_select(h, g, want, keep):
+    """Every leaf of `g` that matches `want`, as a group of the SAME SHAPE --
+    or None when nothing in it does.
+
+    The nesting is preserved: a match inside an inner group comes back inside
+    an inner group, because `split` is defined to give back something you
+    could have raised. That is what makes the two halves add up.
+    """
+    picked = []
+    for one in getattr(g, "subs", None) or []:
+        if isinstance(one, Exc) and getattr(one, "subs", None):
+            inner = _group_select(h, one, want, keep)
+            if inner is not None:
+                picked.append(inner)
+            continue
+        hit = _apy_isinstance(h, [h._new(one), h._new(want)])
+        if hit == 0:
+            return None
+        if bool(h._get(hit, "split")) is bool(keep):
+            picked.append(one)
+    if not picked:
+        return None
+    out = Exc("ExceptionGroup", g.arg if g.has_arg else None)
+    out.subs = picked
+    return out
+
+
+def _apy_group_subgroup(h, a):
+    """`g.subgroup(T)` -- the part that matches, or None."""
+    g = h._get(a[0], "apy_group_subgroup")
+    if not isinstance(g, Exc) or not getattr(g, "subs", None):
+        return h._fail("AttributeError",
+                       f"'{h.kind_name(g)}' object has no attribute "
+                       f"'subgroup'")
+    got = _group_select(h, g, h._get(a[1], "apy_group_subgroup"), True)
+    return h._new(got) if got is not None else h._none
+
+
+def _apy_group_split(h, a):
+    """`g.split(T)` -- `(matching, rest)`, either of which may be None.
+    Together they hold every leaf the original did."""
+    g = h._get(a[0], "apy_group_split")
+    if not isinstance(g, Exc) or not getattr(g, "subs", None):
+        return h._fail("AttributeError",
+                       f"'{h.kind_name(g)}' object has no attribute 'split'")
+    want = h._get(a[1], "apy_group_split")
+    hit = _group_select(h, g, want, True)
+    miss = _group_select(h, g, want, False)
+    return h._new((hit if hit is not None else None,
+                   miss if miss is not None else None))
+
+
+def _tgexit_coro(group):
+    """What `__aexit__` answers: a coroutine that finishes once every task
+    the group started has."""
+    g = Gen(None, 1)
+    g.coro = True
+    g.builtin = _CORO_TGWAIT
+    g.slots[0] = group.dict["_tasks"]
+    return g
+
+
+def _tg_create(h, group, coro):
+    made = _apy_asyncio_create_task(h, [h._new(coro)])
+    if made == 0:
+        return 0
+    group.dict["_tasks"].append(h._get(made, "create_task"))
+    return made
+
+
+def _apy_pos_add(h, a):
+    """Record one statement's position. Called once each, at program start."""
+    h.positions.append((str(h._get(a[0], "apy_pos_add")),
+                        int(a[1]), int(a[2]), int(a[3]), int(a[4])))
+    return h._none
+
+
+def _apy_at(h, a):
+    """Say which statement is running now."""
+    h.pos_here = int(a[0])
+    return h._none
+
+
+def _apy_code_of(h, a):
+    """The code object a frame names, built from what `_apy_pos_add`
+    recorded. Interned per function name, so two tracebacks out of one
+    function name the same object."""
+    name = str(h._get(a[0], "apy_code_of"))
+    made = h._code_objects.get(name)
+    if made is not None:
+        return h._new(made)
+    cls = h._traceback_code_class()
+    code = Instance(cls, h)
+    rows = [(line, end_line, col, end_col)
+            for fn, line, end_line, col, end_col in h.positions if fn == name]
+    code.dict["co_name"] = name
+    code.dict["co_qualname"] = name
+    code.dict["co_filename"] = "<compiled>"
+    code.dict["_positions"] = rows
+    code.dict["co_firstlineno"] = rows[0][0] if rows else 0
+    h._code_objects[name] = code
+    return h._new(code)
+
+
+def _traceback_of(h, exc):
+    """The traceback an exception carries.
+
+    ONE FRAME DEEP -- there is no call stack here, so the chain a real
+    traceback walks has a single link and `tb_next` is None. Saying that is
+    better than inventing frames the runtime never had.
+    """
+    at = getattr(exc, "pos", -1)
+    row = h.positions[at] if 0 <= at < len(h.positions) else None
+    where = row[0] if row else "<module>"
+    code = h._get(_apy_code_of(h, [h._new(where)]), "traceback")
+    frame = Instance(h._traceback_frame_class(), h)
+    frame.dict["f_code"] = code
+    frame.dict["f_lineno"] = row[1] if row else 0
+    frame.dict["f_globals"] = {}
+    frame.dict["f_locals"] = {}
+    tb = Instance(h._traceback_class(), h)
+    tb.dict["tb_frame"] = frame
+    tb.dict["tb_lineno"] = row[1] if row else 0
+    tb.dict["tb_lasti"] = -1
+    tb.dict["tb_next"] = None
+    return tb
+
+
+def _apy_ns_get(h, a):
+    """A class body's namespace, read by name.
+
+    NOT `apy_dict_get`, whose miss is a KeyError: this stands for reading a
+    NAME, and a name that is not bound is a NameError. Both spellings are
+    passed because the KEY is mangled -- `__x` inside `class C` is stored as
+    `_C__x` -- and the message has to say what the program wrote.
+    """
+    ns = h._get(a[0], "apy_ns_get")
+    key = h._get(a[1], "apy_ns_get")
+    if key in ns:
+        return h._value(ns[key])
+    shown = h._get(a[2], "apy_ns_get")
+    return h._fail("NameError", f"name '{shown}' is not defined")
+
+
+# ── PEP 750 template strings ────────────────────────────────────────────────
+# A t-string DOES NOT JOIN. That is the whole of it: an f-string decides at the
+# point of writing that the answer is text and throws away everything it used
+# to get there, and a template keeps the pieces apart so that whatever consumes
+# it decides instead -- which is what makes one safe to hand a SQL or HTML
+# builder and the other not.
+
+
+def _apy_interpolation_new(h, a):
+    """One replacement field: what was WRITTEN and what it CAME TO.
+
+    The expression source is kept because a consumer that reports an error, or
+    builds a query with named parameters, needs the text -- and an f-string has
+    already discarded it by the time anyone could ask.
+    """
+    one = Instance(h._interp_class(), h)
+    one.dict["value"] = h._get(a[0], "apy_interpolation_new")
+    one.dict["expression"] = h._get(a[1], "apy_interpolation_new")
+    one.dict["conversion"] = h._get(a[2], "apy_interpolation_new")
+    one.dict["format_spec"] = h._get(a[3], "apy_interpolation_new")
+    return h._new(one)
+
+
+def _apy_template_new(h, a):
+    """The template itself. `strings` is ALWAYS one longer than
+    `interpolations` -- an empty piece stands between two adjacent fields, and
+    one stands at each end -- so a consumer walks them in lockstep without
+    having to ask which of the two came first."""
+    t = Instance(h._template_class(), h)
+    t.dict["strings"] = h._get(a[0], "apy_template_new")
+    t.dict["interpolations"] = h._get(a[1], "apy_template_new")
+    t.dict["values"] = h._get(a[2], "apy_template_new")
+    return h._new(t)
+
+
+def _apy_group_dispatch(h, a):
+    """PEP 654's `except*` dispatch, whole, in one call.
+
+    EVERY CLAUSE RUNS -- not the first that matches. A group carrying a
+    ValueError and a TypeError enters both handlers, each holding its own
+    half, and that is the entire difference from `except`. Splitting here
+    rather than as a chain of calls in the lowering keeps the LEFTOVER in one
+    place, and the leftover is what has to be re-raised once the clauses
+    between them have not accounted for everything.
+
+    Answers one entry per clause -- what it catches, or None -- and last what
+    nothing caught, or None.
+    """
+    raised = h._get(a[0], "apy_group_dispatch")
+    types = h._get(a[1], "apy_group_dispatch")
+    wrapped = not (isinstance(raised, Exc) and getattr(raised, "subs", None))
+    if wrapped:
+        # A BARE EXCEPTION IS A GROUP OF ONE to `except*`, which is why a
+        # handler binds a group even where the program raised a plain
+        # ValueError.
+        rest = Exc("ExceptionGroup", "")
+        rest.subs = [raised]
+    else:
+        rest = raised
+    out, any_hit = [], False
+    for want in types:
+        hit = _group_select(h, rest, want, True) if rest is not None else None
+        if hit is not None:
+            any_hit = True
+            rest = _group_select(h, rest, want, False)
+        out.append(hit)
+    if not any_hit:
+        # NOTHING MATCHED, so the ORIGINAL propagates -- not the wrapper this
+        # made to split with. A program catching the plain ValueError outside
+        # must see the ValueError.
+        rest = raised
+    elif rest is not None and wrapped:
+        subs = getattr(rest, "subs", None) or []
+        if len(subs) == 1:
+            rest = subs[0]
+    out.append(rest)
+    return h._new(tuple(out))
+
+
+def _apy_split_of(h, a):
+    """`x.split(y)` where `x` may be a str OR an ExceptionGroup.
+
+    ONE METHOD NAME, TWO RECEIVERS, and which is meant is not known until run
+    time -- the same shape `count` and `index` have.
+    """
+    x = h._get(a[0], "apy_split_of")
+    if isinstance(x, Exc) and getattr(x, "subs", None):
+        return _apy_group_split(h, a)
+    return _TABLE["apy_str_split"](h, a)
+
+
+# ── generic aliases and builtin type values ─────────────────────────────────
+# A builtin type name reaches a program as a one-argument thunk -- that is what
+# makes `map(str, xs)` work -- but it is also a TYPE: `print(int)` says
+# `<class 'int'>` and `list[int]` parameterises it. The thunk carries a flag
+# rather than becoming a real class, because the call path would otherwise have
+# to learn to construct from one for the same observable result.
+
+
+class Alias:
+    """`list[int]` -- a PARAMETERISED type.
+
+    Not a type itself: nothing is instantiated from one here, and what a
+    program does with it is print it or write it in an annotation. Kept as the
+    origin and the arguments so the repr can be rebuilt exactly.
+    """
+
+    __slots__ = ("origin", "args")
+
+    def __init__(self, origin, args) -> None:
+        self.origin = origin
+        self.args = args
+
+
+def _alias_part(x) -> str:
+    """How one piece of an alias renders.
+
+    A TYPE ARGUMENT USES ITS NAME even though `str(int)` is `<class 'int'>`:
+    CPython's alias repr uses the qualname, and the difference shows in every
+    annotation a program prints.
+    """
+    if isinstance(x, Func) and getattr(x, "is_type", False):
+        return x.name
+    if isinstance(x, Class):
+        # `NoneType` IS SPELLED `None` inside a union, which is how CPython
+        # prints `int | None`: the class is what the union HOLDS and `None` is
+        # what it is written as.
+        return "None" if x.name == "NoneType" else x.name
+    form = _form_name(x)
+    if form is not None:
+        return "typing." + form
+    return repr(x)
+
+
+def _apy_alias_new(h, a):
+    return h._new(Alias(h._get(a[0], "apy_alias_new"),
+                        h._get(a[1], "apy_alias_new")))
+
+
+def _apy_func_qualname(h, a):
+    """PEP 3155: record a function's qualified name."""
+    f = h._get(a[0], "apy_func_qualname")
+    if isinstance(f, Func):
+        f.qualname = str(h._get(a[1], "apy_func_qualname"))
+    return a[0]
+
+
+def _apy_func_annotate(h, a):
+    """PEP 649: record the thunk that builds this function's annotations."""
+    f = h._get(a[0], "apy_func_annotate")
+    if isinstance(f, Func):
+        f.annotate = h._get(a[1], "apy_func_annotate")
+    return a[0]
+
+
+def _apy_func_builtin(h, a):
+    """Mark a thunk as standing for a BUILTIN reached as a value."""
+    f = h._get(a[0], "apy_func_builtin")
+    if isinstance(f, Func):
+        f.builtin = True
+    return a[0]
+
+
+def _apy_func_is_type(h, a):
+    """Mark a thunk as standing for a builtin TYPE, and hand back the
+    CANONICAL one for that name. It stays callable.
+
+    `int` mentioned twice built two thunks, so `int == int` was False. See the
+    C for why interning by name is not the `type(1) is int` registry that was
+    tried and reverted.
+    """
+    f = h._get(a[0], "apy_func_is_type")
+    if not isinstance(f, Func):
+        return a[0]
+    f.is_type = True
+    found = h._type_thunks.get(f.name)
+    if found is not None:
+        return found
+    h._type_thunks[f.name] = a[0]
+    return a[0]
+
+
+def _apy_type_object(h, a):
+    """`type(x)` -- a TYPE OBJECT, not its name.
+
+    THE SAME OBJECT THE NAME ANSWERS when the program mentions that builtin
+    type anywhere, so `type(1) is int` holds. The frontend registers each at
+    the top of the entry, before any statement, which takes the evaluation
+    order out of it.
+    """
+    v = h._get(a[0], "apy_type_object")
+    if not isinstance(v, (Instance, Class)):
+        found = h._type_thunks.get(h.kind_name(v))
+        if found is not None:
+            return found
+    return h._value(h._type_of(v))
+
+
+def _apy_ascii(h, a):
+    """`ascii(x)` -- `repr(x)` with every non-ASCII character escaped.
+
+    NOT AN ALIAS FOR `repr`, which is what it was: `repr('aé')` is
+    `'aé'` and `ascii('aé')` is `'a\xe9'`. The whole point is that
+    the answer survives a channel that cannot carry the character, so handing
+    back the character defeats it.
+    """
+    shown = _apy_repr(h, a)
+    if shown == 0:
+        return 0
+    # `backslashreplace` produces exactly Python's three escape widths --
+    # `\xNN`, `\uNNNN`, `\UNNNNNNNN` -- so the C and this cannot drift on
+    # which one a code point gets.
+    text = h._get(shown, "apy_ascii")
+    return h._new(text.encode("ascii", "backslashreplace").decode("ascii"))
+
+
+def _apy_hex_of(h, a):
+    """`x.hex()` where `x` may be BYTES or a FLOAT.
+
+    ONE METHOD NAME, TWO RECEIVERS, and the two answer entirely different
+    things: bytes give their contents in hex digits, a float gives the exact
+    binary value it holds. Python's own `float.hex` is used rather than a
+    format string, so the thirteen-digit mantissa and the `0x0.0p+0` spelling
+    of zero cannot drift from the C.
+    """
+    x = h._get(a[0], "apy_hex_of")
+    if isinstance(x, float):
+        return h._new(x.hex())
+    return _TABLE["apy_bytes_hex"](h, a)
+
+
+def _apy_float_fromhex(h, a):
+    """`float.fromhex('0x1.4p+1')` -- exact, which is the point of it."""
+    text = h._get(a[0], "apy_float_fromhex")
+    if not isinstance(text, str):
+        return h._fail("TypeError", f"fromhex() argument must be str, not "
+                                    f"{h.kind_name(text)}")
+    try:
+        return h._new(float.fromhex(text))
+    except ValueError as exc:
+        return h._fail_like(exc)
+
+
+def _apy_dict_view(h, a):
+    """`d.keys()` -- A WINDOW ON THE DICT, not a copy of it.
+
+    Python's own view objects are used rather than a class of this file's: they
+    are already live, already set-like, and already compare and iterate the way
+    the C's do -- so the two cannot drift on any of it.
+    """
+    d = h._get(a[0], "apy_dict_view")
+    if not isinstance(d, dict):
+        return h._fail("AttributeError",
+                       f"'{h.kind_name(d)}' object has no attribute 'keys'")
+    which = int(a[1])
+    return h._new(d.keys() if which == 0
+                  else d.values() if which == 1 else d.items())
+
+
+def _apy_view_items(h, a):
+    """What the view shows RIGHT NOW, as a list. Read at the moment it is
+    asked for rather than when the view was made -- that is the liveness."""
+    v = h._get(a[0], "apy_view_items")
+    return h._new(list(v))
+
+
 def _apy_isinstance(h, a):
     # A TUPLE OF TYPES means ANY OF THESE, and there is no ambiguity with
     # asking about the tuple type itself: `isinstance(x, tuple)` arrives as
     # the STRING "tuple", because a builtin kind has no value form.
     v = h._get(a[0], "apy_isinstance")
     spec = h._get(a[1], "apy_isinstance")
+    decided = _meta_check(h, spec, v, "__instancecheck__")
+    if decided is not None:
+        return decided
+    # PEP 604: `isinstance(x, int | str)` asks each ARM, which is the same
+    # question a tuple of types asks and is answered the same way.
+    if isinstance(spec, Alias) and isinstance(spec.origin, Instance):
+        return _apy_isinstance(h, [a[0], h._new(tuple(spec.args))])
     if isinstance(spec, tuple):
         for element in spec:
             got = _apy_isinstance(h, [a[0], h._value(element)])
@@ -2946,12 +5830,31 @@ def _apy_isinstance(h, a):
     # A real TYPE OBJECT, for a user class: the frontend passes the class
     # itself when the name resolves to one, and its text otherwise. Comparing
     # names would make two classes both called `Node` instances of each other.
+    if isinstance(want, Func) and getattr(want, "is_type", False):
+        # `t = int; isinstance(x, t)` -- the same question as the literal
+        # form, which the frontend rewrites to a name at the call site.
+        return _apy_isinstance(h, [a[0], h._new(want.name)])
     if isinstance(want, Class):
+        # AN EXCEPTION TYPE REACHED AS A VALUE. `isinstance(e, ValueError)` is
+        # rewritten to the NAME at the call site, but `t = ValueError;
+        # isinstance(e, t)` -- and `g.split(ValueError)` -- hand the type
+        # object over, and an exception is not an `Instance`. It answered
+        # False for every such test: a wrong answer, not a refusal.
+        if isinstance(v, Exc):
+            return _apy_isinstance(h, [a[0], h._new(want.name)])
         return h._bool(isinstance(v, Instance) and v.cls.is_sub(want))
     have = h.kind_name(v)
     # An INSTANCE never matches a builtin name. Its kind_name is its class's
     # name, so without this a class called `int` would answer True.
     if isinstance(v, Instance):
+        # EXCEPT WHEN ITS CLASS EXTENDS ONE. `class D(dict)` makes every D an
+        # instance of `dict`, which is what the base says and what a program
+        # testing `isinstance(d, dict)` is asking.
+        if v.held is not None:
+            if h.kind_name(v.held) == want:
+                return h._bool(True)
+            if want != "object":
+                return _apy_isinstance(h, [h._new(v.held), a[1]])
         return h._bool(want == "object")
     if have == want or want == "object":
         return h._bool(True)
@@ -2980,18 +5883,51 @@ def _apy_slice(h, a):
     has_start, has_stop = int(a[4]), int(a[5])
     if step == 0:
         return h._fail("ValueError", "slice step cannot be zero")
-    if not isinstance(v, (list, tuple, str, bytes)):
+    sl = slice(start if has_start else None,
+               stop if has_stop else None, None if step == 1 else step)
+    # A USER OBJECT GETS THE SLICE AS AN OBJECT. `c[1:2]` on an instance is
+    # `c.__getitem__(slice(1, 2, None))` -- the class decides what a slice of
+    # it means, and it can only do that if it is handed one.
+    if isinstance(v, Instance):
+        return _apy_getitem(h, [a[0], h._new(sl)])
+    # A SLICE OF A RANGE IS A RANGE, not a list -- Python's own `range`
+    # answers one, which is the behaviour the C reproduces.
+    if isinstance(v, range):
+        return h._new(v[sl])
+    if not isinstance(v, (list, tuple, str, bytes, bytearray, memoryview)):
         return h._fail("TypeError",
                        f"'{h.kind_name(v)}' object is not subscriptable")
-    sl = slice(start if has_start else None,
-               stop if has_stop else None, step)
+    # SLICING A MEMORYVIEW ANSWERS A MEMORYVIEW, not a copy -- Python's own
+    # type does that, which is why this one line covers it.
     return h._new(v[sl])
 
 
 # ── list and dict methods ───────────────────────────────────────────────────
 
+def _dict_pop(h, d, key, fallback, has_default):
+    """`d.pop(k)` and `d.pop(k, default)`. A MISSING KEY WITH NO DEFAULT IS A
+    KeyError, which is the whole difference from `d.get(k)`."""
+    if key not in d:
+        if has_default:
+            return fallback
+        # The KEY'S REPR is the message, as every missing-key report here
+        # does it -- `KeyError: 'a'` and not `KeyError: a`.
+        return h._fail("KeyError", repr(key))
+    return h._value(d.pop(key))
+
+
 def _apy_list_pop(h, a):
     v = h._get(a[0], "apy_list_pop")
+    # A DICT OR A SET REACHES HERE TOO -- one method name, three receivers,
+    # and the frontend cannot know which it has until run time. `d.pop(k)`
+    # takes a KEY where `xs.pop(i)` takes an index, so those split off before
+    # anything treats the argument as a position.
+    if isinstance(v, dict):
+        return _dict_pop(h, v, h._get(a[1], "apy_list_pop"), None, False)
+    if isinstance(v, (set, frozenset)):
+        if not v:
+            return h._fail("KeyError", "'pop from an empty set'")
+        return h._value(next(iter(v)) if isinstance(v, frozenset) else v.pop())
     if not isinstance(v, list):
         return h._fail("AttributeError",
                        f"'{h.kind_name(v)}' object has no attribute 'pop'")
@@ -3004,9 +5940,45 @@ def _apy_list_pop(h, a):
         return h._fail("IndexError", "pop index out of range")
 
 
+def _apy_pop_or(h, a):
+    """`d.pop(k, default)`. Its own entry point because the method table is
+    keyed by ARGUMENT COUNT, and at two arguments `xs.pop(i)` cannot be
+    meant."""
+    d = h._get(a[0], "apy_pop_or")
+    if not isinstance(d, dict):
+        return h._fail("TypeError",
+                       f"pop() takes at most 1 argument for "
+                       f"'{h.kind_name(d)}'")
+    return _dict_pop(h, d, h._get(a[1], "apy_pop_or"), a[2], True)
+
+
+def _apy_dict_popitem(h, a):
+    """`d.popitem()` -- the LAST pair, and removed. Last rather than
+    arbitrary: CPython has taken it from the end since dicts became ordered,
+    so a loop that pops a dict empty sees the reverse of insertion order."""
+    d = h._get(a[0], "apy_dict_popitem")
+    if not isinstance(d, dict):
+        return h._fail("AttributeError",
+                       f"'{h.kind_name(d)}' object has no attribute "
+                       f"'popitem'")
+    if not d:
+        # QUOTED: `str(KeyError(x))` is the REPR of the argument, so the
+        # message carries its own quotes rather than being re-quoted.
+        return h._fail("KeyError", "'popitem(): dictionary is empty'")
+    return h._value(d.popitem())
+
+
 def _apy_index_of(h, a):
     v = h._get(a[0], "apy_index_of")
     item = h._get(a[1], "apy_index_of")
+    # A str OR BYTES receiver means SUBSTRING search, not element search. The
+    # element loop below answers for a one-character needle and silently
+    # wrongly for any longer one.
+    if isinstance(v, (str, bytes)):
+        try:
+            return h._int(v.index(item))
+        except ValueError:
+            return h._fail("ValueError", "substring not found")
     items = _seq_items(h, v, "apy_index_of")
     if items is None:
         return 0
@@ -3017,6 +5989,11 @@ def _apy_index_of(h, a):
 
 
 def _apy_count_of(h, a):
+    _v = h._get(a[0], "apy_count_of")
+    # Substring counting for a str or bytes, for the same reason `index`
+    # splits.
+    if isinstance(_v, (str, bytes)):
+        return h._int(_v.count(h._get(a[1], "apy_count_of")))
     seq = h._get(a[0], "apy_count_of")
     item = h._get(a[1], "apy_count_of")
     # SUBSTRING counting for a str, element counting for a sequence -- the
@@ -3049,18 +6026,13 @@ def _apy_list_remove(h, a):
 
 
 def _apy_dict_parts(h, a):
-    v = h._get(a[0], "apy_dict_parts")
-    if not isinstance(v, dict):
-        return h._fail("AttributeError",
-                       f"'{h.kind_name(v)}' object has no attribute")
-    which = int(a[1])
-    # Lists, not views -- snapshots, matching the C. A view is live and these
-    # are not, which differs only if the dict is mutated while one is held.
-    if which == 0:
-        return h._new(list(v.keys()))
-    if which == 1:
-        return h._new(list(v.values()))
-    return h._new([(k, val) for k, val in v.items()])
+    """`d.keys()`, `d.values()`, `d.items()` -- A VIEW, not a snapshot.
+
+    `ks = d.keys()` then `d['b'] = 2` and `len(ks)` is 2. A snapshot is the
+    obvious implementation and is wrong exactly when a program relies on the
+    view being live.
+    """
+    return _apy_dict_view(h, a)
 
 
 def _apy_dict_get_or(h, a):
@@ -3088,8 +6060,7 @@ def _apy_dict_get_or(h, a):
 #: The arithmetic and comparison operators are added separately: they share
 #: one implementation parameterised by the Python operator, so there is no
 #: `_apy_add` to find.
-_TABLE = {name[1:]: fn for name, fn in list(globals().items())
-          if name.startswith("_apy_") and callable(fn)}
+_TABLE: dict = {}
 
 _TABLE.update({
     "apy_add": _binop("apy_add", lambda x, y: x + y, "+"),
@@ -3104,6 +6075,9 @@ _TABLE.update({
     "apy_bitxor": _binop("apy_bitxor", lambda x, y: x ^ y, "^"),
     "apy_lshift": _binop("apy_lshift", lambda x, y: x << y, "<<"),
     "apy_rshift": _binop("apy_rshift", lambda x, y: x >> y, ">>"),
+    # PEP 465. NO BUILT-IN KIND IMPLEMENTS IT -- there are no matrices here --
+    # so this reaches `__matmul__` or reports the operand pair.
+    "apy_matmul": _binop("apy_matmul", lambda x, y: x @ y, "@"),
     "apy_eq": _cmpop("apy_eq", lambda x, y: x == y),
     "apy_ne": _cmpop("apy_ne", lambda x, y: x != y),
     "apy_lt": _cmpop("apy_lt", lambda x, y: x < y),
@@ -3193,10 +6167,25 @@ _STR_METHOD_SPEC = (
 )
 
 
+def _apy_str_like(h, a):
+    """Re-tag a str method's result to match its receiver.
+
+    A no-op here: the host calls Python's own methods, so a bytes receiver
+    already answers bytes. The binding exists because the frontend emits the
+    call for the C, which shares one implementation between the two kinds and
+    has to put the tag back.
+    """
+    return a[1]
+
+
 def _make_str_method(symbol: str, method: str, argc: int):
     def binding(h, a, _m=method, _n=argc, _sym=symbol):
         receiver = h._get(a[0], _sym)
-        if not isinstance(receiver, str):
+        # BYTES TOO. `b.strip()` is the same operation on the same layout, and
+        # Python's bytes type spells it the same way -- so the receiver being
+        # accepted is the whole of it here, and the result comes back as bytes
+        # without any re-tagging. The C needs `apy_str_like` for that.
+        if not isinstance(receiver, (str, bytes)):
             return h._fail(
                 "AttributeError",
                 f"'{h.kind_name(receiver)}' object has no attribute '{_m}'")
@@ -3262,6 +6251,10 @@ def _apy_frozenset_new(h, a):
 def _apy_set_push(h, a):
     s = h._get(a[0], "apy_set_push")
     item = h._get(a[1], "apy_set_push")
+    bad = _unhashable_name(item)
+    if bad:
+        return h._fail("TypeError", f"cannot use '{bad}' as a set element "
+                                    f"(unhashable type: '{bad}')")
     try:
         hash(item)
     except TypeError as exc:
@@ -3284,7 +6277,7 @@ def _apy_set_discard(h, a):
 
 def _to_set(h, a, frozen: bool):
     v = h._get(a[0], "apy_to_set")
-    if not isinstance(v, (list, tuple, set, frozenset, dict, str)):
+    if not isinstance(v, (list, tuple, set, frozenset, dict, str, range)):
         return h._fail("TypeError",
                        f"'{h.kind_name(v)}' object is not iterable")
     try:
@@ -3439,6 +6432,15 @@ def _apy_delitem(h, a):
     """
     seq = h._get(a[0], "apy_delitem")
     key = h._get(a[1], "apy_delitem")
+    if isinstance(seq, Instance):
+        # `del obj[k]` IS `obj.__delitem__(k)`. Never dispatched before, so a
+        # class that wrote one had it ignored and the delete was reported as
+        # unsupported -- a wrong answer about the class's own method.
+        if seq.cls.find("__delitem__") is not None:
+            return _user(h, lambda: h._value(seq._send("__delitem__", key)))
+        # A CLASS THAT EXTENDS A BUILTIN deletes from the one it carries.
+        if seq.held is not None:
+            return _apy_delitem(h, [h._new(seq.held), a[1]])
     if isinstance(seq, dict):
         try:
             hash(key)
@@ -3452,6 +6454,14 @@ def _apy_delitem(h, a):
         return h._fail("TypeError",
                        f"'{h.kind_name(seq)}' object doesn't support item "
                        f"deletion")
+    # `del xs[1:3]` REMOVES A SPAN. Falling through to the index path asked
+    # `int()` for the slice and raised out of the bridge.
+    if isinstance(key, slice):
+        if key.step not in (None, 1):
+            return h._fail("ValueError",
+                           "only step 1 slice deletion is supported")
+        del seq[key]
+        return h._none
     i = int(key)
     if i < 0:
         i += len(seq)
@@ -3478,6 +6488,40 @@ def _apy_call_spread(h, a):
         return 0
 
 
+def _apy_call_spread_kw(h, a):
+    """`f(*xs, **kw)`.
+
+    The keyword half travels SEPARATELY, as it does for every other call shape
+    here: appended to the argument list it would arrive as one more
+    positional. Dropping it made every keyword in a spread call vanish.
+    """
+    args = list(h._get(a[1], "apy_call_spread_kw"))
+    kwd = h._get(a[2], "apy_call_spread_kw")
+    callee = h._get(a[0], "apy_call_spread_kw")
+    if not kwd:
+        try:
+            return h._value(h._invoke(callee, args))
+        except _UserFailed:
+            return 0
+    # MATCHED BY NAME against the callee's parameters, as `_apy_call_kw` does
+    # -- `_invoke` alone would put every keyword into `**kw`.
+    target, skip = callee, 0
+    if isinstance(callee, Class):
+        target, skip = callee.find("__init__"), 1
+    elif isinstance(callee, Func) and callee.bound is not None:
+        skip = 1
+    names = list(getattr(target, "pnames", None) or [])[skip + len(args):]
+    extra = dict(kwd)
+    for pname in names:
+        if pname is None or pname not in extra:
+            break
+        args.append(extra.pop(pname))
+    try:
+        return h._value(h._invoke(callee, args, kwrest=extra))
+    except _UserFailed:
+        return 0
+
+
 def _apy_extend(h, a):
     """Every element of a sequence, appended. A dict spreads its KEYS, which
     is what iterating one yields."""
@@ -3491,7 +6535,7 @@ def _apy_extend(h, a):
         return h._fail("AttributeError",
                        f"'{h.kind_name(seq)}' object has no attribute 'extend'")
     if not isinstance(other, (list, tuple, set, frozenset, str, bytes, dict,
-                              Iterator)):
+                              Iterator, range)):
         return h._fail("TypeError",
                        f"'{h.kind_name(other)}' object is not iterable")
     items = _seq_items(h, other, "apy_extend")
@@ -3516,7 +6560,7 @@ def _apy_make_exc0(h, a):
     None. `E().args` is `()` and `E(None).args` is `(None,)`, so the two
     cannot share a constructor -- see `Exc.has_arg`."""
     name = h._get(a[0], "apy_make_exc0")
-    return h._new(Exc(name, None, has_arg=False))
+    return _exc_construct(h, Exc(name, None, has_arg=False), [])
 
 
 def _apy_int_literal(h, a):
@@ -3532,6 +6576,7 @@ def _apy_int_literal(h, a):
 
 
 _TABLE["apy_make_exc0"] = _apy_make_exc0
+_TABLE["apy_make_excn"] = _apy_make_excn
 _TABLE["apy_int_literal"] = _apy_int_literal
 
 
@@ -3540,6 +6585,27 @@ def _apy_from_complex(h, a):
 
 
 def _apy_complex_of(h, a):
+    _re = h._get(a[0], "apy_complex_of")
+    _im = h._get(a[1], "apy_complex_of")
+    # `complex(x)` WITH ONE ARGUMENT ASKS THE CLASS. `complex(x, 0)` is
+    # building from parts and has nothing to ask, which is why the frontend
+    # passes None for an omitted imaginary part rather than zero.
+    if isinstance(_re, Instance) and _im is None:
+        _got = _dunder_number(h, _re, ("__complex__",))
+        if _got is not None:
+            return h._value(_got)
+        if h.err is not None:
+            return 0
+    # `complex("1+2j")` -- THE STRING FORM, which is a parse rather than an
+    # arithmetic conversion, and only exists for the one-argument shape.
+    if isinstance(_re, str) and _im is None:
+        try:
+            return h._new(complex(_re))
+        except ValueError:
+            return h._fail("ValueError",
+                           "complex() arg is a malformed string")
+    if _im is None:
+        a = [a[0], h._int(0)]
     """`complex(re, im)` from two runtime values.
 
     NOT `re + im * 1j`: that loses a signed zero, and the sign of a zero is
@@ -3618,27 +6684,41 @@ def _apy_hasattr(h, a):
 
 
 def _apy_all(h, a):
-    items = _seq_items(h, h._get(a[0], "apy_all"), "apy_all")
-    if items is None:
+    """SHORT-CIRCUITS, which is why it steps rather than indexing: with a
+    generator argument that is observable, because the generator is simply not
+    resumed again."""
+    it = _apy_getiter(h, [a[0]])
+    if not it:
         return 0
-    return h._bool(all(bool(x) for x in items))
+    for _ in range(100000000):
+        got = _apy_step(h, [it])
+        if not got:
+            return 0
+        item = h._get(got, "apy_all")
+        if item is _STOP:
+            return h._bool(True)
+        if bool(item) is False:
+            return h._bool(False)
+    return h._bool(True)
 
 
 def _apy_any(h, a):
-    items = _seq_items(h, h._get(a[0], "apy_any"), "apy_any")
-    if items is None:
+    """SHORT-CIRCUITS, which is why it steps rather than indexing: with a
+    generator argument that is observable, because the generator is simply not
+    resumed again."""
+    it = _apy_getiter(h, [a[0]])
+    if not it:
         return 0
-    return h._bool(any(bool(x) for x in items))
-
-
-_TABLE.update({
-    "apy_ord": _apy_ord,
-    "apy_chr": _apy_chr,
-    "apy_callable": _apy_callable,
-    "apy_hasattr": _apy_hasattr,
-    "apy_all": _apy_all,
-    "apy_any": _apy_any,
-})
+    for _ in range(100000000):
+        got = _apy_step(h, [it])
+        if not got:
+            return 0
+        item = h._get(got, "apy_any")
+        if item is _STOP:
+            return h._bool(False)
+        if bool(item) is True:
+            return h._bool(True)
+    return h._bool(False)
 
 
 def _call_key(h, keyfn, item):
@@ -3707,7 +6787,7 @@ class Iterator:
     keeps the two paths agreeing about a half-consumed one.
     """
 
-    __slots__ = ("src", "i", "fn", "mode")
+    __slots__ = ("src", "i", "fn", "mode", "n0")
 
     #: WHAT A CURSOR DOES on the way. A plain one walks; the rest apply
     #: something as they go, which is what makes `map(f, xs)` lazy -- `f` runs
@@ -3719,6 +6799,11 @@ class Iterator:
         self.fn = fn
         self.mode = mode
         self.i = start
+        # THE SIZE THE WALK STARTED WITH, for a dict. Growing or shrinking
+        # one while iterating it rehashes the table and the walk would
+        # silently skip or repeat entries, so CPython refuses. Only a dict:
+        # a list may change under a walk and CPython allows it.
+        self.n0 = len(src) if isinstance(src, dict) else -1
 
 
 def _apy_iterable(h, a):
@@ -3734,6 +6819,21 @@ def _apy_iterable(h, a):
         # DRAINED: the walk below is by index and an index walk needs a
         # length. See `_apy_gen_drain` for what that costs.
         return _apy_gen_drain(h, a)
+    if isinstance(v, _VIEW_TYPES):
+        # A VIEW IS READ WHEN IT IS WALKED. The index walk below cannot step
+        # one, and materialising here is the moment the liveness happens.
+        return h._new(list(v))
+    if isinstance(v, Class) and v.meta is not None:
+        # ITERATING A CLASS IS THE METACLASS'S BUSINESS: `for c in Color` is
+        # `type(Color).__iter__(Color)`, which is how an enum lists its
+        # members. A class with no metaclass cannot be iterated, and the
+        # refusal further down is still the right answer for it.
+        hook = v.meta.lookup("__iter__")
+        if hook is not _ABSENT:
+            got = h._invoke(hook, [v])
+            if h.err is not None:
+                return 0
+            return h._new(got)
     if not isinstance(v, Instance):
         return a[0]
     try:
@@ -3766,7 +6866,14 @@ def _apy_iterable(h, a):
             out.append(item)
         return h._new(out)
     if not isinstance(got, Instance) or got.cls.find("__next__") is None:
-        return _apy_iterable(h, [h._value(got)])
+        # WHAT `__iter__` RETURNS MUST BE AN ITERATOR. A generator or a cursor
+        # is one; a str is not, however walkable it looks. Recursing into it
+        # turned a broken class into a working one that iterated something
+        # else entirely, which is a wrong answer rather than a refusal.
+        if isinstance(got, (Gen, Iterator, list, tuple, set, frozenset, dict)):
+            return _apy_iterable(h, [h._value(got)])
+        return h._fail("TypeError", f"iter() returned non-iterator of type "
+                                    f"'{h.kind_name(got)}'")
     out = []
     for i in range(1000000):
         try:
@@ -3793,12 +6900,32 @@ class Gen:
     """
 
     __slots__ = ("step", "slots", "state", "sent", "running", "cache",
-                 "pending", "result")
+                 "pending", "result", "coro", "builtin", "deadline",
+                 "agen", "cancel")
 
     def __init__(self, step, nslots: int) -> None:
         self.step = step
         self.slots = [None] * nslots
         self.state = 0
+        #: WHETHER THIS CAME FROM `async def`. The machinery is identical --
+        #: a coroutine is a generator with a frame and a step -- so this
+        #: decides only what the object calls itself.
+        self.coro = False
+        #: Which BUILT-IN coroutine this is (`sleep`, `gather`), or 0 for one
+        #: lowered from an `async def`. The built-ins have no Python body and
+        #: so no step to re-enter; `_apy_await_step` drives them directly.
+        self.builtin = 0
+        #: WHEN A `sleep` WANTS TO WAKE, on the virtual clock. Unused by
+        #: everything else.
+        self.deadline = 0.0
+        #: CANCELLATION, for a task: 0 none, 1 asked for, 2 delivered. Three
+        #: states and not two, because `cancel()` does not raise -- it asks,
+        #: and the exception arrives at the task's next suspension point,
+        #: which is where a `try` around the `await` inside it can catch it.
+        self.cancel = 0
+        #: WHETHER THIS IS AN `async def` CONTAINING `yield` -- an async
+        #: generator, which is neither a coroutine nor a plain generator.
+        self.agen = False
         self.sent = None
         self.running = False
         #: What a LENGTH QUERY drained. `sum(g)` walks by index and an index
@@ -3821,9 +6948,24 @@ def _apy_gen_new(h, a):
     return h._new(Gen(h._get(a[0], "apy_gen_new"), int(a[1])))
 
 
+class _Slot:
+    """A frame slot's contents, as the HANDLE rather than the object.
+
+    The indirection is the point: the C stores a pointer and sees any later
+    replacement of what it names. See `_apy_gen_set`.
+    """
+
+    __slots__ = ("handle",)
+
+    def __init__(self, handle: int) -> None:
+        self.handle = handle
+
+
 def _apy_gen_slot(h, a):
     g = h._get(a[0], "apy_gen_slot")
     i = int(a[1])
+    if 0 <= i < len(g.slots) and isinstance(g.slots[i], _Slot):
+        return g.slots[i].handle
     # An UNSET slot reads as None rather than as a null: a local a `yield` has
     # not reached yet is not an error to read, and a null would be taken for a
     # pending exception by the next operation that touched it.
@@ -3831,10 +6973,20 @@ def _apy_gen_slot(h, a):
 
 
 def _apy_gen_set(h, a):
+    """Store into a frame slot.
+
+    THE HANDLE, not the object it names. The C stores a pointer, and a value
+    that is REPLACED IN ITS CELL afterwards -- which is how a tuple under
+    construction grows here, see `_apy_seq_push` -- has to be visible through
+    the slot. Storing the object froze the slot at whatever the value was when
+    it went in, so `(await a(), await b())` spilled an empty tuple and read an
+    empty tuple back however many elements had been pushed since.
+    """
     g = h._get(a[0], "apy_gen_set")
     i = int(a[1])
     if 0 <= i < len(g.slots):
-        g.slots[i] = h._get(a[2], "apy_gen_set")
+        h._get(a[2], "apy_gen_set")     # the null check the C's callers get
+        g.slots[i] = _Slot(int(a[2]))
     return h._none
 
 
@@ -3926,6 +7078,19 @@ def _gen_step(h, g, sent):
         out = h._invoke_obj(g.step, [g])
     except _UserFailed:
         g.state = -1
+        # PEP 479: a `StopIteration` that ESCAPES a generator body becomes a
+        # RuntimeError, with the original as its `__cause__`. Left alone it
+        # was indistinguishable from the generator finishing normally, so a
+        # bug inside the body read as a clean end of iteration -- which is the
+        # entire reason the PEP exists.
+        if h.err is not None and h.err[0] == "StopIteration":
+            cause = h._get(_apy_error_value(h, []), "gen_step")
+            wrapped = Exc("RuntimeError", "generator raised StopIteration")
+            wrapped.cause = cause
+            # `_fail_raised`, not `_fail`: the object has to survive so
+            # `e.__cause__` reads back the StopIteration it replaced.
+            h.err = None
+            h._fail_raised(wrapped)
         return None, None
     finally:
         g.running = False
@@ -3933,6 +7098,796 @@ def _gen_step(h, g, sent):
     # the generator" is a question about the state AFTER it, not about the
     # value -- a generator may legitimately yield None.
     return out, g.state < 0
+
+
+# ── asyncio ─────────────────────────────────────────────────────────────────
+# A COROUTINE IS A GENERATOR, so this mirrors the C exactly: the same suspend
+# token, the same round-robin in `gather`, the same "a built-in coroutine has
+# no step function and is driven here" rule. The two files have to agree
+# because `asmpython run` and a compiled binary must answer the same program
+# the same way -- and the ordering `gather` produces is observable.
+
+#: Which built-in coroutine a `Gen` is. Mirrors the enum in link/objects.py.
+_CORO_SLEEP = 1
+_CORO_GATHER = 2
+_CORO_ANEXT = 3
+_CORO_TASK = 4
+_CORO_WAITFOR = 5
+_CORO_VALUE = 6
+_CORO_TGWAIT = 7
+
+#: THE VIRTUAL CLOCK. Not a real one -- nothing here waits, and `sleep(10)`
+#: returns as fast as `sleep(0)`. What it buys is ORDER: two coroutines
+#: sleeping for different times must wake shortest-first, which is observable
+#: from the program and which round-robin gets wrong.
+#:
+#: A list so the value is shared rather than rebound; the C keeps a static
+#: double and the two must agree.
+_NOW = [0.0]
+
+#: WHERE A SUSPENSION LEAVES ITS WAKE TIME. Not in the value it hands back: an
+#: async generator yields values of its own through that channel, and
+#: `yield 0.05` would be read as a deadline. Only one coroutine steps at a
+#: time, so the time need not travel as a value. `[set?, when]`.
+_WAKE = [False, 0.0]
+
+
+def _wake_clear():
+    _WAKE[0], _WAKE[1] = False, 0.0
+
+
+def _wake_note(when):
+    """The EARLIEST request wins, so a short sleep beside a long one decides
+    how far the clock moves."""
+    if not _WAKE[0] or when < _WAKE[1]:
+        _WAKE[1] = when
+    _WAKE[0] = True
+
+
+#: What a suspension hands back. An OPAQUE token carrying nothing, so anything
+#: a program yields on purpose is unambiguous.
+_SUSPEND = "<suspend>"
+
+
+def _apy_coro_mark(h, a):
+    """Mark a freshly built frame as a coroutine. Same object, different name:
+    `type(f()).__name__` is 'coroutine' and that is how a program tells one
+    from a generator."""
+    g = h._get(a[0], "apy_coro_mark")
+    if isinstance(g, Gen):
+        g.coro = True
+    return a[0]
+
+
+#: EVERY ASYNC GENERATOR MADE DURING A RUN, so the loop can close the ones a
+#: program abandoned. `async for ...: break` leaves one suspended inside its
+#: own `try` with its `finally` unrun; CPython closes those at loop shutdown.
+def _apy_agen_mark(h, a):
+    """Mark a frame as an ASYNC GENERATOR -- `async def` with `yield`."""
+    g = h._get(a[0], "apy_agen_mark")
+    if isinstance(g, Gen):
+        g.coro = True
+        g.agen = True
+        h.live_agens.append(g)
+    return a[0]
+
+
+# ── descriptors ─────────────────────────────────────────────────────────────
+# `property`, `classmethod`, `staticmethod`, and the protocol a user class
+# joins by defining `__get__`. TWO KINDS, differing only in which side of the
+# instance dict they sit on: a DATA descriptor defines `__set__` and wins over
+# it, a NON-DATA one defines only `__get__` and loses to it. That is what lets
+# `c.v = 4` reach a property's setter while a method can still be shadowed by
+# an attribute of the same name.
+
+PROP_PROPERTY, PROP_CLASSMETHOD, PROP_STATICMETHOD = 0, 1, 2
+
+
+class Descr:
+    """A runtime descriptor. Mirrors `v.p` in link/objects.py."""
+
+    __slots__ = ("get", "set", "del_", "kind")
+
+    def __init__(self, fn, kind: int) -> None:
+        self.get = fn
+        self.set = None
+        self.del_ = None
+        self.kind = kind
+
+
+def _is_descriptor(v) -> bool:
+    if isinstance(v, Descr):
+        return True
+    return isinstance(v, Instance) and v.cls.find("__get__") is not None
+
+
+def _is_data_descriptor(v) -> bool:
+    if isinstance(v, Descr):
+        return v.kind == PROP_PROPERTY
+    return isinstance(v, Instance) and (v.cls.find("__set__") is not None
+                                        or v.cls.find("__delete__") is not None)
+
+
+def _descr_get(h, d, obj, cls):
+    """Read through a descriptor: `d.__get__(obj, type)`."""
+    if isinstance(d, Descr):
+        if d.kind == PROP_CLASSMETHOD:
+            # Bound to the CLASS the lookup started from, so `D.make()` on a
+            # subclass sees `D`.
+            return h._value(d.get.bind(cls))
+        if d.kind == PROP_STATICMETHOD:
+            return h._value(d.get)          # no binding at all
+        # THROUGH THE CLASS, A PROPERTY IS ITSELF -- which is how
+        # `Base.v.fget(self)` reaches the base getter from an override.
+        if obj is None:
+            return h._value(d)
+        if d.get is None:
+            return h._fail("AttributeError", "unreadable attribute")
+        # Through `_user`, like every other re-entry into compiled code: a
+        # getter that failed has already set the flag, and `_UserFailed` means
+        # the only thing left is to answer NULL.
+        return _user(h, lambda: h._value(h._invoke(d.get, [obj])))
+    m = d.cls.find("__get__")
+    return _user(h, lambda: h._value(
+        h._invoke_obj(m.bind(d), [obj, cls if cls is not None else None])))
+
+
+def _descr_write(h, d, obj, value, delete: bool = False):
+    """`p.__set__(obj, v)` and `p.__delete__(obj)` as a program calls them.
+
+    `_descr_set` answers a code the attribute machinery reads; a program
+    calling the method sees None, so the two are not the same function.
+    """
+    half = d.del_ if delete else d.set
+    if half is None:
+        h._fail("AttributeError",
+                "can't delete attribute" if delete else "can't set attribute")
+        return None
+    h._invoke(half, [obj] if delete else [obj, value])
+    return None
+
+
+def _descr_set(h, d, obj, value):
+    """1 when the descriptor took the write, -1 when it is not a data
+    descriptor and the caller should store normally, 0 on failure."""
+    if not _is_data_descriptor(d):
+        return -1
+    if isinstance(d, Descr):
+        if d.set is None:
+            h._fail("AttributeError", "can't set attribute")
+            return 0
+        if _user(h, lambda: (h._invoke(d.set, [obj, value]), 1)[1]) == 0:
+            return 0
+        return 0 if h.err is not None else 1
+    m = d.cls.find("__set__")
+    if m is None:
+        return -1
+    if _user(h, lambda: (h._invoke_obj(m.bind(d), [obj, value]), 1)[1]) == 0:
+        return 0
+    return 0 if h.err is not None else 1
+
+
+def _apy_descr_new(h, a):
+    """`property(f)`, `classmethod(f)`, `staticmethod(f)` -- one constructor,
+    because they differ only in what reading one does."""
+    return h._new(Descr(h._get(a[0], "apy_descr_new"), int(a[1])))
+
+
+def _apy_prop_setter(h, a):
+    """`@v.setter` -- a NEW property carrying the original getter and this
+    setter. New rather than mutated: the decorator's result is rebound
+    afterwards, and a program holding the old object must not see it change."""
+    prop = h._get(a[0], "apy_prop_setter")
+    if not isinstance(prop, Descr):
+        return h._fail("AttributeError", f"'{h.kind_name(prop)}' object has "
+                                         f"no attribute 'setter'")
+    out = Descr(prop.get, PROP_PROPERTY)
+    out.set = h._get(a[1], "apy_prop_setter")
+    out.del_ = prop.del_
+    return h._new(out)
+
+
+def _apy_prop_deleter(h, a):
+    """`@v.deleter` -- the third of the three, and the one that was missing:
+    `del obj.v` had a slot to read and no way to fill it."""
+    prop = h._get(a[0], "apy_prop_deleter")
+    if not isinstance(prop, Descr):
+        return h._fail("AttributeError", f"'{h.kind_name(prop)}' object has "
+                                         f"no attribute 'deleter'")
+    out = Descr(prop.get, PROP_PROPERTY)
+    out.set = prop.set
+    out.del_ = h._get(a[1], "apy_prop_deleter")
+    return h._new(out)
+
+
+def _apy_check_slots(h, a):
+    """`__slots__ = ("v",)` and `v = 1` IN THE SAME BODY is a ValueError, at
+    class creation. The slot and the class attribute would share a name and
+    the attribute would win silently, which is why CPython refuses it rather
+    than picking one -- and why it is raised rather than refused: a program
+    may catch it."""
+    cls = h._get(a[0], "apy_check_slots")
+    if not isinstance(cls, Class):
+        return h._none
+    slots = cls.dict.get("__slots__")
+    if slots is None:
+        return h._none
+    names = [slots] if isinstance(slots, str) else list(slots)
+    for one in names:
+        if isinstance(one, str) and one in cls.dict:
+            return h._fail("ValueError",
+                           f"'{one}' in __slots__ conflicts with class "
+                           f"variable")
+    return h._none
+
+
+def _apy_set_names(h, a):
+    """PEP 487: every descriptor a class body bound is TOLD ITS OWN NAME, once,
+    after the body is complete. A descriptor cannot know it otherwise -- the
+    expression that built it had no idea what it was about to be assigned to.
+    """
+    cls = h._get(a[0], "apy_set_names")
+    if not isinstance(cls, Class):
+        return h._none
+    for key, member in list(cls.dict.items()):
+        if not isinstance(member, Instance):
+            continue
+        hook = member.cls.find("__set_name__")
+        if hook is None:
+            continue
+        h._invoke(hook.bind(member), [cls, key])
+    return h._none
+
+
+def _apy_prop_getter(h, a):
+    prop = h._get(a[0], "apy_prop_getter")
+    if not isinstance(prop, Descr):
+        return h._fail("AttributeError", f"'{h.kind_name(prop)}' object has "
+                                         f"no attribute 'getter'")
+    out = Descr(h._get(a[1], "apy_prop_getter"), PROP_PROPERTY)
+    out.set = prop.set
+    out.del_ = prop.del_
+    return h._new(out)
+
+
+def _apy_func_coro(h, a):
+    """Mark a FUNCTION as one whose call builds a coroutine -- `async def`.
+    Recorded on the function and not only on what it returns, because
+    `inspect.iscoroutinefunction(f)` asks before anything has been called."""
+    f = h._get(a[0], "apy_func_coro")
+    if isinstance(f, Func):
+        f.coro = True
+    return a[0]
+
+
+def _apy_inspect_iscoroutine(h, a):
+    v = h._get(a[0], "apy_inspect_iscoroutine")
+    return h._bool(isinstance(v, Gen) and v.coro and not v.agen)
+
+
+def _apy_inspect_isgenerator(h, a):
+    v = h._get(a[0], "apy_inspect_isgenerator")
+    return h._bool(isinstance(v, Gen) and not v.coro)
+
+
+def _apy_inspect_isasyncgen(h, a):
+    v = h._get(a[0], "apy_inspect_isasyncgen")
+    return h._bool(isinstance(v, Gen) and v.agen)
+
+
+def _apy_inspect_iscoroutinefunction(h, a):
+    v = h._get(a[0], "apy_inspect_iscoroutinefunction")
+    return h._bool(isinstance(v, Func) and v.coro)
+
+
+def _apy_suspend_value(h, a):
+    """The suspend token as a value, so lowered code can compare against it.
+    `async for` has to tell "suspended on an await" from "produced an item",
+    and those arrive through one channel."""
+    return h._suspend
+
+
+def _apy_aiter(h, a):
+    """What `async for` actually iterates: `__aiter__` of whatever was written.
+
+    AN ASYNC GENERATOR IS ITS OWN ITERATOR, which is why this was skipped for
+    so long -- every `async for` in the suite ran over one, and `__aiter__` on
+    it answers itself. A CLASS is the other half of the protocol and the more
+    common one in real code: `__aiter__` hands back the object that has
+    `__anext__`, and `__anext__` is an `async def`, so each item arrives
+    through a coroutine that may suspend before it produces one.
+
+    That coroutine has to survive between steps -- the loop asks for one item
+    at a time and a suspension means "no item yet, ask again" -- so the class
+    is wrapped in a generator cell whose slots hold the iterator and whatever
+    `__anext__` call is currently in flight. Nothing else here has somewhere
+    to keep it.
+    """
+    src = h._get(a[0], "apy_aiter")
+    if isinstance(src, Gen) and src.agen:
+        return h._value(src)
+    if not isinstance(src, Instance) or src.cls.find("__aiter__") is None:
+        return h._fail("TypeError", f"'{h.kind_name(src)}' object does not "
+                                    f"support asynchronous iteration")
+    it = _user(h, lambda: src._send("__aiter__"), fail=_FAILED)
+    if it is _FAILED:
+        return 0
+    if isinstance(it, Gen) and it.agen:
+        return h._value(it)
+    if not isinstance(it, Instance) or it.cls.find("__anext__") is None:
+        return h._fail("TypeError", f"'{h.kind_name(it)}' object does not "
+                                    f"support asynchronous iteration")
+    wrap = Gen(None, 2)
+    wrap.agen = True
+    wrap.builtin = _CORO_ANEXT
+    wrap.slots[0] = it
+    wrap.slots[1] = None
+    return h._new(wrap)
+
+
+def _anext_step(h, g):
+    """One step of an `async for` over a CLASS -- see `_apy_aiter`.
+
+    The same three answers every other step here gives: the next item, the
+    suspend token, or exhaustion. `StopAsyncIteration` out of `__anext__` is
+    exhaustion and not an error, which is the convention the whole protocol
+    is built on.
+    """
+    pending = g.slots[1]
+    if pending is None:
+        got = _user(h, lambda: g.slots[0]._send("__anext__"), fail=_FAILED)
+        if got is _FAILED:
+            if h.err is not None and h.err[0] == "StopAsyncIteration":
+                h.err, h.err_value = None, None
+                return h._stop
+            return 0
+        # `__anext__` WRITTEN AS A PLAIN `def` answers the item itself rather
+        # than a coroutine. Ordinary Python: `async for` awaits what it gets,
+        # and awaiting something not awaitable is the error -- so a class
+        # answering directly is only an unusual way to write it.
+        if not isinstance(got, Gen):
+            return h._value(got)
+        pending = g.slots[1] = got
+    value, done = _gen_step(h, pending, None)
+    if done is None:
+        g.slots[1] = None
+        if h.err is not None and h.err[0] == "StopAsyncIteration":
+            h.err, h.err_value = None, None
+            return h._stop
+        return 0
+    if not done:
+        return h._value(value)              # suspended: ask again
+    g.slots[1] = None
+    return h._value(pending.result)
+
+
+def _apy_agen_step(h, a):
+    """One step of `async for v in agen`.
+
+    THREE OUTCOMES FROM ONE STEP: an item, a suspension, or exhaustion. A
+    suspension is the opaque token and nothing else can be -- which is why the
+    token stopped carrying the deadline.
+    """
+    g = h._get(a[0], "apy_agen_step")
+    if not isinstance(g, Gen) or not g.agen:
+        return h._fail("TypeError", f"'{h.kind_name(g)}' object does not "
+                                    f"support asynchronous iteration")
+    if g.builtin == _CORO_ANEXT:
+        return _anext_step(h, g)
+    if g.state < 0:
+        return h._stop
+    value, done = _gen_step(h, g, None)
+    if done is None:
+        return 0
+    return h._stop if done else h._value(value)
+
+
+def _apy_await_step(h, a):
+    """`await x`, one step of it.
+
+    DELEGATION, NOT DRAINING: each step of the awaited coroutine is handed
+    back so the awaiting one can suspend too. Finishing is reported as the
+    `apy_stop` sentinel, the same one iteration uses, because the IR cannot
+    pass a pointer to a local for an out-parameter.
+    """
+    awaited = h._get(a[0], "apy_await_step")
+    if not isinstance(awaited, Gen):
+        return h._fail("TypeError", f"object {h.kind_name(awaited)} can't be "
+                                    f"used in 'await' expression")
+    if awaited.step is None or awaited.step == 0:
+        # A BUILT-IN coroutine: no Python body, so no step to re-enter.
+        if awaited.builtin == _CORO_GATHER:
+            return _gather_step(h, awaited)
+        if awaited.builtin == _CORO_TASK:
+            return _task_step(h, awaited)
+        if awaited.builtin == _CORO_WAITFOR:
+            return _waitfor_step(h, awaited)
+        if awaited.builtin == _CORO_TGWAIT:
+            return _tgwait_step(h, awaited)
+        if awaited.builtin == _CORO_VALUE:
+            awaited.result = awaited.slots[0]
+            return h._stop
+        # A `sleep` ALWAYS SUSPENDS AT LEAST ONCE, before the clock is even
+        # consulted: `sleep(0)` is how a program hands control to the loop on
+        # purpose. Returning immediately when the deadline had passed ran each
+        # coroutine straight to the end -- concurrency gone, every conformance
+        # case still green, because they only check the results.
+        if awaited.state == 0:
+            awaited.state = 1
+            _wake_note(awaited.deadline)
+            return h._suspend
+        if _NOW[0] < awaited.deadline:
+            _wake_note(awaited.deadline)
+            return h._suspend
+        return h._stop
+    value, done = _gen_step(h, awaited, h._get(a[1], "apy_await_step"))
+    if done is None:
+        return 0
+    return h._stop if done else h._value(value)
+
+
+def _apy_asyncio_sleep(h, a):
+    """`asyncio.sleep(delay)`. A coroutine that suspends once.
+
+    It does NOT wait. There is no clock here, so what it does is suspend --
+    which is the only part of it a program can observe when nothing else is
+    competing for the loop.
+    """
+    delay = h._get(a[0], "apy_asyncio_sleep")
+    g = Gen(None, 0)
+    g.coro = True
+    g.builtin = _CORO_SLEEP
+    # THE DEADLINE IS TAKEN NOW, when `sleep` is called, not when it is first
+    # awaited -- as a real loop does it.
+    d = float(delay) if isinstance(delay, (int, float)) and not isinstance(delay, bool) else 0.0
+    g.deadline = _NOW[0] + (d if d > 0.0 else 0.0)
+    return h._new(g)
+
+
+def _apy_asyncio_gather(h, a):
+    """`asyncio.gather(*coros)` -- run them concurrently, results IN ARGUMENT
+    ORDER rather than completion order."""
+    coros = h._get(a[0], "apy_asyncio_gather")
+    if not isinstance(coros, (list, tuple)):
+        return h._fail("TypeError",
+                       f"gather() takes coroutines, not {h.kind_name(coros)}")
+    g = Gen(None, 2)
+    g.coro = True
+    g.builtin = _CORO_GATHER
+    g.slots[0] = list(coros)
+    # Full of None and filled IN PLACE, so a coroutine finishing third still
+    # lands at its own index. Appending as they complete loses the ordering.
+    g.slots[1] = [None] * len(coros)
+    return h._new(g)
+
+
+def _gather_step(h, g):
+    """One round of `gather`: advance every unfinished child once.
+
+    ROUND-ROBIN AND NOT ONE-AT-A-TIME -- the difference between running
+    concurrently and merely running, and the ordering it produces is
+    observable from the program.
+    """
+    coros, out = g.slots[0], g.slots[1]
+    pending = 0
+    soonest = None
+    for i, child in enumerate(coros):
+        if not isinstance(child, Gen):
+            out[i] = child
+            continue
+        if child.state < 0:
+            continue                      # already finished
+        # CLEARED BEFORE EACH CHILD, so what is read back afterwards is that
+        # child's request and not a sibling's left over from this round.
+        _wake_clear()
+        if child.step is None or child.step == 0:
+            stepped = _apy_await_step(h, [h._new(child), h._none])
+            if stepped == 0:
+                return 0
+            if stepped == h._stop:
+                out[i] = child.result
+            else:
+                pending += 1
+                when = _WAKE[1] if _WAKE[0] else _NOW[0]
+                soonest = when if soonest is None else min(soonest, when)
+            continue
+        value, done = _gen_step(h, child, None)
+        if done is None:
+            return 0
+        if done:
+            out[i] = child.result
+        else:
+            pending += 1
+            # A child that suspended without naming a time is ready now, which
+            # keeps a plain `await` beside a sleep from stalling the clock.
+            when = _WAKE[1] if _WAKE[0] else _NOW[0]
+            soonest = when if soonest is None else min(soonest, when)
+    if pending:
+        # THE EARLIEST MOMENT ANY CHILD COULD MAKE PROGRESS -- the minimum,
+        # not the first seen, so a short sleep wakes before a long one.
+        _wake_note(soonest if soonest is not None else _NOW[0])
+        return h._suspend
+    g.result = out
+    return h._stop
+
+
+# ── tasks ───────────────────────────────────────────────────────────────────
+# A TASK IS A COROUTINE THE LOOP OWNS. `await coro` runs it inside the awaiting
+# one; `create_task(coro)` hands it to the loop, which runs it whenever
+# anything else suspends -- and that difference is the whole of what a task is
+# for. Everything below exists to give the loop somewhere to keep them and
+# something to do with one that has been cancelled.
+
+
+def _apy_asyncio_create_task(h, a):
+    coro = h._get(a[0], "apy_asyncio_create_task")
+    if not isinstance(coro, Gen) or not coro.coro:
+        return h._fail("TypeError",
+                       f"a coroutine was expected, got {h.kind_name(coro)}")
+    t = Gen(None, 3)
+    t.coro = True
+    t.builtin = _CORO_TASK
+    t.slots[0] = coro           # what it runs
+    t.slots[1] = None           # what it returned
+    t.slots[2] = None           # how it failed, if it did
+    h.tasks.append(t)
+    return h._new(t)
+
+
+def _task_step(h, t):
+    """One step of a task, whether the loop is running it in a gap or a
+    program is awaiting it. The two are the same act -- which is why `await
+    task` after the loop has already finished it answers what it finished
+    with rather than running it again."""
+    child = t.slots[0]
+    if t.state < 0:
+        if t.slots[2] is not None:
+            return _apy_raise(h, [h._new(t.slots[2])])
+        return h._stop
+    if t.cancel == 1:
+        t.cancel = 2
+        if isinstance(child, Gen) and child.state > 0:
+            # AT THE SUSPENSION POINT, which is where CPython delivers it: a
+            # `try`/`except CancelledError` around the `await` inside the task
+            # catches it, and being catchable there is the whole of what
+            # cancellation means.
+            child.pending = Exc("CancelledError", None, has_arg=False)
+        else:
+            # NEVER STARTED, so there is no point to raise at and the task
+            # simply never runs.
+            t.state = -1
+            t.slots[2] = Exc("CancelledError", None, has_arg=False)
+            return _apy_raise(h, [h._new(t.slots[2])])
+    stepped = _apy_await_step(h, [h._new(child), h._none])
+    if stepped == 0:
+        # HOW IT FAILED IS KEPT, because the loop may be the one that found
+        # out and the program may ask later. The flag stays set, so whoever
+        # was awaiting sees it now.
+        t.state = -1
+        t.slots[2] = h.err_value if h.err_value is not None else (
+            Exc(h.err[0], h.err[1], has_arg=bool(h.err[1]))
+            if h.err else None)
+        return 0
+    if stepped == h._stop:
+        t.state = -1
+        t.slots[1] = child.result if isinstance(child, Gen) else None
+        # AND WHERE `await` LOOKS FOR IT: it reads what a finished coroutine
+        # returned off the cell it awaited, not off the child.
+        t.result = t.slots[1]
+        return h._stop
+    return stepped
+
+
+def _tasks_turn(h):
+    """Every task the loop owns, advanced once. Called wherever the thing
+    being driven suspends -- that gap is exactly when a task may run."""
+    soonest, have = 0.0, False
+    for t in h.tasks:
+        if t.state < 0:
+            continue
+        _wake_clear()
+        stepped = _task_step(h, t)
+        if stepped == 0:
+            # A TASK THAT FAILED IS NOT THE LOOP'S ERROR. It is recorded on
+            # the task and raised where the task is awaited -- which is what
+            # `asyncio` does, and why an un-awaited failing task is quiet.
+            h.err, h.err_value = None, None
+            continue
+        if stepped != h._stop:
+            here = _WAKE[1] if _WAKE[0] else _NOW[0]
+            if not have or here < soonest:
+                soonest, have = here, True
+    _wake_clear()
+    if have:
+        _wake_note(soonest)
+
+
+def _apy_task_cancel(h, a):
+    """`t.cancel()` -- ASK, do not raise. The exception arrives at the task's
+    next suspension point; here it is only recorded."""
+    t = h._get(a[0], "apy_task_cancel")
+    if not isinstance(t, Gen) or t.builtin != _CORO_TASK:
+        return h._fail("AttributeError",
+                       f"'{h.kind_name(t)}' object has no attribute 'cancel'")
+    if t.state < 0:
+        return h._new(False)
+    if not t.cancel:
+        t.cancel = 1
+    return h._new(True)
+
+
+def _apy_task_result(h, a):
+    """`t.result()` -- what it returned, or the exception it ended with."""
+    t = h._get(a[0], "apy_task_result")
+    if not isinstance(t, Gen) or t.builtin != _CORO_TASK:
+        return h._fail("AttributeError",
+                       f"'{h.kind_name(t)}' object has no attribute 'result'")
+    if t.state >= 0:
+        return h._fail("InvalidStateError", "Result is not set.")
+    if t.slots[2] is not None:
+        return _apy_raise(h, [h._new(t.slots[2])])
+    return h._value(t.slots[1])
+
+
+def _apy_task_done(h, a):
+    t = h._get(a[0], "apy_task_done")
+    if not isinstance(t, Gen) or t.builtin != _CORO_TASK:
+        return h._fail("AttributeError",
+                       f"'{h.kind_name(t)}' object has no attribute 'done'")
+    return h._new(t.state < 0)
+
+
+def _apy_task_cancelled(h, a):
+    t = h._get(a[0], "apy_task_cancelled")
+    if not isinstance(t, Gen) or t.builtin != _CORO_TASK:
+        return h._fail("AttributeError",
+                       f"'{h.kind_name(t)}' object has no attribute "
+                       f"'cancelled'")
+    return h._new(t.state < 0 and isinstance(t.slots[2], Exc)
+                  and t.slots[2].name == "CancelledError")
+
+
+def _apy_asyncio_wait_for(h, a):
+    """`asyncio.wait_for(coro, timeout)` -- run it, and give up at the
+    deadline.
+
+    THE CLOCK IS VIRTUAL and moves only to the next moment something can
+    happen, so a timeout is not an approximation of waiting: it is a deadline
+    among the others, and the loop reaching it first is exactly what "the
+    coroutine took too long" means here.
+    """
+    coro = h._get(a[0], "apy_asyncio_wait_for")
+    timeout = h._get(a[1], "apy_asyncio_wait_for")
+    if not isinstance(coro, Gen):
+        return h._fail("TypeError",
+                       f"a coroutine was expected, got {h.kind_name(coro)}")
+    t = float(timeout) if isinstance(timeout, (int, float)) \
+        and not isinstance(timeout, bool) else -1.0
+    w = Gen(None, 1)
+    w.coro = True
+    w.builtin = _CORO_WAITFOR
+    w.slots[0] = coro
+    # A negative or absent timeout is no deadline at all, which is what
+    # `wait_for(c, None)` means.
+    w.deadline = _NOW[0] + t if t >= 0.0 else -1.0
+    return h._new(w)
+
+
+def _waitfor_step(h, w):
+    child = w.slots[0]
+    limit = w.deadline
+    if limit >= 0.0 and _NOW[0] >= limit and child.state >= 0:
+        # THE CHILD IS STOPPED FIRST. `wait_for` promises not to leave it
+        # running, and a `finally` inside it runs on the way out.
+        if child.state > 0 and _apy_gen_close(h, [h._new(child)]) == 0:
+            return 0
+        child.state = -1
+        return h._fail("TimeoutError", "")
+    _wake_clear()
+    stepped = _apy_await_step(h, [h._new(child), h._none])
+    if stepped == 0:
+        return 0
+    if stepped == h._stop:
+        w.result = child.result
+        return h._stop
+    # THE EARLIER OF the child's own wake and the deadline. Noting only the
+    # child's would let the clock jump past the moment this gives up.
+    if limit >= 0.0:
+        _wake_note(limit)
+    return h._suspend
+
+
+def _apy_asyncio_taskgroup(h, a):
+    """`asyncio.TaskGroup()`.
+
+    AN OBJECT, not a coroutine: `async with` asks it for `__aenter__` and
+    `__aexit__`, and `tg.create_task(...)` is an ordinary call between them.
+    """
+    cls = h._taskgroup_class()
+    g = Instance(cls, h)
+    g.dict["_tasks"] = []
+    return h._new(g)
+
+
+def _coro_value(h, v):
+    """A coroutine that is already finished, carrying one value. `__aenter__`
+    has to answer an awaitable and has nothing to wait for."""
+    g = Gen(None, 1)
+    g.coro = True
+    g.builtin = _CORO_VALUE
+    g.slots[0] = v
+    return g
+
+
+def _tgwait_step(h, w):
+    """Leaving the `async with`: every task the group started runs to the end.
+
+    THAT IS THE WHOLE PROMISE of a task group -- the block does not finish
+    while its children are still going -- and it is why `t.result()` after
+    the block is a question with an answer.
+
+    WHAT IT DOES NOT DO is cancel the others when one of them fails, or when
+    the block is left by an exception. CPython's group does both and collects
+    what it cancelled into an `ExceptionGroup`; here every child runs to its
+    end and a failing one is reported where it is awaited.
+    """
+    pending, soonest, have = 0, 0.0, False
+    for t in w.slots[0]:
+        if t.state < 0:
+            continue
+        _wake_clear()
+        stepped = _task_step(h, t)
+        if stepped == 0:
+            return 0
+        if stepped != h._stop:
+            pending += 1
+            here = _WAKE[1] if _WAKE[0] else _NOW[0]
+            if not have or here < soonest:
+                soonest, have = here, True
+    _wake_clear()
+    if pending:
+        _wake_note(soonest if have else _NOW[0])
+        return h._suspend
+    # FALSE, not None: `__aexit__` answering truthy would swallow whatever
+    # exception was leaving the block.
+    w.result = False
+    return h._stop
+
+
+def _apy_asyncio_run(h, a):
+    """Drive one coroutine to completion and answer what it returned."""
+    coro = h._get(a[0], "apy_asyncio_run")
+    if not isinstance(coro, Gen) or not coro.coro:
+        return h._fail("ValueError",
+                       f"a coroutine was expected, got {h.kind_name(coro)}")
+    for _ in range(100_000_000):
+        _wake_clear()
+        stepped = _apy_await_step(h, [a[0], h._none])
+        if stepped == 0:
+            return 0
+        if stepped == h._stop:
+            # THE LOOP CLOSES WHAT THE PROGRAM ABANDONED, before answering.
+            # An `async for` left by `break` holds a generator suspended
+            # inside its own `try`, and its `finally` has not run yet.
+            result = coro.result
+            while h.live_agens:
+                ag = h.live_agens.pop()
+                if ag.state > 0 and _apy_gen_close(h, [h._new(ag)]) == 0:
+                    return 0
+            return h._value(result)
+        # THE GAP IS WHERE A TASK RUNS. What was being driven has
+        # suspended, so this is the moment anything the program handed to the
+        # loop can make progress -- and without it `create_task` would be an
+        # elaborate way of writing `await`.
+        mine, had = (_WAKE[1] if _WAKE[0] else _NOW[0]), _WAKE[0]
+        _tasks_turn(h)
+        if had and (not _WAKE[0] or mine < _WAKE[1]):
+            _WAKE[0], _WAKE[1] = True, mine
+        # THE CLOCK ONLY EVER MOVES FORWARD, and only to the next moment
+        # something can happen. Everything is blocked when this is reached.
+        if _WAKE[0] and _WAKE[1] > _NOW[0]:
+            _NOW[0] = _WAKE[1]
+    return h._fail("RuntimeError", "coroutine did not finish")
 
 
 def _apy_gen_next(h, a):
@@ -4025,11 +7980,47 @@ def _apy_gen_drain(h, a):
 _STOP = object()
 
 
+def _apy_is_stop(h, a):
+    """Is this the exhaustion sentinel? A comparison the IR cannot spell.
+
+    A RAW MACHINE WORD, not a handle: the caller branches on it directly, and
+    a handle is a small non-zero integer -- so answering one made every test
+    say "stopped" and the delegation loop ran zero times.
+    """
+    return 1 if h._get(a[0], "apy_is_stop") is _STOP else 0
+
+
+def _apy_delegate_step(h, a):
+    """ONE STEP OF A `yield from`, with the value the outer generator was SENT.
+
+    Delegation has to STEP the inner generator rather than drain it: `got =
+    yield ...` inside the inner one reads what the OUTER was sent, and a
+    drained generator has already run past every such point with nothing. A
+    source that is not a generator has nowhere to put the sent value and is
+    simply advanced.
+    """
+    src = h._get(a[0], "apy_delegate_step")
+    if isinstance(src, Gen):
+        # THROUGH `_gen_step`, not `apy_gen_send`: the send entry point raises
+        # StopIteration at the end, and delegation needs the SENTINEL so the
+        # loop that drives it can stop rather than propagate.
+        value, done = _gen_step(h, src, h._get(a[1], "apy_delegate_step"))
+        if done is None:
+            return 0
+        return h._stop if done else h._value(value)
+    return _apy_step(h, [a[0]])
+
+
 def _apy_stop(h, a):
     return h._stop
 
 
 def _apy_getiter(h, a):
+    _v = h._get(a[0], "apy_getiter")
+    if isinstance(_v, _VIEW_TYPES):
+        # READ WHEN THE WALK STARTS -- `for k in d.keys()` sees the keys the
+        # dict has now.
+        return _apy_getiter(h, [h._new(list(_v))])
     """What to step. See `apy_getiter` for why iteration advances rather than
     walking by index."""
     v = h._get(a[0], "apy_getiter")
@@ -4049,7 +8040,7 @@ def _apy_getiter(h, a):
         if v.cls.find("__getitem__") is None:
             return h._fail("TypeError",
                            f"'{h.kind_name(v)}' object is not iterable")
-    elif not isinstance(v, (list, tuple, set, frozenset, dict, str, bytes)):
+    elif not isinstance(v, (list, tuple, set, frozenset, dict, str, bytes, range)):
         return h._fail("TypeError",
                        f"'{h.kind_name(v)}' object is not iterable")
     return h._new(Iterator(v))
@@ -4103,6 +8094,12 @@ def _apy_step(h, a):
     # THE LENGTH IS READ EVERY STEP, which is the point: a body that appends
     # to the list it is walking sees the new elements.
     items = list(src)
+    # A DICT THAT CHANGED SIZE UNDER THE WALK. The table is rehashed by the
+    # write, so continuing would skip or repeat entries; the refusal is what
+    # makes the loss impossible rather than occasional.
+    if it.n0 >= 0 and isinstance(src, dict) and len(items) != it.n0:
+        return h._fail("RuntimeError",
+                       "dictionary changed size during iteration")
     if it.i >= len(items):
         return h._stop
     got = items[it.i]
@@ -4193,6 +8190,17 @@ def _apy_iter(h, a):
     if isinstance(v, Gen):
         # `iter(g)` IS `g`, so a half-consumed generator keeps its position.
         return a[0]
+    if isinstance(v, Class) and v.meta is not None:
+        # ITERATING A CLASS IS THE METACLASS'S BUSINESS: `for c in Color` is
+        # `type(Color).__iter__(Color)`, which is how an enum lists its
+        # members. A class with no metaclass cannot be iterated, and the
+        # refusal further down is still the right answer for it.
+        hook = v.meta.lookup("__iter__")
+        if hook is not _ABSENT:
+            got = h._invoke(hook, [v])
+            if h.err is not None:
+                return 0
+            return _apy_iter(h, [h._new(got)])
     if isinstance(v, Instance):
         # `iter(obj)` answers what `__iter__` did, UNCHANGED, so that
         # `iter(it) is it` holds for a class that returns self.
@@ -4205,7 +8213,7 @@ def _apy_iter(h, a):
         if not drained:
             return 0
         return _apy_iter(h, [drained])
-    if not isinstance(v, (list, tuple, set, frozenset, dict, str, bytes)):
+    if not isinstance(v, (list, tuple, set, frozenset, dict, str, bytes, range)):
         return h._fail("TypeError",
                        f"'{h.kind_name(v)}' object is not iterable")
     return h._new(Iterator(v))
@@ -4232,7 +8240,16 @@ def _apy_next(h, a):
     if not got:
         return 0
     if h._get(got, "apy_next") is _STOP:
-        return a[1] if int(a[2]) else h._fail("StopIteration", "")
+        if int(a[2]):
+            return a[1]
+        # A GENERATOR CARRIES ITS RETURN VALUE OUT IN THE EXCEPTION:
+        # `return "done"` becomes `StopIteration("done")`, and `e.value` is
+        # how a program reads it. A bare one threw that away, while
+        # `yield from` read it off the object -- two spellings disagreeing
+        # about the same generator.
+        # Only a GENERATOR has a return value to carry; a cursor or a user
+        # iterator running out is a bare StopIteration.
+        return _gen_stop(h, it) if isinstance(it, Gen)             else h._fail("StopIteration", "")
     return got
 
 
@@ -4259,6 +8276,23 @@ def _apy_print_seq(h, a):
     because a value-form has no compile-time count."""
     items = h._get(a[0], "apy_print_seq")
     h._interp._emit(" ".join(h._text(v, False) for v in items) + "\n")
+    return h._none
+
+
+def _apy_print_seq_with(h, a):
+    """`print(*xs, sep=..., end=...)`.
+
+    The starred form builds its arguments at run time, so it cannot use the
+    stack-array entry point the fixed form does -- and routing it through
+    `_apy_print_seq`, which has nowhere to put them, DROPPED the separator
+    silently.
+    """
+    items = h._get(a[0], "apy_print_seq_with")
+    sep = h._get(a[1], "apy_print_seq_with")
+    end = h._get(a[2], "apy_print_seq_with")
+    text = (sep if isinstance(sep, str) else " ").join(
+        h._text(v, False) for v in items)
+    h._interp._emit(text + (end if isinstance(end, str) else "\n"))
     return h._none
 
 
@@ -4337,12 +8371,102 @@ def _apy_to_dict(h, a):
     return h._new(out)
 
 
+def _apy_unpack_check(h, a):
+    """`a, b = xs` -- THE ARITY, checked before anything is bound.
+
+    Without it a short sequence read past the end and reported an IndexError
+    from a subscript the program never wrote, and a long one bound the leading
+    names and silently dropped the rest.
+    """
+    v = h._get(a[0], "apy_unpack_check")
+    want, at_least = int(a[1]), int(a[2])
+    # THROUGH `_apy_raw_len`, which drains a generator into its cache the way
+    # the C's does -- so unpacking one sees the same elements the reads below
+    # will, rather than a second traversal of something already consumed.
+    n = _apy_raw_len(h, [a[0]])
+    if n < want:
+        return h._fail("ValueError",
+                       f"not enough values to unpack (expected "
+                       f"{'at least ' if at_least else ''}{want}, got {n})")
+    if not at_least and n > want:
+        return h._fail("ValueError",
+                       f"too many values to unpack (expected {want}, "
+                       f"got {n})")
+    return h._none
+
+
+def _apy_name_or(h, a):
+    """A module-level name that is ALSO a builtin: what the global holds, or
+    the builtin when it holds nothing.
+
+    `a[0]` is read RAW, as in `_apy_locals_put`: a zero means the global was
+    never assigned or has been deleted, which is the question rather than a
+    failure.
+    """
+    return int(a[0]) or int(a[1])
+
+
+def _apy_locals_put(h, a):
+    """One name into the dict `locals()` is building.
+
+    `a[2]` is read RAW rather than through `h._get`, which is the whole point:
+    every other binding treats handle 0 as "an earlier call failed and its
+    result was used unchecked" and traps on it. Here 0 means the name is not
+    bound on the path taken, and the name is simply left out.
+    """
+    if int(a[2]) == 0:
+        return a[0]
+    d = h._get(a[0], "apy_locals_put")
+    d[h._get(a[1], "apy_locals_put")] = h._get(a[2], "apy_locals_put")
+    return a[0]
+
+
+def _apy_to_bytearray(h, a):
+    """`bytearray(...)`. Always a fresh buffer -- see the C."""
+    src = h._get(a[0], "apy_to_bytearray")
+    if isinstance(src, int) and not isinstance(src, bool):
+        if src < 0:
+            return h._fail("ValueError", "negative count")
+        return h._new(bytearray(src))
+    frozen = _apy_to_bytes(h, [a[0]])
+    if not frozen:
+        return 0
+    return h._new(bytearray(h._get(frozen, "apy_to_bytearray")))
+
+
+def _apy_memoryview(h, a):
+    src = h._get(a[0], "apy_memoryview")
+    if isinstance(src, memoryview):
+        return h._new(src)
+    if not isinstance(src, (bytes, bytearray)):
+        return h._fail("TypeError",
+                       "memoryview: a bytes-like object is required, not "
+                       f"'{h.kind_name(src)}'")
+    return h._new(memoryview(src))
+
+
+def _apy_mview_bytes(h, a):
+    """What the view shows RIGHT NOW, as bytes."""
+    return h._new(bytes(h._get(a[0], "apy_mview_bytes")))
+
+
 def _apy_to_bytes(h, a):
     src = h._get(a[0], "apy_to_bytes")
+    if isinstance(src, (bytearray, memoryview)):
+        # A COPY: `bytes(ba)` is a snapshot, and the bytearray goes on being
+        # written to.
+        return h._new(bytes(src))
     if isinstance(src, bytes):
         return h._new(src)
     if isinstance(src, str):
         return h._fail("TypeError", "string argument without an encoding")
+    # `bytes(3)` is THREE ZERO BYTES, not the digit three -- the same rule
+    # `bytearray(3)` follows, and the reason a count is tested before the
+    # sequence walk below asks an int to be iterable.
+    if isinstance(src, int) and not isinstance(src, bool):
+        if src < 0:
+            return h._fail("ValueError", "negative count")
+        return h._new(bytes(src))
     items = _seq_items(h, src, "apy_to_bytes")
     if items is None:
         return 0
@@ -4382,12 +8506,37 @@ _TABLE.update({
     "apy_map": _apy_map,
     "apy_filter": _apy_filter,
     "apy_print_seq": _apy_print_seq,
+    "apy_print_seq_with": _apy_print_seq_with,
+    "apy_prop_deleter": _apy_prop_deleter,
+    "apy_func_annotate": _apy_func_annotate,
+    "apy_func_qualname": _apy_func_qualname,
+    "apy_func_builtin": _apy_func_builtin,
+    "apy_call_spread_kw": _apy_call_spread_kw,
+    "apy_str_like": _apy_str_like,
+    "apy_set_names": _apy_set_names,
+    "apy_check_slots": _apy_check_slots,
     "apy_dict_of": _apy_dict_of,
     "apy_bytes_of": _apy_bytes_of,
     "apy_dict_fromkeys": _apy_dict_fromkeys,
     "apy_from_bytes_n": _apy_from_bytes_n,
     "apy_to_dict": _apy_to_dict,
     "apy_to_bytes": _apy_to_bytes,
+    "apy_to_bytearray": _apy_to_bytearray,
+    "apy_locals_put": _apy_locals_put,
+    "apy_name_or": _apy_name_or,
+    "apy_unpack_check": _apy_unpack_check,
+    "apy_get_origin": _apy_get_origin,
+    "apy_type_class": _apy_type_class,
+    "apy_type_object": _apy_type_object,
+    "apy_prepare": _apy_prepare,
+    "apy_class_build": _apy_class_build,
+    "apy_class_build_kw": _apy_class_build_kw,
+    "apy_meta_for": _apy_meta_for,
+    "apy_type_make": _apy_type_make,
+    "apy_object_class": _apy_object_class,
+    "apy_get_args": _apy_get_args,
+    "apy_memoryview": _apy_memoryview,
+    "apy_mview_bytes": _apy_mview_bytes,
 })
 
 
@@ -4416,3 +8565,19 @@ def _apy_set_update(h, a):
 
 
 _TABLE["apy_set_update"] = _apy_set_update
+
+
+# EVERY `_apy_x` REGISTERED AS `apy_x`, swept at the end of the module so the
+# definitions below the explicit blocks are seen too -- a sweep in the middle
+# silently missed them, and a missing binding is a symbol the compiled program
+# can call and `asmpython run` cannot.
+#
+# An explicit entry above WINS: a few names map to a function whose own name
+# differs (`apy_zip2` is `_zip_two`), and the arithmetic operators share one
+# parameterised implementation with no `_apy_add` to find.
+#
+# `tests/asmpython/unit/test_objects_host` is the ratchet: every symbol
+# `link/objects.py` exports must be reachable here.
+_TABLE.update({name[1:]: fn for name, fn in list(globals().items())
+               if name.startswith("_apy_") and callable(fn)
+               and name[1:] not in _TABLE})

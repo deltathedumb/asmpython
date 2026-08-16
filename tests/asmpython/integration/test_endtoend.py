@@ -811,6 +811,81 @@ class TestDiagnostics:
         assert any(d.code == "E0030" for d in sink.diagnostics)
 
 
+class TestTheRuntimeCompiler:
+    """`compile`, `eval` and `exec` are SUPPORTED, and they say what they cost.
+
+    THEY USED TO BE REFUSED, and the refusal was pinned here as a contract:
+    nineteen conformance cases call `compile()` on a bad program and expect a
+    SyntaxError, and the worry was a half implementation that accepts the call
+    and answers something plausible -- which nothing else in the suite would
+    notice, because a case expecting `SyntaxError` and getting `accepted`
+    reads as one more failure among the nineteen.
+
+    WHAT ANSWERS THAT WORRY NOW is `test_bundled_compile.py`: 87 probes read
+    out of the cases themselves, each compared with CPython's own `compile` on
+    the outcome, the exception class and the warnings. This file pins the
+    OTHER half -- that the program compiles at all, that the warning is
+    reported where the call is written, and that a program naming none of them
+    pays nothing.
+    """
+
+    def build(self, src: str, tmp_path: Path):
+        path = tmp_path / "uses_a_compiler.py"
+        path.write_text(textwrap.dedent(src).strip() + "\n", encoding="utf-8")
+        sink = DiagnosticSink()
+        result = compile_source(Options(source=path), sink)
+        return result, sink
+
+    @harness.cases("name", ["compile", "eval", "exec"])
+    def test_calling_one_compiles_and_warns(self, name, tmp_path):
+        result, sink = self.build(f'{name}("x = 1")', tmp_path)
+        assert result.ok, [d.message for d in sink.diagnostics]
+        found = [d for d in sink.diagnostics if d.code == "W0091"]
+        assert found, [d.code for d in sink.diagnostics]
+        # THE MESSAGE HAS TO SAY WHICH ONE and what it costs: a program
+        # guarding an optional use of one should be able to read the reason.
+        assert name in found[0].message
+
+    @harness.cases("name", ["eval", "exec"])
+    def test_running_source_says_it_is_interpreted(self, name, tmp_path):
+        """THE TWO COSTS DIFFER. `compile()` answers whether source is valid
+        and stops; these RUN it, and running it is interpretation."""
+        _, sink = self.build(f'{name}("x = 1")', tmp_path)
+        notes = " ".join(str(n) for d in sink.diagnostics
+                         for n in (getattr(d, "notes", None) or []))
+        assert "INTERPRETED" in notes or "interpreted" in notes, notes
+
+    @harness.cases("name", ["compile", "eval", "exec"])
+    def test_naming_one_as_a_value_compiles(self, name, tmp_path):
+        """AND NOT ONLY IN CALL POSITION. `f = compile` used to compile and
+        then raise `name 'compile' is not defined` at run time."""
+        result, sink = self.build(f"f = {name}", tmp_path)
+        assert result.ok, [d.message for d in sink.diagnostics]
+
+    def test_a_program_that_names_none_pays_nothing(self, tmp_path):
+        """The cost is paid by the program that asks and by no other: naming
+        one splices two and a half thousand lines of Python into it."""
+        path = tmp_path / "fine.py"
+        path.write_text("f = len\nprint(f([1, 2]))\n", encoding="utf-8")
+        sink = DiagnosticSink()
+        result = compile_source(Options(source=path), sink)
+        assert result.ok, [d.message for d in sink.diagnostics]
+        assert not sink.diagnostics
+        assert not [fn for fn in result.module.functions
+                    if "_pycompile" in fn.name or "_pyparse" in fn.name]
+
+    def test_a_program_with_its_own_compile_keeps_it(self, tmp_path):
+        """A program that BINDS the name means its own, and rewriting the call
+        would send it somewhere else without saying so."""
+        result, sink = self.build(
+            "def compile(src):\n"
+            "    return 'mine: ' + src\n"
+            "\n"
+            "print(compile('x'))\n", tmp_path)
+        assert result.ok, [d.message for d in sink.diagnostics]
+        assert not [d for d in sink.diagnostics if d.code == "W0091"]
+
+
 class TestPipelineContract:
     def test_emit_ir_stops_before_the_backend(self, tmp_path):
         path = tmp_path / "p.py"

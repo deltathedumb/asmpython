@@ -35,7 +35,8 @@ from ...ir import Builder, Function, Module, types as T
 from ...ir.module import Global, Instruction, Linkage
 from ...ir.opcodes import Op
 from .analysis import (
-    BOOL, ENTRY_NAME, FLOAT, INT, NONE, OBJ, FunctionInfo, SemType, TO_IR,
+    BOOL, ENTRY_NAME, FLOAT, INT, NONE, OBJ, FunctionInfo, SemType,
+    TO_IR, sem_type,
     int_literal, span_of,
 )
 from ...link.objects import signatures as object_signatures
@@ -75,6 +76,11 @@ _RUNTIME = {
 
 _SPACE, _NEWLINE = 32, 10
 
+#: The symbol that turns UTF-8 bytes in memory into a Java `String`. Matches
+#: `backends/jvm/interop.STRING_SYMBOL`: the frontend names it, the backend
+#: defines it, and neither builds the other's spelling.
+JAVA_STRING = "jvm$str"
+
 #: The object runtime, as IR signatures -- READ OUT OF THE C, not listed here.
 #:
 #: The frontend must declare each runtime symbol it calls with the right
@@ -113,6 +119,9 @@ class Lowerer(DynamicLowering):
     def __init__(self, functions: dict[str, FunctionInfo],
                  source: "SourceFile", analyzer=None) -> None:
         self.infos = functions
+        #: Java string literal -> the global holding its UTF-8 bytes. One
+        #: global per distinct literal, so `setName("stone")` twice costs one.
+        self.java_strings: dict[str, str] = {}
         self.source = source
         #: What the `class` statements bound, and the two node-id indexes that
         #: get from a statement back to what analysis registered for it.
@@ -120,6 +129,15 @@ class Lowerer(DynamicLowering):
         self.class_of_node = getattr(analyzer, "class_of_node", {})
         self.def_keys = getattr(analyzer, "def_of_node", {})
         self.exc_classes = getattr(analyzer, "exc_classes", {})
+        #: Module-level names more than one `def` binds. A call to one has to
+        #: go through the NAME, because which body it reaches depends on where
+        #: the call sits rather than on anything visible at the call site.
+        self.rebound = getattr(analyzer, "rebound", set())
+        #: Calls whose argument count is provably wrong. Lowered through the
+        #: value path so the RUNTIME reports them -- Python's answer is a
+        #: TypeError a program may catch, and the direct path would be a C
+        #: compile error instead.
+        self.late_arity = getattr(analyzer, "late_arity", set())
         source_name = source.path.stem if source.path else "module"
         #: The IR symbol per Python function name. The entry point is called
         #: `main` in the IR -- backends rename that to `ENTRY_SYMBOL` and the C
@@ -162,6 +180,9 @@ class Lowerer(DynamicLowering):
         #: used as VALUES. One per builtin per module, emitted on first use.
         self._builtin_thunks: dict[str, str] = {}
         self._pending_thunks: list = []
+        #: PEP 649 annotation thunks, as (symbol, [(name, expr)]). Emitted
+        #: alongside the builtin ones -- see `_dyn_emit_annotate_thunks`.
+        self._pending_annotations: list = []
         #: Runtime symbols wrapped as callable values -- `math.sqrt`. Same
         #: shape as the builtin thunks, with an arity that is not always one.
         self._native_thunks: dict[str, str] = {}
@@ -174,6 +195,32 @@ class Lowerer(DynamicLowering):
         #: Comprehension targets, standing in for their enclosing binding
         #: while the comprehension runs -- see `_dyn_comprehension`.
         self._shadow: dict[str, int] = {}
+        #: NAMES THE CLASS BODY BEING LOWERED HAS ALREADY BOUND. A class body
+        #: is a scope that runs top to bottom, so `y = x + 1` and `@v.setter`
+        #: both read something the body itself produced. Empty everywhere
+        #: else, and saved/restored around a nested class.
+        self._class_scope: dict[str, int] = {}
+        #: PEP 657. One (function, span) per statement lowered, in lowering
+        #: order -- which is source order. The index into this list is what
+        #: `apy_at` stores, and `apy_code_of` reads the rows back to answer
+        #: `co_positions()`.
+        #:
+        #: EMPTY UNLESS THE PROGRAM ASKS. Recording costs a call per statement
+        #: at run time, and a program that never looks at a traceback should
+        #: not pay it -- see `_wants_positions`.
+        self._positions: list = []
+        #: Memoised answer to `_wants_positions`, which reads the
+        #: whole source and is asked once per statement.
+        self._positions_wanted = None
+        #: While a class body's GENERAL statements are lowered: the namespace
+        #: they bind into, the class's own name (for private-name mangling),
+        #: and which names go there. None outside one. See `_dyn_class`.
+        self._class_binds: tuple | None = None
+        #: THE EXCEPTION EACH ENCLOSING `except` BODY CAUGHT, innermost last.
+        #: A bare `raise` re-raises the last of them: entering a handler
+        #: clears the error flag, so there is nothing left to propagate by
+        #: itself.
+        self._handling: list = []
         #: `import math` twice binds the SAME namespace, so a module is built
         #: once per program: `import math as m` then `math is m` is True.
         self._modules: dict[str, int] = {}
@@ -208,6 +255,16 @@ class Lowerer(DynamicLowering):
         return "gv_" + name
 
     def run(self) -> Module:
+        # Java calls the program made, declared as externals. Collected from
+        # every function before any body is lowered, because a declaration has
+        # to be in the module before a call can name it.
+        for symbol, (params, ret) in sorted(self._java_externals().items()):
+            fn = Function(symbol, ret, external=True, linkage=Linkage.IMPORT)
+            for i, ty in enumerate(params):
+                fn.params.append(i)
+                fn.registers[i] = ty
+            self.module.functions.append(fn)
+
         for name, (params, ret) in {**_RUNTIME, **_OBJECT_RUNTIME}.items():
             fn = Function(name, ret, external=True, linkage=Linkage.IMPORT)
             for i, ty in enumerate(params):
@@ -230,9 +287,13 @@ class Lowerer(DynamicLowering):
 
         for info in self.infos.values():
             self.module.functions.append(self._function(info))
+        # AFTER the real functions, for the reason the thunks are: what goes
+        # in it is discovered while lowering them.
+        self._dyn_emit_positions()
         # AFTER the real functions: using a builtin as a value is what creates
         # the need for a thunk, and that is discovered while lowering them.
         self._dyn_emit_thunks()
+        self._dyn_emit_annotate_thunks()
         self._dyn_emit_natives()
 
         # Drop runtime declarations nothing called. A module that declares an
@@ -318,7 +379,14 @@ class Lowerer(DynamicLowering):
         # runtime's "no value" and never a legitimate one -- so a read can
         # tell "not assigned yet" from "assigned None". Only those: a proved
         # local stays a plain register with no initialiser and no check.
-        for name in info.maybe_unbound:
+        # `locals()` reads them ALL, including ones no ordinary read could
+        # reach unassigned -- and an uninitialised register is not merely
+        # unreadable, it is IR the verifier rejects. A parameter is excluded
+        # because its register already holds the argument.
+        starts_null = set(info.maybe_unbound)
+        if info.reads_all_locals:
+            starts_null |= {n for n, s in info.locals.items() if not s.is_param}
+        for name in starts_null:
             sym = info.locals.get(name)
             if sym is not None and sym.register is not None \
                     and name not in owned:
@@ -331,6 +399,21 @@ class Lowerer(DynamicLowering):
         # here is module level -- so the entry evaluates all of them, once,
         # before anything else. See `_dyn_init_defaults`.
         if is_entry:
+            # THE CANONICAL BUILTIN TYPES, before any user statement. `type(x)`
+            # answers the object the runtime has registered for that kind, and
+            # `int` mentioned as a value registers it -- so `type(1) is int`
+            # depended on which of the two the program reached FIRST, and left
+            # to right it is `type(1)`. Building them here removes the order
+            # rather than picking a winner, which is what an earlier attempt at
+            # this got wrong.
+            if self._wants_positions:
+                # THE POSITION TABLE IS BUILT FIRST, before any statement can
+                # fail. The function that fills it is emitted after every
+                # other -- the rows are discovered while lowering them -- and
+                # is reached by name, which the IR allows because a call names
+                # a symbol rather than a definition.
+                self.b.call(T.VOID, "pyf__positions", [])
+            self._dyn_register_builtin_types()
             # Every module-level `def` becomes a value here, which is also
             # where its defaults are evaluated -- a module-level `def` is
             # lifted out of the entry's body by analysis, so there is no
@@ -875,6 +958,9 @@ class Lowerer(DynamicLowering):
         return out
 
     def _call(self, node: ast.Call) -> int:
+        java = self.info.java_calls.get(id(node))
+        if java is not None:
+            return self._java_call(node, java)
         name = node.func.id
         if name == "print":
             for i, arg in enumerate(node.args):
@@ -916,6 +1002,74 @@ class Lowerer(DynamicLowering):
                 for a, want in zip(node.args, params)]
         result = self.b.call(TO_IR[ret], self.symbols[name], args)
         return result if result is not None else self.b.const(T.I64, 0)
+
+    def _java_externals(self) -> dict:
+        """Every Java operation the analyser resolved, as an IR signature.
+
+        The types come from the overload the analyser chose, so the
+        declaration and the call cannot disagree about arity or width -- and
+        the backend checks both against the class path, which is a third
+        opinion from the only source that actually knows.
+        """
+        out: dict[str, tuple] = {}
+        wants_string = False
+        for info in self.infos.values():
+            for java in info.java_calls.values():
+                params = [TO_IR[sem_type(p)] for p in java["params"]]
+                if java["receiver"]:
+                    params.insert(0, T.I64)
+                out[java["symbol"]] = (params, TO_IR[sem_type(java["returns"])])
+            wants_string = wants_string or bool(info.java_strings)
+        if wants_string:
+            out[JAVA_STRING] = ([T.PTR], T.I64)
+        return out
+
+    # ── calling Java ────────────────────────────────────────────────────────
+    def _java_call(self, node: ast.Call, java: dict) -> int:
+        """A constructor, a static method or an instance method.
+
+        The analyser already chose the overload and the backend already named
+        the symbol; this only has to evaluate the arguments and emit the call.
+        The receiver, when there is one, is the first argument -- which is what
+        the backend's `call` operations expect and what makes an instance
+        method an ordinary call at the IR level.
+        """
+        args = []
+        if java["receiver"]:
+            args.append(self._expr(node.func.value))
+        for arg, want in zip(node.args, java["params"]):
+            args.append(self._java_arg(arg, want))
+        ret = sem_type(java["returns"])
+        result = self.b.call(TO_IR[ret], java["symbol"], args)
+        return result if result is not None else self.b.const(T.I64, 0)
+
+    def _java_arg(self, node, want: str) -> int:
+        """One argument, coerced to what the Java method declared."""
+        text = self.info.java_strings.get(id(node))
+        if text is not None:
+            return self._java_string(text)
+        return self._coerce(self._expr(node), self._type_of(node),
+                            sem_type(want))
+
+    def _java_string(self, text: str) -> int:
+        """A Java `String` from a literal.
+
+        The bytes go into a read-only global and the runtime builds the String
+        from them. Not a constant in the class file: the literal has to survive
+        `--emit-ir` and a later rebuild, and an IR symbol cannot hold arbitrary
+        text -- a global can hold anything.
+        """
+        symbol = self.java_strings.get(text)
+        if symbol is None:
+            symbol = f"jstr_{len(self.java_strings)}"
+            self.java_strings[text] = symbol
+            self.module.globals.append(Global(
+                name=symbol, size=len(text.encode("utf-8")) + 1,
+                data=text.encode("utf-8") + b"\x00", readonly=True))
+        address = self.b.reg(T.PTR)
+        self.b.emit(Instruction(Op.GLOBAL_ADDR, T.PTR, dst=address,
+                                sym=symbol))
+        return self.b.call(T.I64, JAVA_STRING, [address])
 
     # ── helpers ─────────────────────────────────────────────────────────────
     def _truth(self, node) -> int:
