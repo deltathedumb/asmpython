@@ -147,10 +147,12 @@ So the irreducible floor is roughly:
 Every stage keeps the tree working. The runtime in C stays the one that ships
 until a stage replaces a piece of it and the corpus agrees.
 
-1. **The subset.** Machine types and memory intrinsics in the static path.
+1. **The subset.** ***DONE*** -- see "What stage 1 landed" below. Machine types
+   and memory intrinsics in the static path.
    PROVED BY: a unit test compiling a function that allocates, stores a tagged
    cell and reads it back, checked through the IR verifier and the IR
    interpreter. Cheap -- no backend, no gcc.
+   `tests/asmpython/unit/test_machine_subset.py`, 31 tests, ~1 second.
 2. **The floor.** Define the platform interface and implement it for the C
    backend (trivially, over libc) and the JVM backend (over `byte[]` and
    `System.out`). PROVED BY: a program that prints, on both backends.
@@ -167,6 +169,85 @@ until a stage replaces a piece of it and the corpus agrees.
 6. **Delete the C, delete `objects_host.py`.** PROVED BY: 1668/1668 with
    `--backend c`, and the same suite with `--backend jvm`, which is the goal
    stated at the top.
+
+## What stage 1 landed
+
+The systems subset exists. A function annotated with a machine width takes the
+static path, so **it emits no `apy_*` at all** -- which is the property the
+whole plan rests on and is asserted directly against the IR rather than
+inferred from the program compiling.
+
+### The vocabulary
+
+    i8 i16 i32 i64  u8 u16 u32 u64  f32 f64  ptr      types
+    i32(x)  u64(x)  f64(x)  ptr(x)                    conversions
+    alloca(n)                                         frame storage -> ptr
+    load(T, addr)                                     -> T
+    store(T, value, addr)
+    offset(addr, bytes)                               -> ptr
+    sizeof(T)                                         a constant
+
+Every name is spelled as the IR spells it, so a diagnostic, the IR text and the
+backend all say `u32` and mean the one thing. `bool` is already `i1` and is not
+respelled: one name per storage class, and `bool` is the one Python has.
+
+**Nothing is new grammar.** `load(i64, p)` rather than `*p`, `offset` rather
+than `p + 1`, `sizeof(i64)` rather than a keyword -- so the subset stays
+parseable by `ast` and readable by every tool that already reads Python, and
+the grammar this frontend accepts did not grow by one node. The type argument
+comes FIRST, as LLVM writes the same instruction, so the width being read is
+the first thing on the line rather than something you infer from where the
+value lands.
+
+**Nothing is reserved.** The intrinsics and the width names are looked up after
+the module's own functions, exactly as `int` is, so a program with its own
+`def load(...)` keeps it. Sixteen new names cost nothing.
+
+### The one rule, and why it is the one
+
+**Widths do not convert themselves.** Python's tower widens `bool` to `int` to
+`float` because none of those loses anything; `i64` to `i32` loses half the
+value. A width exists *because something else reads the same bytes*, so an
+implicit conversion is a silent disagreement about a struct layout -- the worst
+bug this subset can have, and the one it would exist to cause.
+
+A LITERAL is the exception and adapts to the type beside it, because `n + 1`
+should not have to be written `n + u32(1)`: a literal has no width of its own to
+lose. One that does not fit is refused rather than wrapped -- `x: u8 = 300`
+quietly becoming 44 is exactly what makes a width annotation worse than none.
+`sizeof(i64)` adapts the same way, and arithmetic over it folds, so a layout can
+be written `alloca(sizeof(i64) + sizeof(ptr) + sizeof(i64) * 4)` instead of as
+`48` with a comment saying where 48 came from.
+
+Ten new diagnostics enforce it (`E0012`-`E0019`, `E0033`, `E0034`), each with
+its own code because each has its own fix. The refusals get as much test room
+as the acceptances: a rejected program is not the failure mode that matters,
+a program that silently truncates and returns a plausible answer is.
+
+### What it caught on the way in
+
+Two bugs that were live in the existing frontend, both invisible to every test
+that existed because nothing had ever asked for a width:
+
+* **A comparison was made at `i64` whatever its operands were**, so a `u64`
+  above 2^63 sorted below zero -- and the coercion that got it there was a
+  same-width truncation the verifier had no reason to object to.
+* **`print` chose its writer on the Python type**, so a machine `f64` went
+  through `put_int`. That does not print a wrong float; it prints an integer,
+  because the coercion truncates first.
+
+Both are the shape the traps section below warns about: an answer that is
+plausible rather than absent.
+
+### What is deferred, and to where
+
+`func_addr`/`call_ptr` for dispatch tables and `global_addr` for module-level
+storage are named in "what has to be added to the static path" above and are
+NOT in stage 1. They are not needed to lay out and read an object, which is
+what stage 1 had to prove; they are needed to dispatch on one, which is stage
+3's first requirement. Nor is `alloca` with a computed size -- frame storage is
+laid out before the function runs, and a runtime size is the allocator's job,
+which is stage 4.
 
 ## Constraints carried in
 

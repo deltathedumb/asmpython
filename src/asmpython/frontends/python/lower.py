@@ -35,9 +35,10 @@ from ...ir import Builder, Function, Module, types as T
 from ...ir.module import Global, Instruction, Linkage
 from ...ir.opcodes import Op
 from .analysis import (
-    BOOL, ENTRY_NAME, FLOAT, INT, NONE, OBJ, FunctionInfo, SemType,
+    BOOL, ENTRY_NAME, FLOAT, INT, MACHINE, MEMORY_INTRINSICS, NONE, OBJ,
+    FunctionInfo, SemType,
     TO_IR, sem_type,
-    int_literal, span_of,
+    const_int, int_literal, span_of,
 )
 from ...link.objects import signatures as object_signatures
 from .dynamic import DynamicLowering
@@ -469,6 +470,13 @@ class Lowerer(DynamicLowering):
     def _stmt(self, node) -> None:
         self.b.span = self._span(node)
         match node:
+            case ast.Expr(value=ast.Call(func=ast.Name(id="store"))) if (
+                    "store" not in self.infos):
+                # `store(...)` IN STATEMENT POSITION yields nothing, and going
+                # through `_expr` would make it yield a constant nobody reads.
+                # That matters here and nowhere else: a runtime written in this
+                # subset is mostly stores.
+                self._store_to_memory(node.value)
             case ast.Expr():
                 if not isinstance(node.value, ast.Constant):
                     self._expr(node.value)
@@ -608,10 +616,17 @@ class Lowerer(DynamicLowering):
         match node:
             case ast.Constant(value=bool() as v):
                 return self.b.const(T.I1, int(v))
+            # A LITERAL IS MATERIALISED AT THE WIDTH ANALYSIS GAVE IT. `5` is
+            # ordinarily `int`, but next to a machine type it adapts (see
+            # `_adapt_literal`), and emitting it as i64 anyway produced a store
+            # of an i64 into a u8 -- caught by the verifier, and reported
+            # against the store rather than against the literal.
             case ast.Constant(value=int() as v):
-                return self.b.const(T.I64, v)
+                ty = self._type_of(node)
+                return self.b.const(TO_IR[ty] if ty.is_machine else T.I64, v)
             case ast.Constant(value=float() as v):
-                return self.b.const(T.F64, v)
+                ty = self._type_of(node)
+                return self.b.const(TO_IR[ty] if ty.is_machine else T.F64, v)
             case ast.Name(id=name):
                 return self.info.locals[name].register
             case ast.UnaryOp(op=ast.Not()):
@@ -650,7 +665,11 @@ class Lowerer(DynamicLowering):
         result = self._type_of(node)
         operand = FLOAT if FLOAT in (self._type_of(node.left),
                                      self._type_of(node.right)) else result
-        if isinstance(node.op, ast.Div):
+        # `/` is float-valued in Python, so it forces both sides to float --
+        # but a MACHINE width is already exactly the type asked for, and
+        # analysis refused `/` on the integer ones. Widening an `f32` division
+        # to `f64` here would quietly give the wrong result type back.
+        if isinstance(node.op, ast.Div) and not operand.is_machine:
             operand = FLOAT
         ty = TO_IR[operand]
         a = self._coerce(self._expr(node.left), self._type_of(node.left), operand)
@@ -920,7 +939,14 @@ class Lowerer(DynamicLowering):
         left_v, left_t = self._expr(node.left), self._type_of(node.left)
         for i, (op_node, right_node) in enumerate(zip(node.ops, node.comparators)):
             right_v, right_t = self._expr(right_node), self._type_of(right_node)
-            operand = FLOAT if FLOAT in (left_t, right_t) else INT
+            # A MACHINE WIDTH COMPARES AT ITS OWN WIDTH. Falling through to
+            # `INT` compared a `u64` as a signed i64, so every address above
+            # 2^63 sorted below zero -- and the coercion that got it there was
+            # a same-width truncation the verifier had no reason to object to.
+            if left_t.is_machine or right_t.is_machine:
+                operand = left_t if left_t.is_machine else right_t
+            else:
+                operand = FLOAT if FLOAT in (left_t, right_t) else INT
             ty = TO_IR[operand]
             res = self.b.cmp(_CMP_OPS[type(op_node)], ty,
                              self._coerce(left_v, left_t, operand),
@@ -980,8 +1006,14 @@ class Lowerer(DynamicLowering):
                     self.b.call(T.VOID, "put_none", [])
                     continue
                 value = self._expr(arg)
-                if ty is FLOAT:
-                    self.b.call(T.VOID, "put_float", [value])
+                # THE WRITER FOLLOWS THE STORAGE CLASS, not the Python type:
+                # a machine `f64` is as much a float as `float` is, and
+                # choosing on `ty is FLOAT` alone sent it through `put_int`,
+                # which does not print a wrong float -- it prints an integer,
+                # because the coercion truncates first.
+                if TO_IR[ty].is_float:
+                    self.b.call(T.VOID, "put_float",
+                                [self._coerce(value, ty, FLOAT)])
                 elif ty is BOOL:
                     self.b.call(T.VOID, "put_bool",
                                 [self._coerce(value, ty, INT)])
@@ -996,12 +1028,76 @@ class Lowerer(DynamicLowering):
             return self._coerce(self._expr(arg), self._type_of(arg),
                                 _CONVERSIONS[name])
 
+        if name in MACHINE and name not in self.infos:
+            arg = node.args[0]
+            return self._coerce(self._expr(arg), self._type_of(arg),
+                                MACHINE[name])
+
+        if name in MEMORY_INTRINSICS and name not in self.infos:
+            return self._memory(name, node)
+
         info = self.infos[name]
         params, ret = info.signature
         args = [self._coerce(self._expr(a), self._type_of(a), want)
                 for a, want in zip(node.args, params)]
         result = self.b.call(TO_IR[ret], self.symbols[name], args)
         return result if result is not None else self.b.const(T.I64, 0)
+
+    # ── the machine subset: memory ──────────────────────────────────────────
+    def _memory(self, name: str, node: ast.Call) -> int:
+        """`alloca`, `load`, `store`, `offset`, `sizeof` -- one instruction each.
+
+        Nothing here is a call, so nothing here adds a runtime dependency.
+        That is the whole reason the systems subset can hold a runtime: code
+        written in it needs no runtime to run.
+        """
+        if name == "sizeof":
+            # A COMPILE-TIME CONSTANT. `offset(p, sizeof(i64))` has to fold to
+            # a number, because a struct layout written in terms of it must
+            # cost the same as writing the number and must be checkable by
+            # reading the IR. It also ADAPTS like any other literal, so
+            # `i * sizeof(i32)` for a machine-typed `i` needs no conversion.
+            ty = self._type_of(node)
+            size = TO_IR[self._type_arg(node.args[0])].size
+            return self.b.const(TO_IR[ty] if ty.is_machine else T.I64, size)
+        if name == "alloca":
+            return self.b.alloca(const_int(node.args[0], self.infos))
+        if name == "load":
+            return self.b.load(TO_IR[self._type_arg(node.args[0])],
+                               self._expr(node.args[1]))
+        if name == "store":
+            self._store_to_memory(node)
+            # `store(...)` yields nothing, but `_expr` must hand back a
+            # register because every caller indexes one -- `print` returns a
+            # constant for the same reason. `_stmt` reaches `_store_to_memory`
+            # directly so the ordinary case does not pay for it: a runtime
+            # written in this subset is mostly stores, and one dead register
+            # each is a large share of an unoptimised function.
+            return self.b.const(T.I64, 0)
+        # offset. The byte count is widened to the pointer's own width, which
+        # is what `Op.OFFSET` takes -- a narrower index would be sign-extended
+        # by the backend anyway, and doing it here means every backend sees
+        # the same instruction.
+        base = self._expr(node.args[0])
+        count = self._coerce(self._expr(node.args[1]),
+                             self._type_of(node.args[1]), INT)
+        return self.b.offset(base, count)
+
+    def _store_to_memory(self, node: ast.Call) -> None:
+        """`store(T, value, addr)`, and nothing else.
+
+        THE VALUE IS EVALUATED BEFORE THE ADDRESS, which is the order the
+        source reads left to right -- and both may have side effects.
+        """
+        ty = self._type_arg(node.args[0])
+        value = self._coerce(self._expr(node.args[1]),
+                             self._type_of(node.args[1]), ty)
+        self.b.store(TO_IR[ty], value, self._expr(node.args[2]))
+
+    def _type_arg(self, node) -> SemType:
+        """The type named by an intrinsic's first argument. Analysis already
+        checked it is one of `MACHINE`, so this only has to read it."""
+        return MACHINE[node.id]
 
     def _java_externals(self) -> dict:
         """Every Java operation the analyser resolved, as an IR signature.
@@ -1093,8 +1189,22 @@ class Lowerer(DynamicLowering):
         src, dst = TO_IR[have], TO_IR[want]
         if src == dst:
             return value
+        # A POINTER IS NOT A NUMBER TO CONVERT, it is 64 bits to reinterpret --
+        # and BITCAST is the only opcode that will take it, because `ptr` is
+        # not in the allowed set of TRUNC, EXTEND, FTOI or ITOF. Analysis
+        # already refused every ptr conversion that is not 64-bit-to-64-bit,
+        # so one bitcast is the whole job.
+        if src.is_ptr or dst.is_ptr:
+            out = self.b.reg(dst)
+            self.b.emit(Instruction(Op.BITCAST, dst, dst=out, args=[value]))
+            return out
         out = self.b.reg(dst)
-        if src.is_float and dst.is_float:
+        if src.is_int and dst.is_int and src.bits == dst.bits:
+            # SIGNEDNESS ONLY -- `u64` to `i64` and back. Nothing moves, and
+            # saying so with BITCAST beats a TRUNC that happens to be a no-op
+            # at this width and would not be at another.
+            op = Op.BITCAST
+        elif src.is_float and dst.is_float:
             op = Op.FTOF
         elif src.is_float:
             op = Op.FTOI

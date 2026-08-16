@@ -73,11 +73,33 @@ class SemType:
 
     @property
     def is_numeric(self) -> bool:
-        return self.name in ("int", "float", "bool")
+        """Whether `+` and friends apply. `ptr` is deliberately NOT numeric:
+        pointer arithmetic goes through `offset`, which says in bytes what it
+        is doing, rather than through a `+` whose meaning would depend on an
+        element type this IR does not have."""
+        return self.name in ("int", "float", "bool") or (
+            self.is_machine and self.name != "ptr")
 
     @property
     def is_error(self) -> bool:
         return self.name == "<error>"
+
+    # ── the machine subset ──────────────────────────────────────────────────
+    @property
+    def is_machine(self) -> bool:
+        return self.name in MACHINE
+
+    @property
+    def is_machine_int(self) -> bool:
+        return self.is_machine and self.name[0] in "iu"
+
+    @property
+    def is_machine_float(self) -> bool:
+        return self.is_machine and self.name[0] == "f"
+
+    @property
+    def is_ptr(self) -> bool:
+        return self.name == "ptr"
 
 
 INT = SemType("int")
@@ -98,8 +120,51 @@ ERROR = SemType("<error>")
 #: and one root cause surfaced as a dozen unrelated-looking bugs.
 OBJ = SemType("object")
 
+#: THE MACHINE SUBSET. The IR's own types, spelled as annotations, named
+#: identically to `ir.types` so that a diagnostic, the IR text and the backend
+#: all say `u32` and mean the one thing.
+#:
+#: WHY THESE EXIST AT ALL. asmpython's object runtime is 15,560 lines of C plus
+#: an 8,583-line Python re-implementation for the IR interpreter, and a backend
+#: that wants dynamic Python has to go and find 229 `apy_*` symbols -- which is
+#: why exactly one backend has them. `docs/INERT-RUNTIME.md` argues the way out
+#: is to write that runtime in IR instead, and the static path is where it gets
+#: written: the static path emits NO `apy_*` at all, so a runtime written in it
+#: stands on the machine rather than on itself. These names are the vocabulary
+#: for doing that.
+#:
+#: They are NOT for ordinary Python. A program that wants an integer writes
+#: `int`; these are for code that has to know a width because something else
+#: reads the same bytes.
+#:
+#: `bool` is already `i1` and `i1` is not spelled here -- one name per storage
+#: class, and `bool` is the one Python has.
+MACHINE = {name: SemType(name) for name in
+           ("i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+            "f32", "f64", "ptr")}
+
+PTR = MACHINE["ptr"]
+
+#: The memory intrinsics, and how many arguments each takes.
+#:
+#: Each is ONE IR INSTRUCTION, not a call -- `load(i64, p)` emits `i64.load`
+#: and nothing else. Naming them rather than inventing syntax (`p[0]`, `*p`,
+#: `&x`) is deliberate: the systems subset stays parseable by `ast`, so it
+#: stays readable by every tool that already reads Python, and the grammar
+#: this frontend has to accept does not grow at all.
+#:
+#: A program that defines its own `def load(...)` keeps it. These are looked up
+#: only after the user's own functions, exactly as `int` is.
+MEMORY_INTRINSICS = {"alloca": 1, "load": 2, "store": 3, "offset": 2,
+                     "sizeof": 1}
+
+#: What each yields when its arity was wrong, so one mistake makes one
+#: diagnostic instead of a cascade about the expression it sits in.
+_INTRINSIC_RESULT = {"alloca": PTR, "load": None, "store": NONE,
+                     "offset": PTR, "sizeof": INT}
+
 BY_NAME = {"int": INT, "float": FLOAT, "bool": BOOL, "None": NONE,
-           "object": OBJ}
+           "object": OBJ, **MACHINE}
 
 #: What the module's top-level statements are called internally. Not a legal
 #: Python identifier, so it can never collide with a user function -- including
@@ -511,7 +576,11 @@ class _IrTypes(dict):
 
 
 TO_IR = _IrTypes({INT: T.I64, FLOAT: T.F64, BOOL: T.I1, NONE: T.VOID,
-                  OBJ: T.PTR})
+                  OBJ: T.PTR,
+                  # The machine types are their IR counterparts by NAME, which
+                  # is not laziness: it is the property that keeps the two
+                  # tables from ever disagreeing about a width.
+                  **{sem: T.ALL[name] for name, sem in MACHINE.items()}})
 
 
 #: Where a name's value actually lives, which is not the same question as what
@@ -777,6 +846,52 @@ def int_literal(node) -> int | None:
         if isinstance(node.op, ast.UAdd):
             return node.operand.value
     return None
+
+
+def const_int(node, shadowed=frozenset()) -> int | None:
+    """An integer the COMPILER knows: a literal, `sizeof(T)`, or arithmetic
+    between two of those. None if it is not one.
+
+    `sizeof(i64)` is a literal that happens to be spelled as a call -- it
+    folds to 8 and emits a constant -- and treating it as one is what lets a
+    struct layout be written the way it should be read:
+
+        p: ptr = alloca(sizeof(i64) + sizeof(ptr) + sizeof(i64) * 4)
+
+    That position needs a number BEFORE the program runs, because `alloca`
+    carries its size in an immediate. Without folding it would have to be
+    written `48` with a comment explaining where 48 came from -- which is how
+    a layout and the code that reads it stop agreeing.
+
+    NOT A CONSTANT EVALUATOR. A NAME does not fold, however constant it looks:
+    resolving one means knowing the scope it is in, and this is a function
+    over a node. `sizeof(...)` and arithmetic on it is the whole of it.
+
+    `shadowed` is the names the program defined itself. A program with its own
+    `def sizeof(...)` keeps it, exactly as it keeps its own `load`.
+    """
+    value = int_literal(node)
+    if value is not None:
+        return value
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == "sizeof" and node.func.id not in shadowed
+            and len(node.args) == 1
+            and getattr(node.args[0], "id", None) in MACHINE):
+        return T.ALL[node.args[0].id].size
+    if isinstance(node, ast.BinOp) and type(node.op) in _CONST_FOLD:
+        left = const_int(node.left, shadowed)
+        right = const_int(node.right, shadowed)
+        if left is not None and right is not None:
+            return _CONST_FOLD[type(node.op)](left, right)
+    return None
+
+
+#: What `const_int` folds. Deliberately not division: `//` by zero would have
+#: to be reported from a helper that has no diagnostic sink, and a layout that
+#: needs division is one that should name its parts.
+_CONST_FOLD = {ast.Add: lambda a, b: a + b,
+               ast.Sub: lambda a, b: a - b,
+               ast.Mult: lambda a, b: a * b}
 
 
 def span_of(source: SourceFile, node) -> Span:
@@ -1781,7 +1896,14 @@ class Analyzer:
             self.sink.report(
                 error("E0011", f"unsupported type {ast.unparse(ann)!r} for {what}")
                 .at(self._span(ann))
-                .note("this frontend understands: " + ", ".join(BY_NAME)))
+                # THE MACHINE TYPES ARE MENTIONED SECOND, and briefly. Someone
+                # who wrote `x: str` needs to hear about `int` and `object`;
+                # putting eleven width names in front of those buries the
+                # answer under a vocabulary they did not ask for.
+                .note("this frontend understands: int, float, bool, None, "
+                      "object")
+                .note("and the machine types, for code that has to know a "
+                      "width: " + ", ".join(MACHINE)))
             return ERROR
         return BY_NAME[name]
 
@@ -1930,7 +2052,8 @@ class Analyzer:
             case ast.Expr():
                 self._expr(node.value)
             case ast.Assign(targets=[ast.Name(id=name)]):
-                self._bind(name, self._expr(node.value), node)
+                self._bind(name, self._expr(node.value), node,
+                           value=node.value)
                 self.assigned.add(name)
             case ast.Assign(targets=[(ast.Tuple() | ast.List()) as target]) \
                     if self.dynamic:
@@ -2011,7 +2134,8 @@ class Analyzer:
                 declared = self._annotation(node.annotation, node, f"{name!r}")
                 if node.value is not None:
                     actual = self._expr(node.value)
-                    self._check_assignable(actual, declared, node)
+                    self._check_assignable(actual, declared, node,
+                                           value=node.value)
                 self._declare(name, declared, node)
                 # `x: int` with no value declares a type and assigns nothing,
                 # exactly as in Python.
@@ -2061,7 +2185,8 @@ class Analyzer:
                 # `v` becomes StopIteration's `value` rather than the result.
                 if not info.is_generator:
                     self._check_assignable(got, info.ret, node,
-                                           what="return value")
+                                           what="return value",
+                                           value=node.value)
                 return False
             case ast.If():
                 self._expr(node.test)
@@ -2570,7 +2695,7 @@ class Analyzer:
         info.locals[name] = sym
         return sym
 
-    def _bind(self, name: str, ty: SemType, at) -> None:
+    def _bind(self, name: str, ty: SemType, at, value=None) -> None:
         info = self.current
         assert info is not None
         if name in info.module_writes:
@@ -2580,7 +2705,7 @@ class Analyzer:
             self._declare(name, ty, at)
             return
         self._check_assignable(ty, existing.type, at,
-                               what=f"assignment to {name!r}")
+                               what=f"assignment to {name!r}", value=value)
 
     def _lookup(self, name: str, at) -> SemType:
         info = self.current
@@ -2673,9 +2798,11 @@ class Analyzer:
                 types = [self._expr(v) for v in node.values]
                 return self._unify_all(types, node)
             case ast.Compare():
-                self._expr(node.left)
-                for c in node.comparators:
-                    self._expr(c)
+                left_node, left = node.left, self._expr(node.left)
+                for op, c in zip(node.ops, node.comparators):
+                    right = self._expr(c)
+                    self._machine_compare(op, left_node, left, c, right)
+                    left_node, left = c, right
                 return BOOL
             case ast.Call():
                 return self._call(node)
@@ -3247,6 +3374,8 @@ class Analyzer:
                 .also(self._span(node.left), str(left))
                 .also(self._span(node.right), str(right)))
             return ERROR
+        if left.is_machine or right.is_machine:
+            return self._machine_binop(node, left, right)
         if isinstance(node.op, ast.Div):
             return FLOAT          # Python's `/` is always float
         if isinstance(node.op, ast.Pow):
@@ -3298,6 +3427,306 @@ class Analyzer:
             return ERROR
         return FLOAT if left is FLOAT else INT
 
+    # ── the machine subset: arithmetic ──────────────────────────────────────
+    #: The bitwise operators, which machine floats have no answer for.
+    _BITWISE = (ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift)
+
+    def _machine_binop(self, node: ast.BinOp, left: SemType,
+                       right: SemType) -> SemType:
+        """`u32 + u32`, and every way that can go wrong.
+
+        THE RULE IS THAT WIDTHS DO NOT CONVERT THEMSELVES. Python's numeric
+        tower widens `bool` to `int` to `float` because none of those loses
+        anything; `i64` to `i32` loses half the value, and the whole reason to
+        write a width down is that something else is reading the same bytes.
+        An implicit conversion here would be a silent disagreement about a
+        struct layout, which is the single worst bug this subset can have.
+
+        A LITERAL IS DIFFERENT and adapts to the other side, because `n + 1`
+        should not have to be written `n + u32(1)` -- the literal has no width
+        of its own to lose, and one that does not fit is refused rather than
+        wrapped.
+        """
+        if left.is_machine and not right.is_machine:
+            if self._adapt_literal(node.right, left):
+                right = left
+        elif right.is_machine and not left.is_machine:
+            if self._adapt_literal(node.left, right):
+                left = right
+        if left.is_error or right.is_error:
+            return ERROR
+        if left != right:
+            self._width_mismatch(node.op, node.left, left, node.right, right)
+            return ERROR
+
+        if isinstance(node.op, ast.Div):
+            # `/` ON AN INTEGER WIDTH IS REFUSED. Python's `/` is float-valued,
+            # so `a / b` on two i32s would have to produce a float and lose the
+            # width the author asked for -- and `//` is what the operation they
+            # meant is actually called.
+            if left.is_machine_int:
+                self.sink.report(
+                    error("E0014", f"`/` is float-valued, and {left} is an "
+                                   f"integer width")
+                    .at(self._span(node))
+                    .help("write `//` for integer division, or convert both "
+                          "sides with f64(...)"))
+                return ERROR
+            return left
+        if isinstance(node.op, ast.Pow):
+            # REFUSED RATHER THAN GUESSED. `**` on Python's `int` expands to
+            # multiplications and on `float` calls a runtime; neither answer is
+            # obviously right for a fixed width, and nothing that needs a width
+            # needs `**`. Refusing costs nothing and cannot be silently wrong.
+            self.sink.report(
+                error("E0015", f"`**` is not defined for {left}")
+                .at(self._span(node))
+                .help("write the multiplications out, or compute in float and "
+                      f"convert back with {left}(...)"))
+            return ERROR
+        if isinstance(node.op, self._BITWISE):
+            if left.is_machine_float:
+                self.sink.report(
+                    error("E0042", f"{_op_symbol(node.op)} requires integers")
+                    .at(self._span(node))
+                    .note("floats have no bitwise representation here"))
+                return ERROR
+            return left
+        return left
+
+    def _adapt_literal(self, node, want: SemType) -> bool:
+        """Retype an untyped numeric LITERAL to a machine type, if it fits.
+
+        Returns True if the literal was taken care of -- either retyped, or
+        refused with a diagnostic already reported. False means this was not a
+        literal at all and the caller should report its own mismatch.
+
+        The retyping is a write into `expr_types`, which is what lowering
+        reads: analysis and lowering walk the same AST objects, so changing
+        this node's recorded type is how a `5` becomes a `u8` five.
+
+        THE RANGE IS CHECKED HERE. `x: u8 = 300` silently becoming 44 is the
+        exact failure that makes width annotations worse than no annotations.
+        """
+        if not want.is_machine or want.is_ptr or self.current is None:
+            return False
+        if want.is_machine_float:
+            if not (isinstance(node, ast.Constant)
+                    and isinstance(node.value, (int, float))
+                    and not isinstance(node.value, bool)):
+                return False
+            self._retype(node, want)
+            return True
+        value = const_int(node, self.functions)
+        if value is None:
+            return False
+        bits = T.ALL[want.name].bits
+        lo, hi = ((-(1 << (bits - 1)), (1 << (bits - 1)) - 1)
+                  if want.name[0] == "i" else (0, (1 << bits) - 1))
+        if not lo <= value <= hi:
+            self.sink.report(
+                error("E0012", f"{value} does not fit in {want}")
+                .at(self._span(node), f"{want} holds {lo} to {hi}")
+                .help("widen the type, or wrap the value explicitly with "
+                      f"{want}(...) if truncation is what you mean"))
+            return True
+        self._retype(node, want)
+        return True
+
+    def _machine_compare(self, op, left_node, left: SemType,
+                         right_node, right: SemType) -> None:
+        """Both sides of ONE `<` must share a width, exactly as `+` does.
+
+        Checked per pair rather than over the chain: `a < b < c` is two
+        comparisons and only the adjacent operands ever meet.
+
+        The same rule and the same diagnostic as `_machine_binop`: comparing a
+        signed width against an unsigned one has no answer that is right for
+        both, which is the same fact as not being able to add them.
+        """
+        if not (left.is_machine or right.is_machine):
+            return
+        if left.is_machine and not right.is_machine:
+            if self._adapt_literal(right_node, left):
+                right = left
+        elif right.is_machine and not left.is_machine:
+            if self._adapt_literal(left_node, right):
+                left = right
+        if left.is_error or right.is_error or left == right:
+            return
+        self._width_mismatch(op, left_node, left, right_node, right)
+
+    def _width_mismatch(self, op, left_node, left: SemType,
+                        right_node, right: SemType) -> None:
+        """The one diagnostic for "these two machine types had to match"."""
+        self.sink.report(
+            error("E0013", f"cannot apply {_op_symbol(op)} to "
+                           f"{left} and {right}")
+            .at(self._span(left_node), str(left))
+            .also(self._span(right_node), str(right))
+            .note("machine types never convert implicitly -- a change of "
+                  "width has to be visible at the point it happens")
+            .help(f"convert one side with {left}(...) or {right}(...)"))
+
+    def _machine_conversion(self, name: str, node: ast.Call) -> SemType:
+        """`i32(x)`, `f64(x)`, `ptr(x)` -- spelled exactly like `int(x)`.
+
+        This is the ONLY way a value changes width, which is what makes the
+        rule in `_machine_binop` enforceable: every conversion in a program
+        that uses these types is a thing you can grep for.
+        """
+        want = MACHINE[name]
+        if len(node.args) != 1:
+            self._error("E0054", f"{name}() takes exactly one argument, "
+                                 f"got {len(node.args)}", node)
+            for a in node.args:
+                self._expr(a)
+            return want
+        got = self._expr(node.args[0])
+        if got.is_error:
+            return want
+        if want.is_ptr:
+            # An address arrives as an integer -- from an allocator, or from a
+            # platform call. Nothing else can become one: `ptr(1.5)` and
+            # `ptr(some_ptr)` are both mistakes rather than conversions.
+            if not (got is INT or got.is_machine_int):
+                self.sink.report(
+                    error("E0033", f"cannot make a ptr from {got}")
+                    .at(self._span(node.args[0]), str(got))
+                    .note("a pointer comes from an integer address, and "
+                          "nothing else here is one"))
+                return ERROR
+            return want
+        if got.is_ptr:
+            # AND BACK. Only at the pointer's own width: narrowing an address
+            # to 32 bits is a real thing to want on a 32-bit target and a
+            # silent disaster on this one, so it has to be written as two
+            # steps.
+            if not (want.is_machine_int and T.ALL[want.name].bits == 64):
+                self.sink.report(
+                    error("E0034", f"cannot convert a ptr to {want}")
+                    .at(self._span(node.args[0]), "ptr")
+                    .note("a pointer is 64 bits wide")
+                    .help("convert to i64 or u64 first, then narrow"))
+                return ERROR
+            return want
+        if not got.is_numeric:
+            self.sink.report(
+                error("E0055", f"cannot convert {got} to {want}")
+                .at(self._span(node.args[0]), str(got)))
+            return ERROR
+        return want
+
+    def _memory_intrinsic(self, name: str, node: ast.Call) -> SemType:
+        """`alloca`, `load`, `store`, `offset`, `sizeof`.
+
+        Not runtime calls: each is one IR instruction, and giving them names
+        instead of syntax is what keeps the systems subset from needing new
+        grammar. `load` and `store` take the TYPE FIRST, spelled the way the
+        IR spells it and the way LLVM writes the same instruction -- so the
+        width being read is the first thing on the line rather than something
+        you infer from the variable it lands in.
+        """
+        want = MEMORY_INTRINSICS[name]
+        if len(node.args) != want:
+            self._error("E0054", f"{name}() takes exactly {want} argument(s), "
+                                 f"got {len(node.args)}", node)
+            for a in node.args:
+                self._expr(a)
+            return _INTRINSIC_RESULT[name] or ERROR
+
+        if name == "sizeof":
+            self._type_arg(node.args[0], name)
+            return INT
+        if name == "alloca":
+            # A COMPILE-TIME CONSTANT, because `Op.ALLOCA` carries its size in
+            # an immediate: frame storage is laid out before the function runs
+            # and a backend has nowhere to put a size it only learns later.
+            # A runtime-sized allocation is the allocator's job, not the
+            # frame's.
+            self._expr(node.args[0])
+            size = const_int(node.args[0], self.functions)
+            if size is None or size <= 0:
+                self.sink.report(
+                    error("E0018", "alloca() needs a positive size the "
+                                   "compiler can work out")
+                    .at(self._span(node.args[0]),
+                        "not a constant" if size is None else str(size))
+                    .note("frame storage is sized before the function runs, "
+                          "so the size cannot be computed")
+                    .help("for a runtime size, call an allocator"))
+                return PTR
+            return PTR
+        if name == "load":
+            ty = self._type_arg(node.args[0], name)
+            self._want_ptr(node.args[1], name, "address")
+            return ty
+        if name == "store":
+            ty = self._type_arg(node.args[0], name)
+            got = self._expr(node.args[1])
+            if not ty.is_error:
+                self._check_assignable(got, ty, node.args[1],
+                                       what="value stored")
+            self._want_ptr(node.args[2], name, "address")
+            return NONE
+        # offset
+        self._want_ptr(node.args[0], name, "base")
+        got = self._expr(node.args[1])
+        if not (got.is_error or got is INT or got.is_machine_int):
+            self._bad_argument(
+                node.args[1], name, "byte count", got, "an integer",
+                "there is no element type here -- an index is multiplied by "
+                "the element size where it is written")
+        return PTR
+
+    def _type_arg(self, node, name: str) -> SemType:
+        """The type argument of `load`/`store`/`sizeof`, read as a TYPE.
+
+        NOT walked as an expression, which is the point: `i64` never becomes a
+        value, so it can never leak into arithmetic and there is no first-class
+        type object anyone has to be told about.
+        """
+        text = getattr(node, "id", None)
+        if text in MACHINE:
+            return MACHINE[text]
+        self.sink.report(
+            error("E0017", f"the first argument to {name}() is a type")
+            .at(self._span(node),
+                ast.unparse(node) if text is None else text)
+            .note("one of: " + ", ".join(MACHINE))
+            .help(f"e.g. {name}(i64, ...)"))
+        return ERROR
+
+    def _want_ptr(self, node, name: str, what: str) -> None:
+        got = self._expr(node)
+        if got.is_error or got.is_ptr:
+            return
+        self._bad_argument(node, name, what, got, "a ptr",
+                           help="wrap an integer address with ptr(...)")
+
+    def _bad_argument(self, node, name: str, what: str, got: SemType,
+                      want: str, note: str = "", help: str = "") -> None:
+        """The one diagnostic for an intrinsic argument of the wrong type."""
+        d = error("E0019", f"the {what} {name}() takes is {want}, not {got}") \
+            .at(self._span(node), str(got))
+        if note:
+            d.note(note)
+        if help:
+            d.help(help)
+        self.sink.report(d)
+
+    def _retype(self, node, want: SemType) -> None:
+        """Record `want` as this literal's type, and its operand's.
+
+        BOTH, because `-1` is `UnaryOp(USub, Constant(1))` and lowering reads
+        the OPERAND's type to pick the width it negates at. Retyping only the
+        outer node left every negative literal at the default width, which
+        showed up as a verifier complaint about mismatched operand types
+        rather than as anything pointing here.
+        """
+        self.current.expr_types[id(node)] = want
+        if isinstance(node, ast.UnaryOp):
+            self.current.expr_types[id(node.operand)] = want
 
     # ── importing a namespace ───────────────────────────────────────────────
     def _static_import(self, alias, node) -> None:
@@ -3419,6 +3848,10 @@ class Analyzer:
                     .at(self._span(node.args[0]), str(got)))
                 return ERROR
             return want
+        if name in MACHINE and name not in self.functions:
+            return self._machine_conversion(name, node)
+        if name in MEMORY_INTRINSICS and name not in self.functions:
+            return self._memory_intrinsic(name, node)
         info = self.functions.get(name)
         if info is None:
             if name in _NEEDS_A_COMPILER:
@@ -3593,6 +4026,23 @@ class Analyzer:
         real = [t for t in types if not t.is_error]
         if not real:
             return ERROR
+        # A MACHINE WIDTH DOES NOT UNIFY WITH ANYTHING BUT ITSELF. Without
+        # this, `x if c else 0` over an `i32` fell through to the `INT in real`
+        # line below and the whole expression was typed `int` -- so the i32 arm
+        # was silently widened and the register the result went into was the
+        # wrong width, which the verifier reports about a register rather than
+        # about this expression.
+        machine = next((t for t in real if t.is_machine), None)
+        if machine is not None:
+            if any(t != machine for t in real):
+                self.sink.report(
+                    error("E0016", "these do not all have the same type: "
+                          + ", ".join(sorted({str(t) for t in real})))
+                    .at(self._span(at))
+                    .note("a machine width unifies only with itself")
+                    .help(f"convert the others with {machine}(...)"))
+                return ERROR
+            return machine
         if FLOAT in real:
             return FLOAT
         if INT in real:
@@ -3600,8 +4050,29 @@ class Analyzer:
         return real[0]
 
     def _check_assignable(self, got: SemType, want: SemType, at,
-                          what: str = "value") -> None:
+                          what: str = "value", value=None) -> None:
+        """`at` is where the diagnostic points; `value` is the EXPRESSION.
+
+        They differ at the three sites that report against a whole statement
+        -- `x: u8 = 5`, `return 5`, `x = 5` -- and the difference matters
+        because a literal adapts to a machine width and a statement is not a
+        literal. Reported spans are unchanged: `at` still decides those.
+        """
         if got.is_error or want.is_error or got == want:
+            return
+        # A MACHINE WIDTH ON EITHER SIDE ends the numeric tower. See
+        # `_machine_binop`: a width exists because something else reads the
+        # same bytes, so it converts only where the source says it does.
+        if want.is_machine or got.is_machine:
+            if self._adapt_literal(at if value is None else value, want):
+                return
+            d = error("E0060", f"{what} has type {got}, expected {want}") \
+                .at(self._span(at), str(got)) \
+                .note("machine types never convert implicitly -- a change of "
+                      "width has to be visible at the point it happens")
+            if not want.is_ptr and not got.is_ptr:
+                d.help(f"convert explicitly with {want}(...)")
+            self.sink.report(d)
             return
         # bool widens to int and int to float, as Python's own numeric tower
         # does. Nothing narrows implicitly: losing precision silently is how a
@@ -3641,6 +4112,12 @@ _OP_SYMBOLS = {
     ast.FloorDiv: "//", ast.Mod: "%", ast.Pow: "**",
     ast.BitAnd: "&", ast.BitOr: "|", ast.BitXor: "^",
     ast.LShift: "<<", ast.RShift: ">>", ast.MatMult: "@",
+    # THE COMPARISONS TOO, so that a mismatch of machine widths reads the same
+    # whichever operator found it: `a < b` and `a + b` break the same rule and
+    # say so with one diagnostic rather than two that have to be kept in step.
+    ast.Eq: "==", ast.NotEq: "!=", ast.Lt: "<", ast.LtE: "<=",
+    ast.Gt: ">", ast.GtE: ">=", ast.Is: "is", ast.IsNot: "is not",
+    ast.In: "in", ast.NotIn: "not in",
 }
 
 

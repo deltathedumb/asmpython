@@ -337,6 +337,14 @@ The full set the frontend can emit:
 | `E0009` | `main` must return `int` (when it is the entry point) |
 | `E0010` | a missing type annotation |
 | `E0011` | a type this frontend does not have |
+| `E0012` | a literal that does not fit the machine type it is given |
+| `E0013` | an operator applied to two different machine widths |
+| `E0014` | `/` applied to an integer width |
+| `E0015` | `**` applied to a machine type |
+| `E0016` | values that must share one type and do not |
+| `E0017` | a memory intrinsic's first argument, which is a type, is not one |
+| `E0018` | `alloca()` without a positive literal size |
+| `E0019` | a memory intrinsic argument of the wrong type |
 | `E0020` | an assignment other than `name = value` |
 | `E0021` | a loop target that is not a plain name |
 | `E0022` | an unsupported statement |
@@ -350,6 +358,8 @@ The full set the frontend can emit:
 | `E0030` | a name redeclared with another type |
 | `E0031` | an undefined name |
 | `E0032` | a name used before it is assigned on every path |
+| `E0033` | a `ptr` made from something that is not an integer address |
+| `E0034` | a `ptr` converted to something that is not 64 bits wide |
 | `E0040` | an unsupported expression |
 | `E0041` | an operator applied to non-numbers |
 | `E0042` | a bitwise operator applied to a float |
@@ -360,7 +370,7 @@ The full set the frontend can emit:
 | `E0051` | a keyword argument |
 | `E0052` | a call to an unknown function |
 | `E0053` | a call with the wrong number of arguments |
-| `E0054` | a conversion with the wrong number of arguments |
+| `E0054` | a conversion or memory intrinsic with the wrong number of arguments |
 | `E0055` | a conversion of something not numeric |
 | `E0056` | a function used as a value |
 | `E0060` | a type mismatch |
