@@ -352,10 +352,35 @@ class _Emitter:
         program calling a function with no JVM implementation is told which
         function -- rather than producing a class that loads and then dies with
         a `NoSuchMethodError` naming a method the user never wrote.
+
+        DECLARED IS NOT CALLED, and the difference is not pedantry. A class
+        file has nothing to resolve for a symbol no instruction names, so an
+        uncalled declaration cannot fail at load, at link or at run -- there is
+        no failure to warn about. Refusing one rejects a program that would
+        have worked.
+
+        It is also how a THIRD PARTY breaks this backend from outside the tree.
+        A plugin patching `Lowerer.run` to declare its own runtime symbols
+        declares them for every program, not only the ones that use it -- and
+        because `run` drops unused externals inside itself, anything a wrapper
+        appends afterwards survives the drop. The C backend shrugs, since an
+        unused C declaration costs nothing; this backend refused every compile
+        with `nothing defines 'luau_l_exec' on the JVM`, naming a symbol the
+        user had never heard of in a program that never used it.
         """
         interop = self.interop
+        called = {ins.sym for fn in self.module.functions
+                  for b in fn.blocks for ins in b.instructions
+                  if ins.op is Op.CALL and ins.sym}
+        # A function POINTER reaches a callee no CALL names, so anything whose
+        # address is taken counts as called too. Without this the check would
+        # pass a program that dies at run time -- which is the failure it
+        # exists to prevent, arrived at from the other side.
+        called |= {ins.sym for fn in self.module.functions
+                   for b in fn.blocks for ins in b.instructions
+                   if ins.op is Op.FUNC_ADDR and ins.sym}
         for fn in self.module.functions:
-            if not fn.external:
+            if not fn.external or fn.name not in called:
                 continue
             if interop is not None and fn.name.startswith("jvm$")                     and interop.lookup(fn.name) is not None:
                 self._check_java_signature(fn, interop)

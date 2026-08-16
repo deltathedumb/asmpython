@@ -121,6 +121,56 @@ entry:
 }
 """)
 
+    def test_an_external_nothing_calls_is_not_refused(self):
+        """DECLARED IS NOT CALLED, and a class file has nothing to resolve for
+        a symbol no instruction names -- so an uncalled declaration cannot fail
+        at load, at link or at run, and refusing one rejects a program that
+        would have worked.
+
+        THIS IS HOW A THIRD PARTY BROKE THIS BACKEND FROM OUTSIDE THE TREE. An
+        installed plugin patched `Lowerer.run` to declare its own runtime
+        symbols, which declared them for EVERY program rather than only the
+        ones using it -- and because `run` drops unused externals inside
+        itself, what the wrapper appended afterwards survived the drop. Every
+        JVM compile on that machine then failed with `nothing defines
+        'luau_l_exec' on the JVM`, naming a symbol the user had never heard of
+        in a program that never used it. 31 tests, none of them about the
+        plugin.
+        """
+        assert build("""\
+module prog
+
+func luau_l_exec(%0: ptr) -> ptr external
+
+export func main() -> i64 {
+entry:
+    %0 = i64.const 7
+    ret %0
+}
+""")
+
+    def test_an_external_whose_address_is_taken_is_still_refused(self):
+        """A function POINTER reaches a callee no CALL names.
+
+        The rule above is "declared is not called", and this is the other side
+        of it: `func_addr` IS a use, and letting it past would pass a program
+        that dies at run time -- the exact failure the check exists to prevent,
+        arrived at from the direction nobody looks.
+        """
+        with harness.raises(BackendUnsupported, match="rand"):
+            build("""\
+module prog
+
+func rand() -> i64 external
+
+export func main() -> i64 {
+entry:
+    %0 = ptr.func_addr @rand
+    %1 = i64.call_ptr %0
+    ret %1
+}
+""")
+
     def test_the_python_runtime_is_named_as_the_reason(self):
         try:
             build("""\
