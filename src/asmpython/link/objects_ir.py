@@ -92,6 +92,12 @@ SPLITS: dict[str, tuple[str, ...]] = {
     # default is TRUE: a fast path that read `v.s.n` for a type would read its
     # base pointer instead.
     "str_len.py": ("apy_raw_len", "apy_len", "apy_truth"),
+    # THE FIRST PORTED CODE THAT ALLOCATES A BUFFER. `apy_chr` asks the arena
+    # for five bytes and hands them to a cell the rest of the runtime reads --
+    # which is the question every later kind runs into (who owns the bytes,
+    # and what happens when nobody can give them back) asked at the smallest
+    # scale there is.
+    "str_code.py": ("apy_ord", "apy_chr"),
 }
 
 #: Every C symbol currently provided by IR instead. What `objects_c()` guards.

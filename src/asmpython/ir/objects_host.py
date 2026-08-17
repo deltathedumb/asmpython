@@ -6918,7 +6918,15 @@ def _apy_chr(h, a):
     again. Refusing anything above ASCII, which is what this did, made
     `chr(233)` an error on a runtime that handles the byte fine."""
     v = h._get(a[0], "apy_chr")
-    if isinstance(v, bool) or not isinstance(v, int):
+    # A BOOL IS AN INT HERE, as it is in Python and as the C's
+    # `apy_is_int_like` already had it: `chr(True)` is `chr(1)` is `'\x01'`.
+    # Excluding it made this the ONE path of the three that refused --
+    # CPython answered, the compiled backend answered, and the interpreter
+    # raised `an integer is required (got type bool)`. That is the drift
+    # docs/INERT-RUNTIME.md exists to end, found by porting `apy_chr` and
+    # watching the two runtimes disagree about which inputs the C half is
+    # even asked about.
+    if not isinstance(v, int):
         return h._fail("TypeError",
                        f"an integer is required (got type {h.kind_name(v)})")
     if not 0 <= v <= 0x10FFFF:
