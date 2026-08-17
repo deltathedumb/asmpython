@@ -21,7 +21,9 @@ from __future__ import annotations
 import ast
 import pathlib
 
+from .analysis import span_of
 from .modules import resolve as _resolve
+from ...diagnostics import error
 
 #: Where the sources live. One file per module, named for it.
 _HERE = pathlib.Path(__file__).parent / "bundled"
@@ -79,6 +81,43 @@ def _module_bindings(tree) -> set:
 
 class _Reserved(Exception):
     """A program used the prefix `splice` reserves for itself."""
+
+
+def _no_member(sink, source, node, module: str, name: str, members) -> None:
+    """`warnings.deprecated` when `warnings` is bundled and has no such name.
+
+    THIS PASS IS THE ONLY ONE THAT CAN SAY IT. A bundled module is spliced and
+    then GONE -- the import statement is dropped and no module object is left
+    behind -- so by the time analysis runs there is nothing named `warnings`
+    for it to have an opinion about. What it said instead was one of two wrong
+    things, and both sent a reader to the wrong place:
+
+      from warnings import deprecated
+        -> `E0083: no module named 'warnings' is available; there is no import
+           path`, listing modules that do not include it. Flatly false: the
+           module is bundled, it was spliced into the program, and every other
+           name in it worked. The reader goes looking for a missing module.
+
+      import warnings; warnings.deprecated(...)
+        -> NOTHING AT COMPILE TIME, and `NameError: name 'warnings' is not
+           defined` at run time -- because the import was dropped and the
+           attribute was the one reference the splice could not rewrite. The
+           reader goes looking for a broken import.
+
+    Neither is the truth, which is that the module is here and this member is
+    not. Stating the coverage in a docstring (`docs/STDLIB.md`) is worth
+    nothing if the compiler contradicts it, so the members it does have go in
+    the diagnostic.
+    """
+    public = sorted(one for one in members[module] if not one.startswith("_"))
+    report = (error("E0084", f"module {module!r} has no member {name!r}")
+              .at(span_of(source, node))
+              .note(f"{module!r} is bundled: it is Python spliced into this "
+                    f"program rather than an import, and it covers part of "
+                    f"CPython's module. See docs/STDLIB.md"))
+    if public:
+        report = report.help("it provides: " + ", ".join(public))
+    sink.report(report)
 
 
 def _bound_locally(node) -> set:
@@ -305,11 +344,17 @@ class _Rewrite(ast.NodeTransformer):
         return node
 
 
-def splice(tree: ast.Module) -> ast.Module:
+def splice(tree: ast.Module, source, sink) -> ast.Module:
     """Rewrite `tree` so its bundled imports become ordinary definitions.
 
     Returns the tree unchanged when it imports none of them, so a program that
     uses no bundled module pays nothing and looks exactly as it did.
+
+    `source` and `sink` are REQUIRED rather than optional. This pass is the
+    only one that can report a reference to a member a bundled module does not
+    have -- see `_no_member` -- and a sink that defaults to None is a sink that
+    silently swallows every one of those the day someone calls this from
+    somewhere new.
     """
     have = available()
     wanted, imported, aliases = [], {}, []
@@ -361,8 +406,10 @@ def splice(tree: ast.Module) -> ast.Module:
     # what puts them in that order.
     order = _dependencies(wanted, have)
     for module in order:
-        source = (_HERE / f"{module}.py").read_text(encoding="utf-8")
-        parsed = ast.parse(source, filename=f"<bundled {module}>")
+        # NOT `source`: that is the SourceFile of the program being compiled,
+        # which `_no_member` needs to turn a node into a span.
+        text = (_HERE / f"{module}.py").read_text(encoding="utf-8")
+        parsed = ast.parse(text, filename=f"<bundled {module}>")
         defined = {s.name for s in parsed.body
                    if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef,
                                      ast.ClassDef))}
@@ -463,10 +510,20 @@ def splice(tree: ast.Module) -> ast.Module:
             for alias in stmt.names:
                 if alias.name not in members[stmt.module]:
                     # NOT SOMETHING THE BUNDLED MODULE DEFINES, so the import
-                    # of it SURVIVES. A module can be bundled IN PART --
-                    # `typing`'s special forms are already runtime values and
-                    # only its classes need writing -- and dropping the whole
-                    # statement unbound the half this does not cover.
+                    # of it SURVIVES -- WHEN THERE IS SOMETHING ELSE TO SURVIVE
+                    # INTO. A module can be bundled IN PART -- `typing`'s
+                    # special forms are already runtime values and only its
+                    # classes need writing -- and dropping the whole statement
+                    # unbound the half this does not cover.
+                    #
+                    # When nothing else provides the module, leaving the
+                    # statement handed analysis an import it could not resolve
+                    # and produced a diagnostic denying the module exists. See
+                    # `_no_member`.
+                    if _resolve(stmt.module) is None:
+                        _no_member(sink, source, stmt, stmt.module,
+                                   alias.name, members)
+                        continue
                     left.append(alias)
                     continue
                 names[alias.asname or alias.name] = _mangled(stmt.module,
@@ -477,6 +534,23 @@ def splice(tree: ast.Module) -> ast.Module:
                                    level=stmt.level), stmt))
             continue
         kept.append(stmt)
+
+    # `warnings.deprecated` WHERE `warnings` IS BUNDLED AND HAS NO SUCH NAME.
+    # Reported HERE, before `_Rewrite` runs, because afterwards the attributes
+    # that DID resolve are gone and the ones left look like an attribute of an
+    # ordinary object. The condition is exactly the one under which
+    # `_Rewrite.visit_Attribute` declines to rewrite and the import statement
+    # was dropped -- so the diagnostic and the rewrite cannot disagree.
+    for stmt in kept:
+        for node in ast.walk(stmt):
+            if not isinstance(node, ast.Attribute) \
+                    or not isinstance(node.value, ast.Name):
+                continue
+            module = imported.get(node.value.id)
+            if module is None or node.attr in members[module] \
+                    or _resolve(module) is not None:
+                continue
+            _no_member(sink, source, node, module, node.attr, members)
 
     # DOES THE PROGRAM REPLACE `sys.stdout`? Only then is `print` routed
     # through it -- see `_Rewrite.visit_Name`.

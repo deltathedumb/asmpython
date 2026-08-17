@@ -2,14 +2,17 @@
 
 COVERAGE: `warn`, `warn_explicit`, `showwarning`, `formatwarning`,
 `filterwarnings`, `simplefilter`, `resetwarnings`, `catch_warnings`,
-`filters`, `WarningMessage`.
+`filters`, `WarningMessage`, `deprecated`.
 
-NOT COVERED: `deprecated` (the 3.13 decorator), `onceregistry` as a public
-name, `skip_file_prefixes`, and the `__warningregistry__` a module gets for
-"once"/"default" bookkeeping -- so `once` and `default` behave as `always`
-here. Every one of those needs frame inspection this frontend does not have,
-and a filter that silently keeps a warning is better than one that silently
-drops it.
+NOT COVERED: `onceregistry` as a public name, `skip_file_prefixes`, and the
+`__warningregistry__` a module gets for "once"/"default" bookkeeping -- so
+`once` and `default` behave as `always` here. Every one of those needs frame
+inspection this frontend does not have, and a filter that silently keeps a
+warning is better than one that silently drops it.
+
+`deprecated` covers the two cases programs use -- a deprecated function and a
+deprecated class -- and NOT the warning CPython issues when something
+SUBCLASSES a deprecated class. See its own docstring for why.
 
 WHY THIS IS THE FIRST MODULE OF THE REBUILD. It was not chosen: the embedded
 compiler needs it. `_pycompile.py` calls `warnings.warn(msg, SyntaxWarning,
@@ -25,6 +28,7 @@ with the source line, indented two spaces, on a second line when there is one.
 Programs parse this, and a message that differs by a colon is a message that
 does not match.
 """
+import functools
 import sys
 
 
@@ -245,6 +249,92 @@ class catch_warnings:
         if self._record:
             _recording.pop()
         return False
+
+
+class deprecated:
+    """PEP 702. Mark a function or a class deprecated, and say so when used.
+
+    A DECORATOR THAT IS A CLASS, because it is two things at once: the
+    `__deprecated__` attribute it leaves behind is what a type checker reads
+    without running anything, and the warning is what a program gets when it
+    reaches the deprecated code anyway. Neither substitutes for the other.
+
+        @deprecated("use spam() instead")
+        def ham(): ...
+
+    `category=None` sets the attribute and issues NOTHING. That is the spelling
+    for something deprecated in the documentation but not yet noisy, and it is
+    the whole reason the parameter accepts None rather than being a flag.
+
+    ON A CLASS THIS WRAPS `__init__`, and CPython wraps `__new__`. The
+    difference is not a shortcut: this object model has no `__new__` to
+    replace -- `C.__new__` on a class that does not define one is an
+    AttributeError here, where CPython finds `object.__new__` -- so there is
+    nothing to intercept. `__init__` runs for exactly the same instantiations,
+    and the `type(self) is target` guard is what keeps a SUBCLASS from
+    warning, which is the rule CPython states as `if cls is arg`.
+
+    WHAT THAT DOES NOT GET is CPython's second warning, the one issued when a
+    class SUBCLASSES a deprecated one. That rides on `__init_subclass__`, which
+    this object model does not have either, and there is no honest way to fake
+    it: nothing runs at the moment a class statement names its base. So
+    `class D(C)` is silent here and warns under CPython, and that is written
+    down rather than discovered.
+    """
+
+    def __init__(self, message, /, *, category=DeprecationWarning,
+                 stacklevel=1):
+        if not isinstance(message, str):
+            raise TypeError("Expected an object of type str for 'message', "
+                            "not %r" % (type(message).__name__,))
+        self.message = message
+        self.category = category
+        self.stacklevel = stacklevel
+
+    def __call__(self, arg, /):
+        # READ OFF `self` FIRST, exactly as CPython does, so that the closures
+        # below capture the three values and not the decorator object. A
+        # wrapper holding `self` keeps the `deprecated` instance alive for as
+        # long as the function it decorates, which is forever.
+        msg = self.message
+        category = self.category
+        stacklevel = self.stacklevel
+        if category is None:
+            arg.__deprecated__ = msg
+            return arg
+        # A CLASS IS CALLABLE, so this test comes first or every class takes
+        # the function path and gets wrapped into something that is no longer
+        # a class.
+        if isinstance(arg, type):
+            inner = getattr(arg, "__init__", None)
+
+            def __init__(self, *args, **kwargs):
+                # ONLY FOR THE DEPRECATED CLASS ITSELF. A subclass inherits
+                # this `__init__` and is not the thing that was deprecated;
+                # CPython spells the same rule `if cls is arg`.
+                if type(self) is arg:
+                    warn(msg, category, stacklevel + 1)
+                if inner is not None:
+                    return inner(self, *args, **kwargs)
+                return None
+
+            arg.__init__ = __init__
+            arg.__deprecated__ = msg
+            return arg
+        if callable(arg):
+            @functools.wraps(arg)
+            def wrapper(*args, **kwargs):
+                warn(msg, category, stacklevel + 1)
+                return arg(*args, **kwargs)
+
+            # BOTH OF THEM. The wrapper is what callers see, and `arg` is what
+            # `__wrapped__` hands back -- a tool that unwraps to find the real
+            # function must not lose the mark by doing so.
+            arg.__deprecated__ = msg
+            wrapper.__deprecated__ = msg
+            return wrapper
+        raise TypeError("@deprecated decorator with non-None category must "
+                        "be applied to a class or callable, not %r" % (arg,))
 
 
 #: THE STARTUP FILTERS, which are CPython's own. Without them a

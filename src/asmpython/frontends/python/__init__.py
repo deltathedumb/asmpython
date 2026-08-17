@@ -172,7 +172,7 @@ class PythonFrontend(Frontend):
         # pass that statement is an ordinary one in the merged tree for the
         # second to resolve. The other order leaves it unspliced.
         tree = user_splice(tree, source.path)
-        tree = splice(tree)
+        tree = splice(tree, source, sink)
         # PEP 3151: `IOError` and `EnvironmentError` ARE `OSError` -- the same
         # object in CPython, not subclasses of it. Rewriting the name here is
         # what makes `IOError is OSError` True and an `except IOError` catch
