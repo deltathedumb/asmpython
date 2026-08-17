@@ -417,9 +417,18 @@ class TestTheArena:
         finally:
             del sys.path[0]
         external = {f.name for f in module.functions if f.external}
-        assert external <= {"plat_heap", "plat_write", "plat_exit",
-                            "apy_add_slow", "apy_sub_slow", "apy_mul_slow"}, \
-            external
+        floor = {"plat_heap", "plat_write", "plat_exit"}
+        # THE `_slow` HALF OF EVERY DECLARED SPLIT, DERIVED rather than listed.
+        # A split's whole point is that the C body survives under a new name,
+        # so each one legitimately adds an external -- and a hand-written list
+        # meant every new split failed here on arrival and was "fixed" by
+        # editing the expectation. That is the one edit that can silently
+        # widen this assertion into meaninglessness, so the expectation now
+        # follows the declaration and the test keeps asking the real question:
+        # the runtime reaches for the floor and its own fallbacks, and nothing
+        # else.
+        allowed = floor | {f"{name}_slow" for name in objects_ir.SPLIT}
+        assert external <= allowed, external - allowed
         assert "apy_obj_alloc" in {f.name for f in module.functions
                                    if not f.external}
 

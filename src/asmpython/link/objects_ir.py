@@ -86,6 +86,12 @@ REPLACES: dict[str, tuple[str, ...]] = {
 #: to be total could not begin. See `link/objects.split_c`.
 SPLITS: dict[str, tuple[str, ...]] = {
     "int_arith.py": ("apy_add", "apy_sub", "apy_mul"),
+    # THE FIRST PORTED CODE THAT READS A CELL RATHER THAN BUILDING ONE. All
+    # three are polymorphic over every kind and all three DECLINE everything
+    # that is not a str or bytes -- which matters most for `apy_truth`, whose
+    # default is TRUE: a fast path that read `v.s.n` for a type would read its
+    # base pointer instead.
+    "str_len.py": ("apy_raw_len", "apy_len", "apy_truth"),
 }
 
 #: Every C symbol currently provided by IR instead. What `objects_c()` guards.
