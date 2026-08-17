@@ -739,7 +739,7 @@ APY_API apy_value apy_from_float(double f) {
 /* A C string literal, for the runtime's own use. `apy_from_cstr` is the same
    thing for the IR, which hands the address over as an integer because that is
    what a `global_addr` produces and how the C backend types a pointer. */
-static apy_value apy_lit(const char *p) {
+APY_API apy_value apy_lit(const char *p) {
     apy_obj *o = apy_alloc(APY_STR_K);
     o->v.s.p = p;
     o->v.s.n = (int64_t)strlen(p);
@@ -806,14 +806,14 @@ APY_API apy_value apy_from_bytes(apy_value p, int64_t n) {
     return V(o);
 }
 
-static apy_value apy_str_take(char *p, int64_t n) {
+APY_API apy_value apy_str_take(char *p, int64_t n) {
     apy_obj *o = apy_alloc(APY_STR_K);
     o->v.s.p = p;
     o->v.s.n = n;
     return V(o);
 }
 
-static apy_value apy_str_copy(const char *p, int64_t n) {
+APY_API apy_value apy_str_copy(const char *p, int64_t n) {
     char *buf = (char *)malloc((size_t)n + 1);
     if (!buf) { fputs("asmpython: out of memory\n", stderr); exit(1); }
     memcpy(buf, p, (size_t)n);
@@ -825,7 +825,7 @@ static apy_value apy_str_copy(const char *p, int64_t n) {
    rather than beside it: the allocation, the NUL and the out-of-memory exit
    are one implementation, and a second copy of them would be a second thing
    to keep right. */
-static apy_value apy_bytes_copy(const char *p, int64_t n) {
+APY_API apy_value apy_bytes_copy(const char *p, int64_t n) {
     apy_value v = apy_str_copy(p, n);
     O(v)->kind = APY_BYTES_K;
     return v;
@@ -848,8 +848,8 @@ APY_API apy_value apy_error_message(void) {
 }
 
 static uint64_t apy_abs64(int64_t v);
-static apy_value apy_lit(const char *p);
-static apy_value apy_str_take(char *p, int64_t n);
+APY_API apy_value apy_lit(const char *p);
+APY_API apy_value apy_str_take(char *p, int64_t n);
 
 /* --- arbitrary precision integers --------------------------------------- */
 /* Python has ONE integer type and it has no width. Until now this file had a
@@ -1703,7 +1703,7 @@ static apy_value apy_exc_text(apy_value v, int quoted) {
     }
 }
 APY_API apy_value apy_repr(apy_value v);
-static apy_value apy_lit(const char *p);
+APY_API apy_value apy_lit(const char *p);
 APY_API apy_value apy_getitem(apy_value seq, apy_value index);
 /* A view's contents, taken when asked -- and the snapshot helper the
    non-dict path still uses. Both run above where they are defined. */
@@ -1789,7 +1789,7 @@ static apy_value apy_dict_get(apy_value d, apy_value key);
 APY_API apy_value apy_dict_set(apy_value d, apy_value key, apy_value val);
 static const char *apy_kind_name(apy_value v);
 static apy_value apy_bytes_repr(apy_value v);
-static apy_value apy_str_copy(const char *p, int64_t n);
+APY_API apy_value apy_str_copy(const char *p, int64_t n);
 /* The class machinery, declared here and defined at the very bottom of this
    file. The order is deliberate and it is the reverse of the dependency: the
    operators -- `+`, `str`, `len`, `==` -- were all written against a closed
@@ -15701,13 +15701,38 @@ OBJECT_NAMES = (
 #: `ptr`, which is what makes the object runtime's arguments and results
 #: opaque to every backend.
 _IR_TYPES = {"apy_value": "ptr", "int64_t": "i64", "double": "f64",
-             "void": "void"}
+             "void": "void",
+             # Every pointer is one machine word, whatever it points at.
+             # `_param_type` folds `const char *` and `char *` to this.
+             "ptr": "ptr"}
 
 
 #: THE C A BACKEND ACTUALLY SEES: the runtime with the generated Unicode
 #: table spliced in at its marker. One file, as it always was -- the split is
 #: only so this module stays readable.
 _WITH_TABLE = OBJECTS_C.replace("/* @UNICODE_TABLE@ */", UNICODE_C)
+
+
+def _param_type(text: str) -> str:
+    """The TYPE half of one C parameter, as a key for `_IR_TYPES`.
+
+    A POINTER PARAMETER IS ONE IR WORD AND ITS SPELLING IS NOT ONE TOKEN. In
+    C's grammar the `*` binds to the NAME, so `const char *p` splits on its
+    last space into `const char` -- a type this table has never heard of, and
+    the failure is an AssertionError naming a type nobody wrote.
+
+    That mattered the moment `str` began moving: `apy_lit`, `apy_str_take`,
+    `apy_str_copy` and `apy_str_copy`'s bytes twin are all `static`, so
+    `_definition_of` cannot find them and the ported runtime cannot replace
+    them -- and simply promoting them to `APY_API` broke this parser instead.
+    The alternative was retyping four signatures to `apy_value` and casting at
+    something like two hundred call sites, which is a lot of edits to avoid
+    teaching one function that a star is a pointer.
+    """
+    text = text.strip()
+    if "*" in text:
+        return "ptr"
+    return text.rsplit(" ", 1)[0].strip() if " " in text else text
 
 
 def signatures() -> dict:
@@ -15732,9 +15757,9 @@ def signatures() -> dict:
         if name in out:
             continue
         args = [] if raw in ("void", "") else [
-            a.strip().rsplit(" ", 1)[0].strip() for a in raw.split(",")]
+            _param_type(a) for a in raw.split(",")]
         try:
-            out[name] = ([_IR_TYPES[a] for a in args], _IR_TYPES[ret])
+            out[name] = ([_IR_TYPES[a] for a in args], _IR_TYPES[_param_type(ret)])
         except KeyError as exc:
             raise AssertionError(
                 f"{name}: no IR type for {exc.args[0]!r}. Add it to _IR_TYPES "

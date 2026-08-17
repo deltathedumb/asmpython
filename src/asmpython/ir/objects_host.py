@@ -6687,6 +6687,49 @@ def _apy_bytes_literal(h, a):
 _TABLE["apy_bytes_literal"] = _apy_bytes_literal
 
 
+# ── the constructors that OWN their bytes ───────────────────────────────────
+#
+# `apy_lit`, `apy_str_take`, `apy_str_copy` and `apy_bytes_copy` were `static`
+# in the C until stage 5 of docs/INERT-RUNTIME.md needed to name them: a port
+# cannot replace a symbol `_definition_of` cannot find, and `signatures()`
+# never typed one it could not see. Promoting them made them EXPORTED, and an
+# exported symbol the interpreter cannot answer is the drift this whole
+# arrangement exists to remove -- `test_every_exported_symbol_has_a_host_
+# binding` said so immediately, which is the ratchet doing its job.
+#
+# THE COPY IS INVISIBLE HERE, and that is not a shortcut. The C distinguishes
+# borrowing a caller's buffer (`take`) from duplicating it (`copy`) because it
+# has to decide who calls `free`. A host string is an immutable Python value
+# with no buffer behind it, so all three collapse to "read those bytes and
+# make a str" -- and the distinction they encode is one the interpreter
+# genuinely does not have.
+
+def _apy_lit(h, a):
+    """A NUL-terminated literal. Interned in the C; a value here."""
+    return h._new(_read_cstr(h, int(a[0])))
+
+
+def _apy_str_take(h, a):
+    addr, n = int(a[0]), int(a[1])
+    return h._new(bytes(h._interp.mem.buf[addr:addr + n])
+                  .decode("utf-8", "surrogateescape"))
+
+
+def _apy_str_copy(h, a):
+    return _apy_str_take(h, a)
+
+
+def _apy_bytes_copy(h, a):
+    addr, n = int(a[0]), int(a[1])
+    return h._new(bytes(h._interp.mem.buf[addr:addr + n]))
+
+
+_TABLE["apy_lit"] = _apy_lit
+_TABLE["apy_str_take"] = _apy_str_take
+_TABLE["apy_str_copy"] = _apy_str_copy
+_TABLE["apy_bytes_copy"] = _apy_bytes_copy
+
+
 def _apy_delitem(h, a):
     """`del d[k]` and `del xs[i]`.
 
