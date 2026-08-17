@@ -79,6 +79,37 @@ not archived and are not rebuilt.
 `ctypes` is a compile-time feature of the frontend (`frontends/python/cffi.py`)
 rather than a bundled module, and is unaffected.
 
+## Rebuilt so far
+
+| module | coverage |
+| --- | --- |
+| `keyword` | complete |
+| `warnings` | `warn`, filters, `catch_warnings`, `formatwarning`; NOT the once/default registry, `stacklevel`, or `deprecated` |
+| `types` | `ModuleType`, `SimpleNamespace`, `new_class` |
+| `itertools` | `count`, `repeat`, `chain`, `islice`, `groupby`, `product`, `combinations` |
+| `functools` | `reduce`, `wraps`, `total_ordering`, `partial`, `cached_property`, `lru_cache`, `cache`, `singledispatch` |
+
+**Restoring is not free, and that is the point of stating coverage.** Three of
+`itertools`'s seven functions were wrong in ways the old suite never asked
+about, and each was a WRONG ANSWER rather than a missing one:
+
+* `islice` accepted a step and ignored it -- `islice(xs, 1, 6, 2)` returned
+  every element instead of every second
+* `product` had no `repeat=`, the usual spelling of a fixed-width product
+* `groupby` named its local `key`, shadowing the parameter, so passing a key
+  function was accepted and dropped
+
+None would fail a test that only asserted what the implementation already did.
+
+## Held back
+
+`contextlib` is written and NOT bundled. Its `__exit__` calls `gen.throw`
+correctly and the cleanup still does not run when the block raises, while the
+same generator throwing into the same `finally` works in isolation -- so the
+fault is in the interaction and is not yet found. A context manager whose
+cleanup silently does not run is worse than an absent one, so it stays out
+until it is understood.
+
 ## What it cost to start
 
 Recorded so each module restored is measured against a real baseline rather
