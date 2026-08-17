@@ -369,7 +369,20 @@ class DynamicLowering:
             self._strings[raw] = name
             self.module.globals.append(
                 Global(name=name, size=len(raw), data=raw, readonly=True))
-        return self.b.call(T.PTR, "apy_from_cstr", [self._dyn_text_addr(text)])
+        # THE LENGTH IS KNOWN HERE, so it is passed rather than re-derived.
+        # `apy_from_cstr` finds the end with `strlen`, which TRUNCATES a
+        # literal containing a NUL: `len("a\0b")` answered 1 where Python says
+        # 3, and every operation downstream then worked on the wrong string.
+        # The compiler has counted the bytes already; asking C to count them
+        # again could only ever lose information.
+        #
+        # THE TRAILING NUL STAYS IN THE GLOBAL and out of the length. The rest
+        # of the runtime reads `v.s.p` as a C string in 200-odd places
+        # (`APY_CSTR`, `strcmp`, `snprintf`), so the terminator is load-bearing
+        # even though it is not part of the value.
+        return self.b.call(T.PTR, "apy_from_bytes",
+                           [self._dyn_text_addr(text),
+                            self.b.const(T.I64, len(raw) - 1)])
 
     def _dyn_text_addr(self, text: str) -> int:
         """The ADDRESS of an interned literal's bytes, without wrapping it.

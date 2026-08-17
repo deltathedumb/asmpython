@@ -69,6 +69,12 @@ SOURCE_DIR = Path(__file__).resolve().parent.parent / "runtime"
 REPLACES: dict[str, tuple[str, ...]] = {
     "arena.py": ("apy_obj_alloc",),
     "int_cell.py": ("apy_from_int", "apy_as_int"),
+    # THE THREE STRING CONSTRUCTORS THAT BORROW THEIR BYTES. The ones that OWN
+    # them -- `apy_str_take`, `apy_str_copy` -- are `static` in the C, so
+    # `_definition_of` cannot find them and `signatures()` never typed them:
+    # the subset cannot name them, let alone replace them. That is the wall
+    # stage 5 stops at, and it is a C edit rather than more IR.
+    "str_cell.py": ("apy_from_cstr", "apy_from_bytes", "apy_bytes_literal"),
 }
 
 #: The C functions a ported module takes the FRONT of, per source file.

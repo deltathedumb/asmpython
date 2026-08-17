@@ -80,8 +80,12 @@ class TestTheLayoutIsTheCs:
             "int main(void) { return (int)probe_entry(); }",
             '#include <stddef.h>\n'
             'int main(void) {\n'
-            '    printf("%zu %zu %zu\\n", sizeof(apy_obj),\n'
-            '           offsetof(apy_obj, kind), offsetof(apy_obj, v.i));\n'
+            '    printf("%zu %zu %zu %zu %zu %zu %d %d %d\\n",\n'
+            '           sizeof(apy_obj),\n'
+            '           offsetof(apy_obj, kind), offsetof(apy_obj, v.i),\n'
+            '           offsetof(apy_obj, v.s.p), offsetof(apy_obj, v.s.n),\n'
+            '           offsetof(apy_obj, v.s.mut),\n'
+            '           (int)APY_INT_K, (int)APY_STR_K, (int)APY_BYTES_K);\n'
             '    return 0;\n'
             '}\n')
         # `runtime_c()` with no module keeps every C definition -- the switch
@@ -95,21 +99,42 @@ class TestTheLayoutIsTheCs:
                                capture_output=True, text=True)
         assert built.returncode == 0, built.stderr[-3000:]
         got = subprocess.run([str(exe)], capture_output=True, text=True)
-        size, kind, payload = (int(x) for x in got.stdout.split())
+        (size, kind, payload, str_p, str_n, str_mut,
+         int_k, str_k, bytes_k) = (int(x) for x in got.stdout.split())
 
-        source = (Path(SRC) / "asmpython" / "runtime" / "int_cell.py").read_text(
-            encoding="utf-8")
+        where = Path(SRC) / "asmpython" / "runtime"
 
-        def literal(fn: str) -> int:
+        def literal(module: str, fn: str) -> int:
+            source = (where / module).read_text(encoding="utf-8")
             m = re.search(rf"def {fn}\(\) -> i64:\n    return (-?\d+)", source)
-            assert m, f"{fn} is not a one-line constant any more"
+            assert m, f"{fn} is not a one-line constant in {module} any more"
             return int(m.group(1))
 
-        assert literal("apy_obj_size") == size, (
+        assert literal("int_cell.py", "apy_obj_size") == size, (
             f"the C struct is {size} bytes and int_cell.py says "
-            f"{literal('apy_obj_size')}")
-        assert literal("apy_kind_offset") == kind
-        assert literal("apy_payload_offset") == payload
+            f"{literal('int_cell.py', 'apy_obj_size')}")
+        assert literal("int_cell.py", "apy_kind_offset") == kind
+        assert literal("int_cell.py", "apy_payload_offset") == payload
+        # THE KIND CONSTANTS, which nothing checked until `str` needed two
+        # more. `APY_INT_K` was asserted by behaviour alone, and a kind is
+        # exactly the constant whose wrongness does NOT announce itself: the
+        # cell is built, every field lands in the right place, and it is
+        # simply the wrong TYPE. The enum numbers ONE member explicitly and
+        # positions the other twenty-eight, and `APY_BYTES_K` was inserted in
+        # the MIDDLE of it -- so the C compiler is the only thing that knows
+        # these values, and reading them off by eye is how they go wrong.
+        assert literal("int_cell.py", "apy_int_kind") == int_k, (
+            f"the C says APY_INT_K is {int_k}")
+        assert literal("str_cell.py", "apy_str_kind") == str_k, (
+            f"the C says APY_STR_K is {str_k}")
+        assert literal("str_cell.py", "apy_bytes_kind") == bytes_k, (
+            f"the C says APY_BYTES_K is {bytes_k}")
+        # The str arm's three fields. `v.s.mut` is the whole of `bytearray` --
+        # same layout, writable buffer -- so a constructor that leaves it
+        # anything but zero makes a literal in read-only memory assignable.
+        assert literal("str_cell.py", "apy_str_ptr_offset") == str_p
+        assert literal("str_cell.py", "apy_str_len_offset") == str_n
+        assert literal("str_cell.py", "apy_str_mut_offset") == str_mut
 
 
 class TestTheSwitchIsCoherent:
