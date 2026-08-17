@@ -7946,6 +7946,45 @@ static apy_value apy_exc_class_named(const char *name) {
     return apy_dict_get_or(apy_exc_class_table, apy_lit(name), 0);
 }
 
+/* Is this type object one that CONSTRUCTS AN EXCEPTION when it is called?
+
+   `apy_exc_type` ends in `apy_type_of`, so `ValueError` as a VALUE is an
+   ordinary `APY_TYPE_K` carrying the name and an empty dict -- nothing in the
+   object itself says it stands for an exception, and the name is all there is
+   left to ask. `apy_exc_parent` is the same table `except` matches through,
+   so this cannot drift from the hierarchy: a name that is an exception to a
+   handler is one here, and a class the program wrote by subclassing one is
+   registered in that table too.
+
+   THE CHEAP TEST FIRST. Every call of every class reaches this, and the walk
+   of a table of names is a strcmp loop that allocates nothing; the two class
+   lookups below run only for a name that is already an exception.
+
+   A REGISTERED CLASS ANSWERS YES, and its `__init__` still runs --
+   `apy_make_excn` ends in `apy_exc_construct`, which finds the class by name
+   and calls it. Sending `AppError` through `apy_instantiate` instead built an
+   ordinary instance: `str(e)` read `<AppError object at 0x...>` and `raise e`
+   said `exceptions must derive from BaseException, not 'AppError'` -- about
+   a class whose `class` statement names ValueError as its base.
+
+   `user == f` and not merely `user`, because a program may define an
+   ordinary class sharing the name; the object registered as the exception is
+   the one this is true of. */
+static int apy_type_is_exc(apy_value f) {
+    const char *name;
+    apy_value user;
+    if (O(f)->kind != APY_TYPE_K || O(f)->v.t.meta) return 0;
+    name = APY_CSTR(O(f)->v.t.name);
+    if (strcmp(name, "BaseException") != 0 && apy_exc_parent(name) == NULL)
+        return 0;
+    user = apy_exc_class_named(name);
+    if (user) return user == f;
+    /* A BUILTIN NAME CARRYING A BODY is a class the program wrote over the
+       top of one, and it means itself. */
+    return !apy_class_find(f, apy_name("__init__"))
+        && !apy_class_find(f, apy_name("__new__"));
+}
+
 /* Give a fresh exception its class and, where the class writes one, run its
    `__init__` over the arguments the `raise` supplied.
 
@@ -14883,6 +14922,26 @@ static apy_value apy_call_nk(apy_value f, apy_value *argv, int64_t argc,
        being read as a second construction. */
     if (O(f)->kind == APY_EXC_K && !O(f)->v.e.has_arg && !O(f)->v.e.argv)
         return apy_make_excn(apy_lit(O(f)->v.e.name), (apy_value)argv, argc);
+    /* AND THE TYPE OBJECT THE NAME ACTUALLY ANSWERS, which is not an
+       `APY_EXC_K` at all. `apy_exc_type` builds one and immediately hands it
+       to `apy_type_of`, so what a program holds when it writes `c =
+       ValueError` is a plain `APY_TYPE_K` with an empty dict -- and the test
+       above, which reads exactly right, never fired once.
+
+       That is why this is a SECOND check and not a widening of the first: the
+       interpreter's `objects_host` keeps the exception cell and matched on
+       it, so the same source ran correctly there and failed here. Two paths
+       agreeing on the language and disagreeing on which object a name holds
+       is the failure this whole runtime is arranged to make visible, and it
+       stayed invisible because nothing constructed an exception through a
+       variable on the compiled path until `warnings.warn` did.
+
+       GUARDED ON THE CLASS BEING EMPTY. A type with `__init__` or `__new__`
+       is a class the program wrote, and `apy_exc_class_named` finds the ones
+       it wrote by subclassing an exception; either way it means its own and
+       `apy_instantiate` is right for it. */
+    if (O(f)->kind == APY_TYPE_K && apy_type_is_exc(f))
+        return apy_make_excn(O(f)->v.t.name, (apy_value)argv, argc);
     if (O(f)->kind == APY_TYPE_K)
         return apy_instantiate(f, argv, argc, kwrest, bound);
     if (O(f)->kind == APY_FUNC_K

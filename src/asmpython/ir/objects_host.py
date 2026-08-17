@@ -732,6 +732,32 @@ class ObjectHost:
             # `_apy_make_excn` returns printed the handle as an integer --
             # `11` where the message should have been.
             return made
+        # AND A CLASS THE PROGRAM WROTE BY SUBCLASSING ONE. `class
+        # AppError(ValueError)` has a body, so the test above declines it, and
+        # `_instantiate` built an ordinary Instance instead: `str(e)` read
+        # `<AppError object at 0x...>` and `raise e` said `exceptions must
+        # derive from BaseException, not 'AppError'` -- about a class whose
+        # `class` statement names ValueError as its base. Only through a
+        # VARIABLE, because the frontend resolves the written spelling at the
+        # call site, which is what kept it hidden.
+        #
+        # `is f` rather than a membership test: a program may bind an ordinary
+        # class to a name an exception class also has, and the registered
+        # object is the one this holds for.
+        if isinstance(f, Class) and self.exc_class.get(f.name) is f:
+            made = Exc(f.name, args[0] if args else None, bool(args))
+            made.argv = tuple(args)
+            made.cls = f
+            # ITS OWN `__init__` STILL RUNS, over the arguments the call
+            # supplied and after the defaults are in place -- the same order
+            # `_exc_construct` uses for the written spelling, so the two ways
+            # of naming the class build the same object. Called through
+            # `_invoke_obj` and not `_exc_construct`, which answers a HANDLE
+            # where everything here speaks in objects.
+            init = f.find("__init__")
+            if isinstance(init, (Func, Native)):
+                self._invoke_obj(init.bind(made), args, kwrest, bound)
+            return made
         if isinstance(f, Class):
             if f.meta is not None:
                 # THE METACLASS DECIDES WHAT CALLING THE CLASS DOES, if it

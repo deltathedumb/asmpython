@@ -1064,6 +1064,28 @@ class _Scope:
         return s
 
 
+def parameter_names(args: ast.arguments) -> list[str]:
+    """Every name a parameter list BINDS.
+
+    ALL FIVE GROUPS, which is the point of writing it once. The closure scopes
+    bound `args.args` and the two star-parameters and nothing else, which is
+    right for every function whose parameters are ordinary and silently wrong
+    for one written `def f(arg, /)`: a positional-only parameter was not bound
+    in its own scope, so a nested function reading it could not see it. The
+    diagnostic that came out was `E0052: call to unknown function 'arg'` --
+    about a parameter three lines above, listing every function in the program
+    except the one meant. `warnings.deprecated` is written that way, and CPython
+    writes it that way deliberately, so the gap had to be closed before the
+    module could exist.
+    """
+    names = [a.arg for a in
+             list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs)]
+    for star in (args.vararg, args.kwarg):
+        if star is not None:
+            names.append(star.arg)
+    return names
+
+
 def lambda_def(node: ast.Lambda) -> ast.FunctionDef:
     """The `def` a lambda is, built once and cached on the node.
 
@@ -1469,10 +1491,7 @@ class Analyzer:
                                     "<genexp>" if genexp else "<lambda>")
         self.def_of_node[id(lam)] = key
         child = self._new_scope(key, "function", scope, made)
-        for a in made.args.args:
-            child.bound.add(a.arg)
-        if made.args.vararg:
-            child.bound.add(made.args.vararg.arg)
+        child.bound.update(parameter_names(made.args))
         for stmt in made.body:
             self._collect(stmt, child)
 
@@ -1495,12 +1514,7 @@ class Analyzer:
                 _expr_names(dec, scope)
             key = self._register_nested(node, scope, qual or node.name)
             child = self._new_scope(key, "function", scope, node)
-            for a in node.args.args:
-                child.bound.add(a.arg)
-            if node.args.vararg:
-                child.bound.add(node.args.vararg.arg)
-            if node.args.kwarg:
-                child.bound.add(node.args.kwarg.arg)
+            child.bound.update(parameter_names(node.args))
             for s in node.body:
                 self._collect(s, child)
             return
