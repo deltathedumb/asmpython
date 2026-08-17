@@ -89,6 +89,7 @@ rather than a bundled module, and is unaffected.
 | `itertools` | `count`, `repeat`, `chain`, `islice`, `groupby`, `product`, `combinations` |
 | `functools` | `reduce`, `wraps`, `total_ordering`, `partial`, `cached_property`, `lru_cache`, `cache`, `singledispatch` |
 | `re` | the whole ordinary language and surface; NOT lookbehind, conditional/atomic groups, possessive quantifiers, `\N{...}`, property escapes, `Scanner`, `bytes` patterns -- each refused BY NAME |
+| `contextlib` | `contextmanager`, `suppress`, `ExitStack`, `nullcontext`; NOT the `async` half, `closing`, `redirect_*`, `chdir` |
 
 **Restoring is not free, and that is the point of stating coverage.** Three of
 `itertools`'s seven functions were wrong in ways the old suite never asked
@@ -198,14 +199,29 @@ splice the whole engine into every program that calls `compile`, `eval` or
 `exec`. The fix is for `_pycompile` to stop needing all of `warnings`, which
 is its own piece of work.
 
-## Held back
+## Held back, and released
 
-`contextlib` is written and NOT bundled. Its `__exit__` calls `gen.throw`
-correctly and the cleanup still does not run when the block raises, while the
-same generator throwing into the same `finally` works in isolation -- so the
-fault is in the interaction and is not yet found. A context manager whose
-cleanup silently does not run is worse than an absent one, so it stays out
-until it is understood.
+`contextlib` was withheld: its `__exit__` called `gen.throw` correctly and the
+cleanup still did not run when the block raised, while the same generator
+throwing into the same `finally` worked in isolation. A context manager whose
+cleanup silently does not run is worse than an absent one, so it stayed out
+until the fault was understood rather than until it happened to pass.
+
+**It was never a fault in this module.** Taking the shape apart one layer at a
+time settled it -- a generator resumed past its last `yield`, then resumed
+from a function, then from a method, then through the `with` protocol, then
+through a factory, then thrown into with a `try` around the yield, then with a
+`finally`. The ladder is written down in
+`scratchpad/ctx-probe.py`-shaped form and every rung already agreed with
+CPython, and so did the module itself once the compiler fixes above landed.
+
+That is worth stating plainly: **withholding it was right and the diagnosis
+was wrong.** The module was suspected because it was the new thing, and the
+fault was in the runtime the whole time -- which is what a ladder of
+one-difference-at-a-time cases is for, and what "a failure is asmpython's
+until shown otherwise" means applied to this suite's own output.
+
+Nothing is held back now.
 
 ## What it cost to start
 
