@@ -104,4 +104,27 @@ try:
     raise copy.Error("x")
 except Exception as exc:
     print("caught by Exception:", exc)
+# A CLASS THAT REFUSES WRITES IS STILL COPYABLE. Rebuilding a copy is not
+# mutating it, so the state goes in through `object.__setattr__` rather than
+# `setattr` -- otherwise an immutable class raises from its own `__setattr__`
+# while being CONSTRUCTED. Found by `dataclasses`, whose frozen classes are
+# the ones every program has.
+class Immutable:
+    def __init__(self, k, xs):
+        object.__setattr__(self, "k", k)
+        object.__setattr__(self, "xs", xs)
+
+    def __setattr__(self, name, value):
+        raise AttributeError("cannot assign to field %r" % (name,))
+
+    def __repr__(self):
+        return "Immutable(%r, %r)" % (self.k, self.xs)
+
+
+frozen_one = Immutable(3, [1, 2])
+deep = copy.deepcopy(frozen_one)
+shallow = copy.copy(frozen_one)
+print(deep, deep.xs is frozen_one.xs, deep is frozen_one)
+print(shallow, shallow.xs is frozen_one.xs)
+
 print("done")

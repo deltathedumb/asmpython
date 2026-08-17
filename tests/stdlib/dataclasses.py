@@ -483,6 +483,32 @@ try:
     dataclasses.replace(Bag(), computed=1)
 except TypeError as exc:
     print("TypeError:", exc)
+# AN UNKNOWN KEYWORD IS THE CONSTRUCTOR'S ERROR, so it names the class.
+try:
+    dataclasses.replace(Point(1), zzz=5)
+except TypeError as exc:
+    print("TypeError:", exc)
+# A SET IS NOT RECURSED INTO -- its members are deep-copied instances, because
+# converting them to dicts would make them unhashable and crash.
+@dataclass(frozen=True)
+class Key:
+    k: int
+
+
+@dataclass
+class HasSet:
+    s: object
+
+
+snap_set = dataclasses.asdict(HasSet({Key(3)}))
+print(snap_set, type(snap_set["s"]).__name__)
+# A CLASS IS NOT AN INSTANCE: asdict/astuple/replace take instances only.
+for fn in (dataclasses.asdict, dataclasses.astuple):
+    try:
+        fn(Point)
+        print("ACCEPTED a class")
+    except TypeError as exc:
+        print("TypeError:", exc)
 print(dataclasses.replace(WithInit(1, 10), x=5, doubled=1).total)
 
 

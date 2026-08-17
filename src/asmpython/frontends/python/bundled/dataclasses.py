@@ -1020,6 +1020,14 @@ def _asdict_inner(obj, dict_factory):
 
 
 def _is_namedtuple(obj):
+    """CPython's own test: a tuple that knows its field names.
+
+    UNTESTED AGAINST THE ORACLE HERE, and said so rather than left to look
+    covered. A namedtuple is a tuple SUBCLASS, `collections` is not rebuilt
+    yet, and this compiler cannot subclass a builtin -- so no program it
+    compiles can currently produce one. The branch is written correctly for
+    when `collections` lands.
+    """
     return isinstance(obj, tuple) and hasattr(obj, "_fields")
 
 
@@ -1034,6 +1042,10 @@ def _astuple_inner(obj, tuple_factory):
         return tuple_factory([_astuple_inner(getattr(obj, spec.name),
                                              tuple_factory)
                               for spec in fields(obj)])
+    if _is_namedtuple(obj):
+        # A NAMEDTUPLE SURVIVES `astuple` TOO, which is easy to miss because
+        # the function's whole job looks like "make everything a tuple".
+        return type(obj)(*[_astuple_inner(one, tuple_factory) for one in obj])
     if isinstance(obj, tuple):
         return tuple([_astuple_inner(one, tuple_factory) for one in obj])
     if isinstance(obj, list):
@@ -1056,7 +1068,13 @@ def replace(obj, /, **changes):
     if not _is_dataclass_instance(obj):
         raise TypeError("replace() should be called on dataclass instances")
     found = getattr(type(obj), _FIELDS)
-    values = {}
+    # STARTS FROM WHAT THE CALLER PASSED, so a name that is not a field at all
+    # stays in and reaches the constructor -- which is where CPython's
+    # `P.__init__() got an unexpected keyword argument 'zzz'` comes from.
+    # Building a fresh dict of known fields instead silently DROPPED the
+    # unknown one and answered an unchanged object, so `replace(cfg,
+    # tiemout=5)` was a typo nobody ever found out about.
+    values = dict(changes)
     for name in found:
         spec = found[name]
         if spec._field_type is _FIELD_CLASSVAR:
@@ -1067,7 +1085,6 @@ def replace(obj, /, **changes):
                                 "cannot be specified with replace()" % (name,))
             continue
         if name in changes:
-            values[name] = changes[name]
             continue
         if spec._field_type is _FIELD_INITVAR:
             if spec.default is MISSING and spec.default_factory is MISSING:
@@ -1075,10 +1092,10 @@ def replace(obj, /, **changes):
                                 "replace()" % (name,))
             continue
         values[name] = getattr(obj, name)
-    for name in changes:
-        if name not in found:
-            raise TypeError("__init__() got an unexpected keyword argument "
-                            "%r" % (name,))
+    # AN UNKNOWN KEYWORD IS LEFT TO THE CONSTRUCTOR, which names the class:
+    # `P.__init__() got an unexpected keyword argument 'zzz'`. Checking it
+    # here produced the same sentence without the class in front of it, and a
+    # message that differs is a message that does not match.
     return type(obj)(**values)
 
 

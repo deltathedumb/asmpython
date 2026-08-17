@@ -122,7 +122,14 @@ def _reconstruct(x, memo=None):
         memo[id(x)] = made
     for key in state:
         value = state[key]
-        setattr(made, key, deepcopy(value, memo) if memo is not None else value)
+        # `object.__setattr__` AND NOT `setattr`. A class that refuses writes
+        # -- a frozen dataclass is the one every program has -- raises from its
+        # own `__setattr__` when a copy is being rebuilt, which is absurd: the
+        # copy is not being MUTATED, it is being constructed. CPython restores
+        # state through `__dict__` for the same reason and never consults the
+        # class's `__setattr__` either.
+        object.__setattr__(made, key,
+                           deepcopy(value, memo) if memo is not None else value)
     return made
 
 

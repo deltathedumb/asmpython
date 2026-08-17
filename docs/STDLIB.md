@@ -303,6 +303,39 @@ way to read a class's OWN annotations now answers `{}` for every class -- and
 the first version produced dataclasses with no fields at all. The plain
 attribute read is correct on both runtimes and was verified on both.
 
+## What the adversarial critic caught that the specification missed
+
+The five slices were commissioned to specify `dataclasses` before it was
+written; a sixth agent was told to find what they had MISSED. It earned its
+place three times over, and every one of the three is a WRONG ANSWER that no
+happy-path test notices:
+
+* **`asdict` deep-copies leaf values.** The recursion set is exactly
+  dataclass / list / tuple / dict, and everything else goes through
+  `deepcopy`. Passing leaves through gives a dict whose values are the SAME
+  objects the instance holds, so mutating the snapshot mutates the original --
+  which is precisely what somebody calling `asdict` is trying to avoid.
+* **`replace()` must let an unknown keyword reach the constructor.** Building
+  a fresh dict of known fields silently DROPPED it, so `replace(cfg,
+  tiemout=5)` answered an unchanged object and nobody found out. CPython's
+  message names the class, which only the constructor can do.
+* **A namedtuple stays a namedtuple**, in both `asdict` and `astuple`, and is
+  rebuilt SPLATTED (`NT(*[...])`) because its constructor takes one argument
+  per field. Untestable here until `collections` is rebuilt, and said so in
+  the module rather than left looking covered.
+
+It also confirmed two things right by construction: a SET is not recursed into
+(its members are deep-copied instances, and converting them to dicts would
+make them unhashable), and `asdict`/`astuple`/`replace` take instances only,
+never a class.
+
+**And `dataclasses` then found a bug in `copy`.** `deepcopy` of a FROZEN
+dataclass raised `FrozenInstanceError` from the class's own `__setattr__` --
+while the copy was being CONSTRUCTED, not mutated. `_reconstruct` restores
+state with `object.__setattr__` now, which is what CPython's `__dict__`
+restore amounts to. Every program that freezes a dataclass and copies it hit
+this.
+
 ## A bundled module's exception class leaks its mangled name
 
 Found by restoring `copy`, which defines `class Error(Exception)`. Two
