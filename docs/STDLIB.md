@@ -93,6 +93,7 @@ rather than a bundled module, and is unaffected.
 | `inspect` | `signature`, `Signature`, `Parameter` and the five kinds, `isfunction`, `isclass`, `getdoc` of a FUNCTION; NOT source, frames, `bind`, `getfullargspec` |
 | `__future__` | complete |
 | `enum` | `Enum`, `IntEnum`, `StrEnum`, `Flag`, `IntFlag`, `auto`, `unique`, aliases, `__members__`; NOT `verify`/`EnumCheck`, `boundary=`, `global_enum`, `member`/`nonmember`, `_missing_`, functional creation |
+| `copy` | `copy`, `deepcopy`, the hooks, the memo; NOT `__reduce__`, `__getstate__`, `copyreg`, `copy.replace` |
 
 **Restoring is not free, and that is the point of stating coverage.** Three of
 `itertools`'s seven functions were wrong in ways the old suite never asked
@@ -258,6 +259,35 @@ nothing had exercised one. Seven faults, all fixed, none of them about enums:
   falls back to it and these called `apy_order` directly, so `Num.THREE <
   Num.ONE` worked and `sorted([Num.THREE, Num.ONE])` said `unsupported operand
   type(s) for <` -- for the same two objects.
+
+## A bundled module's exception class leaks its mangled name
+
+Found by restoring `copy`, which defines `class Error(Exception)`. Two
+symptoms, one cause, and both are the compiler rather than the module:
+
+    import copy
+    issubclass(copy.Error, Exception)      # False; CPython says True
+    try: raise copy.Error("x")
+    except Exception as e: type(e).__name__   # `_asmpy_bundled_copy_Error`
+
+A bundled module's classes are spliced under mangled names and the splice
+restores `__name__` afterwards, precisely so the mangling stays invisible --
+`bundled.py` says so where it emits that assignment. It does not stay
+invisible: the runtime's exception hierarchy is keyed by NAME and was
+registered with the mangled one, so the class is outside the tree that
+`issubclass` walks, and a raised instance reports the internal spelling to any
+program that prints its type.
+
+CATCHING IT WORKS, which is why nothing noticed until now -- `except
+copy.Error` and `except Exception` both match, because those go through the
+same name table that was registered.
+
+IT IS NOT A ONE-LINE FIX, which is why it is written down rather than patched.
+Registering the demangled name instead would conflate two bundled modules that
+both define `Error` -- `copy.Error` and `re.error` are distinct classes in
+CPython -- so it needs the hierarchy to be keyed by something other than a bare
+name, and that touches `raise`, `except`, the parent walk and
+`apy_error_matches` together.
 
 `inspect` found a third, worked around rather than fixed: **`X = X` in a class
 body reads the right-hand side as the class attribute being defined** instead
