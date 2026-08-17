@@ -109,6 +109,74 @@ class TestTheSuiteIsHonest:
                 wrong.append(p.name)
         assert not wrong, f"does not import its own module: {wrong}"
 
+    def test_reaching_past_a_module_says_so(self, tmp_path):
+        """The compiler must not contradict the coverage line.
+
+        Stating what a module covers is worth nothing if reaching past it
+        reports something else, and it used to report one of two wrong things.
+        `from warnings import deprecated` said `E0083: no module named
+        'warnings' is available` -- flatly false, since the module is bundled
+        and every other name in it worked -- and `warnings.deprecated` said
+        NOTHING at compile time and raised `NameError: name 'warnings' is not
+        defined` at run time, because the import statement had been spliced
+        away. One sent the reader after a missing module and the other after a
+        broken import.
+
+        BOTH SPELLINGS, because they failed differently and were fixed in
+        different places: the `from` form in the statement rewrite and the
+        attribute form in a walk of what is left. See `bundled._no_member`.
+        """
+        for name, program in (
+                ("from", "from itertools import nosuchthing\n"
+                         "print(nosuchthing)\n"),
+                ("attribute", "import itertools\n"
+                              "print(itertools.nosuchthing)\n")):
+            path = tmp_path / f"reach_{name}.py"
+            path.write_text(program, encoding="utf-8")
+            got = _asmpython(path)
+            assert got.returncode != 0, f"{name}: compiled anyway"
+            said = got.stdout + got.stderr
+            assert "E0084" in said and "has no member" in said, \
+                f"{name}: not reported as a missing member:\n{said[-2000:]}"
+            assert "no module named" not in said, \
+                f"{name}: still denies the module exists:\n{said[-2000:]}"
+            # The help line is the coverage line, restated where someone has
+            # just run into its edge.
+            assert "it provides: chain" in said, \
+                f"{name}: does not say what the module has:\n{said[-2000:]}"
+
+    def test_re_refuses_what_it_does_not_have(self, tmp_path):
+        """The one thing `tests/stdlib/re.py` structurally cannot check.
+
+        Lookbehind, conditional groups, atomic groups, possessive quantifiers,
+        `\\N{...}` and unicode property escapes are features CPython HAS, so a
+        differential test asserting asmpython refuses them would be asserting
+        a difference -- it could only ever fail. They are measured here
+        instead, against asmpython alone.
+
+        THAT THEY ARE REFUSED IS THE POINT. A regular-expression engine that
+        quietly matches the wrong thing is worse than one that says it cannot:
+        `(?<=a)b` read as an ordinary group would match a DIFFERENT language
+        and report nothing, and the program that relied on it would be wrong
+        somewhere else entirely.
+        """
+        unsupported = ("(?<=a)b", "(?<!a)b", "(?(1)a)", "(?>a)", "a*+",
+                       r"\p{L}", r"\N{BULLET}")
+        lines = ["import re", "for one in %r:" % (unsupported,),
+                 "    try:",
+                 "        re.compile(one)",
+                 "        print('ACCEPTED', one)",
+                 "    except re.error as exc:",
+                 "        print(one, 'not supported' in str(exc))"]
+        path = tmp_path / "refusals.py"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        got = _asmpython(path)
+        assert got.returncode == 0, got.stderr[-3000:]
+        said = got.stdout.split("\n")
+        for one, line in zip(unsupported, said):
+            assert line == f"{one} True", (
+                f"{one!r} is not refused by name: {line!r}")
+
     def test_a_bundled_module_has_a_test(self):
         """A module in `bundled/` with no test program is one nobody has
         measured. The `_py*` modules are exempt: they are the embedded
