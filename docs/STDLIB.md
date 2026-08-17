@@ -221,14 +221,84 @@ fault was in the runtime the whole time -- which is what a ladder of
 one-difference-at-a-time cases is for, and what "a failure is asmpython's
 until shown otherwise" means applied to this suite's own output.
 
-Nothing is held back now.
+`enum` is held back now, for the same reason and by the same rule. It is
+written -- `Enum`, `IntEnum`, `StrEnum`, `Flag`, `IntFlag`, `auto`, `unique`,
+aliases -- and its logic is PROVED: it is ordinary Python, so putting it on
+`sys.path` under CPython and running `tests/stdlib/enum.py` against it instead
+of CPython's own gives identical output. What it is waiting on is the
+compiler, and the two remaining faults are named below.
+
+## What `enum` found in the compiler
+
+A metaclass is the one thing an enum cannot be written without, and almost
+nothing had exercised one. Four faults, all fixed, all in code that has
+nothing to do with enums:
+
+* **`C()` ANSWERED None for any class with a metaclass.** Every metaclass
+  inherits `type.__call__`, so a metaclass that writes no `__call__` of its own
+  still found one -- and `_invoke_obj` has no case for that Native the way
+  `_invoke` does, so it called its body directly. This is not an enum bug; it
+  is every metaclass, including `ABCMeta`.
+* **`len(C)`, `x in C` and `repr(C)` did not consult the metaclass.**
+  `__iter__` had grown the case and the other three had not, so `for c in
+  Colour` worked while `len(Colour)` said `object of type 'EnumMeta' has no
+  len()` -- about a class whose metaclass plainly defines one.
+
+Two remain, and they are why the module is not bundled:
+
+* **The class statement does not bind what the metaclass's `__new__`
+  returned.** `class C(metaclass=Meta)` where `Meta.__new__` returns a class
+  leaves `C is Meta.seen` False. Members are built against the class the
+  metaclass saw, so `type(Colour.RED) is Colour` is False.
+* **`"%d" % obj` fails for an object with `__format__` or `__index__`**, with
+  `unsupported format string passed to Instance.__format__`.
+
+`inspect` found a third, worked around rather than fixed: **`X = X` in a class
+body reads the right-hand side as the class attribute being defined** instead
+of the enclosing module's name, which is valid Python and how CPython's own
+`inspect` writes `POSITIONAL_ONLY = POSITIONAL_ONLY`. The module uses
+underscored module-level names instead and says so.
 
 ## What it cost to start
 
 Recorded so each module restored is measured against a real baseline rather
-than an impression. Filled in as the rebuild proceeds.
+than an impression.
 
-| | conformance (spec+cpython) | suite |
+| | conformance (spec+cpython) |
+| --- | --- |
+| before archiving | 1668/1668 (100%) |
+| after archiving, with 8 modules rebuilt | 1627/1668 (97.5%) |
+
+**41 cases, and not one of them is a wrong answer.** That is the number worth
+having, because it says the clear cost coverage and not correctness:
+
+| | | |
 | --- | --- | --- |
-| before archiving | 1668/1668 | 29,559 |
-| after archiving | *pending* | *pending* |
+| 35 | REFUSED | the program names a module that no longer exists |
+| 5 | FAIL | four reach an archived module at RUN time (`sys.monitoring`, `sys.addaudithook`, `typing`, `inspect`); one was `__future__`, below |
+| 1 | TIMEOUT | not a regression, see below |
+
+The 35 refusals name exactly what to write next, in this order by how many
+cases each unblocks: `collections` and `collections.abc`, `abc`, `typing`,
+`dataclasses`, `io`, `os`/`pathlib`, `enum`, `numbers`, `decimal`,
+`fractions`, `statistics`, `datetime`/`zoneinfo`, `contextvars`, `copy`,
+`unicodedata`, `tomllib`, `annotationlib`.
+
+**The TIMEOUT is a measurement artefact and was checked rather than assumed.**
+`exceptions/type-raised-by-builtin-ops` calls `eval` in a loop; it passes in
+isolation and takes ~18s, against a 30s default timeout, so under `-j 2` it
+tipped over. The cost is the embedded compiler -- `eval` splices roughly 3,300
+lines of `_pylex`, `_pyparse`, `_pyvalidate`, `_pycompile` and `_pyrun` into
+the program. I suspected the `functools` import I had just added to
+`warnings`, measured it at 17.4s with and 17.2s without, and it was not that.
+The import is gone anyway (see `warnings._wraps`) on the smaller argument that
+a module spliced into every `eval` program should not carry a dependency it
+uses three lines of.
+
+**One case found a file that had been LOST rather than archived.**
+`pep/0236-future-statement` failed with `'int' object has no attribute
+'optional'`, which turned out to be `bundled/__future__.py` deleted by the
+clear and never copied into `archived/stdlib-prerefactor/` -- so unlike the
+other twenty-seven it had no reference version, and the only copy was in git.
+It is restored, with a coverage line and a test it never had. Every other
+deleted file did reach the archive; that was checked, not assumed.

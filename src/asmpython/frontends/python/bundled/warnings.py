@@ -28,7 +28,6 @@ with the source line, indented two spaces, on a second line when there is one.
 Programs parse this, and a message that differs by a colon is a message that
 does not match.
 """
-import functools
 import sys
 
 
@@ -251,6 +250,32 @@ class catch_warnings:
         return False
 
 
+def _wraps(inner, fn):
+    """`functools.wraps`, written out here rather than imported.
+
+    NOT DUPLICATION FOR ITS OWN SAKE: `_pycompile` imports this module for one
+    `SyntaxWarning`, so anything `warnings` imports is spliced into EVERY
+    program that calls `compile`, `eval` or `exec`. Importing `functools` for
+    one function put all of it -- `lru_cache`, `singledispatch`, `partial` and
+    the rest -- into those programs, for the three lines below.
+
+    WHAT IT DID NOT DO IS SPEED THEM UP, and that was the reason it was tried.
+    An `eval` program was measured at 17.4s with the import and 17.2s without:
+    the cost of those programs is the embedded compiler itself, roughly 3,300
+    lines of `_pylex`, `_pyparse`, `_pyvalidate`, `_pycompile` and `_pyrun`,
+    and one more module is lost in it. Recorded because the next person to
+    find `eval` slow should start there and not here.
+
+    So this stands on the smaller claim: a module spliced into every such
+    program should not carry a dependency it uses three lines of. A program
+    that wants the real `functools.wraps` imports it and pays deliberately.
+    """
+    inner.__name__ = fn.__name__
+    inner.__doc__ = fn.__doc__
+    inner.__wrapped__ = fn
+    return inner
+
+
 class deprecated:
     """PEP 702. Mark a function or a class deprecated, and say so when used.
 
@@ -322,11 +347,11 @@ class deprecated:
             arg.__deprecated__ = msg
             return arg
         if callable(arg):
-            @functools.wraps(arg)
             def wrapper(*args, **kwargs):
                 warn(msg, category, stacklevel + 1)
                 return arg(*args, **kwargs)
 
+            _wraps(wrapper, arg)
             # BOTH OF THEM. The wrapper is what callers see, and `arg` is what
             # `__wrapped__` hands back -- a tool that unwraps to find the real
             # function must not lose the mark by doing so.

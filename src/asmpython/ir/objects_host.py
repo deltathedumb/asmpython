@@ -463,6 +463,17 @@ class ObjectHost:
     # ── text ────────────────────────────────────────────────────────────────
     def _text(self, v, quoted: bool) -> str:
         if isinstance(v, Class):
+            # PRINTING A CLASS IS THE METACLASS'S BUSINESS when it says so.
+            # `repr(Colour)` is `type(Colour).__repr__(Colour)`, which is how
+            # an enum prints as `<enum 'Colour'>` -- the fourth of the
+            # metaclass dunders to need saying so, beside `__iter__`,
+            # `__len__` and `__contains__`.
+            if v.meta is not None:
+                hook = v.meta.lookup("__repr__")
+                if hook is not _ABSENT:
+                    got = self._invoke(hook, [v])
+                    if self.err is None and isinstance(got, str):
+                        return got
             return f"<class '{v.name}'>"
         if isinstance(v, Alias):
             # THE UNION IS THE ONLY FORM THAT PRINTS WITH BARS. PEP 604 made
@@ -766,7 +777,16 @@ class ObjectHost:
                 # abstract methods. Looked for only when there IS a metaclass
                 # -- the default is the allocate-and-init below.
                 hook = f.meta.lookup("__call__")
-                if isinstance(hook, (Func, Native)):
+                # THE DEFAULT `type.__call__` IS THE FALL-THROUGH, not a hook
+                # to run. Every metaclass inherits it, so a metaclass that
+                # writes no `__call__` of its own still found one here -- and
+                # `_invoke_obj` has no case for that Native the way `_invoke`
+                # does, so it called its body directly and `C()` answered
+                # None. Skipping it lands on `_instantiate` below, which IS
+                # what `type.__call__` means.
+                if isinstance(hook, (Func, Native)) and not (
+                        isinstance(hook, Native)
+                        and hook.name == "<type.__call__>"):
                     return self._invoke_obj(hook, [f] + list(args), kwrest)
             return self._instantiate(f, args, kwrest, bound)
         if isinstance(f, Native) and f.name == "<type.__call__>":
@@ -1065,6 +1085,19 @@ def _apy_truth(h, a):
 
 def _apy_len(h, a):
     v = h._get(a[0], "apy_len")
+    if isinstance(v, Class) and v.meta is not None:
+        # THE LENGTH OF A CLASS IS THE METACLASS'S BUSINESS, exactly as
+        # iterating one is: `len(Colour)` is `type(Colour).__len__(Colour)`,
+        # which is how an enum says how many members it has. `_apy_iter` grew
+        # this case and this did not, so `for c in Colour` worked and
+        # `len(Colour)` answered `object of type 'EnumMeta' has no len()` --
+        # about a class whose metaclass plainly defines one.
+        hook = v.meta.lookup("__len__")
+        if hook is not _ABSENT:
+            got = h._invoke(hook, [v])
+            if h.err is not None:
+                return 0
+            return h._value(got)
     if isinstance(v, Instance):
         # A CLASS THAT EXTENDS A BUILTIN has one for everything it did not
         # write, so a `class D(dict)` whose body says nothing about length
@@ -3052,6 +3085,17 @@ def _apy_contains(h, a):
                 return h._new(False)
             if item == needle or item is needle:
                 return h._new(True)
+    if isinstance(hay, Class) and hay.meta is not None:
+        # MEMBERSHIP IN A CLASS IS THE METACLASS'S BUSINESS, as iterating and
+        # measuring one are: `Colour.RED in Colour` is
+        # `type(Colour).__contains__(Colour, RED)`. The third of the three to
+        # need saying so -- see `_apy_iter` and `_apy_len`.
+        hook = hay.meta.lookup("__contains__")
+        if hook is not _ABSENT:
+            got = h._invoke(hook, [hay, needle])
+            if h.err is not None:
+                return 0
+            return h._bool(bool(got))
     if isinstance(hay, Instance) and hay.cls.find("__contains__") is None:
         # No `__contains__`. `in` falls back to ITERATION, which is CPython's
         # rule and the reason a class with only `__getitem__` supports it.

@@ -3601,6 +3601,16 @@ static int64_t apy_str_chars(apy_value v) {
 }
 
 APY_API apy_value apy_len(apy_value v) {
+    /* THE LENGTH OF A CLASS IS THE METACLASS'S BUSINESS, exactly as iterating
+       one is: `len(Colour)` is `type(Colour).__len__(Colour)`, which is how an
+       enum says how many members it has. Iteration grew this case and length
+       did not, so `for c in Colour` worked and `len(Colour)` reported
+       `object of type 'EnumMeta' has no len()` -- about a class whose
+       metaclass plainly defines one. */
+    if (O(v)->kind == APY_TYPE_K && O(v)->v.t.meta) {
+        apy_value hook = apy_class_find(O(v)->v.t.meta, apy_name("__len__"));
+        if (hook) return apy_call_n(apy_bind(hook, v), NULL, 0);
+    }
     /* A CLASS THAT EXTENDS A BUILTIN has one for everything it did not write.
        Asked before the dunder walk below, which would report "has no len()"
        for a `class D(dict)` whose body says nothing about length. */
@@ -3913,6 +3923,17 @@ static apy_value apy_text(apy_value v, int quoted) {
         return apy_str_copy(buf, (int64_t)strlen(buf));
     }
     case APY_TYPE_K:
+        /* PRINTING A CLASS IS THE METACLASS'S BUSINESS when it says so.
+           `repr(Colour)` is `type(Colour).__repr__(Colour)`, which is how an
+           enum prints as `<enum 'Colour'>` -- the fourth of the metaclass
+           dunders to need saying so, beside `__iter__`, `__len__` and
+           `__contains__`. */
+        if (O(v)->v.t.meta) {
+            apy_value hook = apy_class_find(O(v)->v.t.meta,
+                                            apy_name("__repr__"));
+            if (hook)
+                return apy_call_n(apy_bind(hook, v), NULL, 0);
+        }
         snprintf(buf, sizeof buf, "<class '%s'>",
                  APY_CSTR(O(v)->v.t.name));
         return apy_str_copy(buf, (int64_t)strlen(buf));
@@ -5171,6 +5192,19 @@ APY_API apy_value apy_is(apy_value a, apy_value b) { return apy_from_bool(a == b
    legal Python and it is False, not an error. A str haystack is a SUBSTRING
    test and demands a str needle, which is the one place `in` raises. */
 APY_API apy_value apy_contains(apy_value needle, apy_value hay) {
+    /* MEMBERSHIP IN A CLASS IS THE METACLASS'S BUSINESS, as iterating and
+       measuring one are: `Colour.RED in Colour` is
+       `type(Colour).__contains__(Colour, RED)`. The third of the three to need
+       saying so -- see `apy_iter` and `apy_len`. */
+    if (O(hay)->kind == APY_TYPE_K && O(hay)->v.t.meta) {
+        apy_value hook = apy_class_find(O(hay)->v.t.meta,
+                                        apy_name("__contains__"));
+        if (hook) {
+            apy_value argv[1];
+            argv[0] = needle;
+            return apy_call_n(apy_bind(hook, hay), argv, 1);
+        }
+    }
     /* ARITHMETIC, not a search: `10**11 in range(10**12)` is a division. */
     if (O(hay)->kind == APY_RANGE_K) {
         int64_t want;
