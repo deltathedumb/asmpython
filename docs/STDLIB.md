@@ -94,6 +94,7 @@ rather than a bundled module, and is unaffected.
 | `__future__` | complete |
 | `enum` | `Enum`, `IntEnum`, `StrEnum`, `Flag`, `IntFlag`, `auto`, `unique`, aliases, `__members__`; NOT `verify`/`EnumCheck`, `boundary=`, `global_enum`, `member`/`nonmember`, `_missing_`, functional creation |
 | `copy` | `copy`, `deepcopy`, the hooks, the memo; NOT `__reduce__`, `__getstate__`, `copyreg`, `copy.replace` |
+| `dataclasses` | `dataclass` with init/repr/eq/order/unsafe_hash/frozen/match_args/kw_only, `field` with all eight arguments, `Field`, `fields`, `is_dataclass`, `asdict`/`astuple` recursing, `replace`, `InitVar`, `KW_ONLY`, `MISSING`, `FrozenInstanceError`, `__post_init__`, ClassVar exclusion, inheritance; NOT `make_dataclass`, `slots`, `weakref_slot` (each refused BY NAME), `field(doc=)`, `Field[int]` |
 
 **Restoring is not free, and that is the point of stating coverage.** Three of
 `itertools`'s seven functions were wrong in ways the old suite never asked
@@ -259,6 +260,44 @@ nothing had exercised one. Seven faults, all fixed, none of them about enums:
   falls back to it and these called `apy_order` directly, so `Num.THREE <
   Num.ONE` worked and `sorted([Num.THREE, Num.ONE])` said `unsupported operand
   type(s) for <` -- for the same two objects.
+
+## What `dataclasses` found in the compiler
+
+Specified first, in five parallel slices measured against CPython, with an
+adversarial critic behind them -- which is why the module was right on the
+first compile rather than the fifth. What it then found was the compiler, and
+three of the five are things no earlier module had reached:
+
+* **`type(name, bases, {"__annotations__": ...})` LOSES THE ANNOTATIONS**, and
+  so does assigning `C.__annotations__` afterwards: both read back `{}`.
+  Annotations are fixed when the class statement is compiled. This is why
+  `make_dataclass` is refused rather than approximated -- built on that it
+  would answer a dataclass with NO FIELDS whose every constructor call
+  succeeds.
+* **KEYWORD-ONLY PARAMETERS ARE NOT ENFORCED AT RUN TIME.** `field(3)` against
+  `def field(*, ...)` is accepted and becomes the `default`; the compiler warns
+  where it can see the call and lets it through. One permissive superset rather
+  than a wrong answer, and stated in the module.
+* **A comparison against a user object named the wrong class.** `a < b` where
+  `__lt__` answered NotImplemented reported `'<' not supported between
+  instances of 'Instance' and 'int'` -- `Instance` being the interpreter's own
+  class, which every user object shares. The arithmetic path had rewritten that
+  message and the comparison path had not, so `a + b` blamed the right types
+  and `a < b` did not. Fixed.
+* **`bytearray` cannot be used as a VALUE** (`E0056`), only inside an
+  `isinstance` call, so a tuple of mutable types has to be written as separate
+  tests.
+* **`__class__` does not exist on an `int`.** CPython's generated `__eq__`
+  tests `other.__class__ is self.__class__` deliberately -- it differs from
+  `type()` for anything overriding `__class__` -- and comparing a dataclass to
+  an integer raised `AttributeError` from inside `__eq__` where CPython answers
+  NotImplemented. The module keeps CPython's spelling and falls back.
+
+PEP 649 also caught the implementation out: `__annotations__` is never in
+`cls.__dict__` under 3.14, so the `__dict__` lookup that used to be the careful
+way to read a class's OWN annotations now answers `{}` for every class -- and
+the first version produced dataclasses with no fields at all. The plain
+attribute read is correct on both runtimes and was verified on both.
 
 ## A bundled module's exception class leaks its mangled name
 

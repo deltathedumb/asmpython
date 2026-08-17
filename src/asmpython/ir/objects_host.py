@@ -3105,8 +3105,28 @@ def _cmpop(name, op):
         except _UserFailed:
             return 0
         except TypeError as e:
+            if name in _CMP_SYMBOL and (isinstance(x, Instance)
+                                        or isinstance(y, Instance)):
+                # PYTHON'S MESSAGE NAMES `Instance`, which is THIS FILE'S class
+                # and not the program's type. Every user object shares it, so a
+                # dataclass whose `__lt__` answered NotImplemented reported
+                # `'<' not supported between instances of 'Instance' and 'int'`
+                # -- naming a class the program has never heard of. The
+                # arithmetic path already rewrote this; comparison did not, so
+                # `a + b` blamed the right types and `a < b` did not.
+                return h._fail(
+                    "TypeError",
+                    f"'{_CMP_SYMBOL[name]}' not supported between instances "
+                    f"of '{h.kind_name(x)}' and '{h.kind_name(y)}'")
             return h._fail_like(e)
     return run
+
+
+#: The operator each ORDERING binding spells, for the message above. Only the
+#: four orderings: `==` and `!=` never reach it, because equality between any
+#: two objects is always answerable, and membership of this table is what
+#: selects the branch.
+_CMP_SYMBOL = {"apy_lt": "<", "apy_le": "<=", "apy_gt": ">", "apy_ge": ">="}
 
 
 def _apy_is(h, a):
