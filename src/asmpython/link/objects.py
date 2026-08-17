@@ -14866,6 +14866,23 @@ static apy_value apy_call_nk(apy_value f, apy_value *argv, int64_t argc,
                                kwrest, 0);
         }
     }
+    /* AN EXCEPTION TYPE IS CALLABLE, and reaching it through a variable is
+       the only way to notice that it was not. `ValueError("v")` is resolved
+       at the CALL SITE by the frontend and never arrives here; `c =
+       ValueError; c("v")` does, and answered `ValueError() takes no
+       arguments` -- about a class every program constructs.
+
+       `warnings.warn` is why this surfaced: `raise category(message)` holds
+       the class in a parameter, so the entire module was unwritable. A type
+       that can only be called by the spelling the compiler recognises is not
+       a value, and every library that takes an exception class as an
+       argument depends on it being one.
+
+       A type carries no argument; an INSTANCE does. That is the whole
+       distinction here, and it is what stops `e = ValueError("v"); e()` from
+       being read as a second construction. */
+    if (O(f)->kind == APY_EXC_K && !O(f)->v.e.has_arg && !O(f)->v.e.argv)
+        return apy_make_excn(apy_lit(O(f)->v.e.name), (apy_value)argv, argc);
     if (O(f)->kind == APY_TYPE_K)
         return apy_instantiate(f, argv, argc, kwrest, bound);
     if (O(f)->kind == APY_FUNC_K

@@ -229,6 +229,12 @@ class ObjectHost:
         #: `class AppError(Exception):` WITH A BODY -> the class its name
         #: stands for. See `_apy_exc_class_bind`.
         self.exc_class: dict = {}
+        #: id(Class) -> the builtin exception name it stands for. `_type_of`
+        #: interns one bare `Class` per kind, so the object standing for
+        #: `ValueError` is otherwise indistinguishable from the one standing
+        #: for `int` -- and calling it found no `__init__` and answered
+        #: `ValueError() takes no arguments`. See `_invoke`.
+        self.exc_types: dict = {}
         #: (kept beside `user_exc`, which holds the same names' bases)
         self.user_exc: dict = {}
         self._none = self._new(None)
@@ -699,6 +705,33 @@ class ObjectHost:
         packs the surplus positionals FIRST, so a dict sitting in `args` would
         be swallowed into `rest` instead of landing past it.
         """
+        # AN EXCEPTION TYPE IS CALLABLE. `ValueError("v")` is resolved at the
+        # call site by the frontend and never reaches here; `c = ValueError;
+        # c("v")` does, and answered `ValueError() takes no arguments` about a
+        # class every program constructs. `warnings.warn` is why it surfaced:
+        # `raise category(message)` holds the class in a parameter.
+        #
+        # A TYPE CARRIES NO ARGUMENT and an instance does, which is the whole
+        # distinction -- it is what stops `e = ValueError("v"); e()` from being
+        # read as a second construction.
+        #
+        # THE SAME RULE AS THE C's, and it has to be: `apy_call_nk` grew this
+        # case in the same commit. Two runtimes disagreeing about whether a
+        # class is callable is exactly the drift docs/INERT-RUNTIME.md exists
+        # to end.
+        if isinstance(f, Class) and id(f) in self.exc_types and not f.dict:
+            name = self.exc_types[id(f)]
+            if (args and name == "OSError"
+                    and isinstance(args[0], int)
+                    and not isinstance(args[0], bool)):
+                name = _ERRNO_CLASS.get(args[0], name)
+            made = Exc(name, args[0] if args else None, bool(args))
+            made.argv = tuple(args)
+            # THE OBJECT, not a handle. `_invoke` speaks in objects and the
+            # `_apy_*` bindings speak in handles; returning what
+            # `_apy_make_excn` returns printed the handle as an integer --
+            # `11` where the message should have been.
+            return made
         if isinstance(f, Class):
             if f.meta is not None:
                 # THE METACLASS DECIDES WHAT CALLING THE CLASS DOES, if it
@@ -5188,7 +5221,17 @@ def _apy_exc_type(h, a):
     # through another.
     if name in h.exc_class:
         return h._value(h.exc_class[name])
-    return h._value(h._type_of(Exc(name, None, False)))
+    # TAGGED AS CONSTRUCTIBLE. `_type_of` interns a bare `Class` per kind, so
+    # the object standing for `ValueError` is indistinguishable from the one
+    # standing for `int` -- and calling it found no `__init__` and answered
+    # `ValueError() takes no arguments`. Recording the name here is what lets
+    # `_invoke` build one; see the case there.
+    cls = h._type_of(Exc(name, None, False))
+    # RECORDED SEPARATELY, not on the class. `Class.builtin` already means
+    # something else, and writing the name there rendered every constructed
+    # exception as a number.
+    h.exc_types[id(cls)] = name
+    return h._value(cls)
 
 
 def _apy_id(h, a):
