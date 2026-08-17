@@ -22,6 +22,7 @@ from ...diagnostics import DiagnosticSink, SourceFile, error, warning
 from ...frontend import Frontend, register
 from ...ir import Module
 from .analysis import Analyzer, span_of
+from . import cffi
 from .bundled import splice
 from .imports import splice as user_splice
 from .lower import Lowerer
@@ -187,6 +188,10 @@ class PythonFrontend(Frontend):
 
         analyzer = Analyzer(source, sink, library=library)
         functions = analyzer.run(tree)
+        # WHAT THE LINKER HAS TO BE TOLD. `ctypes.CDLL("m")` is a promise that
+        # `-lm` will be there; published here because the driver drives the
+        # link and the frontend only knows what the source said.
+        cffi.name_libraries(analyzer.ctypes_libraries)
         if sink.failed:
             # Lowering assumes analysis succeeded. Running it anyway would
             # produce IR that fails the verifier, and the user would see an

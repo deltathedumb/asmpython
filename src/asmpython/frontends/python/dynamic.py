@@ -2323,6 +2323,19 @@ class DynamicLowering:
         self.b.span = self._span(node)
         self._dyn_record_position(node)
         match node:
+            case _ if id(node) in self.ctypes_stmts:
+                # A CTYPES DECLARATION DESCRIBES THE BUILD. `libm =
+                # ctypes.CDLL("m")` names a library for the linker and
+                # `libm.sqrt.restype = ...` names a signature for the caller;
+                # neither does anything at run time, and lowering them as
+                # ordinary statements looked for a `ctypes` that was never
+                # going to exist -- `NameError: name 'ctypes' is not defined`,
+                # from a program whose every native call had already compiled.
+                #
+                # FIRST IN THE MATCH, because `case ast.Assign(...)` matches
+                # the same statements and comes below: a guard placed after it
+                # never runs.
+                pass
             case ast.Expr():
                 if not isinstance(node.value, ast.Constant):
                     self._dyn_expr(node.value)
@@ -2532,6 +2545,15 @@ class DynamicLowering:
                 self._dyn_raise(node)
             case ast.Assert():
                 self._dyn_assert(node)
+            case ast.Import() if all(a.name == "ctypes" for a in node.names):
+                # `import ctypes` BINDS NOTHING AT RUN TIME. It is a spelling
+                # the compiler understands rather than a module it has: the
+                # analyser turned every `lib.f(...)` into a direct call to an
+                # external symbol, so there is no module object left to make
+                # and nothing for this statement to store. See `cffi.py`.
+                pass
+            case ast.ImportFrom(module="ctypes", level=0):
+                pass
             case ast.Import():
                 for alias in node.names:
                     # `import a.b` BINDS `a` and `a.b` is an attribute of it;

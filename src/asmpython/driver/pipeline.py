@@ -23,7 +23,7 @@ fault, and go looking in the wrong place.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .. import backend as backend_registry
@@ -322,6 +322,18 @@ def _link_stage(opts: Options, result: Result, be, target: Target,
     output = opts.output or opts.source.with_suffix(target.executable_suffix)
     if output.suffix != target.executable_suffix and target.executable_suffix:
         output = output.with_suffix(target.executable_suffix)
+
+    # NATIVE LIBRARIES THE SOURCE NAMED, as `-l` flags. A `ctypes.CDLL("m")`
+    # is a promise to the linker and this is where it is kept; see
+    # `frontends/python/cffi.py`.
+    try:
+        from ..frontends.python import cffi as py_cffi
+        named = tuple(py_cffi.link_flag(lib)
+                      for lib in py_cffi.named_libraries())
+    except ImportError:                     # the frontend is not installed
+        named = ()
+    if named:
+        opts = replace(opts, link_inputs=opts.link_inputs + named)
 
     runtime_sources: tuple[Path, ...] = ()
     if not be.self_contained and link_registry.needs_runtime(module):

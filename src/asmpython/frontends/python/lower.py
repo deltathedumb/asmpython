@@ -153,6 +153,8 @@ class Lowerer(DynamicLowering):
         #: TypeError a program may catch, and the direct path would be a C
         #: compile error instead.
         self.late_arity = getattr(analyzer, "late_arity", set())
+        #: Statements that were ctypes declarations. See `dynamic.py`.
+        self.ctypes_stmts = getattr(analyzer, "ctypes_stmts", set())
         source_name = source.path.stem if source.path else "module"
         #: The IR symbol per Python function name. The entry point is called
         #: `main` in the IR -- backends rename that to `ENTRY_SYMBOL` and the C
@@ -273,7 +275,9 @@ class Lowerer(DynamicLowering):
         # Java calls the program made, declared as externals. Collected from
         # every function before any body is lowered, because a declaration has
         # to be in the module before a call can name it.
-        for symbol, (params, ret) in sorted(self._java_externals().items()):
+        for symbol, (params, ret) in sorted(
+                {**self._java_externals(),
+                 **self._ctypes_externals()}.items()):
             fn = Function(symbol, ret, external=True, linkage=Linkage.IMPORT)
             for i, ty in enumerate(params):
                 fn.params.append(i)
@@ -1005,6 +1009,9 @@ class Lowerer(DynamicLowering):
         return out
 
     def _call(self, node: ast.Call) -> int:
+        native = self.info.ctypes_calls.get(id(node))
+        if native is not None:
+            return self._ctypes_call(node, native)
         java = self.info.java_calls.get(id(node))
         if java is not None:
             return self._java_call(node, java)
@@ -1144,6 +1151,37 @@ class Lowerer(DynamicLowering):
         """The type named by an intrinsic's first argument. Analysis already
         checked it is one of `MACHINE`, so this only has to read it."""
         return MACHINE[node.id]
+
+    def _ctypes_call(self, node: ast.Call, native: dict) -> int:
+        """`lib.sqrt(9.0)` -- one `Op.CALL` to an external symbol.
+
+        Nothing is loaded and nothing is looked up. The analyser resolved the
+        name and the signature while compiling, the backend emits an `extern`
+        for a symbol it does not define, and the toolchain links it -- exactly
+        as it would for a C program calling the same function. See `cffi.py`.
+        """
+        want = [sem_type(p) for p in native["params"]]
+        args = [self._coerce(self._expr(a), self._type_of(a), w)
+                for a, w in zip(node.args, want)]
+        ret = sem_type(native["ret"])
+        result = self.b.call(TO_IR[ret], native["symbol"], args)
+        return result if result is not None else self.b.const(T.I64, 0)
+
+    def _ctypes_externals(self) -> dict:
+        """Every native function this module calls, as an IR signature.
+
+        Declared from the CALL SITES rather than from the analyser's table of
+        signatures, so a function declared and never called adds no external
+        -- the same rule the rest of the runtime follows, and what keeps a
+        program from acquiring a link dependency it does not use.
+        """
+        out: dict = {}
+        for info in self.infos.values():
+            for native in info.ctypes_calls.values():
+                out[native["symbol"]] = (
+                    [TO_IR[sem_type(p)] for p in native["params"]],
+                    TO_IR[sem_type(native["ret"])])
+        return out
 
     def _java_externals(self) -> dict:
         """Every Java operation the analyser resolved, as an IR signature.

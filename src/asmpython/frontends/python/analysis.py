@@ -21,7 +21,7 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass, field
 
-from . import modules
+from . import cffi, modules
 from .modules import importable, member, resolve
 
 from ...diagnostics import (DiagnosticSink, SourceFile, Span, error,
@@ -708,6 +708,11 @@ class FunctionInfo:
     #: published it. Lowering reads this rather than resolving again: two
     #: resolutions of an overload set are two chances to pick differently.
     java_calls: dict[int, dict] = field(default_factory=dict)
+    #: Call node id -> the native function it names, as
+    #: `{symbol, params, ret, library}`. Recorded by analysis and read by
+    #: lowering for the same reason `java_calls` is: resolving twice is two
+    #: chances to resolve differently.
+    ctypes_calls: dict[int, dict] = field(default_factory=dict)
     #: Constant node id -> the string literal that has to become a Java
     #: `String`. Only literals in a Java argument position are here; the
     #: subset has no string type for them to have anywhere else.
@@ -1209,6 +1214,31 @@ class Analyzer:
         #: `import a.b` puts `a` here mapped to "", meaning "a package root,
         #: the module is further along the attribute chain".
         self.namespaces: dict[str, str] = {}
+        #: What `import ctypes` and `from ctypes import ...` bound, as
+        #: {local name: "ctypes" | "ctypes.type" | "ctypes.loader"}.
+        self.ctypes_names: dict[str, str] = {}
+        #: Local name -> the library `CDLL(...)` named. See `cffi.py`.
+        self.ctypes_libs: dict[str, str] = {}
+        #: (library-local, function) -> {"params": [...], "ret": str}, built
+        #: from the `argtypes` and `restype` assignments a program writes.
+        self.ctypes_sigs: dict = {}
+        #: Every library named, so the driver can hand them to the linker.
+        self.ctypes_libraries: list = []
+        #: Statement ids that WERE a ctypes declaration. Lowering skips them:
+        #: `libm = ctypes.CDLL("m")` describes the build rather than doing
+        #: anything, and lowering it as ordinary code looks for a run-time
+        #: `ctypes` that was never going to exist.
+        self.ctypes_stmts: set = set()
+        #: Python class name -> the backend's table for the type it declares.
+        #: `class MyBlock(block.Block)` is not a class in the runtime-object
+        #: sense at all: it is a TYPE the backend generates, its instances are
+        #: handles like any other Java object's, and its methods are ordinary
+        #: static functions. Nothing here reaches `self.classes`.
+        self.java_subclasses: dict[str, dict] = {}
+        #: Python class name -> {method name: its key in `functions`}.
+        self.java_subclass_methods: dict[str, dict] = {}
+        #: The keys of those methods, in source order, for the body pass.
+        self._java_method_keys: list[str] = []
         self.current: FunctionInfo | None = None
         #: `break`/`continue` are only meaningful inside a loop, and Python
         #: makes that a syntax error. ast.parse does NOT -- it happily parses
@@ -1267,6 +1297,10 @@ class Analyzer:
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     self._remember_namespace(alias)
+        # AND THEN THE CLASSES OVER JAVA TYPES, for the same reason one step
+        # further on: `def place(b: MyBlock)` names one, so what those classes
+        # are has to be settled before any signature is built either.
+        self._collect_ctypes(tree)
 
         defs = [n for n in tree.body if isinstance(n, _DEF_NODES)]
         # WHETHER THERE IS AN ENTRY AT ALL is decided by the RUNNABLE
@@ -1279,9 +1313,21 @@ class Analyzer:
         # at the top of a file made the module body the entry, and a module
         # body is DYNAMIC: the program acquired the whole object runtime for an
         # import that costs no instructions.
+        # A `class` over a JAVA TYPE is not runnable either, and for the same
+        # reason: it declares a type the backend generates and emits not one
+        # instruction where it is written. Counting it would make the module
+        # body the entry, and a module body is dynamic.
+        # A CTYPES DECLARATION IS NOT RUNNABLE, for the same reason as the two
+        # above: `libm = ctypes.CDLL("m")` names a library for the linker and
+        # `libm.sqrt.restype = ...` names a signature for the caller, and
+        # neither emits an instruction. Counting them made the module body the
+        # entry -- so a program whose `main` did all the work had `main`
+        # renamed out of the way and never called, and printed nothing at all
+        # while compiling and linking perfectly.
         runnable = [n for n in tree.body
                     if not isinstance(n, _DEF_NODES) and not _is_docstring(n)
-                    and not self._is_namespace_import(n)]
+                    and not self._is_namespace_import(n)
+                    and id(n) not in self.ctypes_stmts]
         # WHAT THE ENTRY CONTAINS keeps the `def` STATEMENTS too, in source
         # order. Their own bodies are analysed separately, through `defs` --
         # but the statement still has to RUN where it is written, because that
@@ -1289,7 +1335,9 @@ class Analyzer:
         # Lifting them out meant `n = 1` / `def f(v=n)` / `n = 99` reached `n`
         # before the module had bound it, and a decorator naming something the
         # module assigns did the same.
-        body = ([n for n in tree.body if not _is_docstring(n)]
+        body = ([n for n in tree.body
+                 if not _is_docstring(n)
+                 and id(n) not in self.ctypes_stmts]
                 if runnable else [])
 
         # The module's own names, before anything else: a function body may
@@ -2165,6 +2213,8 @@ class Analyzer:
                 pass
             case ast.Expr():
                 self._expr(node.value)
+            case ast.Assign() if self._ctypes_assign(node):
+                pass
             case ast.Assign(targets=[ast.Name(id=name)]):
                 self._bind(name, self._expr(node.value), node,
                            value=node.value)
@@ -2470,6 +2520,10 @@ class Analyzer:
                 self._expr(node.test)
                 if node.msg is not None:
                     self._expr(node.msg)
+            case ast.Import() if self._ctypes_import(node):
+                pass
+            case ast.ImportFrom() if self._ctypes_import(node):
+                pass
             case ast.Import() if not self.dynamic:
                 for alias in node.names:
                     self._static_import(alias, node)
@@ -2855,6 +2909,18 @@ class Analyzer:
                 self.module_names.add(name)
                 self.current.module_reads.add(name)
                 return OBJ
+            if name in self.ctypes_libs:
+                # A CTYPES LIBRARY IS NOT A VALUE. `libm = ctypes.CDLL("m")`
+                # binds a compile-time namespace, exactly as `import block`
+                # does for Java: `libm.sqrt(...)` is resolved to an external
+                # symbol while compiling and nothing survives to be read.
+                #
+                # So the name is legal here and would be undefined ANYWHERE
+                # else -- a statically typed function cannot see module-level
+                # storage, and this is not module-level storage. Without this
+                # the one place a native call belongs, where the arguments are
+                # already machine scalars, was the one place it was refused.
+                return ERROR if self._used_as_value(at) else OBJ
             self.sink.report(
                 error("E0031", f"undefined name {name!r}")
                 .at(self._span(at))
@@ -4018,6 +4084,11 @@ class Analyzer:
 
     def _call(self, node: ast.Call) -> SemType:
         if isinstance(node.func, ast.Attribute):
+            # A NATIVE CALL BEFORE A JAVA ONE. Both are attribute calls and
+            # only the receiver tells them apart, so the one with the narrower
+            # test goes first.
+            if self._is_ctypes_call(node):
+                return self._ctypes_call(node)
             return self._java_call(node)
         if not isinstance(node.func, ast.Name):
             self._error("E0050", "only direct calls by name are supported", node)
@@ -4080,6 +4151,200 @@ class Analyzer:
             self._expr(extra)
         return ret
 
+
+
+    # ── ctypes ──────────────────────────────────────────────────────────────
+    #
+    # A NATIVE CALL RESOLVED WHILE COMPILING. See `cffi.py` for why this needs
+    # no `dlopen` and therefore adds nothing to the platform floor: the C
+    # backend already emits an `extern` for any external the IR declares and
+    # does not define, and the toolchain resolves it. `CDLL("m")` is a promise
+    # to the linker, not a load.
+
+    def _collect_ctypes(self, tree) -> None:
+        """Read every ctypes declaration BEFORE any function body.
+
+        A declaration is a module-level statement and a use is usually inside
+        a function, and function bodies are analysed first -- so collecting
+        these where they are written left `libm` undefined in the one place
+        anybody writes `libm.sqrt(...)`. The same reason `_declare_java_
+        subclasses` runs here: a name a body may use has to exist before the
+        body is read.
+
+        THIS PASS REPORTS, and it is the only one that can. A declaration is
+        excluded from the entry's body -- it describes the build and emits no
+        instruction -- so the statement is never analysed again, and a pass
+        that stayed quiet here swallowed every diagnostic about one. `from
+        ctypes import Structure` compiled cleanly and did nothing.
+
+        Nothing is reported twice, for the same reason: these statements are
+        visited here and nowhere else.
+        """
+        for stmt in tree.body:
+            if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                self._ctypes_import(stmt)
+            elif isinstance(stmt, ast.Assign):
+                self._ctypes_assign(stmt)
+
+    def _ctypes_import(self, node) -> bool:
+        """`import ctypes` / `from ctypes import ...`. True if it was one.
+
+        Recognised BEFORE the ordinary import rules and on either path, because
+        `ctypes` is not a module this compiler has -- it is a spelling this
+        compiler understands, in the same way `plat_write` is a name rather
+        than an import.
+        """
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name != "ctypes":
+                    return False
+            for alias in node.names:
+                self.ctypes_names[alias.asname or "ctypes"] = "ctypes"
+            self.ctypes_stmts.add(id(node))
+            return True
+        if isinstance(node, ast.ImportFrom) and node.module == "ctypes" \
+                and not node.level:
+            for alias in node.names:
+                local = alias.asname or alias.name
+                if alias.name in cffi.TYPES:
+                    self.ctypes_names[local] = "ctypes.type"
+                elif alias.name in cffi.LOADERS:
+                    self.ctypes_names[local] = "ctypes.loader"
+                else:
+                    self._error("E0128",
+                                f"ctypes.{alias.name} is not supported; this "
+                                f"frontend has the scalar types, the library "
+                                f"loaders, and calls with declared signatures",
+                                node)
+            self.ctypes_stmts.add(id(node))
+            return True
+        return False
+
+    def _ctypes_assign(self, node) -> bool:
+        """The three statements a ctypes declaration is made of.
+
+            lib = ctypes.CDLL("m")
+            lib.sqrt.restype = ctypes.c_double
+            lib.sqrt.argtypes = [ctypes.c_double]
+
+        True if this statement was one of them, so the caller stops.
+        """
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            return False
+        target = node.targets[0]
+        claimed = self.ctypes_stmts.add
+
+        # `lib = ctypes.CDLL("m")`
+        if isinstance(target, ast.Name):
+            library = cffi.loader_call(node.value, self.ctypes_names)
+            if library is None:
+                return False
+            if not library:
+                self._error("E0124",
+                            "a ctypes library must be named by a literal",
+                            node.value)
+                self.ctypes_libs[target.id] = ""
+                return True
+            self.ctypes_libs[target.id] = library
+            if library not in self.ctypes_libraries:
+                self.ctypes_libraries.append(library)
+            claimed(id(node))
+            return True
+
+        # `lib.sqrt.restype = ...` / `lib.sqrt.argtypes = [...]`
+        if not (isinstance(target, ast.Attribute)
+                and target.attr in ("restype", "argtypes")
+                and isinstance(target.value, ast.Attribute)
+                and isinstance(target.value.value, ast.Name)
+                and target.value.value.id in self.ctypes_libs):
+            return False
+        key = (target.value.value.id, target.value.attr)
+        signature = self.ctypes_sigs.setdefault(key, {})
+        if target.attr == "restype":
+            name = cffi.type_name(node.value, self.ctypes_names)
+            if name is None:
+                self._error("E0121", "restype must be a ctypes scalar type",
+                            node.value)
+                claimed(id(node))
+                return True
+            signature["ret"] = name
+            claimed(id(node))
+            return True
+        if not isinstance(node.value, (ast.List, ast.Tuple)):
+            self._error("E0122", "argtypes must be a list",
+                        node.value)
+            claimed(id(node))
+            return True
+        params = []
+        for item in node.value.elts:
+            name = cffi.type_name(item, self.ctypes_names)
+            if name is None:
+                self._error("E0123",
+                            "this is not a ctypes scalar type", item)
+                claimed(id(node))
+                return True
+            params.append(name)
+        signature["params"] = params
+        claimed(id(node))
+        return True
+
+    def _used_as_value(self, at) -> bool:
+        """Whether a ctypes library name is being read rather than called.
+
+        `libm.sqrt(1.0)` never reaches `_lookup` -- `_call` intercepts it --
+        so anything that does get here is `libm` on its own or `libm.sqrt`
+        without a call, neither of which is a thing. Reported where it is
+        written rather than left to become a stranger error downstream.
+        """
+        self._error("E0127",
+                    "a ctypes library is a compile-time name, not a value; "
+                    "it can only be called through", at)
+        return True
+
+    def _is_ctypes_call(self, node) -> bool:
+        return (isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in self.ctypes_libs)
+
+    def _ctypes_call(self, node: ast.Call) -> SemType:
+        """`lib.sqrt(9.0)` -- an ordinary call to an external symbol."""
+        local, symbol = node.func.value.id, node.func.attr
+        signature = self.ctypes_sigs.get((local, symbol), {})
+        params = signature.get("params")
+        if params is None:
+            # STRICTER THAN CPYTHON, and deliberately. There a missing
+            # `argtypes` means "guess from the values", and guessing is how a
+            # ctypes program corrupts a stack -- a Python int passed where the
+            # callee wants a 32-bit value does not fail, it truncates. A
+            # compiler that knows the types at build time has no reason to
+            # guess.
+            self._error("E0125",
+                        f"{local}.{symbol} has no argtypes; this frontend "
+                        f"will not guess a native signature", node)
+            for a in node.args:
+                self._expr(a)
+            return ERROR
+        # `restype` DEFAULTS TO `c_int`, which is what ctypes documents and
+        # what a program relying on it is entitled to.
+        ret = signature.get("ret", cffi.DEFAULT_RESTYPE)
+        if len(node.args) != len(params):
+            self._error("E0126",
+                        f"{local}.{symbol}() takes {len(params)} argument(s) "
+                        f"by its argtypes, got {len(node.args)}", node)
+        for arg, want in zip(node.args, params):
+            got = self._expr(arg)
+            self._check_assignable(got, BY_NAME[cffi.TYPES[want]], arg,
+                                   what=f"argument to {symbol}()", value=arg)
+        for extra in node.args[len(params):]:
+            self._expr(arg)
+        if self.current is not None:
+            self.current.ctypes_calls[id(node)] = {
+                "symbol": symbol,
+                "params": [cffi.TYPES[p] for p in params],
+                "ret": cffi.TYPES[ret],
+                "library": self.ctypes_libs.get(local, ""),
+            }
+        return BY_NAME[cffi.TYPES[ret]]
 
     # ── calling Java ────────────────────────────────────────────────────────
     def _java_call(self, node: ast.Call) -> SemType:

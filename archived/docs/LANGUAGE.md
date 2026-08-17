@@ -412,6 +412,14 @@ The full set the frontend can emit:
 | `E0100` | an attribute chain too long to be a call |
 | `E0101` | wrong number of arguments to a Java method |
 | `E0102` | no overload of a Java method takes these argument types |
+| `E0121` | a `restype` that is not a `ctypes` scalar type |
+| `E0122` | an `argtypes` that is not a list |
+| `E0123` | an `argtypes` entry that is not a `ctypes` scalar type |
+| `E0124` | a `ctypes` library named by something other than a literal |
+| `E0125` | a native call whose function has no `argtypes` |
+| `E0126` | a native call with the wrong number of arguments for its `argtypes` |
+| `E0127` | a `ctypes` library used as a value rather than called through |
+| `E0128` | a `ctypes` name this frontend does not have |
 
 Each applies wherever the construct appears, including inside an augmented
 assignment -- `x **= n` reports `E0043` exactly as `x = x ** n` does.
