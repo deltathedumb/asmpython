@@ -71,12 +71,11 @@ try:
     del Frozen(1).x
 except dataclasses.FrozenInstanceError as exc:
     print("FrozenInstanceError:", exc)
-# `issubclass(FrozenInstanceError, AttributeError)` IS NOT COMPARED. A bundled
-# module's exception class is spliced under a mangled name and answers False to
-# issubclass against a builtin exception -- the compiler bug recorded in
-# docs/STDLIB.md. Catching it by its own name works, which is what matters and
-# what is tested above.
-print(dataclasses.FrozenInstanceError.__name__ == "FrozenInstanceError")
+# COMPARED NOW: a bundled module's exception class keeps its place in the
+# hierarchy across the splice's rename. `FrozenInstanceError` inheriting
+# AttributeError is what lets `except AttributeError` and hasattr-style probing
+# behave the way real code expects.
+print(issubclass(dataclasses.FrozenInstanceError, AttributeError))
 
 
 @dataclass(eq=False)

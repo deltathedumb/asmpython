@@ -2445,6 +2445,31 @@ def _exc_construct(h, exc, args):
     return _user(h, run)
 
 
+def _rename_exception(h, was: str, now: str, cls) -> None:
+    """Carry a class's EXCEPTION REGISTRATION across a rename.
+
+    The hierarchy is a table of NAMES, and a class that is renamed after it was
+    registered leaves the two disagreeing. That is not a hypothetical: a
+    BUNDLED module's classes are spliced under mangled names and the splice
+    then restores `__name__` -- precisely so the mangling stays invisible --
+    so `copy.Error` registered as `_asmpy_bundled_copy_Error` and then started
+    calling itself `Error`. `issubclass(copy.Error, Exception)` asks the table
+    for `Error`, finds nothing, and answers False for a class whose `class`
+    statement plainly names Exception as its base.
+
+    BOTH SPELLINGS ARE KEPT rather than the old one moved. Generated code
+    raises through the mangled name -- that is the name in the compiled
+    program -- while everything a reader sees uses the restored one, so the
+    table has to answer for both or one of the two stops working.
+    """
+    if was == now:
+        return
+    if h.exc_class.get(was) is cls:
+        h.exc_class[now] = cls
+    if was in h.user_exc:
+        h.user_exc[now] = h.user_exc[was]
+
+
 def _apy_exc_class_bind(h, a):
     """A user exception class, findable by NAME.
 
@@ -4879,7 +4904,9 @@ def _apy_default_setattr(h, a):
         # ordinary attribute left `__name__` reading the old one -- the write
         # appeared to succeed and changed nothing.
         if name == "__name__":
+            was = obj.name
             obj.name = str(value)
+            _rename_exception(h, was, obj.name, obj)
             return h._none
         obj.dict[name] = value
         return h._none

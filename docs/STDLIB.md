@@ -348,22 +348,26 @@ symptoms, one cause, and both are the compiler rather than the module:
 
 A bundled module's classes are spliced under mangled names and the splice
 restores `__name__` afterwards, precisely so the mangling stays invisible --
-`bundled.py` says so where it emits that assignment. It does not stay
-invisible: the runtime's exception hierarchy is keyed by NAME and was
-registered with the mangled one, so the class is outside the tree that
-`issubclass` walks, and a raised instance reports the internal spelling to any
-program that prints its type.
+`bundled.py` says so where it emits that assignment. It did not stay invisible:
+the runtime's exception hierarchy is keyed by NAME and was registered with the
+mangled one, so the class sat outside the tree `issubclass` walks.
 
-CATCHING IT WORKS, which is why nothing noticed until now -- `except
-copy.Error` and `except Exception` both match, because those go through the
-same name table that was registered.
+**THE `issubclass` HALF IS FIXED, on both runtimes.** The answer was not to
+re-key the hierarchy -- that would conflate two bundled modules both defining
+`Error`, and `copy.Error` and `re.error` are distinct classes in CPython. It
+was to make the REGISTRATION FOLLOW THE RENAME: assigning `__name__` on a class
+that is a registered exception re-registers it under the new spelling, keeping
+BOTH, because generated code still raises through the mangled one. See
+`objects_host._rename_exception` and the `__name__` arm of the C's
+`apy_setattr`.
 
-IT IS NOT A ONE-LINE FIX, which is why it is written down rather than patched.
-Registering the demangled name instead would conflate two bundled modules that
-both define `Error` -- `copy.Error` and `re.error` are distinct classes in
-CPython -- so it needs the hierarchy to be keyed by something other than a bare
-name, and that touches `raise`, `except`, the parent walk and
-`apy_error_matches` together.
+**THE PRINTED TYPE STILL LEAKS.** `type(e).__name__` for a RAISED bundled
+exception answers `_asmpy_bundled_copy_Error` where CPython says `Error`, on
+both paths. Catching it, `issubclass` and `isinstance` are all correct; what is
+wrong is the name a traceback or a `print(type(e))` shows. Recorded rather than
+guessed at: the class object's own `__name__` reads correctly, so the raised
+instance is reaching a different type object than the class, and finding out
+which is the next step.
 
 `inspect` found a third, worked around rather than fixed: **`X = X` in a class
 body reads the right-hand side as the class attribute being defined** instead

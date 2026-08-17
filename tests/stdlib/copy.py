@@ -92,14 +92,11 @@ class Custom:
 
 print(copy.copy(Custom()).tag, copy.deepcopy(Custom()).tag)
 
-# `issubclass(copy.Error, Exception)` IS NOT COMPARED, and neither is
-# `type(e).__name__` for one raised. A bundled module's exception class is
-# spliced under a mangled name, and the mangling leaks: the class answers False
-# to `issubclass` against `Exception`, and a raised one reports its type as
-# `_asmpy_bundled_copy_Error`. That is a compiler bug with a repro in
-# docs/STDLIB.md, not something this module can fix, and asserting it here
-# would only pin the wrong answer.
-print(copy.error is copy.Error)
+# `issubclass` IS COMPARED NOW: the exception registration follows a class
+# rename, so a bundled module's exception sits in the hierarchy under the name
+# it calls itself. `type(e).__name__` still answers the mangled spelling for a
+# RAISED one and is not compared -- that half is recorded in docs/STDLIB.md.
+print(issubclass(copy.Error, Exception), copy.error is copy.Error)
 try:
     raise copy.Error("x")
 except Exception as exc:

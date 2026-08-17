@@ -14078,7 +14078,26 @@ APY_API apy_value apy_setattr(apy_value obj, apy_value name, apy_value value) {
        appeared to succeed and changed nothing. */
     if (O(obj)->kind == APY_TYPE_K && O(name)->kind == APY_STR_K
             && strcmp(APY_CSTR(name), "__name__") == 0) {
+        /* AND THE EXCEPTION REGISTRATION FOLLOWS THE RENAME. The hierarchy is
+           a table of NAMES, so a class renamed after it was registered leaves
+           the two disagreeing. Not hypothetical: a BUNDLED module's classes
+           are spliced under mangled names and the splice then restores
+           `__name__` -- precisely so the mangling stays invisible -- so
+           `copy.Error` registered as `_asmpy_bundled_copy_Error` and then
+           started calling itself `Error`, and `issubclass(copy.Error,
+           Exception)` asked the table for `Error`, found nothing, and answered
+           False for a class whose `class` statement names Exception as its
+           base. BOTH spellings are kept: generated code raises through the
+           mangled one. */
+        const char *was = APY_CSTR(O(obj)->v.t.name);
+        const char *parent = apy_exc_parent(was);
+        apy_value found = apy_exc_class_named(was);
         O(obj)->v.t.name = value;
+        if (parent && strcmp(was, APY_CSTR(value)) != 0) {
+            apy_value pname = apy_lit(parent);
+            apy_exc_register(value, pname);
+            if (found == obj) apy_exc_class_bind(value, obj);
+        }
         return apy_none();
     }
     if (O(obj)->kind == APY_INST_K) {

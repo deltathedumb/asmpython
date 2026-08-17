@@ -7,11 +7,16 @@ NOT COVERED: `__reduce__` and `__reduce_ex__`, `__getstate__`/`__setstate__`,
 `copyreg` dispatch, `deepcopy` of a class or a function (both are returned
 unchanged, as CPython does), and `replace` (3.13's `copy.replace`).
 
-`Error` IS NOT USABLE WITH `issubclass` YET, and that is the compiler rather
-than this module. A bundled module's exception class is spliced under a mangled
-name and the mangling leaks: `issubclass(copy.Error, Exception)` answers False,
-and a raised one reports `type(e).__name__` as `_asmpy_bundled_copy_Error`.
-Catching it as `Exception` or by its own name works. See `docs/STDLIB.md`.
+`Error` WORKS WITH `issubclass` NOW -- that was a compiler bug and it is
+fixed: a bundled module's classes are spliced under mangled names and the
+splice restores `__name__`, so the class was registered in the exception
+hierarchy under one spelling and asking about itself under the other. The
+registration follows the rename now.
+
+WHAT STILL LEAKS is the printed type of a RAISED one: `type(e).__name__`
+answers `_asmpy_bundled_copy_Error` where CPython says `Error`. Catching it,
+`issubclass` and `isinstance` are all correct; only the name a traceback or a
+`print(type(e))` shows is the internal spelling. See `docs/STDLIB.md`.
 
 The difference is one question: does the copy share the objects the original
 pointed at, or does it get copies of those too? `copy` shares them and
