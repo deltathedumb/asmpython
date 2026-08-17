@@ -11,11 +11,7 @@ reverse-MRO order; the whole `(eq, frozen, unsafe_hash, explicit hash)` table;
 and the four `__init__` arity errors.
 
 NOT COVERED, and each REFUSED BY NAME rather than accepted and ignored:
-`make_dataclass`, `slots=True` and `weakref_slot=True`. `make_dataclass` needs
-`__annotations__` to be settable at run time and this compiler fixes them when
-the class statement is compiled -- neither passing them to `type()` nor
-assigning them afterwards is visible, so a `make_dataclass` here would answer a
-dataclass with NO FIELDS whose every constructor call succeeds. `slots` replaces the class object and
+`slots=True` and `weakref_slot=True`. `slots` replaces the class object and
 rewrites the `__class__` cell behind every zero-argument `super()` in it, and a
 half-built version of that is worse than none -- a program gets a class whose
 `super()` calls fail at run time and nowhere near the decorator.
@@ -1097,19 +1093,14 @@ def make_dataclass(cls_name, fields, *, bases=(), namespace=None, init=True,
     spelled here as the string `"typing.Any"` because `typing` is not a
     rebuilt module.
     """
-    # REFUSED, because it cannot work here. `make_dataclass` builds a class at
-    # RUN TIME and its fields come from annotations set at run time -- and
-    # under asmpython `__annotations__` is computed when the class statement is
-    # compiled: neither `type(name, bases, {"__annotations__": ...})` nor
-    # assigning `C.__annotations__ = ...` afterwards is visible, both answer
-    # `{}`. A `make_dataclass` built on that returns a dataclass with NO
-    # FIELDS, which is silently wrong in the worst way: every constructor call
-    # succeeds and every instance is empty.
-    raise TypeError(
-        "make_dataclass is not supported by this implementation: it needs "
-        "__annotations__ to be settable at run time, and this compiler fixes "
-        "them when the class statement is compiled. Write the class out. "
-        "See docs/STDLIB.md")
+    # THIS NEEDED A COMPILER FIX RATHER THAN A WORKAROUND. `make_dataclass`
+    # builds a class at RUN TIME and its fields come from annotations written
+    # into the namespace -- and the runtime's `__annotations__` read consulted
+    # only the PEP 649 thunk, ignoring a stored entry, so both
+    # `type(name, bases, {"__annotations__": ...})` and a later
+    # `C.__annotations__ = ...` answered `{}`. The write appeared to succeed
+    # and the read did not see it. Refusing this function was the honest
+    # answer while that held; the read now prefers what was stored.
     annotations = {}
     body = dict(namespace) if namespace else {}
     seen = set()

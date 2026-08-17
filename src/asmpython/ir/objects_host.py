@@ -4405,6 +4405,20 @@ def _apy_default_getattr(h, a):
         # thunk the body left in the dict, for the same reason a function's
         # is -- an annotation may name something that does not exist yet.
         if name == "__annotations__":
+            # WHAT WAS STORED WINS OVER THE THUNK. A program may set
+            # `C.__annotations__` directly, or hand a class body to
+            # `type(name, bases, {"__annotations__": ...})`, and both write an
+            # ordinary dict entry -- which this read ignored entirely, so the
+            # write appeared to succeed and the read still answered `{}`.
+            #
+            # That is not an exotic spelling: it is how every library that
+            # builds a class dynamically declares its fields, and it is why
+            # `dataclasses.make_dataclass` could not work here at all. The
+            # thunk stays the fallback, because for a class written out in
+            # source PEP 649 is what defers evaluating the annotations.
+            stored = obj.dict.get("__annotations__")
+            if stored is not None:
+                return h._value(stored)
             thunk = obj.dict.get("__annotate__")
             if thunk is None:
                 return h._new({})

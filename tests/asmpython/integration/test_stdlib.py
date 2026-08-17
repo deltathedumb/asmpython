@@ -178,29 +178,25 @@ class TestTheSuiteIsHonest:
                 f"{one!r} is not refused by name: {line!r}")
 
     def test_dataclasses_refuses_what_it_cannot_do(self, tmp_path):
-        """The three things `tests/stdlib/dataclasses.py` cannot check.
+        """The one thing `tests/stdlib/dataclasses.py` cannot check.
 
-        `make_dataclass`, `slots=True` and `weakref_slot=True` are all
-        implemented by CPython, so a differential test asserting asmpython
-        refuses them could only ever fail. They are measured here instead.
+        `slots=True` is implemented by CPython, so a differential test
+        asserting asmpython refuses it could only ever fail.
 
-        WHY THEY ARE REFUSED RATHER THAN APPROXIMATED. `make_dataclass` needs
-        `__annotations__` to be settable at run time and this compiler fixes
-        them when the class statement is compiled -- so a version built on it
-        would answer a dataclass with NO FIELDS whose every constructor call
-        succeeds. `slots=True` replaces the class object and rewrites the
-        `__class__` cell behind every zero-argument `super()` in it; a
-        half-built version gives a class whose `super()` fails at run time,
-        nowhere near the decorator. Both would be silently wrong, which is the
-        one outcome this rebuild exists to prevent -- so they say so instead.
+        WHY IT IS REFUSED RATHER THAN APPROXIMATED. `slots=True` replaces the
+        class object and rewrites the `__class__` cell behind every
+        zero-argument `super()` in it; a half-built version gives a class
+        whose `super()` fails at run time, nowhere near the decorator. That
+        would be silently wrong, which is the one outcome this rebuild exists
+        to prevent -- so it says so instead.
+
+        `make_dataclass` WAS refused here and is not any more: it needed
+        `__annotations__` written into a namespace to be readable back, and
+        that was a runtime bug rather than a limit. Fixing the read was the
+        right answer and the refusal was the placeholder.
         """
         program = """import dataclasses
 from dataclasses import dataclass
-try:
-    dataclasses.make_dataclass('M', [('x', int)])
-    print('make_dataclass ACCEPTED')
-except TypeError as exc:
-    print('make_dataclass', 'not supported' in str(exc))
 try:
     @dataclass(slots=True)
     class S:
@@ -220,8 +216,8 @@ except TypeError as exc:
         path.write_text(program, encoding="utf-8")
         got = _asmpython(path)
         assert got.returncode == 0, got.stderr[-3000:]
-        assert got.stdout.splitlines()[:3] == [
-            "make_dataclass True", "slots True", "weakref True"], got.stdout
+        assert got.stdout.splitlines()[:2] == [
+            "slots True", "weakref True"], got.stdout
 
     def test_a_bundled_module_has_a_test(self):
         """A module in `bundled/` with no test program is one nobody has

@@ -94,7 +94,7 @@ rather than a bundled module, and is unaffected.
 | `__future__` | complete |
 | `enum` | `Enum`, `IntEnum`, `StrEnum`, `Flag`, `IntFlag`, `auto`, `unique`, aliases, `__members__`; NOT `verify`/`EnumCheck`, `boundary=`, `global_enum`, `member`/`nonmember`, `_missing_`, functional creation |
 | `copy` | `copy`, `deepcopy`, the hooks, the memo; NOT `__reduce__`, `__getstate__`, `copyreg`, `copy.replace` |
-| `dataclasses` | `dataclass` with init/repr/eq/order/unsafe_hash/frozen/match_args/kw_only, `field` with all eight arguments, `Field`, `fields`, `is_dataclass`, `asdict`/`astuple` recursing, `replace`, `InitVar`, `KW_ONLY`, `MISSING`, `FrozenInstanceError`, `__post_init__`, ClassVar exclusion, inheritance; NOT `make_dataclass`, `slots`, `weakref_slot` (each refused BY NAME), `field(doc=)`, `Field[int]` |
+| `dataclasses` | `dataclass` with init/repr/eq/order/unsafe_hash/frozen/match_args/kw_only, `field` with all eight arguments, `Field`, `fields`, `is_dataclass`, `asdict`/`astuple` recursing, `replace`, `make_dataclass`, `InitVar`, `KW_ONLY`, `MISSING`, `FrozenInstanceError`, `__post_init__`, ClassVar exclusion, inheritance; NOT `slots`, `weakref_slot` (refused BY NAME), `field(doc=)`, `Field[int]` |
 
 **Restoring is not free, and that is the point of stating coverage.** Three of
 `itertools`'s seven functions were wrong in ways the old suite never asked
@@ -268,12 +268,16 @@ adversarial critic behind them -- which is why the module was right on the
 first compile rather than the fifth. What it then found was the compiler, and
 three of the five are things no earlier module had reached:
 
-* **`type(name, bases, {"__annotations__": ...})` LOSES THE ANNOTATIONS**, and
-  so does assigning `C.__annotations__` afterwards: both read back `{}`.
-  Annotations are fixed when the class statement is compiled. This is why
-  `make_dataclass` is refused rather than approximated -- built on that it
-  would answer a dataclass with NO FIELDS whose every constructor call
-  succeeds.
+* **`type(name, bases, {"__annotations__": ...})` LOST THE ANNOTATIONS**, and
+  so did assigning `C.__annotations__` afterwards: both read back `{}`. The
+  runtime's `__annotations__` read consulted ONLY the PEP 649 `__annotate__`
+  thunk and ignored a stored entry, while `setattr` wrote one perfectly
+  happily -- so the write appeared to succeed and the read never saw it. That
+  is how every library that builds a class dynamically declares its fields.
+  **Fixed on both runtimes** (what was stored wins, the thunk is the fallback),
+  and `make_dataclass` went from refused to covered as a result. Refusing it
+  was the right answer while the bug stood and the wrong thing to leave
+  standing.
 * **KEYWORD-ONLY PARAMETERS ARE NOT ENFORCED AT RUN TIME.** `field(3)` against
   `def field(*, ...)` is accepted and becomes the `default`; the compiler warns
   where it can see the call and lets it through. One permissive superset rather

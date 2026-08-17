@@ -510,10 +510,42 @@ for bad in (42, Plain, Plain()):
         print("TypeError:", exc)
 
 
-# `make_dataclass` IS NOT TESTED HERE: it is refused by name under asmpython
-# (annotations cannot be set at run time) and implemented by CPython, so a
-# differential test of it could only ever fail. See
-# test_stdlib.py::test_dataclasses_refuses_what_it_cannot_do.
+# ---- make_dataclass ----------------------------------------------------
+# It needed a COMPILER fix, not a workaround: the runtime's `__annotations__`
+# read consulted only the PEP 649 thunk and ignored a stored entry, so the
+# namespace this function writes was invisible and every made class had no
+# fields.
+Made = dataclasses.make_dataclass(
+    "Made", ["a", ("b", int), ("c", int, field(default=3))])
+print(Made(1, 2), [f.name for f in fields(Made)])
+print(dataclasses.is_dataclass(Made), Made.__name__, Made.__match_args__)
+print(Made(1, 2) == Made(1, 2), Made(1, 2) == Made(1, 9))
+
+MadeFrozen = dataclasses.make_dataclass("MadeFrozen", [("x", int)],
+                                        frozen=True, order=True)
+print(hash(MadeFrozen(1)) == hash(MadeFrozen(1)),
+      MadeFrozen(1) < MadeFrozen(2))
+try:
+    MadeFrozen(1).x = 5
+except dataclasses.FrozenInstanceError as exc:
+    print("FrozenInstanceError:", exc)
+
+# `y` NEEDS A DEFAULT: `Base` ends in defaulted fields, and a non-default one
+# after them is the same TypeError whether the class is written out or made.
+MadeSub = dataclasses.make_dataclass(
+    "MadeSub", [("y", int, field(default=7))], bases=(Base,))
+print([f.name for f in fields(MadeSub)], MadeSub(1))
+
+for bad in ("class", "not-an-identifier"):
+    try:
+        dataclasses.make_dataclass("Bad", [(bad, int)])
+        print("ACCEPTED", bad)
+    except TypeError as exc:
+        print("TypeError:", exc)
+try:
+    dataclasses.make_dataclass("Dup", [("a", int), ("a", int)])
+except TypeError as exc:
+    print("TypeError:", exc)
 
 
 # ---- weakref_slot without slots is an error in BOTH -------------------

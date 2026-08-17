@@ -13220,8 +13220,21 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
            thunk the body left in the dict, for the same reason a function's
            is -- an annotation may name something that does not exist yet. */
         if (strcmp(want, "__annotations__") == 0) {
-            apy_value thunk = apy_dict_get_or(O(obj)->v.t.dict,
-                                              apy_name("__annotate__"), 0);
+            /* WHAT WAS STORED WINS OVER THE THUNK. A program may set
+               `C.__annotations__` directly, or hand a class body to
+               `type(name, bases, {"__annotations__": ...})`, and both write an
+               ordinary dict entry -- which this read ignored entirely, so the
+               write appeared to succeed and the read still answered `{}`.
+               That is how every library building a class dynamically declares
+               its fields, and it is why `dataclasses.make_dataclass` could not
+               work here. The thunk stays the fallback, because for a class
+               written out in source PEP 649 is what defers the annotations. */
+            apy_value stored = apy_dict_get_or(O(obj)->v.t.dict,
+                                               apy_name("__annotations__"), 0);
+            apy_value thunk;
+            if (stored) return stored;
+            thunk = apy_dict_get_or(O(obj)->v.t.dict,
+                                    apy_name("__annotate__"), 0);
             if (!thunk) return apy_dict_new(1);
             return apy_call_n(thunk, NULL, 0);
         }
