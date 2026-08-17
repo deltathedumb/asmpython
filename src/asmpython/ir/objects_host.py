@@ -1932,7 +1932,18 @@ def _class_build(h, a, kw):
             # parameter, so a keyword naming a declared one was dropped and
             # the parameter took its default.
             return _call_kwargs(h, use, [name, bases, ns], dict(kw))
-        return h._new(h._invoke(use, [name, bases, ns]))
+        # `h._value`, NOT `h._new`. `is` compares HANDLES, and the class the
+        # metaclass answered already has one -- it was built inside
+        # `Meta.__new__`, where the body could keep it. Minting a second made
+        # `C is Meta.seen` False for a class the metaclass had just handed
+        # back, and left every member an enum built against the class its
+        # metaclass saw rather than against the one the statement bound, so
+        # `type(Colour.RED) is Colour` was False too.
+        #
+        # The same rule `_apy_exc_type` states for `OSError is OSError`. The
+        # plain path below keeps `_new`, because there the class is made HERE
+        # and this is the first handle it has ever had.
+        return h._value(h._invoke(use, [name, bases, ns]))
     made = _type_from_ns(h, None, name, bases, ns)
     return h._new(made) if made is not None else 0
 
@@ -2870,6 +2881,28 @@ def _percent(h, fmt, right):
             value = chr(int(value)) if _is_int_like(value)                 else h._text(value, False)
         else:
             spec += "d" if conv in ("i", "u") else conv
+        if isinstance(value, Instance):
+            # A USER OBJECT REACHES A NUMERIC CONVERSION THROUGH ITS NUMBER
+            # and not through `__format__`: CPython's `%d` asks `__index__`
+            # and `%f` asks `__float__`. Handing the object straight to
+            # `format()` reached `object.__format__`, which refuses a
+            # non-empty spec -- so `"%d" % obj` failed with `unsupported
+            # format string passed to Instance.__format__`, naming a dunder
+            # the user never wrote and `%` never consults.
+            want = "__float__" if conv in "eEfFgG" else "__index__"
+            try:
+                got = value._send(want)
+                if got is NotImplemented and want == "__index__":
+                    got = value._send("__int__")
+            except _UserFailed:
+                return 0
+            if h.err is not None:
+                return 0
+            if got is NotImplemented:
+                return h._fail("TypeError",
+                               f"%{conv} format: a number is required, "
+                               f"not {value.cls.name}")
+            value = got
         try:
             out.append(format(value, spec))
         except (ValueError, TypeError) as exc:
@@ -2889,6 +2922,15 @@ def _reject(h, sym: str, x, y):
         # `%` on a str or on bytes is PRINTF-STYLE FORMATTING, not arithmetic.
         return _percent(h, x, y)
     if sym == "+" and isinstance(x, str) and not isinstance(y, str):
+        # UNLESS THE RIGHT OPERAND WRITES `__radd__`. `"the " + obj` is
+        # `str.__add__` answering NotImplemented and CPython then asking
+        # `type(obj).__radd__`, which is how a `StrEnum` member concatenates.
+        # Rejecting here ran BEFORE the reflected dispatch below and reported
+        # `can only concatenate str (not "Colours") to str` about a class that
+        # defines exactly the method for it. `None` means "not rejected", so
+        # the reflected call gets its turn.
+        if isinstance(y, Instance) and y.cls.find("__radd__") is not None:
+            return None
         return h._fail("TypeError",
                        f'can only concatenate str (not "{h.kind_name(y)}") '
                        f'to str')
@@ -2915,6 +2957,15 @@ def _reject(h, sym: str, x, y):
         # the bitwise operator despite the spelling.
         return None
     if sym in ("&", "|", "^", "<<", ">>"):
+        # A USER OBJECT WRITING THE DUNDER IS NOT AN INT-LIKE and is still
+        # entitled to the operator: `Perm.R | Perm.W` is `Flag.__or__`, which
+        # is the whole of what a flag enum is. This rule ran BEFORE the
+        # reflected dispatch and reported `unsupported operand type(s) for |`
+        # about two objects whose class defines `__or__`. `None` means "not
+        # rejected", so the dispatch below gets its turn and answers the
+        # unsupported-pair error itself when neither side has the method.
+        if isinstance(x, Instance) or isinstance(y, Instance):
+            return None
         if not (_is_int_like(x) and _is_int_like(y)):
             return h._binop_error(sym, x, y)
     return None
@@ -3506,6 +3557,22 @@ class Instance:
         if out is NotImplemented:
             return self.__repr__()
         return self.h._require_str(out, "__str__")
+
+    def __format__(self, spec):
+        """`"{:03d}".format(obj)` -- reached through PYTHON'S formatting
+        machinery rather than through `apy_format`.
+
+        `_apy_str_format` hands the arguments to `str.format`, which asks the
+        HOST object for `__format__`; without one it found `object`'s, which
+        refuses a non-empty spec and reported `unsupported format string
+        passed to Instance.__format__` -- naming a class the program has never
+        heard of. `apy_format` had the case and this did not, so
+        `format(obj, "03d")` worked and `"{:03d}".format(obj)` did not.
+        """
+        out = self._send("__format__", spec)
+        if out is NotImplemented:
+            return format(self.__str__(), spec)
+        return self.h._require_str(out, "__format__")
 
     def __bool__(self):
         out = self._send("__bool__")

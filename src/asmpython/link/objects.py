@@ -4323,6 +4323,16 @@ APY_API apy_value apy_add(apy_value a, apy_value b) {
        generic operand form: `'ab' + 7` is `can only concatenate str (not
        "int") to str`. A str on the RIGHT of a non-str gets the generic
        message, because there the left operand's `__add__` is what refused. */
+    /* UNLESS THE RIGHT OPERAND WRITES `__radd__`. `"the " + obj` is
+       `str.__add__` answering NotImplemented and CPython then asking
+       `type(obj).__radd__`, which is how a `StrEnum` member concatenates.
+       Refusing here ran before that could happen and reported
+       `can only concatenate str (not "Colours") to str` about a class that
+       defines exactly the method for it. */
+    if (O(a)->kind == APY_STR_K && O(b)->kind == APY_INST_K) {
+        apy_value r = apy_binary_dunder(a, b, "__add__", "__radd__");
+        if (r || apy_error_occurred()) return r;
+    }
     if (O(a)->kind == APY_STR_K)
         return apy_fail2("TypeError",
                          "can only concatenate str (not \"%s\") to str%s",
@@ -5337,6 +5347,33 @@ APY_API apy_value apy_contains(apy_value needle, apy_value hay) {
 
 /* -1 / 0 / 1, APY_UNORD for a nan (False for every ordering, no error), or
    2 for "these kinds cannot be ordered at all" (a TypeError). */
+static int apy_order(apy_value a, apy_value b);
+
+/* `apy_order` WITH THE USER'S `__lt__` BEHIND IT.
+
+   `apy_order` answers 2 for "these are not orderable to me", which is the
+   right answer for an int against a str and the WRONG one for two instances
+   of a class that writes `__lt__`. The `<` operator already knew that --
+   `apy_cmp` falls back to the dunder at exactly that point -- and `sorted`,
+   `min` and `max` called `apy_order` directly and reported `unsupported
+   operand type(s) for <` instead. So `Num.THREE < Num.ONE` worked and
+   `sorted([Num.THREE, Num.ONE])` did not, for the same two objects.
+
+   THE MIRRORED OPERATOR IS THE REFLECTED NAME, as in `apy_cmp`: `a < b` falls
+   back to `b.__gt__(a)`, because what b is asked is the comparison from its
+   side. */
+static int apy_order_rich(apy_value a, apy_value b) {
+    int c = apy_order(a, b);
+    apy_value r;
+    if (c != 2 || !apy_either_inst(a, b)) return c;
+    r = apy_binary_dunder(a, b, "__lt__", "__gt__");
+    if (!r) return 2;
+    if (apy_truth(r)) return -1;
+    r = apy_binary_dunder(b, a, "__lt__", "__gt__");
+    if (!r) return 2;
+    return apy_truth(r) ? 1 : 0;
+}
+
 static int apy_order(apy_value a, apy_value b) {
     /* SET ORDERING IS CONTAINMENT, AND IT IS PARTIAL. `{1, 2} < {1, 3}` is
        False and so is `>`, and neither is an error -- the two sets simply
@@ -5371,7 +5408,7 @@ static int apy_order(apy_value a, apy_value b) {
            out first it is the smaller. */
         int64_t i, n = O(a)->v.q.n < O(b)->v.q.n ? O(a)->v.q.n : O(b)->v.q.n;
         for (i = 0; i < n; i++) {
-            int c = apy_order(O(a)->v.q.items[i], O(b)->v.q.items[i]);
+            int c = apy_order_rich(O(a)->v.q.items[i], O(b)->v.q.items[i]);
             if (c == 2) return 2;
             if (c) return c;
         }
@@ -6936,7 +6973,7 @@ APY_API apy_value apy_sorted(apy_value seq) {
         apy_value key = O(out)->v.q.items[i];
         j = i - 1;
         while (j >= 0) {
-            int c = apy_order(key, O(out)->v.q.items[j]);
+            int c = apy_order_rich(key, O(out)->v.q.items[j]);
             if (c == 2) {
                 apy_binop_error("<", key, O(out)->v.q.items[j]);
                 return 0;
@@ -6988,7 +7025,7 @@ static apy_value apy_sort_with(apy_value seq, apy_value keyfn, int reverse) {
         apy_value k = O(keys)->v.q.items[i];
         j = i - 1;
         while (j >= 0) {
-            int c = apy_order(k, O(keys)->v.q.items[j]);
+            int c = apy_order_rich(k, O(keys)->v.q.items[j]);
             if (c == 2) {
                 apy_binop_error("<", k, O(keys)->v.q.items[j]);
                 return 0;
@@ -7490,7 +7527,7 @@ static apy_value apy_extreme_by(apy_value seq, apy_value keyfn, int want_max) {
         if (!k) return 0;
         if (!best) { best = item; best_key = k; continue; }
         {
-            int c = apy_order(k, best_key);
+            int c = apy_order_rich(k, best_key);
             if (c == 2) { apy_binop_error("<", k, best_key); return 0; }
             if (want_max ? c > 0 : c < 0) { best = item; best_key = k; }
         }
@@ -7521,7 +7558,7 @@ static apy_value apy_extreme(apy_value seq, int want_max) {
     best = apy_key_at(seq, 0);
     for (i = 1; i < n; i++) {
         apy_value item = apy_key_at(seq, i);
-        int c = apy_order(item, best);
+        int c = apy_order_rich(item, best);
         if (c == 2) { apy_binop_error("<", item, best); return 0; }
         /* Strict, so that on a tie the EARLIER element wins -- which is what
            CPython does and is observable when the elements are equal but
@@ -7584,7 +7621,7 @@ APY_API apy_value apy_extreme_n(apy_value buf, int64_t n, int64_t want_max) {
     if (n < 1) return apy_fail("TypeError", "min expected at least 1 argument");
     best = argv[0];
     for (i = 1; i < n; i++) {
-        int c = apy_order(argv[i], best);
+        int c = apy_order_rich(argv[i], best);
         if (c == 2) { apy_binop_error("<", argv[i], best); return 0; }
         if (want_max ? c > 0 : c < 0) best = argv[i];
     }

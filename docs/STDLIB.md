@@ -90,6 +90,9 @@ rather than a bundled module, and is unaffected.
 | `functools` | `reduce`, `wraps`, `total_ordering`, `partial`, `cached_property`, `lru_cache`, `cache`, `singledispatch` |
 | `re` | the whole ordinary language and surface; NOT lookbehind, conditional/atomic groups, possessive quantifiers, `\N{...}`, property escapes, `Scanner`, `bytes` patterns -- each refused BY NAME |
 | `contextlib` | `contextmanager`, `suppress`, `ExitStack`, `nullcontext`; NOT the `async` half, `closing`, `redirect_*`, `chdir` |
+| `inspect` | `signature`, `Signature`, `Parameter` and the five kinds, `isfunction`, `isclass`, `getdoc` of a FUNCTION; NOT source, frames, `bind`, `getfullargspec` |
+| `__future__` | complete |
+| `enum` | `Enum`, `IntEnum`, `StrEnum`, `Flag`, `IntFlag`, `auto`, `unique`, aliases, `__members__`; NOT `verify`/`EnumCheck`, `boundary=`, `global_enum`, `member`/`nonmember`, `_missing_`, functional creation |
 
 **Restoring is not free, and that is the point of stating coverage.** Three of
 `itertools`'s seven functions were wrong in ways the old suite never asked
@@ -221,37 +224,40 @@ fault was in the runtime the whole time -- which is what a ladder of
 one-difference-at-a-time cases is for, and what "a failure is asmpython's
 until shown otherwise" means applied to this suite's own output.
 
-`enum` is held back now, for the same reason and by the same rule. It is
-written -- `Enum`, `IntEnum`, `StrEnum`, `Flag`, `IntFlag`, `auto`, `unique`,
-aliases -- and its logic is PROVED: it is ordinary Python, so putting it on
-`sys.path` under CPython and running `tests/stdlib/enum.py` against it instead
-of CPython's own gives identical output. What it is waiting on is the
-compiler, and the two remaining faults are named below.
+Nothing is held back now.
 
 ## What `enum` found in the compiler
 
 A metaclass is the one thing an enum cannot be written without, and almost
-nothing had exercised one. Four faults, all fixed, all in code that has
-nothing to do with enums:
+nothing had exercised one. Seven faults, all fixed, none of them about enums:
 
 * **`C()` ANSWERED None for any class with a metaclass.** Every metaclass
-  inherits `type.__call__`, so a metaclass that writes no `__call__` of its own
-  still found one -- and `_invoke_obj` has no case for that Native the way
-  `_invoke` does, so it called its body directly. This is not an enum bug; it
-  is every metaclass, including `ABCMeta`.
+  inherits `type.__call__`, so one writing no `__call__` of its own still found
+  a hook -- and `_invoke_obj` has no case for that Native the way `_invoke`
+  does, so it called its body directly. That is every metaclass, `ABCMeta`
+  included.
 * **`len(C)`, `x in C` and `repr(C)` did not consult the metaclass.**
   `__iter__` had grown the case and the other three had not, so `for c in
   Colour` worked while `len(Colour)` said `object of type 'EnumMeta' has no
   len()` -- about a class whose metaclass plainly defines one.
-
-Two remain, and they are why the module is not bundled:
-
-* **The class statement does not bind what the metaclass's `__new__`
-  returned.** `class C(metaclass=Meta)` where `Meta.__new__` returns a class
-  leaves `C is Meta.seen` False. Members are built against the class the
-  metaclass saw, so `type(Colour.RED) is Colour` is False.
-* **`"%d" % obj` fails for an object with `__format__` or `__index__`**, with
-  `unsupported format string passed to Instance.__format__`.
+* **The class statement bound a SECOND HANDLE to the class the metaclass
+  returned.** `is` compares handles, so `C is Meta.seen` was False for a class
+  the metaclass had just handed back, and every enum member was built against
+  the class its metaclass saw rather than the one the statement bound. The same
+  rule `_apy_exc_type` states for `OSError is OSError`, missed one call away.
+* **`"%d" % obj` reached `object.__format__`** and reported `unsupported format
+  string passed to Instance.__format__`, naming a dunder the user never wrote
+  and `%` never consults -- CPython's `%d` asks `__index__`. `"{:03d}".format`
+  failed separately, because Python's own formatting machinery asks the HOST
+  object and `Instance` had no `__format__` at all.
+* **`"the " + obj` never tried `__radd__`**, and **`a | b` on two instances
+  never tried `__or__`**: both were refused by a kind rule that ran BEFORE the
+  reflected dispatch that would have handled them. The dispatch was already
+  correct; nothing reached it.
+* **`sorted`, `min` and `max` bypassed the user's `__lt__`.** The `<` operator
+  falls back to it and these called `apy_order` directly, so `Num.THREE <
+  Num.ONE` worked and `sorted([Num.THREE, Num.ONE])` said `unsupported operand
+  type(s) for <` -- for the same two objects.
 
 `inspect` found a third, worked around rather than fixed: **`X = X` in a class
 body reads the right-hand side as the class attribute being defined** instead
