@@ -4475,6 +4475,75 @@ def _apy_is_instance(h, a):
     return 1 if isinstance(h._get(a[0], "apy_is_instance"), Instance) else 0
 
 
+def _apy_alloc_block(h, a):
+    """`n` bytes of interpreter memory that the caller may hand back.
+
+    REACHED ONLY BY PORTED IR. The host's own containers are Python lists and
+    dicts, so nothing here has a `v.q.items` to allocate -- but an exported
+    symbol the interpreter cannot answer is precisely the drift the ported
+    runtime exists to remove, and `test_every_exported_symbol_has_a_host_
+    binding` is what says so.
+
+    NO FREE LIST, deliberately. `runtime/blocks.py` reuses blocks because a
+    compiled program runs until it exits and its arena is all the memory it
+    will ever have; the interpreter is a Python process whose memory outlives
+    any one program and whose `mem` grows on demand. Reusing here would be
+    machinery serving no measurement, so `apy_free_block` is a no-op and this
+    hands out fresh bytes each time -- which is CORRECT and not thrifty, and
+    the two paths still agree on every value.
+    """
+    n = int(h._get(a[0], "apy_alloc_block"))
+    return h._interp.mem.alloc(n if n > 0 else 1)
+
+
+def _apy_realloc_block(h, a):
+    """`want` bytes holding the first `was` of what `p` held."""
+    p = int(h._get(a[0], "apy_realloc_block"))
+    was = int(h._get(a[1], "apy_realloc_block"))
+    want = int(h._get(a[2], "apy_realloc_block"))
+    if want < 1:
+        want = 1
+    fresh = h._interp.mem.alloc(want)
+    if p:
+        keep = was if was < want else want
+        if keep > 0:
+            buf = h._interp.mem.buf
+            buf[fresh:fresh + keep] = buf[p:p + keep]
+    return fresh
+
+
+def _apy_free_block(h, a):
+    """A no-op. See `_apy_alloc_block` for why there is no free list here."""
+    return 0
+
+
+def _ascii_pred(which):
+    """One of the five ASCII predicates, for the interpreter.
+
+    PROMOTED SYMBOLS NEED A HOST BINDING, which is what
+    `test_every_exported_symbol_has_a_host_binding` insists on and the reason
+    it exists: an exported symbol only the C can answer is exactly the drift
+    the ported runtime is meant to remove.
+
+    THE ARGUMENT IS A BYTE, arriving as the machine word the C widened it to.
+    Anything outside 0..127 is not ASCII and every one of these answers False
+    for it, which is what makes them safe to run over UTF-8: every byte of a
+    multi-byte sequence has its high bit set.
+    """
+    def run(h, a):
+        c = int(h._get(a[0], "apy_c_" + which)) & 0xFF
+        if which == "lower":
+            return 1 if 0x61 <= c <= 0x7A else 0
+        if which == "upper":
+            return 1 if 0x41 <= c <= 0x5A else 0
+        if which == "alpha":
+            return 1 if (0x41 <= c <= 0x5A or 0x61 <= c <= 0x7A) else 0
+        if which == "digit":
+            return 1 if 0x30 <= c <= 0x39 else 0
+        return 1 if c in (0x20, 0x09, 0x0A, 0x0D, 0x0C, 0x0B) else 0
+    return run
+
+
 def _apy_method_is_builtin(h, a):
     """Whether `obj.name(...)` should take the BUILTIN side of the call.
 
@@ -6933,6 +7002,14 @@ _TABLE.update({
     "apy_default_init": _apy_default_init,
     "apy_getattr": _apy_getattr,
     "apy_is_instance": _apy_is_instance,
+    "apy_alloc_block": _apy_alloc_block,
+    "apy_realloc_block": _apy_realloc_block,
+    "apy_free_block": _apy_free_block,
+    "apy_c_lower": _ascii_pred("lower"),
+    "apy_c_upper": _ascii_pred("upper"),
+    "apy_c_alpha": _ascii_pred("alpha"),
+    "apy_c_digit": _ascii_pred("digit"),
+    "apy_c_space": _ascii_pred("space"),
     "apy_method_is_builtin": _apy_method_is_builtin,
     "apy_method_self": _apy_method_self,
     "apy_exc_register": _apy_exc_register,

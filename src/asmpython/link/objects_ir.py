@@ -87,6 +87,13 @@ REPLACES: dict[str, tuple[str, ...]] = {
     # reclaim. Size classes and a free list over the same arena, so the
     # platform floor is still three functions.
     "blocks.py": ("apy_alloc_block", "apy_realloc_block", "apy_free_block"),
+    # THE ASCII PREDICATES, and the smallest thing in the runtime that can be
+    # ported: they take a number and answer a number, so there is no cell
+    # layout to know and no allocation to get right. The four not listed here
+    # are written out as specifications at the foot of `runtime/ascii.py`; a
+    # name joins this tuple when its function exists, and until then the C's
+    # version is what a program uses.
+    "ascii.py": ("apy_c_lower",),
 }
 
 #: The C functions a ported module takes the FRONT of, per source file.

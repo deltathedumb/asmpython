@@ -6106,11 +6106,22 @@ APY_API apy_value apy_str_count3(apy_value s, apy_value sub, apy_value start,
    unchanged, which is at least stable and never corrupts UTF-8: every byte of
    a multi-byte sequence has its high bit set, so none of them can be mistaken
    for a letter to map. */
-static int apy_c_lower(unsigned char c) { return c >= 'a' && c <= 'z'; }
-static int apy_c_upper(unsigned char c) { return c >= 'A' && c <= 'Z'; }
-static int apy_c_alpha(unsigned char c) { return apy_c_lower(c) || apy_c_upper(c); }
-static int apy_c_digit(unsigned char c) { return c >= '0' && c <= '9'; }
-static int apy_c_space(unsigned char c) {
+/* PROMOTED FROM `static` so the subset can name them. The five ASCII
+   predicates are what every case transform and every `str.isalpha`
+   family member rests on, and `runtime/str_cell.py` records the case
+   transforms as blocked -- this is the half of that blockage which is
+   not the Unicode table.
+
+   `int64_t` RATHER THAN `unsigned char` AND `int`, because those are
+   not types `signatures()` can describe: it knows `apy_value`,
+   `int64_t`, `double` and `void`, and a runtime symbol the frontend
+   cannot describe is one it cannot call. Every caller passes an
+   `unsigned char`, which widens to `int64_t` on its own. */
+APY_API int64_t apy_c_lower(int64_t c) { return c >= 'a' && c <= 'z'; }
+APY_API int64_t apy_c_upper(int64_t c) { return c >= 'A' && c <= 'Z'; }
+APY_API int64_t apy_c_alpha(int64_t c) { return apy_c_lower(c) || apy_c_upper(c); }
+APY_API int64_t apy_c_digit(int64_t c) { return c >= '0' && c <= '9'; }
+APY_API int64_t apy_c_space(int64_t c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'
         || c == '\v';
 }
