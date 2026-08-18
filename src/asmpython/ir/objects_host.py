@@ -6716,6 +6716,40 @@ def _apy_bytes_literal(h, a):
 _TABLE["apy_bytes_literal"] = _apy_bytes_literal
 
 
+def _apy_str_bytes(h, a):
+    """The bytes of a string as an address in the interpreter's memory.
+
+    A HOST STRING HAS NO BYTES until someone asks, so this writes them and
+    answers where. That is not the C's arrangement -- there the cell already
+    points at them -- but it is the same promise: NUL-terminated, and valid
+    for as long as the program runs, because this memory is never released
+    either.
+
+    IT WILL NOT BE REACHED BY A WORKING PROGRAM. `ctypes` resolves at LINK
+    time and the interpreter has no linker, so a native call traps before
+    this with `call to undefined function`. It exists because every exported
+    symbol must be answerable here -- see
+    `test_every_exported_symbol_has_a_host_binding` -- and a stub that raised
+    would be a worse answer than the real one.
+    """
+    v = h._get(a[0], "apy_str_bytes")
+    if isinstance(v, str):
+        raw = v.encode("utf-8", "surrogateescape")
+    elif isinstance(v, (bytes, bytearray)):
+        raw = bytes(v)
+    else:
+        return h._fail("TypeError",
+                       f"a pointer argument must be str or bytes, not "
+                       f"{h.kind_name(v)}")
+    at = h._interp.mem.alloc(len(raw) + 1)
+    h._interp.mem.buf[at:at + len(raw)] = raw
+    h._interp.mem.buf[at + len(raw)] = 0
+    return at
+
+
+_TABLE["apy_str_bytes"] = _apy_str_bytes
+
+
 # ── the constructors that OWN their bytes ───────────────────────────────────
 #
 # `apy_lit`, `apy_str_take`, `apy_str_copy` and `apy_bytes_copy` were `static`

@@ -204,17 +204,42 @@ and a box after the result. The cause was narrow -- `ctypes_calls` was recorded
 only by the static analyser and read only by the static lowerer, so a dynamic
 call lowered as an ordinary attribute access on a name the splice had removed.
 
-**POINTERS ARE STILL REFUSED FROM DYNAMIC CODE** (`E0129`), and that is what
-still stands between here and `pathlib`: `fopen` takes a `const char *`.
-Unboxing an `apy_value` to a machine word is exact for a number; for a pointer
-it means handing the callee the address of a runtime object, or a string's
-bytes without the lifetime that implies. Passing one as a raw integer is how a
-ctypes program corrupts memory rather than failing, so it says so instead.
+**POINTERS WORK NOW TOO.** `apy_str_bytes` hands a native call the bytes of a
+`str` or `bytes`, checking the kind at run time because a dynamic value's kind
+is a run-time fact -- handing a native function the address of an integer cell
+is how a ctypes program corrupts memory rather than failing.
 
-What that needs is an accessor giving a `str`'s bytes as a pointer, and a rule
-about how long they live. The arena makes the second question easier than it
-was -- a string's bytes are already immortal -- so this is now a smaller
-question than it looked.
+Both safety questions were CHECKED rather than assumed. NUL TERMINATION: every
+producer writes one, including a slice, which reaches `apy_str_copy` like
+everything else -- and the remaining C already depends on it in two hundred
+places through `APY_CSTR`. LIFETIME: a literal lives in read-only program data
+and an arena string is immortal, so nothing a callee keeps can be freed
+underneath it. The bump-pointer arena that cannot free is exactly what makes
+that answerable.
+
+**A REAL FILESYSTEM QUERY NOW WORKS FROM DYNAMIC PYTHON**, byte-identical to
+CPython:
+
+    k32 = ctypes.CDLL("kernel32")
+    k32.GetFileAttributesA.restype = ctypes.c_uint32
+    k32.GetFileAttributesA.argtypes = [ctypes.c_char_p]
+
+    def exists(path):
+        return k32.GetFileAttributesA(path) != 4294967295
+
+**BUT NOT THROUGH LIBC, AND THAT IS THE NEXT OBSTACLE.** `objects.py` includes
+`<stdio.h>`, `<stdlib.h>`, `<string.h>`, `<math.h>` and `<errno.h>`, and the
+backend emits `uint64_t strlen(uintptr_t)` for a symbol the IR declares --
+which gcc rejects against `size_t strlen(const char *)`. Scalars are fine
+(`double sqrt(double)` matches); pointers are not, because the IR has one
+pointer type and C has many. So `sqrt` works and `fopen`, `strlen` and
+`getenv` do not, and that is PRE-EXISTING -- the static path fails the same
+way, checked.
+
+So `pathlib` is written against the platform's own API rather than libc, or
+the backend learns to CALL THROUGH A CAST instead of declaring an extern --
+a change to `backends/c/emit.py`. The first works today; the second is the
+general fix.
 
 ## `re`, the keystone
 

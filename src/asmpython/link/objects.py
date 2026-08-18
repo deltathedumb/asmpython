@@ -799,6 +799,28 @@ APY_API apy_value apy_bytes_literal(apy_value p, int64_t n) {
     return V(o);
 }
 
+/* THE BYTES OF A STRING, AS A POINTER, for a native call that wants one.
+
+   SAFE ON BOTH COUNTS, and both were checked rather than assumed. NUL
+   TERMINATION: every producer writes one and the remaining C already relies
+   on it in two hundred places through `APY_CSTR`, including a SLICE, which
+   reaches `apy_str_copy` like everything else. LIFETIME: a literal lives in
+   the program's read-only data and an arena string is immortal, so nothing
+   the callee keeps can be freed underneath it -- the bump-pointer arena that
+   cannot free is exactly what makes this answerable.
+
+   The kind IS checked, unlike the extraction helpers next door. Those are
+   reached only where the frontend has proved the kind; this one is reached
+   from `ctypes` with whatever the program passed, and handing a native
+   function the address of an integer cell is how a ctypes program corrupts
+   memory rather than failing. */
+APY_API apy_value apy_str_bytes(apy_value s) {
+    if (O(s)->kind != APY_STR_K && O(s)->kind != APY_BYTES_K)
+        return apy_fail("TypeError",
+                        "a native pointer argument must be str or bytes");
+    return (apy_value)(uintptr_t)O(s)->v.s.p;
+}
+
 APY_API apy_value apy_from_bytes(apy_value p, int64_t n) {
     apy_obj *o = apy_alloc(APY_STR_K);
     o->v.s.p = (const char *)p;

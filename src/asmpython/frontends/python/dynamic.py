@@ -1717,12 +1717,18 @@ class DynamicLowering:
         'libm' is not defined` -- about a library the source declares three
         lines above. See docs/STDLIB.md.
 
-        POINTER PARAMETERS ARE REFUSED IN ANALYSIS, not here, so nothing that
-        reaches this has one.
+        A POINTER ARGUMENT IS A STRING'S BYTES. The kind is checked at run
+        time by `apy_str_bytes`, because a dynamic value's kind is a run-time
+        fact -- and handing a native function the address of an integer cell
+        is how a ctypes program corrupts memory rather than failing.
         """
         args = []
         for arg, want in zip(node.args, native["params"]):
             value = self._dyn_expr(arg)
+            if want == "ptr":
+                args.append(self.b.call(T.PTR, "apy_str_bytes", [value]))
+                self._dyn_check()
+                continue
             floaty = want in self._CFFI_FLOATS
             raw = self.b.call(T.F64 if floaty else T.I64,
                               "apy_as_float" if floaty else "apy_as_int",
@@ -1735,6 +1741,12 @@ class DynamicLowering:
             self.b.call(None, native["symbol"], args)
             return self.b.call(T.PTR, "apy_none", [])
         result = self.b.call(TO_IR[sem_type(ret)], native["symbol"], args)
+        if ret == "ptr":
+            # AN ADDRESS COMES BACK AS AN INTEGER, which is what CPython does
+            # for a `c_void_p` restype. It answers None for NULL and this
+            # answers 0; a program testing the result for truth reads both the
+            # same way, and that is the whole of what a handle is used for.
+            return self.b.call(T.PTR, "apy_from_int", [result])
         floaty = ret in self._CFFI_FLOATS
         wide = self._cffi_width(result, TO_IR[sem_type(ret)],
                                 T.F64 if floaty else T.I64)

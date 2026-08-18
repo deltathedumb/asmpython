@@ -4603,20 +4603,13 @@ class Analyzer:
                         f"by its argtypes, got {len(node.args)}", node)
         for a in node.args:
             self._expr(a)
-        # A POINTER IS REFUSED FROM DYNAMIC CODE, and by name. Unboxing an
-        # `apy_value` to a machine word is exact for a number; for a pointer
-        # it would mean handing the callee the address of a runtime object, or
-        # a string's bytes without the lifetime that implies. Passing one as a
-        # raw integer is how a ctypes program corrupts memory rather than
-        # failing, so the static path -- which knows what it holds -- keeps
-        # that job until there is an accessor written for it.
+        # A POINTER ARGUMENT IS A STRING'S BYTES, checked at run time. The
+        # kind cannot be known here -- that is what dynamic means -- so
+        # `apy_str_bytes` does the checking and fails with the callee's name
+        # rather than handing a native function the address of an integer
+        # cell. NUL termination and lifetime are both already guaranteed: see
+        # the accessor.
         wide = [cffi.TYPES[p] for p in params]
-        if "ptr" in wide or cffi.TYPES[ret] == "ptr":
-            self._error("E0129",
-                        f"{local}.{symbol}() has a pointer in its signature "
-                        f"and is called from code with no static types; "
-                        f"this frontend cannot pass one that way yet", node)
-            return OBJ
         if self.current is not None:
             self.current.ctypes_calls[id(node)] = {
                 "symbol": symbol,

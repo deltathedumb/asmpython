@@ -48,6 +48,28 @@ time has no reason to guess, so it does not.
 **NO STRUCTS, ARRAYS, `byref`, CALLBACKS OR `errcheck` YET.** Scalars and
 pointers. A callback needs `func_addr`/`call_ptr`, which is deferred for the
 fourth time and for the same reason each time.
+
+**A POINTER ARGUMENT MAY BE `str` OR `bytes`, WHERE CPYTHON WANTS `bytes` FOR
+`c_char_p`.** That follows from the flattening above: every pointer type is
+one machine word here, so nothing distinguishes `c_char_p` from `c_wchar_p` to
+act on. A `str` is passed as its UTF-8 bytes, which is what a `char *` API
+wants; CPython would raise `ArgumentError`. Leniency, not a different answer --
+but a program written against this and run under CPython would need `b"..."`.
+
+**A SYMBOL THE RUNTIME'S OWN HEADERS ALREADY DECLARE CANNOT TAKE A POINTER.**
+`objects.py` includes `<stdio.h>`, `<stdlib.h>`, `<string.h>`, `<math.h>` and
+`<errno.h>`, and the backend emits `uint64_t strlen(uintptr_t)` for a symbol
+the IR declares -- which gcc rejects against `size_t strlen(const char *)`.
+Scalar signatures are fine, because `double sqrt(double)` matches what the IR
+emits; POINTER ones are not, because the IR has one pointer type and C has
+many. So `sqrt` works and `strlen`, `fopen`, `getenv` do not.
+
+That rules out the whole of libc's filesystem surface, and it is why
+`pathlib` is written against the platform's own API instead -- `kernel32`'s
+`GetFileAttributesA` is not in any header this includes, so its prototype is
+the IR's and there is nothing to conflict with. The general fix is for the
+backend to CALL THROUGH A CAST rather than declare an extern, which is a
+change to `backends/c/emit.py` and not to this file.
 """
 from __future__ import annotations
 

@@ -428,7 +428,6 @@ The full set the frontend can emit:
 | `E0126` | a native call with the wrong number of arguments for its `argtypes` |
 | `E0127` | a `ctypes` library used as a value rather than called through |
 | `E0128` | a `ctypes` name this frontend does not have |
-| `E0129` | a `ctypes` function with a pointer in its signature, called from code with no static types |
 
 Each applies wherever the construct appears, including inside an augmented
 assignment -- `x **= n` reports `E0043` exactly as `x = x ** n` does.
