@@ -160,6 +160,47 @@ name holds. They were found by a library module and not by the conformance
 suite, because the suite writes exception names out and library code takes
 them as arguments.
 
+## `pathlib` is not a module-writing problem, and this is what it is
+
+The self-host probe ranks `pathlib` first at **30 of 79 files**, which reads
+like the next module to write. It is not, and the reason is worth having
+written down before someone spends a day on it.
+
+**The compiler's own source needs the CONCRETE half.** Counted, not guessed:
+`resolve` 14, `mkdir` 11, `write_text` 8, `read_text` 8, `exists` 8,
+`absolute` 7, `glob` 5, `write_bytes` 4, `is_file`/`is_dir`/`rglob`/
+`read_bytes` the rest. The archived module is 168 lines of the PURE half --
+`PurePosixPath` and nothing that touches a disk -- and it is correct as far as
+it goes.
+
+**Shipping the pure half alone would LOWER THE PROBE'S NUMBER AND FIX
+NOTHING.** Add a `Path = PurePosixPath` alias and those 30 files import
+cleanly and compile; they then fail at run time on the first `read_text`. That
+is precisely the "accepted and ignored" shape this rebuild exists to prevent
+-- `frozen=True` in the archived `dataclasses`, `islice`'s ignored step -- and
+it would be worse here because a green probe would say the constraint had
+moved when it had not.
+
+**`ctypes` LOOKED like the way in and is not, yet.** `docs/STDLIB.md` already
+noted that a C library can be called with no new platform function, so
+`fopen`/`fread`/`stat` through `ctypes` would give a concrete `Path` without
+growing the floor. Measured instead of assumed:
+
+    def static_call(x: f64) -> f64:
+        return libm.sqrt(x)          # works, prints 3.0
+
+    def dynamic_call(x):
+        return libm.sqrt(x)          # NameError: name 'libm' is not defined
+
+**`ctypes` resolves at COMPILE time on the STATICALLY TYPED path only.** A
+bundled module is ordinary dynamic Python, so it cannot reach a C library at
+all -- and `pathlib` has to be a bundled module. The same is true of any
+module that would need the filesystem.
+
+So the order is: **make `ctypes` reachable from dynamic code, or grow the
+platform floor.** Until one of those happens, `pathlib` can only ship its pure
+half, and shipping it would move a number rather than the constraint.
+
 ## `re`, the keystone
 
 Seven of the planned modules import it and three of the four things blocking
@@ -361,13 +402,33 @@ BOTH, because generated code still raises through the mangled one. See
 `objects_host._rename_exception` and the `__name__` arm of the C's
 `apy_setattr`.
 
-**THE PRINTED TYPE STILL LEAKS.** `type(e).__name__` for a RAISED bundled
-exception answers `_asmpy_bundled_copy_Error` where CPython says `Error`, on
-both paths. Catching it, `issubclass` and `isinstance` are all correct; what is
-wrong is the name a traceback or a `print(type(e))` shows. Recorded rather than
-guessed at: the class object's own `__name__` reads correctly, so the raised
-instance is reaching a different type object than the class, and finding out
-which is the next step.
+**THE PRINTED TYPE STILL LEAKS.** `type(e).__name__` for a bundled exception
+answers `_asmpy_bundled_copy_Error` where CPython says `Error`, on both paths.
+Catching it, `issubclass` and `isinstance` are all correct; what is wrong is
+the name a traceback or a `print(type(e))` shows.
+
+**An attempt at it was made and BACKED OUT**, and what it established is worth
+more than the attempt was:
+
+* The cell's name CANNOT simply be corrected. `except copy.Error` compiles to
+  the mangled spelling and `apy_error_matches` walks the hierarchy by name, so
+  renaming the cell fixes the display and breaks the catch. Any fix has to
+  separate the name a program MATCHES on from the name it SHOWS.
+* `type(e).__name__` is FUSED by the frontend into a single `apy_type_name`
+  call (`dynamic.py`, the `ast.Attribute(attr="__name__")` case), which reads
+  the cell's name string directly. That is why `t = type(e); t.__name__`
+  answers `Error` and `type(e).__name__` does not, for the same object -- only
+  one of them goes through the class.
+* A display-name helper mapping the cell's name back through the registered
+  class is the shape of the fix, and it did not work when tried: the lookup
+  found nothing, which means a bundled module's exception class is not in
+  `apy_exc_class_table` under the name its cells carry. THAT is the thing to
+  establish first, and it was not established, so nothing was kept.
+
+There are at least four display paths (`apy_type_name`, the `repr` and `str`
+builders, `apy_kind_name`), so a partial fix makes the two runtimes disagree
+with each other as well as with CPython -- which is why the attempt was
+reverted whole rather than left half-applied.
 
 `inspect` found a third, worked around rather than fixed: **`X = X` in a class
 body reads the right-hand side as the class attribute being defined** instead
