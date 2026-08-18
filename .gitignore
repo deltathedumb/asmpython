@@ -124,3 +124,5 @@ editors/vscode/*/package-lock.json
 # Working conformance measurements. `asmpython.json` is the recorded state and
 # is tracked; a session produces dozens of these on the way to it.
 conformance/results/new*.json
+# A work brief for a second agent, not part of the project.
+port.txt
