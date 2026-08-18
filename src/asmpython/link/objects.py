@@ -140,7 +140,8 @@ enum {
     /* A generator's own three. They are dispatched by NAME at the call site,
        so nothing needed a VALUE for them -- until a program asked
        `hasattr(g, "close")`, which every duck-typed consumer does. */
-    APY_NAT_GEN_SEND, APY_NAT_GEN_THROW, APY_NAT_EXC_INIT, APY_NAT_POSITIONS,
+    APY_NAT_GEN_SEND, APY_NAT_GEN_THROW, APY_NAT_EXC_INIT,
+    APY_NAT_BUILTIN_INIT, APY_NAT_BUILTIN_NEW, APY_NAT_POSITIONS,
     APY_NAT_TASK_CANCEL, APY_NAT_TASK_RESULT, APY_NAT_TASK_DONE,
     APY_NAT_TASK_CANCELLED, APY_NAT_TG_ENTER, APY_NAT_TG_EXIT,
     APY_NAT_TG_CREATE,
@@ -1878,6 +1879,26 @@ APY_API apy_value apy_bitxor(apy_value a, apy_value b);
 APY_API apy_value apy_sub(apy_value a, apy_value b);
 APY_API apy_value apy_mul(apy_value a, apy_value b);
 APY_API apy_value apy_add(apy_value a, apy_value b);
+/* The rest of the arithmetic, declared here because `apy_op_apply` names all
+   of them and sits with the operator fallback, well above where most are
+   defined. */
+APY_API apy_value apy_truediv(apy_value a, apy_value b);
+APY_API apy_value apy_floordiv(apy_value a, apy_value b);
+APY_API apy_value apy_mod(apy_value a, apy_value b);
+APY_API apy_value apy_bitor(apy_value a, apy_value b);
+APY_API apy_value apy_lshift(apy_value a, apy_value b);
+APY_API apy_value apy_rshift(apy_value a, apy_value b);
+/* `class D(dict)` acting as its dict for one operation -- defined with the
+   two method-dispatch helpers near the end, used by the operator fallback
+   near the beginning. */
+static apy_value apy_as_builtin(apy_value v, const char *dunder);
+/* One builtin container built from one argument, by KIND. Defined with the
+   instantiation machinery, named by the `super().__init__` native well above
+   it. */
+static apy_value apy_call_kind(int kind, apy_value src);
+/* The builtin kind a class extends, looked up the WHOLE chain: a subclass of
+   a subclass of `tuple` is still a tuple. 0 for a class that extends none. */
+static int apy_class_builtin_kind(apy_value cls);
 APY_API apy_value apy_to_dict(apy_value src);
 APY_API apy_value apy_iter(apy_value v);
 APY_API apy_value apy_getiter(apy_value v);
@@ -2482,6 +2503,12 @@ APY_API int64_t apy_raw_len(apy_value v) {
         apy_value n = apy_unary_dunder(v, "__len__");
         if (n && apy_is_int_like(n)) return O(n)->v.i;
         if (apy_error_occurred()) return 0;
+        /* A CLASS EXTENDING A BUILTIN has the builtin's length, which is what
+           bounds the index walk. `a, b, c = t` on a `class T(tuple)` takes
+           its count from here, so without this an unpack refused before it
+           started -- while `for x in t` worked, the same elements by another
+           road. */
+        if (O(v)->v.o.held) return apy_raw_len(O(v)->v.o.held);
     }
     apy_fail2("TypeError", "'%s' object is not iterable%s",
               apy_kind_name(v), "");
@@ -2663,6 +2690,16 @@ static apy_value apy_dict_text(apy_value v) {
    a set is iterable and not subscriptable, and this is the function that means
    "iterate". */
 APY_API apy_value apy_key_at(apy_value v, int64_t i) {
+    /* PAIRED WITH `apy_raw_len`, AND THE PAIR HAS TO MOVE TOGETHER. That
+       function answers a builtin-extending instance with the builtin's
+       length; if this one did not also unwrap, the walk would read the right
+       COUNT of elements out of the wrong object -- an instance's union arm
+       where a sequence's `items` pointer belongs. It did, and `sorted(s)` on
+       a `class St(set)` died dereferencing it, with the program's buffered
+       output lost so that nothing was printed at all. */
+    if (O(v)->kind == APY_INST_K && O(v)->v.o.held
+            && !apy_class_find(O(v)->v.o.cls, apy_name("__getitem__")))
+        return apy_key_at(O(v)->v.o.held, i);
     if (O(v)->kind == APY_VIEW_K) return apy_key_at(apy_view_items(v), i);
     if (O(v)->kind == APY_GEN_K)
         /* From what the length query drained -- see `apy_raw_len`. */
@@ -3975,6 +4012,13 @@ static apy_value apy_text(apy_value v, int quoted) {
         r = apy_unary_dunder(v, "__repr__");
         if (r || apy_error_occurred())
             return r ? apy_text_result(r, "__repr__") : r;
+        /* A CLASS EXTENDING A BUILTIN SHOWS THE BUILTIN. `class D(dict)`
+           with no `__repr__` prints `{'a': 1}` in CPython, and the default
+           below would hide the entire contents -- which for a Counter or a
+           defaultdict is the whole value. The class name is not added,
+           because CPython does not add it either; a subclass that wants its
+           name in the repr writes one, as `Counter` and `deque` do. */
+        if (O(v)->v.o.held) return apy_repr(O(v)->v.o.held);
         /* The default. CPython prints the ADDRESS, which no two runs agree on
            and which no conformance case can therefore assert -- every case
            that prints a bare instance defines `__repr__`. The address is
@@ -4221,6 +4265,8 @@ static const char *const APY_OP_DUNDERS[][3] = {
    answered. `apy_binop_error` itself is kept for the two call sites in
    `sorted`/`min`, which want the REPORT and not another dispatch -- they have
    already decided the comparison failed and are naming why. */
+static apy_value apy_op_apply(const char *op, apy_value a, apy_value b);
+
 static apy_value apy_binop_fallback(const char *op, apy_value a, apy_value b) {
     int i;
     if (apy_either_inst(a, b))
@@ -4229,6 +4275,21 @@ static apy_value apy_binop_fallback(const char *op, apy_value a, apy_value b) {
                 apy_value r = apy_binary_dunder(a, b, APY_OP_DUNDERS[i][1],
                                                 APY_OP_DUNDERS[i][2]);
                 if (r || apy_error_occurred()) return r;
+                /* NEITHER SIDE WROTE THE DUNDER, so a builtin-extending
+                   instance means the builtin: `t + (4,)` on a `class
+                   T(tuple)` is tuple concatenation, and reporting an
+                   unsupported operand pair between `'T'` and `'tuple'` names
+                   an operation tuples plainly support. Retried once, with
+                   whichever side was an instance replaced -- the retry
+                   cannot loop, because what goes back in is a builtin. */
+                {
+                    apy_value ua = apy_as_builtin(a, APY_OP_DUNDERS[i][1]);
+                    apy_value ub = apy_as_builtin(b, APY_OP_DUNDERS[i][2]);
+                    if (ua != a || ub != b) {
+                        apy_value r2 = apy_op_apply(op, ua, ub);
+                        if (r2 || apy_error_occurred()) return r2;
+                    }
+                }
                 break;
             }
     return apy_binop_error(op, a, b);
@@ -4349,6 +4410,23 @@ static apy_value apy_complex_binop(const char *sym, apy_value a, apy_value b) {
        message names the operator, as CPython's does. */
     return apy_fail2("TypeError",
                      "can't take floor or mod of complex number%s%s", "", "");
+}
+
+/* One operator, chosen by the symbol `apy_binop_fallback` was given. Only
+   the arithmetic ones, because only those reach that fallback. */
+static apy_value apy_op_apply(const char *op, apy_value a, apy_value b) {
+    if (strcmp(op, "+") == 0)  return apy_add(a, b);
+    if (strcmp(op, "-") == 0)  return apy_sub(a, b);
+    if (strcmp(op, "*") == 0)  return apy_mul(a, b);
+    if (strcmp(op, "/") == 0)  return apy_truediv(a, b);
+    if (strcmp(op, "//") == 0) return apy_floordiv(a, b);
+    if (strcmp(op, "%") == 0)  return apy_mod(a, b);
+    if (strcmp(op, "&") == 0)  return apy_bitand(a, b);
+    if (strcmp(op, "|") == 0)  return apy_bitor(a, b);
+    if (strcmp(op, "^") == 0)  return apy_bitxor(a, b);
+    if (strcmp(op, "<<") == 0) return apy_lshift(a, b);
+    if (strcmp(op, ">>") == 0) return apy_rshift(a, b);
+    return 0;
 }
 
 APY_API apy_value apy_add(apy_value a, apy_value b) {
@@ -5142,6 +5220,17 @@ static int apy_eq_raw(apy_value a, apy_value b) {
         apy_value r = apy_binary_dunder(a, b, "__eq__", "__eq__");
         if (r) return apy_truth(r) != 0;
         if (apy_error_occurred()) return 0;
+        /* A CLASS EXTENDING A BUILTIN COMPARES AS THE BUILTIN. Identity is
+           the right default only for an object with no content; here it made
+           two equal namedtuples distinct, and a set holding both kept both
+           even though they hash alike. Hooked HERE rather than in `apy_eq`
+           for the same reason the dunder is: a CONTAINER of them has to
+           compare element by element the same way. */
+        {
+            apy_value ua = apy_as_builtin(a, "__eq__");
+            apy_value ub = apy_as_builtin(b, "__eq__");
+            if (ua != a || ub != b) return apy_eq_raw(ua, ub);
+        }
         return a == b;
     }
     /* A MEMORYVIEW COMPARES BY CONTENT, and against bytes as well as against
@@ -5239,6 +5328,13 @@ APY_API apy_value apy_eq(apy_value a, apy_value b) {
     if (apy_either_inst(a, b)) {
         apy_value r = apy_binary_dunder(a, b, "__eq__", "__eq__");
         if (r || apy_error_occurred()) return r;
+        /* NEITHER SIDE WROTE `__eq__`, so a builtin-extending instance
+           compares as the builtin it carries: `D({'a': 1}) == {'a': 1}` is
+           True in CPython, and `apy_eq_raw` below compares an INSTANCE with
+           a dict by identity and answers False. A wrong False is worse than
+           an error here -- nothing marks it. */
+        a = apy_as_builtin(a, "__eq__");
+        b = apy_as_builtin(b, "__eq__");
     }
     return apy_from_bool(apy_eq_raw(a, b));
 }
@@ -5288,6 +5384,13 @@ APY_API apy_value apy_contains(apy_value needle, apy_value hay) {
        is found. */
     if (O(hay)->kind == APY_VIEW_K)
         return apy_contains(needle, apy_view_items(hay));
+    /* A CLASS EXTENDING A BUILTIN answers membership as the builtin, unless
+       its body says otherwise -- `"a" in d` on a `class D(dict)` asks the
+       dict's keys, the same question `for k in d` asks. */
+    {
+        apy_value as = apy_as_builtin(hay, "__contains__");
+        if (as != hay) return apy_contains(needle, as);
+    }
     /* `x in gen` CONSUMES the generator up to the match, and leaves the rest.
        That is what makes `2 in squares` then `list(squares)` answer `False`
        and `[]` -- a generator is consumed once. Stepping rather than draining
@@ -7222,6 +7325,13 @@ APY_API apy_value apy_to_dict(apy_value src) {
        a new object -- which only became visible once `|=` mutated in place,
        and then `c = dict(a); c |= b` changed `a` too. */
     if (O(src)->kind == APY_DICT_K) return apy_copy(src);
+    /* `dict(d)` WHERE `d` IS A dict SUBCLASS copies the MAPPING, not the
+       keys. Iterating a dict yields keys, so the pair walk below read
+       `dict(["a"])` and reported a sequence element of the wrong length --
+       about a `defaultdict` that is a perfectly good mapping. */
+    if (O(src)->kind == APY_INST_K && O(src)->v.o.held
+            && O(O(src)->v.o.held)->kind == APY_DICT_K)
+        return apy_copy(O(src)->v.o.held);
     n = apy_raw_len(src);
     if (apy_error_occurred()) return 0;
     out = apy_dict_new(n + 1);
@@ -7421,6 +7531,10 @@ APY_API apy_value apy_iter(apy_value v) {
         apy_value got = apy_unary_dunder(v, "__iter__");
         if (got) return got;
         if (apy_error_occurred()) return 0;
+        /* A CLASS EXTENDING A BUILTIN IS ITERABLE BECAUSE THE BUILTIN IS.
+           `for k in d` over a `class D(dict)` walks its keys; the miss above
+           is not the answer, because `__iter__` was never in the body. */
+        if (O(v)->v.o.held) return apy_iter(O(v)->v.o.held);
         got = apy_iterable(v);
         if (!got) return 0;
         if (got != v) return apy_iter(got);
@@ -7476,6 +7590,12 @@ APY_API apy_value apy_iterable(apy_value v) {
         }
     }
     if (O(v)->kind != APY_INST_K) return v;
+    /* A CLASS EXTENDING A BUILTIN WALKS THE BUILTIN. This is the EAGER
+       funnel -- unpacking, `sorted`, `list(x)` -- as `apy_getiter` is the
+       lazy one, and `a, b, c = t` on a `class T(tuple)` comes through here.
+       Before the dunder walk, which would find nothing and refuse. */
+    if (O(v)->v.o.held && !apy_class_find(O(v)->v.o.cls, apy_name("__iter__")))
+        return apy_iterable(O(v)->v.o.held);
     it = apy_unary_dunder(v, "__iter__");
     if (apy_error_occurred()) return 0;
     if (it) {
@@ -12215,6 +12335,17 @@ APY_API apy_value apy_getiter(apy_value v) {
                              "iter() returned non-iterator of type '%s'%s",
                              apy_kind_name(got), "");
         }
+        /* THE BUILTIN AGAIN, and here as well as in `apy_iter` because this
+           is the entry a GENERATOR's `for` uses -- it steps a cursor rather
+           than walking by index, since an index walk cannot survive a
+           suspension. Fixing only `apy_iter` left `[k for k in d]` working
+           and `(k for k in d)` not, which is the same loop written twice.
+
+           `apy_getiter` AND NOT `apy_iterable`: this function answers a
+           CURSOR, and `apy_iterable` answers the thing to walk -- returning
+           the latter handed a bare dict to the stepper, which reported
+           `'dict' object is not an iterator`. */
+        if (O(v)->v.o.held) return apy_getiter(O(v)->v.o.held);
         /* No `__iter__`: `__len__` plus `__getitem__`, or `__getitem__`
            walked until it reports IndexError. A cursor over the object does
            both, since `apy_step` reads through `apy_getitem`. */
@@ -12429,6 +12560,13 @@ static int64_t apy_hash_raw(apy_value v) {
             return 0;
         }
         if (apy_error_occurred()) return 0;
+        /* A CLASS EXTENDING A BUILTIN HASHES AS THE BUILTIN, so two equal
+           namedtuples land in the same bucket. The address would not: they
+           compare equal through the held tuple and would still both sit in a
+           set, which is a wrong ANSWER rather than an error. */
+        if (O(v)->v.o.held
+                && !apy_class_find(O(v)->v.o.cls, apy_name("__eq__")))
+            return apy_hash_raw(O(v)->v.o.held);
         /* DEFINING `__eq__` AND NOT `__hash__` MAKES A CLASS UNHASHABLE.
            Saying so is what turns a dict key of one into an error rather
            than a lookup that silently finds nothing -- two equal objects
@@ -13014,6 +13152,14 @@ APY_API apy_value apy_instance_new(apy_value cls) {
 }
 
 /* The builtin an instance carries, or 0. The one place anything asks. */
+static int apy_class_builtin_kind(apy_value cls) {
+    while (cls && O(cls)->kind == APY_TYPE_K) {
+        if (O(cls)->v.t.builtin) return O(cls)->v.t.builtin;
+        cls = O(cls)->v.t.base;
+    }
+    return 0;
+}
+
 static apy_value apy_inst_held(apy_value v) {
     return O(v)->kind == APY_INST_K ? O(v)->v.o.held : 0;
 }
@@ -13273,6 +13419,30 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
                 return apy_no_attribute(obj, name);
             return O(obj)->v.o.dict;
         }
+        /* A CLASS THAT EXTENDS A BUILTIN answers with the builtin's own
+           method for everything its body did not define. `class D(dict)` with
+           only a `__missing__` still has `keys`, `items`, `get` and `update`,
+           and this is where they come from -- asked of `held`, the real dict
+           the instance carries.
+
+           HERE AND NOT EARLIER, because the class body wins: a `Counter`
+           defining `update` must shadow `dict.update` rather than be shadowed
+           by it. And here and not LATER, because in CPython these arrive
+           through the MRO, which is consulted before `__getattr__` -- a class
+           extending a builtin AND defining `__getattr__` would otherwise
+           route every inherited method through the fallback.
+
+           THE MISS IS NOT THE ANSWER. A name neither the class nor the
+           builtin has must still reach `__getattr__`, so the AttributeError
+           the delegation raised is cleared rather than reported. */
+        if (O(obj)->v.o.held) {
+            apy_value got = apy_default_getattr(O(obj)->v.o.held, name);
+            if (got) return got;
+            if (apy_err_type && strcmp(apy_err_type, "AttributeError") == 0)
+                apy_error_clear();
+            else
+                return got;
+        }
         /* `__getattr__` -- the LAST resort, asked only after the instance
            dict and the class have both missed. That ordering is the whole
            protocol: `__getattribute__` intercepts everything and this
@@ -13485,6 +13655,21 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
         if (!found && self && O(self)->kind == APY_EXC_K
                 && strcmp(want, "__init__") == 0)
             return apy_bind(apy_native(APY_NAT_EXC_INIT, 2, "__init__"), self);
+        /* THE SAME ARRANGEMENT FOR A BUILTIN BASE, and for the same reason:
+           the chain above `class M(dict)` ends in a KIND rather than a class,
+           so the walk finds nothing and `object.__init__` would accept the
+           arguments and drop them. */
+        if (!found && self && O(self)->kind == APY_INST_K
+                && O(self)->v.o.held && strcmp(want, "__init__") == 0)
+            return apy_bind(apy_native(APY_NAT_BUILTIN_INIT, 2, "__init__"),
+                            self);
+        /* AND `__new__`, for the same chain and a different reason -- see the
+           native. `from` rather than `self` decides, because `__new__` is
+           called with the class and there may be no instance yet. */
+        if (!found && strcmp(want, "__new__") == 0 && from
+                && O(from)->kind == APY_TYPE_K
+                && apy_class_builtin_kind(from) != 0)
+            return apy_native(APY_NAT_BUILTIN_NEW, 2, "__new__");
         if (!found) {
             /* THE BASE CHAIN HAS RUN OUT, which means `object` -- and every
                class has one. `super().__init__()` inside a class with no
@@ -14341,6 +14526,18 @@ static apy_value apy_native(int sel, int64_t arity, const char *name) {
     o->v.fn.native = sel;
     o->v.fn.arity = arity;
     o->v.fn.name = apy_lit(name);
+    /* THE ARGUMENT IS OPTIONAL for the two that stand in for a builtin base's
+       constructor, because `dict.__init__` takes nought or one and
+       `super().__init__()` with nothing is the ordinary spelling. The arity
+       check further down fills a missing trailing slot from `defaults` and
+       then insists the count matches exactly, so an omitted argument was an
+       arity error naming a method the program never declared. */
+    if (sel == APY_NAT_BUILTIN_INIT || sel == APY_NAT_BUILTIN_NEW) {
+        static apy_value absent[1];
+        absent[0] = apy_none();
+        o->v.fn.ndefaults = 1;
+        o->v.fn.defaults = absent;
+    }
     if (sel == APY_NAT_KIND) return V(o);
     made[sel] = V(o);
     return made[sel];
@@ -14792,6 +14989,60 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
         return g;
     }
     case APY_NAT_INIT:     return apy_none();
+    case APY_NAT_BUILTIN_NEW: {
+        /* `super().__new__(cls, x)` PAST A BUILTIN BASE, which is the only
+           way to build an immutable one: a tuple's contents cannot be set
+           after it exists, so `class P(tuple)` fills it here or never.
+           `apy_object_default("__new__")` would answer a bare instance with
+           an EMPTY tuple inside -- a wrong value rather than an error, and
+           the shape every `namedtuple` would have had.
+
+           THE CLASS IS THE FIRST ARGUMENT and is not a bound receiver:
+           `__new__` is an implicit staticmethod, so the caller writes the
+           class out. */
+        apy_value cls, made;
+        int kind;
+        if (n < 1) return apy_fail("TypeError", "unbound builtin method");
+        cls = a[0];
+        if (O(cls)->kind != APY_TYPE_K)
+            return apy_fail("TypeError",
+                            "__new__() argument 1 must be a type");
+        made = apy_instance_new(cls);
+        if (!made) return 0;
+        if (n > 1 && O(a[1])->kind != APY_NONE_K
+                && O(made)->kind == APY_INST_K && O(made)->v.o.held) {
+            apy_value filled = apy_call_kind(O(O(made)->v.o.held)->kind, a[1]);
+            if (!filled) return 0;
+            O(made)->v.o.held = filled;
+        }
+        return made;
+    }
+    case APY_NAT_BUILTIN_INIT: {
+        /* `super().__init__(...)` where the base chain ends at a BUILTIN.
+           `class M(dict)` writing it means `dict.__init__`, which FILLS the
+           instance -- and there is no Python above `M` to find that on, so
+           the walk ran out, `object.__init__` answered, and the call quietly
+           did nothing. An empty dict where the program asked for a full one
+           is the failure this arrangement is worst at showing: no error, just
+           a container that is not there.
+
+           IN PLACE, not a new object: the lines after `super().__init__()` in
+           the same body go on using the instance the caller already has. */
+        apy_value self, made;
+        if (n < 1) return apy_fail("TypeError", "unbound builtin method");
+        self = a[0];
+        if (O(self)->kind != APY_INST_K || !O(self)->v.o.held)
+            return apy_none();
+        /* NONE MEANS OMITTED, since the default above always fills the
+           slot. `super().__init__(None)` written out is therefore the same as
+           `super().__init__()` -- no builtin constructor takes None as
+           content, so nothing is lost. */
+        if (n < 2 || O(a[1])->kind == APY_NONE_K) return apy_none();
+        made = apy_call_kind(O(O(self)->v.o.held)->kind, a[1]);
+        if (!made) return 0;
+        O(self)->v.o.held = made;
+        return apy_none();
+    }
     case APY_NAT_EXC_INIT: {
         /* `BaseException.__init__(*args)`: it SETS THE MESSAGE AND `args`,
            which is the whole of what it does and the reason a class writing
@@ -15023,6 +15274,56 @@ static apy_value apy_arity_error(apy_value f, int64_t got) {
    SEPARATE FROM `apy_call_nk` because `type.__call__` is exactly this and
    nothing else: a metaclass that overrides `__call__` and ends by delegating
    upward has to reach the default without re-entering the hook. */
+/* `dict(x)`, `list(x)`, `tuple(x)`, `set(x)` or `str(x)`, chosen by KIND
+   rather than by name -- the caller has an instance carrying one of these and
+   wants another built from its argument, and the kind is what it knows.
+   Assembled from the entry points the frontend already lowers those calls to,
+   so there is no second opinion about what `dict(pairs)` means. */
+static apy_value apy_call_kind(int kind, apy_value src) {
+    apy_value out;
+    /* AN INSTANCE ARGUMENT MEANS ITS CONTENT. `OrderedDict(other)` reaches
+       here with an instance, and every branch below reads `src` as a real
+       container -- see `_content_of` in the host for the same unwrap. */
+    if (O(src)->kind == APY_INST_K && O(src)->v.o.held)
+        src = O(src)->v.o.held;
+    if (kind == APY_DICT_K) {
+        out = apy_dict_new(4);
+        return (out && apy_update(out, src)) ? out : 0;
+    }
+    /* A SET IS FILLED ONE ELEMENT AT A TIME and not by `apy_extend`, which
+       pushes through `apy_seq_push` -- a list operation that reports
+       `'set' object has no attribute 'append'` when handed one. Adding is
+       also the only way to get the DEDUPLICATION a set is for. */
+    if (kind == APY_SET_K) {
+        /* THROUGH A LIST, which is not a detour. `apy_extend` is the one
+           thing here that already knows how to drain every kind of source --
+           a generator, a dict (its KEYS), a str -- and it pushes through
+           `apy_seq_push`, a LIST operation that refuses a set outright.
+           Collect with it, then add, which is also where the deduplication a
+           set is for happens.
+
+           NOT `apy_key_at`: that answers what ITERATING yields for a dict, a
+           set or a cursor, and a plain list falls past those branches into
+           the cursor one, where the union's `it.i` overlaps the element
+           count. It read off the end and the program died with its buffered
+           output lost, which is why this printed nothing at all. */
+        apy_value tmp = apy_list_new(4);
+        int64_t i;
+        if (!tmp || !apy_extend(tmp, src)) return 0;
+        out = apy_set_new(4);
+        if (!out) return 0;
+        for (i = 0; i < O(tmp)->v.q.n; i++)
+            if (!apy_set_add(out, O(tmp)->v.q.items[i])) return 0;
+        return out;
+    }
+    if (kind == APY_LIST_K || kind == APY_TUPLE_K) {
+        out = kind == APY_LIST_K ? apy_list_new(4) : apy_tuple_new(4);
+        return (out && apy_extend(out, src)) ? out : 0;
+    }
+    if (kind == APY_STR_K) return apy_str(src);
+    return 0;
+}
+
 static apy_value apy_instantiate(apy_value f, apy_value *argv, int64_t argc,
                                  apy_value kwrest, int bound) {
     apy_value self;
@@ -15064,7 +15365,30 @@ static apy_value apy_instantiate(apy_value f, apy_value *argv, int64_t argc,
            than reporting one it does not declare. */
         if (O(init)->kind == APY_FUNC_K && O(init)->v.fn.native) kwrest = 0;
         if (!apy_call_nk(bound_init, argv, argc, kwrest, bound)) return 0;
-    } else if (argc != 0) {
+    } else if (argc != 0 && !maker) {
+        /* A CLASS EXTENDING A BUILTIN INHERITS ITS CONSTRUCTOR. `class
+           L(list): pass` then `L([1, 2, 3])` is a list of three, because
+           `list.__init__` is what the empty body left in place -- and
+           `L() takes no arguments` names the wrong thing entirely: the class
+           HAS a constructor, inherited, and the arguments are what it wants.
+
+           ONE ARGUMENT, which is every builtin constructor that fills from
+           something: `dict(pairs)`, `list(it)`, `tuple(it)`, `set(it)`. The
+           keyword forms (`dict(a=1)`) reach `__init__` on a class that wrote
+           one; a class that did not gets the refusal it had before.
+
+           NONE OF THIS WHEN THE CLASS WROTE `__new__` -- see the `!maker` on
+           the branch above. That constructor has already decided what the
+           instance holds (a `namedtuple` packs its arguments into one tuple),
+           and CPython draws the same line: `object.__init__` complains about
+           surplus arguments only when `__new__` is not overridden. */
+        if (O(self)->kind == APY_INST_K && O(self)->v.o.held && argc == 1) {
+            apy_value made = apy_call_kind(
+                O(O(self)->v.o.held)->kind, argv[0]);
+            if (!made) return 0;
+            O(self)->v.o.held = made;
+            return self;
+        }
         char buf[128];
         snprintf(buf, sizeof buf,
                  "%s() takes no arguments", APY_CSTR(O(f)->v.t.name));
@@ -15464,6 +15788,56 @@ APY_API int64_t apy_is_instance(apy_value v) {
     return O(v)->kind == APY_INST_K;
 }
 
+/* WHICH SIDE OF A METHOD CALL A RECEIVER BELONGS ON, and what it should be
+   when it lands there. `_dyn_method_either` emits both a user lookup and a
+   direct builtin call and picks between them at run time; these two answer
+   the picking.
+
+   THE QUESTION IS ABOUT THE CLASS, NOT THE KIND. It used to be `is this an
+   instance`, which is right for the collision it was written for -- a class
+   defining `add` next to `set.add` -- and wrong for `class D(dict)`, which
+   INHERITS `keys` without writing it. Such an instance is not a set and not a
+   dict either, so both branches refused it: the user lookup found no `keys`
+   on the class, and the builtin call was never reached.
+
+   SO THE INSTANCE IS UNWRAPPED INSTEAD. A method the class did not define is
+   the builtin's, and the builtin wants the value the instance CARRIES. That
+   is one test and one substitution rather than teaching each of the hundred
+   or so builtin methods what an instance is. */
+/* An instance ACTING AS the builtin it carries, for one operation. The
+   class body wins: a `Counter` writing `__eq__` means its own, so the dunder
+   is asked for by name and a class that defines it is left alone. Identity
+   for everything that is not a builtin-extending instance, which is what lets
+   this be dropped in front of an existing test rather than beside it. */
+static apy_value apy_as_builtin(apy_value v, const char *dunder) {
+    if (O(v)->kind == APY_INST_K && O(v)->v.o.held
+            && !apy_class_find(O(v)->v.o.cls, apy_name(dunder)))
+        return O(v)->v.o.held;
+    return v;
+}
+
+APY_API int64_t apy_method_is_builtin(apy_value obj, apy_value name) {
+    if (O(obj)->kind != APY_INST_K)
+        return 1;
+    /* THE CLASS BODY WINS. A `Counter` defining `update` means its own, even
+       though `dict` has one -- which is the whole reason this asks the class
+       before it asks the kind. */
+    if (apy_class_find(O(obj)->v.o.cls, name))
+        return 0;
+    /* AN ORDINARY INSTANCE STAYS ON THE USER SIDE even with nothing found,
+       so a `__getattr__` still gets its chance -- the lookup there reports
+       the AttributeError, and reporting it from a builtin that was handed the
+       wrong kind would name the kind instead of the attribute. */
+    return O(obj)->v.o.held != 0;
+}
+
+APY_API apy_value apy_method_self(apy_value obj, apy_value name) {
+    if (O(obj)->kind == APY_INST_K && O(obj)->v.o.held
+            && !apy_class_find(O(obj)->v.o.cls, name))
+        return O(obj)->v.o.held;
+    return obj;
+}
+
 /* --- type objects ------------------------------------------------------- */
 /* `type(x)` has to be a VALUE now, not the string `apy_type_name` returns:
    `isinstance(p, Point)` names a class, and comparing its name to a string
@@ -15702,6 +16076,7 @@ OBJECT_NAMES = (
     "apy_inspect_iscoroutine", "apy_inspect_isgenerator",
     "apy_inspect_isasyncgen", "apy_inspect_iscoroutinefunction",
     "apy_is_instance", "apy_exc_register",
+    "apy_method_is_builtin", "apy_method_self",
     "apy_range", "apy_sorted", "apy_min", "apy_max", "apy_sum", "apy_reversed", "apy_enumerate", "apy_zip2", "apy_abs", "apy_round", "apy_isinstance", "apy_slice", "apy_list_pop", "apy_index_of", "apy_count_of", "apy_list_remove", "apy_dict_parts", "apy_dict_get_or",
     "apy_list_new", "apy_tuple_new", "apy_seq_push", "apy_getitem",
     "apy_dict_new", "apy_dict_set", "apy_key_at",

@@ -847,9 +847,47 @@ class ObjectHost:
             init = f.find("__init__")
             if isinstance(init, (Func, Native)):
                 self._invoke_obj(init.bind(obj), args, kwrest, bound)
-            elif args:
-                self._fail("TypeError", f"{f.name}() takes no arguments")
-                raise _UserFailed
+            elif (args or kwrest) and not isinstance(maker, (Func, Native)):
+                # A CLASS EXTENDING A BUILTIN INHERITS ITS CONSTRUCTOR.
+                # `class L(list): pass` then `L([1, 2, 3])` is a list of
+                # three, because `list.__init__` is what the empty body left
+                # in place -- and reporting `L() takes no arguments` about it
+                # names the wrong thing entirely: the class HAS a constructor,
+                # inherited, and the arguments are exactly what it wants.
+                #
+                # `builtin_kind()` IS THE HOST TYPE, which is what makes this
+                # two lines rather than a second constructor per kind: the
+                # instance already carries a real `dict`/`list`/`tuple`/`set`/
+                # `str`, so building the initial one is calling that type.
+                #
+                # NOT WHEN THE CLASS WROTE `__new__`. That constructor has
+                # already decided what the instance holds -- a `namedtuple`
+                # packs its arguments into one tuple -- and filling it a
+                # second time from the RAW arguments would either undo the
+                # packing or, for `P(1, 2)`, ask `tuple(1, 2)` for a tuple of
+                # two separate things and report the arity as an error.
+                # CPython draws the same line: `object.__init__` complains
+                # about surplus arguments only when `__new__` is not
+                # overridden.
+                kind = f.builtin_kind() if isinstance(f, Class) else None
+                if kind is None:
+                    self._fail("TypeError", f"{f.name}() takes no arguments")
+                    raise _UserFailed
+                # THE ARGUMENTS ARE HOST VALUES ALREADY, not handles --
+                # `_instantiate` is reached from `_invoke`, which unwraps.
+                # Putting a `_get` here read `int(a_list)` and reported the
+                # builtin's complaint about an int.
+                try:
+                    obj.held = kind(*[_content_of(one) for one in args],
+                                    **(kwrest or {}))
+                except _UserFailed:
+                    raise
+                except Exception as exc:
+                    # THE BUILTIN'S OWN REFUSAL, forwarded rather than
+                    # reworded: `L(5)` is a TypeError about an int not being
+                    # iterable, and that is the message CPython gives.
+                    self._fail(type(exc).__name__, str(exc))
+                    raise _UserFailed
             return obj
 
     def _invoke_rest(self, f, args: list, kwrest=None, bound: bool = False):
@@ -1187,6 +1225,12 @@ def _apy_raw_len(h, a):
             return int(v._send("__len__"))
         except _UserFailed:
             return 0
+    # A CLASS EXTENDING A BUILTIN has the builtin's length, which is what the
+    # index walk needs to bound itself. Without it the walk refused before it
+    # started, so `class D(dict)` was iterable through `for` and not through
+    # a comprehension -- the same object, two answers.
+    if isinstance(v, Instance) and v.held is not None:
+        return len(v.held)
     h._fail("TypeError", f"'{h.kind_name(v)}' object is not iterable")
     return 0
 
@@ -2790,6 +2834,26 @@ _OP_DUNDER = {
 }
 
 
+def _as_builtin(v, dunders):
+    """A builtin-extending instance ACTING AS its builtin, for one operator.
+
+    `class T(tuple)` has no `__add__` in its body, so `t + (4,)` reported an
+    unsupported operand pair between `'T'` and `'tuple'` -- about an object
+    that is a tuple and an operation tuples support. The same miss made
+    `D({'a': 1}) == {'a': 1}` answer False, which is worse than an error
+    because nothing marks it.
+
+    ONLY WHEN THE CLASS IS SILENT. A class that writes `__eq__` means its own,
+    and substituting the held value would run the builtin's comparison
+    instead -- so both the direct and the reflected name are checked before
+    anything is swapped.
+    """
+    if isinstance(v, Instance) and v.held is not None \
+            and all(v.cls.find(d) is None for d in dunders):
+        return v.held
+    return v
+
+
 def _binop(name, op, sym):
     """One arithmetic binding: Python's operator, the C's dispatch.
 
@@ -2815,6 +2879,13 @@ def _binop(name, op, sym):
         if sym == "|" and _is_type_like(x) and _is_type_like(y):
             arms = _union_arms(x) + _union_arms(y)
             return h._new(Alias(_union_form(h), tuple(arms)))
+        # BEFORE `_reject`, which sees a builtin-extending instance as
+        # neither a sequence nor a number and reports an unsupported pair --
+        # so a substitution made after it never gets the chance.
+        _pair = _OP_DUNDER.get(sym.split(" ")[0])
+        if _pair is not None:
+            x = _as_builtin(x, _pair)
+            y = _as_builtin(y, _pair)
         bad = _reject(h, sym, x, y)
         if bad is not None:
             return bad
@@ -3160,6 +3231,12 @@ def _cmpop(name, op):
                     return 0
                 if got is not NotImplemented:
                     return h._value(got)
+            # AFTER the dunders and before the comparison: a class that wrote
+            # one has already answered, and one that did not compares as the
+            # builtin it extends. `Counter(a=1) == {'a': 1}` is True in
+            # CPython for exactly this reason.
+            x = _as_builtin(x, (direct, reflected))
+            y = _as_builtin(y, (direct, reflected))
         try:
             return h._bool(op(x, y))
         except _UserFailed:
@@ -3628,9 +3705,18 @@ class Instance:
 
     def __repr__(self):
         out = self._send("__repr__")
-        if out is NotImplemented:
-            return f"<{self.cls.name} object at 0x{id(self):x}>"
-        return self.h._require_str(out, "__repr__")
+        if out is not NotImplemented:
+            return self.h._require_str(out, "__repr__")
+        # A CLASS EXTENDING A BUILTIN SHOWS THE BUILTIN. `class D(dict)` with
+        # no `__repr__` prints `{'a': 1}` in CPython, and printing
+        # `<D object at 0x...>` instead hides the entire contents of the thing
+        # -- which for a Counter or a defaultdict is the whole value. The
+        # class name is not shown here because CPython does not show it
+        # either: `repr(D({'a': 1}))` is `{'a': 1}`, and a subclass wanting
+        # its name in the repr writes one, as `Counter` and `deque` do.
+        if self.held is not None:
+            return repr(self.held)
+        return f"<{self.cls.name} object at 0x{id(self):x}>"
 
     def __str__(self):
         out = self._send("__str__")
@@ -3672,19 +3758,33 @@ class Instance:
     def __eq__(self, other):
         out = self._send("__eq__", other)
         if out is NotImplemented:
-            return self is other
+            # A CLASS EXTENDING A BUILTIN COMPARES AS THE BUILTIN. Identity is
+            # the right default only for an object with no content to compare;
+            # for two equal namedtuples it answers False, and together with a
+            # hash that agreed they would both sit in the same set.
+            got = _held_binary(self, "__eq__", other)
+            return (self is other) if got is NotImplemented else got
         return out
 
     def __ne__(self, other):
         out = self._send("__ne__", other)
         if out is NotImplemented:
             eq = self._send("__eq__", other)
-            return self is not other if eq is NotImplemented else not eq
+            if eq is NotImplemented:
+                got = _held_binary(self, "__eq__", other)
+                return (self is not other) if got is NotImplemented else not got
+            return not eq
         return out
 
     def __hash__(self):
         out = self._send("__hash__")
         if out is NotImplemented:
+            # A CLASS EXTENDING A BUILTIN HASHES AS THE BUILTIN, so two equal
+            # namedtuples land in the same bucket. Identity would not: they
+            # compare equal through the held tuple and would still both sit in
+            # a set, which is the wrong ANSWER rather than an error.
+            if self.held is not None and self.cls.find("__eq__") is None:
+                return hash(self.held)
             # A class defining `__eq__` and not `__hash__` is UNHASHABLE in
             # Python, and saying so is what makes a dict key of one an error
             # rather than a silently wrong lookup.
@@ -4026,12 +4126,40 @@ class Super:
         self.recv = recv
 
 
+def _held_binary(self, name, other):
+    """The operation performed by the BUILTIN the class extends, or
+    NotImplemented if that is not what this instance is.
+
+    THE HOST'S OWN OPERATORS NEED IT TOO, which is easy to miss. `_binop` and
+    `_cmpop` are what the IR calls, and they already substitute -- but
+    `sorted`, `min`, `max` and `list.sort` compare with PYTHON's `<` on the
+    `Instance` objects directly, and that reaches these generated dunders
+    instead. Without the same fallback, `sorted([P(2, 1), P(1, 9)])` on a
+    `namedtuple` reported `'<' not supported between instances of 'Instance'
+    and 'Instance'` -- naming this file's class, about two tuples.
+    """
+    if self.held is None or self.cls.find(name) is not None:
+        return NotImplemented
+    theirs = other
+    if isinstance(other, Instance) and other.held is not None \
+            and other.cls.find(name) is None:
+        theirs = other.held
+    method = getattr(self.held, name, None)
+    if method is None:
+        return NotImplemented
+    return method(theirs)
+
+
 def _make_binary(name, rname):
     def run(self, other):
-        return self._send(name, other)
+        got = self._send(name, other)
+        return _held_binary(self, name, other) if got is NotImplemented \
+            else got
 
     def rrun(self, other):
-        return self._send(rname, other)
+        got = self._send(rname, other)
+        return _held_binary(self, rname, other) if got is NotImplemented \
+            else got
     return run, rrun
 
 
@@ -4284,6 +4412,41 @@ def _apy_exit(h, a):
     return _user(h, lambda: h._value(cm._send("__exit__", *args)))
 
 
+def _content_of(v):
+    """What a builtin constructor should be handed for `v`.
+
+    `OrderedDict(other_ordered_dict)` reaches `dict(instance)`, and the host's
+    `dict` cannot read one: it subscripts what it is given, and an Instance is
+    not subscriptable. The instance's own dict is what the caller meant, and
+    handing that over is also what CPython does -- a mapping argument is
+    copied as a mapping.
+    """
+    return v.held if isinstance(v, Instance) and v.held is not None else v
+
+
+def _builtin_init(*args):
+    """`super().__init__(...)` where the base chain ends at a BUILTIN.
+
+    `class M(dict)` writing `super().__init__(other)` means `dict.__init__`,
+    which FILLS the instance -- and the base chain has no Python in it to find
+    that on, so the walk ran out, `object.__init__` answered, and the call
+    quietly did nothing. An empty dict where the program asked for a full one
+    is the shape of failure this whole arrangement is worst at showing: no
+    error, just a container that is not there.
+    """
+    if not args or not isinstance(args[0], Instance):
+        return None
+    recv, rest = args[0], list(args[1:])
+    kind = recv.cls.builtin_kind()
+    if kind is None:
+        return None
+    # IN PLACE, not a new object: `super().__init__()` initialises the
+    # instance the caller already has, and the lines after it in the same
+    # `__init__` go on using it.
+    recv.held = kind(*[_content_of(one) for one in rest])
+    return None
+
+
 def _exc_init(*args):
     """`BaseException.__init__(*args)`: it SETS THE MESSAGE AND `args`, which
     is the whole of what it does and the reason a class writing
@@ -4310,6 +4473,34 @@ def _apy_super(h, a):
 
 def _apy_is_instance(h, a):
     return 1 if isinstance(h._get(a[0], "apy_is_instance"), Instance) else 0
+
+
+def _apy_method_is_builtin(h, a):
+    """Whether `obj.name(...)` should take the BUILTIN side of the call.
+
+    See the C of the same name for the argument. In short: the class body
+    wins, a class that extends a builtin gets the builtin's method for
+    everything it did not write, and an ordinary instance stays on the user
+    side so `__getattr__` still gets its chance.
+    """
+    obj = h._get(a[0], "apy_method_is_builtin")
+    if not isinstance(obj, Instance):
+        return 1
+    name = str(h._get(a[1], "apy_method_is_builtin"))
+    if obj.cls.find(name) is not None:
+        return 0
+    return 1 if obj.held is not None else 0
+
+
+def _apy_method_self(h, a):
+    """The receiver the builtin side should act on: the held value, when the
+    class did not define the method itself."""
+    obj = h._get(a[0], "apy_method_self")
+    if isinstance(obj, Instance) and obj.held is not None:
+        name = str(h._get(a[1], "apy_method_self"))
+        if obj.cls.find(name) is None:
+            return h._new(obj.held)
+    return a[0]
 
 
 def _apy_getattr(h, a):
@@ -4392,6 +4583,34 @@ def _apy_default_getattr(h, a):
             if not _slot_allows(obj.cls, "__dict__"):
                 return h._no_attr(obj, name)
             return h._new(obj.dict)
+        # A CLASS THAT EXTENDS A BUILTIN answers with the builtin's own
+        # method for everything its body did not define. `class D(dict)` with
+        # only a `__missing__` still has `keys`, `items`, `get` and `update`,
+        # and this is where they come from -- asked of `held`, the real dict
+        # the instance carries.
+        #
+        # HERE AND NOT EARLIER, because the class body wins: a `Counter`
+        # defining `update` must shadow `dict.update` rather than be shadowed
+        # by it. And here and not LATER, because in CPython these arrive
+        # through the MRO, which is consulted before `__getattr__` -- a class
+        # extending a builtin AND defining `__getattr__` would otherwise route
+        # every inherited method through the fallback.
+        #
+        # THE MISS IS NOT THE ANSWER. A name neither the class nor the builtin
+        # has must still reach `__getattr__`, so the AttributeError the
+        # delegation raised is rolled back rather than reported -- the same
+        # rollback `_apy_getattr_default` does for its fallback.
+        if obj.held is not None:
+            before = h.err
+            got = _apy_default_getattr(h, [h._new(obj.held), a[1]])
+            if got:
+                return got
+            if h.err is not None and h.err is not before \
+                    and h.err[0] == "AttributeError":
+                h.err = before
+                h.err_value = None
+            else:
+                return got
         # `__getattr__` -- the LAST resort, asked only after the instance dict
         # and the class have both missed. That ordering is the whole protocol.
         if obj.cls.find("__getattr__") is not None:
@@ -4587,6 +4806,33 @@ def _apy_default_getattr(h, a):
         # message and does nothing with it.
         if found is None and isinstance(obj.recv, Exc) and name == "__init__":
             return h._new(Native("__init__", _exc_init).bind(obj.recv))
+        # THE SAME ARRANGEMENT FOR A BUILTIN BASE, and for the same reason:
+        # the chain above `class M(dict)` is a KIND rather than a class, so
+        # the walk finds nothing and `object.__init__` would accept the
+        # arguments and drop them. See `_builtin_init`.
+        if found is None and name == "__init__"                 and isinstance(obj.recv, Instance) and obj.recv.held is not None:
+            return h._new(Native("__init__", _builtin_init).bind(obj.recv))
+        # `super().__new__(cls, x)` PAST A BUILTIN BASE, which is the only way
+        # to build an immutable one. A tuple's contents cannot be set after
+        # the fact, so `class P(tuple)` has to fill it here or never -- and
+        # `object.__new__` below would answer a bare instance with an EMPTY
+        # tuple inside, which is a wrong value rather than an error.
+        #
+        # NOT BOUND. `__new__` is an implicit staticmethod: the class arrives
+        # as an ordinary first argument that the caller writes out, and
+        # binding the receiver in front of it would land every argument one
+        # place late.
+        if found is None and name == "__new__" and isinstance(obj.frm, Class) \
+                and obj.frm.builtin_kind() is not None:
+            def _builtin_new(cls, *rest):
+                made = Instance(cls, h)
+                kind = cls.builtin_kind() if isinstance(cls, Class) else None
+                if kind is not None:
+                    made.held = kind(*[_content_of(one) for one in rest]) \
+                        if rest else kind()
+                return made
+
+            return h._new(Native("__new__", _builtin_new))
         if found is None:
             # THE BASE CHAIN HAS RUN OUT, which means `object` -- and every
             # class has one. `super().__init__()` inside a class with no
@@ -6687,6 +6933,8 @@ _TABLE.update({
     "apy_default_init": _apy_default_init,
     "apy_getattr": _apy_getattr,
     "apy_is_instance": _apy_is_instance,
+    "apy_method_is_builtin": _apy_method_is_builtin,
+    "apy_method_self": _apy_method_self,
     "apy_exc_register": _apy_exc_register,
     "apy_default_setattr": _apy_default_setattr,
     "apy_default_delattr": _apy_default_delattr,
@@ -7254,6 +7502,14 @@ def _apy_iterable(h, a):
             return h._new(got)
     if not isinstance(v, Instance):
         return a[0]
+    # A CLASS EXTENDING A BUILTIN WALKS THE BUILTIN, unless its body says
+    # otherwise. This is the funnel every eager walk comes through -- a
+    # comprehension, `sorted`, `list(x)`, `in` -- so the delegation belongs
+    # here as well as in `_apy_iter`: patching only the latter left
+    # `sorted(k for k in d)` reporting `'D' object is not iterable` while
+    # `for k in d` worked, which is a worse state than neither.
+    if v.cls.find("__iter__") is None and v.cls.find("__getitem__") is None             and v.held is not None:
+        return h._new(list(v.held))
     try:
         got = v._send("__iter__")
     except _UserFailed:
@@ -8455,6 +8711,13 @@ def _apy_getiter(h, a):
             if isinstance(got, Instance) and got.cls.find("__next__") is not None:
                 return h._value(got)
             return _apy_getiter(h, [h._value(got)])
+        # A CLASS EXTENDING A BUILTIN steps the builtin's own cursor. This is
+        # the entry a GENERATOR's `for` uses -- it advances rather than
+        # walking by index, because an index walk cannot survive a suspension
+        # -- so without this `[k for k in d]` worked and `(k for k in d)` did
+        # not, which is the same loop written two ways.
+        if v.held is not None:
+            return _apy_getiter(h, [h._new(v.held)])
         if v.cls.find("__getitem__") is None:
             return h._fail("TypeError",
                            f"'{h.kind_name(v)}' object is not iterable")
@@ -8627,6 +8890,13 @@ def _apy_iter(h, a):
             return 0
         if got is not NotImplemented:
             return h._value(got)
+        # A CLASS EXTENDING A BUILTIN IS ITERABLE BECAUSE THE BUILTIN IS.
+        # `for k in d` over a `class D(dict)` walks its keys, and without this
+        # it reported `'D' object is not iterable` about a thing whose whole
+        # content is iterable -- `__iter__` is not in the body, so the miss
+        # above is not the answer.
+        if v.held is not None:
+            return _apy_iter(h, [h._new(v.held)])
         drained = _apy_iterable(h, a)
         if not drained:
             return 0
@@ -8765,6 +9035,12 @@ def _apy_to_dict(h, a):
     # a new object, which only became visible once `|=` mutated in place.
     if isinstance(src, dict):
         return h._new(dict(src))
+    # `dict(d)` WHERE `d` IS A dict SUBCLASS copies the MAPPING, not the keys.
+    # Iterating a dict yields keys, so the pair walk below read `dict(["a"])`
+    # and reported a sequence element of the wrong length -- about a
+    # `defaultdict` that is a perfectly good mapping.
+    if isinstance(src, Instance) and isinstance(src.held, dict):
+        return h._new(dict(src.held))
     items = _seq_items(h, src, "apy_to_dict")
     if items is None:
         return 0

@@ -5206,7 +5206,8 @@ class DynamicLowering:
             return out
         args = self._dyn_operands(node.args)
         sym = method_symbol(attr, len(args))
-        if sym is not None and attr in self.user_method_names:
+        if sym is not None and (attr in self.user_method_names
+                                or self.extends_builtin):
             # THE NAME COLLIDES. `add` is a set's method and may equally be a
             # method of a class in this same program, and which one `x.add(1)`
             # means is decided by the receiver at run time -- there is no
@@ -5215,7 +5216,17 @@ class DynamicLowering:
             # Only where a collision actually exists: the frontend knows every
             # method name every class in the module defines, so a program with
             # no `add` method keeps `s.add(1)` as one call and pays nothing.
-            return self._dyn_method_either(receiver, attr, args, sym)
+            #
+            # A CLASS EXTENDING A BUILTIN IS THE SAME SITUATION, arrived at
+            # from the other side. `class D(dict)` INHERITS `keys` without
+            # writing it, so the name is not in `user_method_names` and
+            # `d.keys()` was lowered as a direct `apy_dict_keys(d)` -- handing
+            # a runtime function that wants a dict an INSTANCE, which reported
+            # `'D' object has no attribute 'keys'` for a method the object
+            # plainly has. The receiver decides here too, so it gets the same
+            # two-way shape; a program with no such class still pays nothing.
+            return self._dyn_method_either(receiver, attr, args, sym,
+                                           node.keywords)
         if sym is None:
             # Not a built-in method name: look the attribute up on the
             # receiver and call what comes back. This is the only path a user
@@ -5324,33 +5335,69 @@ class DynamicLowering:
         return {self.infos[k].node.name
                 for c in self.classes.values() for k in c.methods}
 
+    @property
+    def extends_builtin(self) -> bool:
+        """Whether any class here extends `dict`, `list`, `tuple`, `set` or
+        `str`.
+
+        WHICH ONE DOES NOT MATTER, only that one does. The question this
+        answers is "can a receiver at an arbitrary call site be an instance
+        carrying a builtin", and a single such class in the module makes the
+        answer yes for every builtin method name at once -- there is nothing
+        finer to test against, because the receiver's class is exactly what is
+        not known at a dynamic call site.
+        """
+        return any(c.builtin_base is not None for c in self.classes.values())
+
     def _dyn_method_either(self, receiver: int, attr: str, args: list,
-                           sym: str) -> int:
+                           sym: str, keywords=()) -> int:
         """One call site, two answers, chosen by the receiver's kind.
 
         The result lands in ONE register written on both paths, which is what
         the mutable-register IR makes cheap -- under SSA this would need a phi.
+
+        THE KEYWORDS TRAVEL WITH THE ARGUMENTS. They did not, and while this
+        shape was reached only on a NAME COLLISION that was invisible: the
+        colliding calls in the corpus passed none. Widening the test to cover
+        a class extending a builtin brought ordinary calls through here, and
+        `od.popitem(last=False)` quietly popped the other end -- the keyword
+        was dropped and the default stood, which is a wrong answer with
+        nothing to mark it.
         """
         out = self.b.reg(T.PTR)
         user = self.b.new_block("usermethod")
         builtin = self.b.new_block("builtinmethod")
         done = self.b.new_block("methodend")
-        is_inst = self.b.call(T.I64, "apy_is_instance", [receiver])
-        self.b.branch(self.b.cmp(Op.NE, T.I64, is_inst,
-                                 self.b.const(T.I64, 0)), user, builtin)
+        # THE CLASS DECIDES, NOT THE KIND. This used to ask
+        # `apy_is_instance`, which sends every instance down the user path --
+        # correct for a class that DEFINES the colliding name, and wrong for
+        # one that INHERITS it from a builtin base, where the class has no
+        # `keys` to find and the builtin call is never reached. See
+        # `apy_method_is_builtin`.
+        is_builtin = self.b.call(T.I64, "apy_method_is_builtin",
+                                 [receiver, self._dyn_str_literal(attr)])
+        self.b.branch(self.b.cmp(Op.NE, T.I64, is_builtin,
+                                 self.b.const(T.I64, 0)), builtin, user)
 
         self.b.switch_to(user)
         found = self.b.call(T.PTR, "apy_getattr",
                             [receiver, self._dyn_str_literal(attr)])
         self._dyn_check()
-        self.b.emit(Instruction(Op.COPY, T.PTR, dst=out,
-                                args=[self._dyn_indirect(found, args)]))
+        self.b.emit(Instruction(
+            Op.COPY, T.PTR, dst=out,
+            args=[self._dyn_indirect(found, args, keywords)]))
         self.b.jump(done)
 
         self.b.switch_to(builtin)
+        # UNWRAPPED FIRST. A `class D(dict)` reaching `apy_dict_keys` has to
+        # arrive as the dict it carries; handing the instance over is what
+        # made the runtime report `'D' object has no attribute 'keys'`.
         self.b.emit(Instruction(
             Op.COPY, T.PTR, dst=out,
-            args=[self._dyn_builtin_method(receiver, attr, args, sym)]))
+            args=[self._dyn_builtin_method(
+                self.b.call(T.PTR, "apy_method_self",
+                            [receiver, self._dyn_str_literal(attr)]),
+                attr, args, sym, keywords)]))
         self.b.jump(done)
 
         self.b.switch_to(done)

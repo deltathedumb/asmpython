@@ -96,6 +96,9 @@ rather than a bundled module, and is unaffected.
 | `copy` | `copy`, `deepcopy`, the hooks, the memo; NOT `__reduce__`, `__getstate__`, `copyreg`, `copy.replace` |
 | `dataclasses` | `dataclass` with init/repr/eq/order/unsafe_hash/frozen/match_args/kw_only, `field` with all eight arguments, `Field`, `fields`, `is_dataclass`, `asdict`/`astuple` recursing, `replace`, `make_dataclass`, `InitVar`, `KW_ONLY`, `MISSING`, `FrozenInstanceError`, `__post_init__`, ClassVar exclusion, inheritance; NOT `slots`, `weakref_slot` (refused BY NAME), `field(doc=)`, `Field[int]` |
 | `pathlib` | the whole PURE half -- `PurePosixPath`, `parts`, `name`, `stem`, `suffix`, `suffixes`, `parent`, `parents`, `root`, `anchor`, `is_absolute`, `joinpath`, `with_name`, `with_suffix`, `with_stem`, `relative_to`, `match`, `as_posix`, `/`, comparison, `__fspath__`; and a CONCRETE `Path` with `exists`, `is_file`, `is_dir`, `read_bytes`, `read_text`, `write_bytes`, `write_text`, `mkdir`, `touch`, `unlink`, `rmdir`. NOT `iterdir`, `glob`, `rglob`, `stat`, `resolve`, `absolute`, `open`, symlinks -- each refused BY NAME -- and `Path` is POSIX-flavoured, so `str()` renders `/` where CPython on Windows renders `\`. Windows-only concrete half. |
+| `abc` | `ABCMeta`, `ABC`, `abstractmethod`, `register`, `__abstractmethods__`, `__subclasshook__`, `update_abstractmethods`, `get_cache_token`, `@property`/`@classmethod` stacked over `@abstractmethod`; the three deprecated decorators are FUNCTIONS rather than subclasses of `property`/`classmethod`/`staticmethod`, which this frontend cannot extend. NOT the per-class negative cache. |
+| `collections` | `namedtuple` (positional and keyword construction, `defaults`, `rename`, `_make`/`_replace`/`_asdict`/`_fields`/`_field_defaults`), `deque` (both ends, `maxlen`, `rotate`, `extendleft`), `defaultdict`, `Counter` (all four operators, `most_common`, `elements`, `subtract`, `total`), `OrderedDict` (`move_to_end`, order-sensitive `__eq__`), `ChainMap`, `UserDict`, `UserList`, `UserString`. NOT `deque`'s O(1) ends -- it is a list inside, so the answers match and the costs do not -- and `namedtuple` has no `__slots__`. |
+| `collections.abc` | all twenty-five ABCs, the mixin methods for `Sequence`/`MutableSequence`/`Set`/`MutableSet`/`Mapping`/`MutableMapping`, `__subclasshook__` for the structural protocols, and the builtin registrations. NOT `range`, `bytearray` or `memoryview`, which cannot be named as values in this frontend and so cannot be registered; `MappingView` and its three subclasses are names rather than working views. |
 
 **Restoring is not free, and that is the point of stating coverage.** Three of
 `itertools`'s seven functions were wrong in ways the old suite never asked
@@ -564,10 +567,10 @@ having, because it says the clear cost coverage and not correctness:
 | 5 | FAIL | four reach an archived module at RUN time (`sys.monitoring`, `sys.addaudithook`, `typing`, `inspect`); one was `__future__`, below |
 | 1 | TIMEOUT | not a regression, see below |
 
-The 35 refusals name exactly what to write next, in this order by how many
-cases each unblocks: `collections` and `collections.abc`, `abc`, `typing`,
-`dataclasses`, `io`, `os` (`pathlib` is written -- see above), `enum`,
-`numbers`, `decimal`,
+The 35 refusals named what to write next, in order by how many cases each
+unblocks. `collections`, `collections.abc`, `abc`, `dataclasses`, `enum`, `copy` and
+`pathlib` are done; what is left is `typing`,
+`io`, `os`, `numbers`, `decimal`,
 `fractions`, `statistics`, `datetime`/`zoneinfo`, `contextvars`, `copy`,
 `unicodedata`, `tomllib`, `annotationlib`.
 
@@ -589,3 +592,54 @@ clear and never copied into `archived/stdlib-prerefactor/` -- so unlike the
 other twenty-seven it had no reference version, and the only copy was in git.
 It is restored, with a coverage line and a test it never had. Every other
 deleted file did reach the archive; that was checked, not assumed.
+
+## `collections` was a compiler problem, and this is what it was
+
+**A `dict` COULD NOT BE SUBCLASSED, and the failure was silent.** `class
+D(dict)` produced an object that answered `isinstance(d, dict)` with True and
+`len(d)` with 0 forever, had no `keys`, and printed as `<D object at 0x...>`.
+The mechanism was half-built: an instance already carried a `held` value --
+a real dict, list, tuple, set or str -- and `getitem`, `setitem` and `len`
+consulted it. Nothing else did.
+
+**THAT DECIDED THE SHAPE OF THE MODULE.** `defaultdict`, `Counter` and
+`OrderedDict` ARE dicts in CPython: `isinstance(c, dict)` is True, `c == {...}`
+compares by content, `dict(c)` copies. The archived module worked around the
+gap with a `_Mapping` base and got all three wrong. Building on composition
+again would have been a module that passed its own tests and disagreed with
+the oracle on the three questions people actually ask, so the compiler was
+fixed instead.
+
+**WHAT THE FIX WAS**, in both runtimes and in the frontend:
+
+| where | what |
+| --- | --- |
+| attribute lookup | a name the class does not define is asked of `held`, before `__getattr__` and after the class body, which is where the MRO would put it |
+| method dispatch | the frontend chose between a user lookup and a direct builtin call by asking `apy_is_instance`; it now asks whether the CLASS defines the name, and hands the builtin branch the held value |
+| iteration | four separate entry points -- the lazy cursor, the eager walk, the index-walk length and its element accessor -- and the last two had to move together or the walk read the right COUNT out of the wrong object |
+| construction | a class extending a builtin inherits its constructor, and `super().__new__(cls, x)` past a builtin base builds one; a tuple's contents cannot be set afterwards, so that is the only place a `namedtuple` can be filled |
+| operators | `+`, `==` and the orderings fall back to the builtin when neither side wrote the dunder -- and the HOST's own dunders needed it too, because `sorted` compares with Python's `<` rather than through the IR |
+| `repr` and `hash` | a subclass with no `__repr__` prints its content, and two equal namedtuples hash alike |
+
+**ONE OF THOSE FIXES FOUND A BUG THAT WAS ALREADY THERE.**
+`_dyn_method_either` -- the two-way call shape -- DROPPED KEYWORD ARGUMENTS.
+It was reached only on a name collision between a user method and a builtin
+one, and no such call in the corpus passed a keyword, so nothing showed it.
+Widening the test to cover builtin-extending classes brought ordinary calls
+through it and `od.popitem(last=False)` popped the other end. A dropped
+keyword is a wrong answer with nothing to mark it, which is why it survived.
+
+**WHAT IS STILL A LIMIT**, found by writing the module against it:
+
+- `super().__new__` past a builtin base works; `SomeClass.__new__` reached as
+  an attribute does not, so `namedtuple` is built on a module-level base that
+  every generated class extends rather than on a per-class `__new__`.
+- A class NESTED IN A FUNCTION cannot use zero-argument `super()`: the
+  frontend emits a reference to a `__class__` global it never creates, and the
+  compile fails with `global_addr of unknown global`. That is a real bug with
+  a name; it is why the base is at module level.
+- A `str` does not answer its method names through `getattr`, so a starred
+  forward (`self.data.replace(a, b, *rest)`) cannot reach them. `UserString`
+  writes its optional parameters out instead.
+- `range`, `bytearray`, `memoryview`, `complex` and `NoneType` are not values,
+  so `collections.abc` cannot register them.

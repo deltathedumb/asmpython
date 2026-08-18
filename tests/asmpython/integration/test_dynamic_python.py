@@ -79,6 +79,95 @@ PROGRAMS = {
         # An exception that was never raised has no traceback.
         print(ValueError("unraised").__traceback__)
     """,
+    "extending_a_builtin": """
+        # `class D(dict)` and its four siblings, which `collections` is built
+        # on. An instance carries a real dict/list/tuple/set and DELEGATES to
+        # it for everything the class body does not define -- attributes,
+        # iteration, `in`, `len`, the operators, `repr`, `hash` and the
+        # constructor. Every one of those was a separate entry point and each
+        # is here, because getting one wrong is a silently wrong answer rather
+        # than an error: the object still claims `isinstance(d, dict)`.
+        class D(dict):
+            def __missing__(self, k):
+                return "missing:" + str(k)
+
+
+        d = D()
+        d["a"] = 1
+        print(d, d["a"], len(d), sorted(d.keys()), d["zz"])
+        print(sorted(d.items()), d.get("a"), d.get("q", 7))
+        print(isinstance(d, dict), d == {"a": 1}, dict(d))
+        print([k for k in d], sorted(k for k in d), list(d))
+        print("a" in d, "zz" in d)
+        d.update({"b": 2})
+        print(sorted(d.items()), d.pop("b"), sorted(d.items()))
+
+
+        class Init(dict):
+            def __init__(self, *a, **k):
+                super().__init__(*a)
+                self.tag = "t"
+
+
+        i = Init({"x": 1})
+        print(i, i.tag, len(i))
+
+
+        class L(list):
+            def second(self):
+                return self[1]
+
+
+        l = L([3, 1, 2])
+        print(l, l.second(), len(l), isinstance(l, list))
+        l.append(4)
+        l.sort()
+        print(l, l.index(3), l.count(1), l[1:], list(reversed(l)))
+
+
+        class T(tuple):
+            def __new__(cls, *args):
+                return super().__new__(cls, list(args))
+
+
+        t = T(1, 2, 3)
+        print(t, len(t), t[1], t + (4,), t == (1, 2, 3))
+        a, b, c = t
+        print(a, b, c, len({T(1, 2), T(1, 2)}), hash(t) == hash((1, 2, 3)))
+
+
+        class S(set):
+            pass
+
+
+        s = S([1, 2])
+        s.add(3)
+        print(sorted(s), 2 in s, len(s))
+
+
+        # THE CLASS BODY WINS over the builtin, which is what lets a `Counter`
+        # define `update` next to `dict.update`.
+        class Own(dict):
+            def keys(self):
+                return "mine"
+
+            def __repr__(self):
+                return "Own!"
+
+
+        o = Own()
+        o["k"] = 1
+        print(o.keys(), repr(o), len(o), o["k"])
+
+
+        # A plain instance is untouched by any of it.
+        class Plain:
+            def __getattr__(self, name):
+                return "fallback:" + name
+
+
+        print(Plain().whatever, Plain().append)
+    """,
     "spread_calls_onto_every_callable": """
         class B:
             def m(self, a, b):
