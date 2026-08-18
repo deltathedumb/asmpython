@@ -1656,6 +1656,8 @@ static int apy_is_int_like(apy_value v);
 static int apy_eq_raw(apy_value a, apy_value b);
 static apy_value apy_text(apy_value v, int quoted);
 
+static const char *apy_exc_shown(const char *name);
+
 /* `str(e)` is the ARGUMENT alone and `repr(e)` is `ValueError('x')`.
    Printing an exception shows its message, which is why the two differ
    here and not for any other kind. */
@@ -1673,10 +1675,10 @@ static apy_value apy_exc_text(apy_value v, int quoted) {
         int64_t n, out;
         char *buf;
         if (!quoted) return shown;
-        n = (int64_t)strlen(O(v)->v.e.name) + O(shown)->v.s.n + 1;
+        n = (int64_t)strlen(apy_exc_shown(O(v)->v.e.name)) + O(shown)->v.s.n + 1;
         buf = (char *)malloc((size_t)n + 1);
-        out = (int64_t)strlen(O(v)->v.e.name);
-        memcpy(buf, O(v)->v.e.name, (size_t)out);
+        out = (int64_t)strlen(apy_exc_shown(O(v)->v.e.name));
+        memcpy(buf, apy_exc_shown(O(v)->v.e.name), (size_t)out);
         /* The tuple's own parentheses ARE the call's, which is why the text
            is spliced in whole rather than wrapped again. */
         memcpy(buf + out, O(shown)->v.s.p, (size_t)O(shown)->v.s.n);
@@ -1709,10 +1711,10 @@ static apy_value apy_exc_text(apy_value v, int quoted) {
         int twice = O(v)->v.e.rendered
             && strcmp(O(v)->v.e.name, "KeyError") == 0;
         apy_value shown = !has ? apy_lit("") : apy_text(arg, !twice);
-        int64_t n = (int64_t)strlen(O(v)->v.e.name) + O(shown)->v.s.n + 2;
+        int64_t n = (int64_t)strlen(apy_exc_shown(O(v)->v.e.name)) + O(shown)->v.s.n + 2;
         char *buf = (char *)malloc((size_t)n + 1);
-        int64_t out = (int64_t)strlen(O(v)->v.e.name);
-        memcpy(buf, O(v)->v.e.name, (size_t)out);
+        int64_t out = (int64_t)strlen(apy_exc_shown(O(v)->v.e.name));
+        memcpy(buf, apy_exc_shown(O(v)->v.e.name), (size_t)out);
         buf[out++] = '(';
         memcpy(buf + out, O(shown)->v.s.p, (size_t)O(shown)->v.s.n);
         out += O(shown)->v.s.n;
@@ -3482,7 +3484,7 @@ static const char *apy_kind_name(apy_value v) {
     case APY_INT_K:   return "int";
     case APY_FLOAT_K: return "float";
     case APY_DICT_K:  return "dict";
-    case APY_EXC_K:   return O(v)->v.e.name;
+    case APY_EXC_K:   return apy_exc_shown(O(v)->v.e.name);
     case APY_LIST_K:  return "list";
     case APY_TUPLE_K: return "tuple";
     case APY_SET_K:   return "set";
@@ -8035,6 +8037,20 @@ APY_API apy_value apy_exc_class_bind(apy_value name, apy_value cls) {
 static apy_value apy_exc_class_named(const char *name) {
     if (!apy_exc_class_table) return 0;
     return apy_dict_get_or(apy_exc_class_table, apy_lit(name), 0);
+}
+
+/* THE NAME AN EXCEPTION SHOWS, which is not always the name it MATCHES.
+
+   A bundled module's classes are spliced under mangled names and the splice
+   renames them back, so `copy.Error`'s cells still carry
+   `_asmpy_bundled_copy_Error` -- and they must, because `except copy.Error`
+   compiles to that spelling and `apy_error_matches` walks by name. Renaming
+   the cell would fix the display and break the catch, so the mapping happens
+   HERE: everything a program READS goes through this, everything that
+   MATCHES keeps using `v.e.name`. */
+static const char *apy_exc_shown(const char *name) {
+    apy_value cls = apy_exc_class_named(name);
+    return cls ? APY_CSTR(O(cls)->v.t.name) : name;
 }
 
 /* Is this type object one that CONSTRUCTS AN EXCEPTION when it is called?
@@ -14116,7 +14132,18 @@ APY_API apy_value apy_setattr(apy_value obj, apy_value name, apy_value value) {
         if (parent && strcmp(was, APY_CSTR(value)) != 0) {
             apy_value pname = apy_lit(parent);
             apy_exc_register(value, pname);
-            if (found == obj) apy_exc_class_bind(value, obj);
+            /* BOTH SPELLINGS, and `!found` is the case that matters. An
+               exception class with an EMPTY BODY is never handed to
+               `apy_exc_class_bind` at all -- `_dyn_class` early-returns
+               because there is nothing to build -- so nothing was registered
+               under the mangled name, `apy_exc_construct` could not find a
+               class, and every display fell back to the name the CELL
+               carries. Right for a user's class, wrong for a bundled one
+               whose cells carry the mangled spelling. */
+            if (found == obj || !found) {
+                apy_exc_class_bind(value, obj);
+                apy_exc_class_bind(apy_lit(was), obj);
+            }
         }
         return apy_none();
     }

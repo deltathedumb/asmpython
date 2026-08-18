@@ -509,11 +509,18 @@ class ObjectHost:
             # 'a','b'))` is `('a', 'b')` and its repr is `ValueError('a',
             # 'b')` -- CPython shows the whole of `args` once there is more
             # than one, and rendering only the first dropped the rest.
+            # THE NAME IT SHOWS, not the one it MATCHES on. A bundled
+            # module's exception class is spliced under a mangled name and
+            # renamed back, while its cells keep the mangled spelling --
+            # because `except copy.Error` compiles to that and the hierarchy
+            # walks by name. Mirrors the C's `apy_exc_shown`.
+            held = v.cls if v.cls is not None else self.exc_class.get(v.name)
+            shown_name = held.name if held is not None else v.name
             argv = getattr(v, "argv", None)
             if argv is not None and len(argv) > 1:
                 shown = self._text(tuple(argv), True)
                 # The tuple's own parentheses ARE the call's.
-                return f"{v.name}{shown}" if quoted else shown
+                return f"{shown_name}{shown}" if quoted else shown
             # `str(e)` is the argument alone, `repr(e)` is `ValueError('x')`.
             if not quoted:
                 # `str(KeyError('k'))` is `"'k'"` -- the REPR of the argument.
@@ -529,7 +536,7 @@ class ObjectHost:
             # the C for why that half needs the key retained.
             twice = v.rendered and v.name == "KeyError"
             shown = "" if not v.has_arg else self._text(v.arg, not twice)
-            return f"{v.name}({shown})"
+            return f"{shown_name}({shown})"
         if isinstance(v, range):
             # `range(0, 10, 2)` -- and `range(0, 3)` when the step is 1, which
             # is how CPython prints one. Before the container branch, which
@@ -1073,7 +1080,21 @@ def _apy_as_bool(h, a):
 # ── inspection ──────────────────────────────────────────────────────────────
 
 def _apy_type_name(h, a):
-    return h._new(h.kind_name(h._get(a[0], "apy_type_name")))
+    """`type(x).__name__`, fused by the frontend into one call.
+
+    THROUGH `_type_of` AND NOT STRAIGHT TO `kind_name`. The fused shape has to
+    answer what the unfused one does, and `kind_name` reads an exception's own
+    NAME STRING rather than the class behind it -- so a bundled module's
+    exception, whose class the splice renames from `_asmpy_bundled_copy_Error`
+    back to `Error`, showed the internal spelling. `t = type(e); t.__name__`
+    was right and `type(e).__name__` was not, for the same object, because
+    only one of them came through here.
+    """
+    v = h._get(a[0], "apy_type_name")
+    got = h._type_of(v)
+    if isinstance(got, Class):
+        return h._new(got.name)
+    return h._new(h.kind_name(v))
 
 
 def _apy_truth(h, a):
@@ -2464,10 +2485,18 @@ def _rename_exception(h, was: str, now: str, cls) -> None:
     """
     if was == now:
         return
-    if h.exc_class.get(was) is cls:
-        h.exc_class[now] = cls
     if was in h.user_exc:
         h.user_exc[now] = h.user_exc[was]
+    # BOTH SPELLINGS, and the `not registered` case is the one that matters.
+    # An exception class with an EMPTY BODY is never handed to
+    # `apy_exc_class_bind` at all -- the lowering early-returns because there
+    # is nothing to build -- so nothing was registered under the mangled name,
+    # and every display fell back to the name the CELL carries. Right for a
+    # user's class, wrong for a bundled one. Mirrors the C's `__name__` arm.
+    held = h.exc_class.get(was)
+    if held is cls or (held is None and was in h.user_exc):
+        h.exc_class[now] = cls
+        h.exc_class[was] = cls
 
 
 def _apy_exc_class_bind(h, a):
