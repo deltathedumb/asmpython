@@ -325,9 +325,25 @@ class TestTheArithmeticSplit:
             text = objects_c(split=SPLIT)
         finally:
             del sys.path[0]
+        # A SIGNATURE MAY WRAP, and until `str` began moving none of them did.
+        # `apy_str_find3(apy_value s, apy_value sub, apy_value start,` carries
+        # its `apy_value end);` on the next line, so asking whether THIS line
+        # ends with `;` or `{` put it in neither bucket -- and the test failed
+        # for a split the generator had performed perfectly. Each head is
+        # joined to its terminator before anything is decided about it.
+        lines = text.splitlines()
+        joined = []
+        for i, first in enumerate(lines):
+            if not first.startswith("APY_API"):
+                continue
+            head, j = first, i
+            while not head.rstrip().endswith((";", "{")) and j + 1 < len(lines):
+                j += 1
+                head = head + " " + lines[j].strip()
+            joined.append(head)
         for name in SPLIT:
-            heads = [l for l in text.splitlines() if l.startswith("APY_API")
-                     and (f" {name}(" in l or f" {name}_slow(" in l)]
+            heads = [l for l in joined
+                     if f" {name}(" in l or f" {name}_slow(" in l]
             declared = [l for l in heads if l.rstrip().endswith(";")]
             defined = [l for l in heads if l.rstrip().endswith("{")]
             assert any(f" {name}(" in l for l in declared), (name, heads)

@@ -98,6 +98,12 @@ SPLITS: dict[str, tuple[str, ...]] = {
     # and what happens when nobody can give them back) asked at the smallest
     # scale there is.
     "str_code.py": ("apy_ord", "apy_chr"),
+    # THE LARGEST GROUP SO FAR, and the safest: six entry points over one
+    # shared search, and not one of them allocates anything but the integer it
+    # answers with. The whole group is verifiable by comparing values, with no
+    # question about who owns a buffer.
+    "str_find.py": ("apy_str_find", "apy_str_find2", "apy_str_find3",
+                    "apy_str_rfind", "apy_str_rfind2", "apy_str_rfind3"),
 }
 
 #: Every C symbol currently provided by IR instead. What `objects_c()` guards.
