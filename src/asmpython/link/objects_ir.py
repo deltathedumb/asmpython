@@ -81,6 +81,12 @@ REPLACES: dict[str, tuple[str, ...]] = {
     # an `apy_value` parameter because that is what an IR `ptr` compiles to.
     "str_cell.py": ("apy_from_cstr", "apy_from_bytes", "apy_bytes_literal",
                     "apy_str_copy_bytes"),
+    # THE BUFFERS, which is the prerequisite docs/INERT-RUNTIME.md names ahead
+    # of `list` and `dict`: those two grow by DOUBLING and release the block
+    # they grew out of, and stage 4's bump arena can neither resize nor
+    # reclaim. Size classes and a free list over the same arena, so the
+    # platform floor is still three functions.
+    "blocks.py": ("apy_alloc_block", "apy_realloc_block", "apy_free_block"),
 }
 
 #: The C functions a ported module takes the FRONT of, per source file.

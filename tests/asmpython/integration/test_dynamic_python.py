@@ -79,6 +79,68 @@ PROGRAMS = {
         # An exception that was never raised has no traceback.
         print(ValueError("unraised").__traceback__)
     """,
+    "buffers_grow_and_are_released": """
+        # THE BLOCK ALLOCATOR, exercised through the things that use it. A
+        # list's item array is the one allocation this runtime genuinely frees
+        # -- it DOUBLES on growth and a slice assignment hands the old one
+        # back -- so `runtime/blocks.py` puts size classes and free lists over
+        # the arena, and every buffer below is handed out, grown, released and
+        # handed out again.
+        #
+        # WHAT A BROKEN ALLOCATOR LOOKS LIKE HERE: not a crash, but an element
+        # read out of a block that was reused while still live. So every case
+        # checks CONTENTS after the reuse rather than only lengths.
+        xs = []
+        for i in range(200):
+            xs.append(i)
+        print(len(xs), xs[0], xs[199], sum(xs))
+
+        # A release, then a rebuild that should take the same blocks back.
+        xs[0:150] = []
+        print(len(xs), xs[0], xs[-1])
+        for i in range(300):
+            xs.append(i * 2)
+        print(len(xs), xs[49], xs[50], xs[-1])
+
+        # Several live at once, so the free lists cannot hand the same block
+        # to two of them.
+        a = list(range(100))
+        b = list(range(100, 200))
+        c = list(range(200, 300))
+        a[0:50] = []
+        print(len(a), len(b), len(c), a[0], b[0], c[0], a[-1], b[-1], c[-1])
+        for i in range(200):
+            a.append(-i)
+        print(len(a), a[0], a[49], a[50], a[-1], b[0], b[99], c[0], c[99])
+
+        # Dicts grow the same way, two buffers at a time.
+        d = {}
+        for i in range(150):
+            d[i] = i * i
+        print(len(d), d[0], d[149], sorted(d)[:3])
+        for i in range(75):
+            del d[i]
+        print(len(d), d[75], d[149], min(d), max(d))
+
+        # Sets, and a nesting so the blocks are interleaved rather than
+        # allocated and freed in order.
+        s = set()
+        for i in range(200):
+            s.add(i % 91)
+        print(len(s), min(s), max(s))
+        rows = [list(range(k, k + 30)) for k in range(40)]
+        for row in rows:
+            row[0:10] = []
+        print(len(rows), len(rows[0]), rows[0][0], rows[39][0], rows[39][-1])
+
+        # Tuples share the sequence buffer and are built once.
+        t = tuple(range(120))
+        print(len(t), t[0], t[119], t[60])
+
+        # An empty list, a one-element list and a list that never grows are
+        # the three sizes the smallest class has to get right.
+        print(len([]), len([1]), [1][0], len([1, 2]), [1, 2][1])
+    """,
     "extending_a_builtin": """
         # `class D(dict)` and its four siblings, which `collections` is built
         # on. An instance carries a real dict/list/tuple/set and DELEGATES to

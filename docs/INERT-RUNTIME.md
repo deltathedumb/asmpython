@@ -16,7 +16,10 @@ So the JVM backend compiles annotated Python and refuses the language. Done is:
 
 ## Where this stands
 
-**Stages 1 to 4 are done and measured. Stages 5 and 6 are not started.**
+**Stages 1 to 4 are done and measured. Stage 5 is under way: the string
+cell and its length, code-point and search families are ported, and the
+allocator upgrade that stage 5 named as its own prerequisite is done. Stage 6
+is not started.**
 
 | | | |
 | --- | --- | --- |
@@ -24,7 +27,8 @@ So the JVM backend compiles annotated Python and refuses the language. Done is:
 | 2 | the platform floor | **3 functions**, down from 5, and none language-aware |
 | 3 | the integer cell | construction, and arithmetic as a split |
 | 4 | the allocator | every object in a program, from one arena in the subset |
-| 5 | kind by kind | **not started** -- read "What stage 5 has to solve first" |
+| 5 | kind by kind | **under way** -- `str`'s cell, length, codes and search; and the allocator upgrade below |
+| 5a | the buffer allocator | size classes and free lists, which `list` and `dict` need before anything else |
 | 6 | delete the C | not started; and see the note on `objects_host.py` below |
 
 Each stage is recorded below in a "What stage N landed" section, including what
@@ -33,8 +37,11 @@ it could NOT do, which twice turned out to be the more useful half.
 **The headline number has moved for the subset and not yet for the language.**
 A backend compiling the statically typed subset owes three functions instead of
 five, and none of the three knows what a Python value is. A backend compiling
-DYNAMIC Python still owes 229 minus the six now written in IR -- the mechanism
-to move the rest exists, is measured, and is the whole of stage 5.
+DYNAMIC Python still owes 418 exported symbols minus the 24 now written in IR
+-- the mechanism to move the rest exists, is measured, and is the whole of
+stage 5. **394 remain**, and that number is the honest size of what is left:
+most of them are polymorphic over eighteen kinds, and `func_addr`/`call_ptr`
+and stage 6 sit behind them.
 
 **What the C runtime is now: still supported, no longer required.** That
 distinction is the point of the whole exercise. `--object-runtime c` uses the
@@ -602,3 +609,53 @@ Written down because each one has already cost time here.
   static buffer for two identical literals.
 * **Estimate the hook, not the surface.** bytes methods looked like 52 changes
   and were one, because dispatch chooses the symbol in a single place.
+
+
+## What stage 5a landed: the buffer allocator
+
+**The prerequisite this document named before it named a kind.** "The allocator
+does not survive `list`" -- stage 4's arena is a bump pointer, correct because
+cells are immortal, and a list's `v.q.items` is the one allocation this runtime
+genuinely frees. `runtime/blocks.py` is size classes and free lists over the
+same arena: `apy_alloc_block`, `apy_realloc_block`, `apy_free_block`.
+
+**Two allocators and not one, which was the design question.** Rounding every
+allocation up to a size class costs a CELL 40% -- 152 bytes into a 256-byte
+class -- to serve the one kind of allocation that is ever freed. So
+`apy_alloc_bytes` keeps its exact-fit bump for immortal things and blocks get
+classes. Both draw from the same arena, so the platform floor is still three
+functions and still gets hit once a megabyte.
+
+**The size travels with the pointer, and that is a real cost.** `free(p)` needs
+no size because malloc writes a header before every block; a size-classed
+allocator over a bump arena has none to read, and adding one would cost eight
+bytes on every buffer to store what every caller already knows. So the caller
+passes the length it asked for -- a contract a caller can break, where malloc's
+cannot be. It is checkable: a wrong size puts the block on the wrong list and
+the next allocation of that class is handed memory that is too small, which the
+corpus finds at once.
+
+**Measured, on a program that builds and releases one size class 200 times:**
+
+| | peak |
+| --- | --- |
+| the IR block allocator | 4.5 MB |
+| the C's malloc/free (`--object-runtime c`) | 5.3 MB |
+| the same, if nothing were reused | ~48 MB |
+
+**And a negative finding worth more than the positive one.** Isolating that
+measurement showed a program that builds a 4096-element list 4000 times and
+NEVER releases it costs 147 MB, against 24 MB when it does. That gap is not
+this allocator: nothing frees a dropped list's buffer, because there is no
+garbage collector, and the C runtime leaks it identically. What the free lists
+recover is exactly what is handed back, which is what they claim. A collector
+is a different stage and this document does not schedule one.
+
+**What it does not do.** No coalescing, no splitting, no return to the
+platform: a block is reused at its own class or not at all. That is enough
+because the only thing that frees here GROWS BY DOUBLING, so every block it
+releases is exactly the size the next one up asks for. Past the last class
+(2**34) a block is dropped rather than tracked.
+
+**The C keeps its version**, over malloc, and `--object-runtime c` uses it --
+the same arrangement every stage has had, and the reason both are tested.

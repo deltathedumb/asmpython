@@ -693,6 +693,47 @@ APY_API apy_value apy_obj_alloc(int64_t kind) {
     return V(o);
 }
 
+/* ── the BUFFERS ─────────────────────────────────────────────────────────
+   A CELL IS IMMORTAL AND A BUFFER IS NOT, which is the whole reason these are
+   three functions and not one. Stage 4's arena is a bump pointer and is
+   correct for cells because nothing frees one -- checked, not assumed. A
+   list's `v.q.items` is the other case: it DOUBLES on growth and it is the
+   one allocation this runtime genuinely releases, so it needs an allocator
+   that can hand the same memory out twice.
+
+   NAMED SEPARATELY FROM `apy_alloc_bytes` rather than replacing it. Rounding
+   every allocation up to a size class would cost a cell 40% -- 152 bytes into
+   a 256-byte class -- to serve the one kind of allocation that is freed.
+   Immortal things keep the exact-fit bump; things that come back get classes.
+
+   THE SIZE TRAVELS WITH THE POINTER. `free(p)` needs no size because malloc
+   keeps a header; a size-classed allocator over a bump arena has no header to
+   read, so every caller passes the length it asked for. That is why
+   `apy_free_block` and `apy_realloc_block` take one -- and it is checkable,
+   because a wrong size puts the block on the wrong list and the corpus
+   notices long before a user would.
+
+   These three are the C's, over malloc, and `runtime/blocks.py` replaces them
+   with the arena version. Both are supported, which is what
+   `--object-runtime c` means. */
+APY_API apy_value apy_alloc_block(int64_t n) {
+    return (apy_value)(uintptr_t)malloc((size_t)(n > 0 ? n : 1));
+}
+
+APY_API apy_value apy_realloc_block(apy_value p, int64_t was, int64_t want) {
+    (void)was;
+    return (apy_value)(uintptr_t)realloc((void *)(uintptr_t)p,
+                                         (size_t)(want > 0 ? want : 1));
+}
+
+/* Answers an int rather than nothing, because `signatures()` types every
+   exported symbol as `ptr`/`i64`/`f64` and a void return is not among them. */
+APY_API int64_t apy_free_block(apy_value p, int64_t was) {
+    (void)was;
+    free((void *)(uintptr_t)p);
+    return 0;
+}
+
 APY_API apy_value apy_none(void) { return V(&apy_none_cell); }
 
 /* `...` and the name `Ellipsis` -- one cell, so `is` answers True. */
@@ -1976,7 +2017,8 @@ static int apy_is_set(apy_value v) {
 static apy_value apy_seq_new(int kind, int64_t cap) {
     apy_obj *o = apy_alloc(kind);
     if (cap < 1) cap = 1;
-    o->v.q.items = (apy_value *)malloc((size_t)cap * sizeof(apy_value));
+    o->v.q.items = (apy_value *)(uintptr_t)apy_alloc_block(
+        cap * (int64_t)sizeof(apy_value));
     o->v.q.n = 0;
     o->v.q.cap = cap;
     return V(o);
@@ -1993,9 +2035,11 @@ APY_API apy_value apy_tuple_new(int64_t cap) { return apy_seq_new(APY_TUPLE_K, c
 static void apy_q_append(apy_value q, apy_value item) {
     apy_obj *o = O(q);
     if (o->v.q.n == o->v.q.cap) {
+        int64_t was = o->v.q.cap * (int64_t)sizeof(apy_value);
         o->v.q.cap *= 2;
-        o->v.q.items = (apy_value *)realloc(
-            o->v.q.items, (size_t)o->v.q.cap * sizeof(apy_value));
+        o->v.q.items = (apy_value *)(uintptr_t)apy_realloc_block(
+            (apy_value)(uintptr_t)o->v.q.items, was,
+            o->v.q.cap * (int64_t)sizeof(apy_value));
     }
     o->v.q.items[o->v.q.n++] = item;
 }
@@ -2385,7 +2429,8 @@ APY_API apy_value apy_setitem(apy_value seq, apy_value index, apy_value item) {
             if (k >= 0) apy_seq_push(fresh, O(seq)->v.q.items[k]);
         /* IN PLACE: every other name bound to this list has to see the
            change, which is what makes `xs[:] = ys` the idiom it is. */
-        free(O(seq)->v.q.items);
+        apy_free_block((apy_value)(uintptr_t)O(seq)->v.q.items,
+                       O(seq)->v.q.cap * (int64_t)sizeof(apy_value));
         O(seq)->v.q.items = O(fresh)->v.q.items;
         O(seq)->v.q.n = O(fresh)->v.q.n;
         O(seq)->v.q.cap = O(fresh)->v.q.cap;
@@ -2534,8 +2579,10 @@ APY_API int64_t apy_raw_len(apy_value v) {
 static apy_value apy_dict_new_cap(int64_t cap) {
     apy_obj *o = apy_alloc(APY_DICT_K);
     if (cap < 1) cap = 1;
-    o->v.d.keys = (apy_value *)malloc((size_t)cap * sizeof(apy_value));
-    o->v.d.vals = (apy_value *)malloc((size_t)cap * sizeof(apy_value));
+    o->v.d.keys = (apy_value *)(uintptr_t)apy_alloc_block(
+        cap * (int64_t)sizeof(apy_value));
+    o->v.d.vals = (apy_value *)(uintptr_t)apy_alloc_block(
+        cap * (int64_t)sizeof(apy_value));
     o->v.d.n = 0;
     o->v.d.cap = cap;
     return V(o);
@@ -2621,11 +2668,14 @@ APY_API apy_value apy_dict_set(apy_value d, apy_value key, apy_value val) {
         return apy_none();
     }
     if (O(d)->v.d.n == O(d)->v.d.cap) {
+        int64_t was = O(d)->v.d.cap * (int64_t)sizeof(apy_value);
         O(d)->v.d.cap *= 2;
-        O(d)->v.d.keys = (apy_value *)realloc(
-            O(d)->v.d.keys, (size_t)O(d)->v.d.cap * sizeof(apy_value));
-        O(d)->v.d.vals = (apy_value *)realloc(
-            O(d)->v.d.vals, (size_t)O(d)->v.d.cap * sizeof(apy_value));
+        O(d)->v.d.keys = (apy_value *)(uintptr_t)apy_realloc_block(
+            (apy_value)(uintptr_t)O(d)->v.d.keys, was,
+            O(d)->v.d.cap * (int64_t)sizeof(apy_value));
+        O(d)->v.d.vals = (apy_value *)(uintptr_t)apy_realloc_block(
+            (apy_value)(uintptr_t)O(d)->v.d.vals, was,
+            O(d)->v.d.cap * (int64_t)sizeof(apy_value));
     }
     O(d)->v.d.keys[O(d)->v.d.n] = key;
     O(d)->v.d.vals[O(d)->v.d.n] = val;
