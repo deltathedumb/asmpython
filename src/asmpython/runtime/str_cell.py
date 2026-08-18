@@ -106,6 +106,38 @@ def apy_bytes_literal(p: ptr, n: i64) -> ptr:
     return cell
 
 
+def apy_str_copy_bytes(p: ptr, n: i64) -> ptr:
+    """`n` bytes COPIED into storage the cell owns, plus a terminator.
+
+    THE ONE THE RUNTIME BUILDS EVERY STRING WITH. Twenty-four places in the C
+    reach it through the `apy_str_copy` shim -- every slice, join, case
+    transform, repr and format -- so this is the function that decides where a
+    compiled program's strings live. It was `malloc`; it is the arena now,
+    which is what "the object runtime allocates from one place" finally means
+    for a string's BYTES and not just for its cell.
+
+    A BUMP POINTER CANNOT FREE, AND THAT COSTS NOTHING HERE -- checked rather
+    than assumed. Nothing in the C frees `v.s.p`: all 51 `free()` calls
+    release transient locals, never the buffer handed to `apy_str_take`. A
+    string's bytes already lived until the program exited, so this changes the
+    allocator and not the lifetime.
+
+    THE TERMINATOR IS WRITTEN AND IS NOT PART OF THE LENGTH. Two hundred
+    places in the remaining C read `v.s.p` as a C string, so a cell built
+    without one is a cell the rest of the runtime reads off the end of. The
+    arena is asked for `n + 1` for exactly that byte.
+    """
+    buf: ptr = apy_alloc_bytes(n + 1)
+    if not buf:
+        return buf
+    i: i64 = 0
+    while i < n:
+        store(u8, load(u8, offset(p, i)), offset(buf, i))
+        i = i + 1
+    store(u8, u8(0), offset(buf, n))
+    return apy_from_bytes(buf, n)
+
+
 def apy_from_cstr(p: ptr) -> ptr:
     """A str cell over a NUL-terminated C string.
 

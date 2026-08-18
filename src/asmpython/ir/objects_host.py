@@ -6727,6 +6727,21 @@ def _apy_bytes_copy(h, a):
 _TABLE["apy_lit"] = _apy_lit
 _TABLE["apy_str_take"] = _apy_str_take
 _TABLE["apy_str_copy"] = _apy_str_copy
+
+
+def _apy_str_copy_bytes(h, a):
+    """The half of `apy_str_copy` that allocates, which the IR replaces.
+
+    The C is two functions so that this one can take an `apy_value` and match
+    what an IR `ptr` compiles to; the shim keeps the pointer-typed name its 24
+    call sites already use. On the host both spellings are the same read --
+    there is no buffer to own, so the split that exists for the ABI's sake has
+    nothing behind it here.
+    """
+    return _apy_str_take(h, a)
+
+
+_TABLE["apy_str_copy_bytes"] = _apy_str_copy_bytes
 _TABLE["apy_bytes_copy"] = _apy_bytes_copy
 
 

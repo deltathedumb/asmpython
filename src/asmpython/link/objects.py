@@ -813,12 +813,31 @@ APY_API apy_value apy_str_take(char *p, int64_t n) {
     return V(o);
 }
 
-APY_API apy_value apy_str_copy(const char *p, int64_t n) {
+/* THE ONE THE RUNTIME BUILDS EVERY STRING WITH, split in two so the half
+   that allocates can be replaced by IR.
+
+   The parameter is an `apy_value` and not a `const char *` because that is
+   what an IR `ptr` compiles to: a ported definition emits
+   `uintptr_t apy_str_copy_bytes(uintptr_t, int64_t)`, and a C prototype
+   spelling the first argument as a pointer is a CONFLICTING TYPE where gcc
+   sees both. The three constructors ported before this one already took
+   `apy_value`, so the question never arose.
+
+   THE SHIM IS WHY THE 24 CALL SITES DID NOT HAVE TO CHANGE. Retyping
+   `apy_str_copy` itself would have meant a cast at every slice, join, case
+   transform and repr in this file -- a mechanical sweep through the one
+   function every string operation flows through, where a wrong cast gives
+   plausible wrong strings rather than a crash. */
+APY_API apy_value apy_str_copy_bytes(apy_value p, int64_t n) {
     char *buf = (char *)malloc((size_t)n + 1);
     if (!buf) { fputs("asmpython: out of memory\n", stderr); exit(1); }
-    memcpy(buf, p, (size_t)n);
+    memcpy(buf, (const char *)(uintptr_t)p, (size_t)n);
     buf[n] = '\0';
     return apy_str_take(buf, n);
+}
+
+APY_API apy_value apy_str_copy(const char *p, int64_t n) {
+    return apy_str_copy_bytes((apy_value)(uintptr_t)p, n);
 }
 
 /* The same bytes under a different kind. Written in terms of `apy_str_copy`
@@ -1789,6 +1808,7 @@ static apy_value apy_dict_get(apy_value d, apy_value key);
 APY_API apy_value apy_dict_set(apy_value d, apy_value key, apy_value val);
 static const char *apy_kind_name(apy_value v);
 static apy_value apy_bytes_repr(apy_value v);
+APY_API apy_value apy_str_copy_bytes(apy_value p, int64_t n);
 APY_API apy_value apy_str_copy(const char *p, int64_t n);
 /* The class machinery, declared here and defined at the very bottom of this
    file. The order is deliberate and it is the reverse of the dependency: the

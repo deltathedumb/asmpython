@@ -74,7 +74,13 @@ REPLACES: dict[str, tuple[str, ...]] = {
     # `_definition_of` cannot find them and `signatures()` never typed them:
     # the subset cannot name them, let alone replace them. That is the wall
     # stage 5 stops at, and it is a C edit rather than more IR.
-    "str_cell.py": ("apy_from_cstr", "apy_from_bytes", "apy_bytes_literal"),
+    # `apy_str_copy_bytes` IS THE ONE THE RUNTIME BUILDS EVERY STRING WITH --
+    # 24 call sites reach it through the `apy_str_copy` shim -- so replacing it
+    # moves a compiled program's string BYTES off malloc and onto the arena.
+    # It could only be named once the promotion made it visible, and it needed
+    # an `apy_value` parameter because that is what an IR `ptr` compiles to.
+    "str_cell.py": ("apy_from_cstr", "apy_from_bytes", "apy_bytes_literal",
+                    "apy_str_copy_bytes"),
 }
 
 #: The C functions a ported module takes the FRONT of, per source file.
