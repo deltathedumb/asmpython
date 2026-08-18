@@ -293,34 +293,55 @@ def _check_reads_after_writes(fn: Function, out: list[str]) -> None:
                 reachable.add(j)
                 frontier.append(j)
 
+    # THE SETS ARE BITMASKS, one bit per register, and that is not a
+    # micro-optimisation. This is a fixed-point dataflow: two sets per block,
+    # each starting as EVERY register, iterated until nothing changes. As
+    # `set` objects that is O(blocks x registers) live Python ints, and a
+    # large generated `<module>` function has thousands of both -- the
+    # standard library's own `dataclasses` test stopped compiling here with a
+    # MemoryError raised by the list comprehension itself, before a single
+    # instruction was examined.
+    #
+    # A register is an index from a monotonically increasing counter
+    # (`Function.reg`), so it IS a bit position, and Python's arbitrary
+    # precision ints make the whole mask one object. Intersection becomes `&`,
+    # "define this register" becomes `|= 1 << r`, and the comparison the loop
+    # turns on stays exact -- ints compare by value.
     params = set(fn.params)
+    all_regs = 0
+    for r in fn.registers:
+        all_regs |= 1 << r
+    param_mask = 0
+    for r in fn.params:
+        param_mask |= 1 << r
+
     # Start optimistic everywhere but the entry, so loops converge downward.
-    all_regs = set(fn.registers)
-    avail_in: list[set[int]] = [set(all_regs) for _ in fn.blocks]
-    avail_out: list[set[int]] = [set(all_regs) for _ in fn.blocks]
+    avail_in: list[int] = [all_regs] * len(fn.blocks)
+    avail_out: list[int] = [all_regs] * len(fn.blocks)
     if fn.blocks:
-        avail_in[0] = set(params)
+        avail_in[0] = param_mask
 
     for _ in range(len(fn.blocks) + 2):
         changed = False
         for i, blk in enumerate(fn.blocks):
             live_preds = [p for p in preds[i] if p in reachable]
             if i == 0:
-                cur = set(params)
+                cur = param_mask
             elif live_preds:
-                cur = set.intersection(*(avail_out[p] for p in live_preds))
+                cur = avail_out[live_preds[0]]
+                for p in live_preds[1:]:
+                    cur &= avail_out[p]
             else:
                 # No reachable predecessor. The block cannot run, so nothing
                 # it reads can be read at run time; start it optimistic so it
                 # reports nothing and poisons nothing downstream.
-                cur = set(all_regs)
+                cur = all_regs
             if cur != avail_in[i]:
                 avail_in[i] = cur
                 changed = True
-            cur = set(cur)
             for ins in blk.instructions:
                 if ins.dst is not None:
-                    cur.add(ins.dst)
+                    cur |= 1 << ins.dst
             if cur != avail_out[i]:
                 avail_out[i] = cur
                 changed = True
@@ -331,14 +352,15 @@ def _check_reads_after_writes(fn: Function, out: list[str]) -> None:
     for i, blk in enumerate(fn.blocks):
         if i not in reachable:
             continue        # cannot run; a read in it is not a read
-        live = set(avail_in[i])
+        live = avail_in[i]
         for ins in blk.instructions:
             for a in ins.args:
-                if a in fn.registers and a not in live and (blk.label, a) not in reported:
+                if a in fn.registers and not (live >> a) & 1 \
+                        and (blk.label, a) not in reported:
                     reported.add((blk.label, a))
                     out.append(
                         f"{fn.name}/{blk.label}: reads %{a} before any path "
                         f"writes it ({ins.op.value})"
                     )
             if ins.dst is not None:
-                live.add(ins.dst)
+                live |= 1 << ins.dst
