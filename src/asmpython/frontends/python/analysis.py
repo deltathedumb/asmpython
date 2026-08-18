@@ -1233,6 +1233,32 @@ def _expr_names(node, scope: _Scope) -> None:
             # scope's. Walking into one bound them here, so `lambda x: x` made
             # `x` a local of whatever contained it.
             continue
+        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) \
+                and sub.func.id == "super" and not sub.func.id in scope.bound \
+                and not sub.args:
+            # `super()` READS THE CLASS IT WAS WRITTEN IN, and nothing in the
+            # source says so. The no-argument form is sugar for
+            # `super(TheClass, self)`, and the frontend supplies the first
+            # half from the method's owner -- but it supplies it as a NAME to
+            # be loaded, and a name nobody recorded a read of gets no cell.
+            #
+            # For a class at module level that was invisible: the load fell
+            # through to a global read and the global was there. For a class
+            # NESTED IN A FUNCTION the class is a local of that function, so
+            # the load emitted `global_addr` for a global that is never
+            # created and the compile failed with `unknown global`. Recording
+            # the read here is what makes the enclosing function hand the
+            # method a cell, which is the same mechanism CPython's `__class__`
+            # closure is.
+            #
+            # HARMLESS AT MODULE LEVEL, where the closure pass finds the name
+            # bound in no enclosing FUNCTION and leaves it a global read --
+            # which is what it already was.
+            owner = scope.parent
+            while owner is not None and owner.kind != "class":
+                owner = owner.parent
+            if owner is not None and owner.node is not None:
+                scope.reads.add(owner.node.name)
         if isinstance(sub, ast.Name):
             if isinstance(sub.ctx, ast.Load):
                 scope.reads.add(sub.id)
