@@ -48,6 +48,18 @@ def build_and_run(tmp_path: Path, source: str) -> subprocess.CompletedProcess:
     return subprocess.run([str(out)], capture_output=True, text=True)
 
 
+def run_only(tmp_path: Path, source: str) -> subprocess.CompletedProcess:
+    """The same program under the IR INTERPRETER rather than compiled.
+
+    THE TWO HAVE TO AGREE and they reach a native symbol by completely
+    different routes -- the compiled one through an `extern` the system linker
+    resolves, this one through `ir/natives_host.py`. A test that only built
+    would not notice the interpreter answering something else, or refusing to
+    answer at all, which is what it did until `natives_host` existed.
+    """
+    return _cli("run", str(write(tmp_path, source)))
+
+
 def refused(tmp_path: Path, source: str) -> str:
     r = _cli("build", str(write(tmp_path, source)), "--emit-ir",
              "-o", str(tmp_path / "p.ir"), "--workdir", str(tmp_path / "wd"))
@@ -223,3 +235,139 @@ class TestWhatItRefuses:
                 x = libm
                 return 0
         """)
+
+
+class TestPointerArguments:
+    """The three things `bundled/pathlib.py` needs, each checked on BOTH paths.
+
+    A POINTER ARGUMENT IS NOT A NUMBER, and that is the whole difficulty. The
+    value a Python program has is an `apy_value` -- a tagged object, or in the
+    interpreter a HANDLE into a table -- and the callee wants an address. The
+    two paths solve it differently and must arrive at the same answer, so
+    every case here runs twice.
+    """
+
+    #: Opened, written, read back and removed, using only symbols that no
+    #: header the runtime includes declares. `_write`/`_read` take a pointer,
+    #: which is what makes this more than a `sqrt` test.
+    ROUNDTRIP = """\
+        import ctypes
+        libc = ctypes.CDLL("c")
+        libc._open.restype = ctypes.c_int
+        libc._open.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+        libc._close.restype = ctypes.c_int
+        libc._close.argtypes = [ctypes.c_int]
+        libc._read.restype = ctypes.c_int
+        libc._read.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+        libc._write.restype = ctypes.c_int
+        libc._write.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+
+        name = "apy-ctypes-case.bin"
+        fd = libc._open(name, 1 | 256 | 512 | 32768, 128)
+        print("write fd ok:", fd >= 0)
+        print("wrote:", libc._write(fd, b"abc\\x00d", 5))
+        libc._close(fd)
+
+        fd = libc._open(name, 0 | 32768, 0)
+        buf = bytearray(5)
+        print("read:", libc._read(fd, buf, 5))
+        libc._close(fd)
+        print("got:", bytes(buf))
+
+        # REMOVED BY THE PROGRAM, because it runs in the repository root and a
+        # test that leaves a file behind makes `git status` dirty for whoever
+        # runs the suite next. `DeleteFileA` rather than `_unlink`: the second
+        # is declared in MinGW's <stdio.h> and the extern conflicts.
+        k32 = ctypes.CDLL("kernel32")
+        k32.DeleteFileA.restype = ctypes.c_int
+        k32.DeleteFileA.argtypes = [ctypes.c_char_p]
+        print("cleaned:", k32.DeleteFileA(name) != 0)
+    """
+
+    @harness.needs("gcc")
+    def test_a_buffer_is_filled_by_the_callee_when_compiled(self, tmp_path):
+        """`bytearray` IS the writable buffer, and reading proves it.
+
+        A `str` argument only has to be READ by the callee, so passing its
+        bytes is enough. A read has to be WRITTEN THROUGH, so the address
+        handed over must be the object's own storage rather than a copy --
+        and the failure when it is not is a buffer of the right LENGTH full
+        of zeroes, which no exception marks.
+        """
+        got = build_and_run(tmp_path, self.ROUNDTRIP)
+        assert got.returncode == 0, got.stderr
+        lines = [ln for ln in got.stdout.split("\n") if ln]
+        assert lines == ["write fd ok: True", "wrote: 5", "read: 5",
+                         "got: b'abc\\x00d'", "cleaned: True"], got.stdout
+
+    def test_the_interpreter_answers_the_same_call(self, tmp_path):
+        """The oracle reaches the same symbols through `natives_host`.
+
+        Its pointers are offsets into a `bytearray` the interpreter owns, so
+        the write-back is a SECOND copy rather than a shared address -- see
+        `natives_host._writeback`. Whether that copy happens is invisible
+        except here.
+        """
+        got = run_only(tmp_path, self.ROUNDTRIP)
+        assert got.returncode == 0, got.stdout + got.stderr
+        lines = [ln for ln in got.stdout.split("\n") if ln]
+        assert lines[-5:] == ["write fd ok: True", "wrote: 5", "read: 5",
+                              "got: b'abc\\x00d'", "cleaned: True"], got.stdout
+
+    #: `0` where a pointer is declared. C admits a null pointer constant for a
+    #: pointer parameter and `CreateDirectoryA(path, 0)` is the ordinary way
+    #: to write "no security descriptor"; refusing it made every native call
+    #: with a NULL argument a TypeError.
+    NULL_ARGUMENT = """\
+        import ctypes
+        k32 = ctypes.CDLL("kernel32")
+        k32.CreateDirectoryA.restype = ctypes.c_int
+        k32.CreateDirectoryA.argtypes = [ctypes.c_char_p, ctypes.c_void_p]
+        k32.RemoveDirectoryA.restype = ctypes.c_int
+        k32.RemoveDirectoryA.argtypes = [ctypes.c_char_p]
+        k32.GetFileAttributesA.restype = ctypes.c_uint32
+        k32.GetFileAttributesA.argtypes = [ctypes.c_char_p]
+
+        name = "apy-ctypes-case-dir"
+        print("made:", k32.CreateDirectoryA(name, 0) != 0)
+        print("is dir:", (k32.GetFileAttributesA(name) & 16) != 0)
+        print("removed:", k32.RemoveDirectoryA(name) != 0)
+        print("gone:", k32.GetFileAttributesA(name) == 4294967295)
+    """
+
+    @harness.needs("gcc")
+    def test_an_int_where_a_pointer_is_declared_when_compiled(self, tmp_path):
+        got = build_and_run(tmp_path, self.NULL_ARGUMENT)
+        assert got.returncode == 0, got.stderr
+        lines = [ln for ln in got.stdout.split("\n") if ln]
+        assert lines == ["made: True", "is dir: True", "removed: True",
+                         "gone: True"], got.stdout
+
+    def test_an_int_where_a_pointer_is_declared_in_the_interpreter(
+            self, tmp_path):
+        got = run_only(tmp_path, self.NULL_ARGUMENT)
+        assert got.returncode == 0, got.stdout + got.stderr
+        lines = [ln for ln in got.stdout.split("\n") if ln]
+        assert lines[-4:] == ["made: True", "is dir: True", "removed: True",
+                              "gone: True"], got.stdout
+
+    def test_a_pointer_argument_that_is_neither(self, tmp_path):
+        """A float has no bytes and no address, and saying so is the point.
+
+        The check exists because the alternative is passing whatever the
+        object's payload happens to be as an address, which is a crash
+        somewhere else with nothing pointing back to here.
+        """
+        got = run_only(tmp_path, """\
+            import ctypes
+            k32 = ctypes.CDLL("kernel32")
+            k32.GetFileAttributesA.restype = ctypes.c_uint32
+            k32.GetFileAttributesA.argtypes = [ctypes.c_char_p]
+
+            try:
+                k32.GetFileAttributesA(1.5)
+            except TypeError as e:
+                print("TypeError:", "str, bytes or int" in str(e))
+        """)
+        assert got.returncode == 0, got.stdout + got.stderr
+        assert "TypeError: True" in got.stdout, got.stdout

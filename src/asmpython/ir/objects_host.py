@@ -172,6 +172,12 @@ class ObjectHost:
         #: Builtin type thunks, by name -- see `_apy_func_is_type`. One per
         #: name, so `int == int` is True.
         self._type_thunks: dict = {}
+        #: Where each mutable buffer handed to a native call was copied to,
+        #: as address -> the `bytearray` itself. See `_apy_str_bytes`: the
+        #: bytes of a host object live in the host, so a native call that
+        #: FILLS a buffer fills a copy, and `natives_host` uses this to put
+        #: what it wrote back where the program can see it.
+        self._native_buffers: dict[int, bytearray] = {}
         #: `member_descriptor`, the class a slot read through its own class
         #: answers -- see the `__slots__` branch in `_apy_getattr`.
         self._member_class = None
@@ -6725,25 +6731,45 @@ def _apy_str_bytes(h, a):
     for as long as the program runs, because this memory is never released
     either.
 
-    IT WILL NOT BE REACHED BY A WORKING PROGRAM. `ctypes` resolves at LINK
-    time and the interpreter has no linker, so a native call traps before
-    this with `call to undefined function`. It exists because every exported
-    symbol must be answerable here -- see
-    `test_every_exported_symbol_has_a_host_binding` -- and a stub that raised
-    would be a worse answer than the real one.
+    IT IS REACHED NOW, which the previous version of this comment said it
+    would not be. `ctypes` still resolves at LINK time, but `natives_host.py`
+    binds the handful of symbols a bundled module declares -- otherwise the
+    oracle could not run a program that opens a file, and the compiled
+    behaviour of `pathlib` would be measured against nothing.
+
+    AN INT IS AN ADDRESS AND IS PASSED THROUGH, matching `apy_str_bytes` in
+    `link/objects.py`: C's rule for a pointer parameter admits a null pointer
+    constant, and `CreateDirectoryA(path, 0)` relies on it.
+
+    A `bytearray` IS REGISTERED FOR WRITE-BACK, and that is the one part of
+    this that the C does not need. There, the cell already points at the
+    bytes and a native call that fills a buffer fills the object itself.
+    Here the bytes are COPIED into interpreter memory, so a call that writes
+    -- `_read` is the only one so far -- would fill a copy and the program
+    would see the buffer it passed still zeroed. `_native_buffers` records
+    where each mutable buffer went so `natives_host` can copy it back. A
+    `str` or `bytes` is not registered, because nothing may write to one.
     """
     v = h._get(a[0], "apy_str_bytes")
+    if isinstance(v, bool):
+        return h._fail("TypeError",
+                       "a pointer argument must be str, bytes or int, not "
+                       "bool")
+    if isinstance(v, int):
+        return v
     if isinstance(v, str):
         raw = v.encode("utf-8", "surrogateescape")
     elif isinstance(v, (bytes, bytearray)):
         raw = bytes(v)
     else:
         return h._fail("TypeError",
-                       f"a pointer argument must be str or bytes, not "
+                       f"a pointer argument must be str, bytes or int, not "
                        f"{h.kind_name(v)}")
     at = h._interp.mem.alloc(len(raw) + 1)
     h._interp.mem.buf[at:at + len(raw)] = raw
     h._interp.mem.buf[at + len(raw)] = 0
+    if isinstance(v, bytearray):
+        h._native_buffers[at] = v
     return at
 
 

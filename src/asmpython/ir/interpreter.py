@@ -229,6 +229,17 @@ class Interpreter:
             end = self.mem.buf.index(0, addr)
             self._emit(bytes(self.mem.buf[addr:end]).decode("utf-8", "replace"))
             return None
+        # THE NATIVE SYMBOLS A `ctypes` DECLARATION REACHES, last, because a
+        # bundled module's declaration is the only thing that puts one in an
+        # IR module and the name could otherwise shadow a runtime function.
+        # Without these the interpreter cannot run a program that opens a file
+        # -- the declaration is resolved by the LINKER, and this path has no
+        # linker -- so the oracle would have nothing to say about the compiled
+        # behaviour of `pathlib`. See `natives_host.py`.
+        from .natives_host import NOT_MINE, call as native_call
+        result = native_call(self, name, args)
+        if result is not NOT_MINE:
+            return result
         raise Trap(f"call to undefined function {name!r} (no host binding)")
 
     def _emit(self, s: str) -> None:

@@ -64,12 +64,34 @@ Scalar signatures are fine, because `double sqrt(double)` matches what the IR
 emits; POINTER ones are not, because the IR has one pointer type and C has
 many. So `sqrt` works and `strlen`, `fopen`, `getenv` do not.
 
-That rules out the whole of libc's filesystem surface, and it is why
-`pathlib` is written against the platform's own API instead -- `kernel32`'s
-`GetFileAttributesA` is not in any header this includes, so its prototype is
-the IR's and there is nothing to conflict with. The general fix is for the
-backend to CALL THROUGH A CAST rather than declare an extern, which is a
-change to `backends/c/emit.py` and not to this file.
+IT IS THE HEADER AND NOT THE LIBRARY, which is a smaller rule than it first
+looks and worth stating precisely: a libc symbol whose declaration this
+runtime never sees is reachable like any other. `<io.h>` and `<fcntl.h>` are
+NOT included, so `_open`, `_read`, `_write`, `_close` and `_lseek` -- the
+whole low-level file surface, pointers and all -- work today, and
+`bundled/pathlib.py` is built on them. `_unlink` and `_mkdir` do not, because
+MinGW declares those two in `<stdio.h>`; that module reaches kernel32's
+`DeleteFileA` and `CreateDirectoryA` instead, which are in no header this
+includes. The general fix is for the backend to CALL THROUGH A CAST rather
+than declare an extern, which is a change to `backends/c/emit.py` and not to
+this file.
+
+**AN INT IS ACCEPTED WHERE A POINTER IS DECLARED, and means the address
+itself.** C's own rule for a pointer parameter admits a null pointer constant,
+and `CreateDirectoryA(path, 0)` is the ordinary way to write "no security
+descriptor". Refusing it made every native call with a NULL argument a
+TypeError. A float or a list is still refused, because the alternative is
+handing a callee whatever the object's payload happens to be.
+
+**THE IR INTERPRETER RESOLVES NONE OF THIS, so a short list of symbols is
+bound by hand.** Everything above happens at COMPILE and LINK time; the
+interpreter has no linker, so a declared symbol trapped there with `call to
+undefined function`. Since the interpreter is the oracle the C backend is
+measured against, that left any module using `ctypes` with no check on its
+compiled behaviour at all. `ir/natives_host.py` binds the symbols the bundled
+library declares, through `os`, marshalling each pointer between a host object
+and interpreter memory. It grows when the standard library does; it is not an
+attempt to bind libc.
 """
 from __future__ import annotations
 

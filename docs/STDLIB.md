@@ -95,6 +95,7 @@ rather than a bundled module, and is unaffected.
 | `enum` | `Enum`, `IntEnum`, `StrEnum`, `Flag`, `IntFlag`, `auto`, `unique`, aliases, `__members__`; NOT `verify`/`EnumCheck`, `boundary=`, `global_enum`, `member`/`nonmember`, `_missing_`, functional creation |
 | `copy` | `copy`, `deepcopy`, the hooks, the memo; NOT `__reduce__`, `__getstate__`, `copyreg`, `copy.replace` |
 | `dataclasses` | `dataclass` with init/repr/eq/order/unsafe_hash/frozen/match_args/kw_only, `field` with all eight arguments, `Field`, `fields`, `is_dataclass`, `asdict`/`astuple` recursing, `replace`, `make_dataclass`, `InitVar`, `KW_ONLY`, `MISSING`, `FrozenInstanceError`, `__post_init__`, ClassVar exclusion, inheritance; NOT `slots`, `weakref_slot` (refused BY NAME), `field(doc=)`, `Field[int]` |
+| `pathlib` | the whole PURE half -- `PurePosixPath`, `parts`, `name`, `stem`, `suffix`, `suffixes`, `parent`, `parents`, `root`, `anchor`, `is_absolute`, `joinpath`, `with_name`, `with_suffix`, `with_stem`, `relative_to`, `match`, `as_posix`, `/`, comparison, `__fspath__`; and a CONCRETE `Path` with `exists`, `is_file`, `is_dir`, `read_bytes`, `read_text`, `write_bytes`, `write_text`, `mkdir`, `touch`, `unlink`, `rmdir`. NOT `iterdir`, `glob`, `rglob`, `stat`, `resolve`, `absolute`, `open`, symlinks -- each refused BY NAME -- and `Path` is POSIX-flavoured, so `str()` renders `/` where CPython on Windows renders `\`. Windows-only concrete half. |
 
 **Restoring is not free, and that is the point of stating coverage.** Three of
 `itertools`'s seven functions were wrong in ways the old suite never asked
@@ -240,6 +241,74 @@ So `pathlib` is written against the platform's own API rather than libc, or
 the backend learns to CALL THROUGH A CAST instead of declaring an extern --
 a change to `backends/c/emit.py`. The first works today; the second is the
 general fix.
+
+### It is written, and this is what it took
+
+**THE FIRST ROUTE WAS TAKEN.** `bundled/pathlib.py` is the pure half restored
+plus a concrete `Path`, and it passes `tests/stdlib/pathlib.py` against
+CPython on the interpreter and compiled alike. The symbols are chosen for the
+obstacle above rather than for tidiness: `_open`, `_read`, `_write`, `_close`
+and `_lseek` from the C runtime, because `<fcntl.h>` and `<io.h>` are NOT
+included and so nothing conflicts with them; and `GetFileAttributesA`,
+`CreateDirectoryA`, `DeleteFileA` and `RemoveDirectoryA` from kernel32,
+because `_unlink` and `_mkdir` ARE declared in MinGW's `<stdio.h>` and hit
+exactly the conflict described above. `GetFileAttributesA` also answers
+`is_dir` outright, where libc offers nothing short of `stat` and a struct
+this frontend cannot receive. The general fix in `emit.py` is still worth
+making; it is no longer what stands between here and a filesystem.
+
+**READING NEEDED A WRITABLE BUFFER AND `bytearray` IS ONE.** Its cell is a
+string's cell with the mutable flag set, so `apy_str_bytes` hands over the
+object's own storage and `_read` fills it in place. Nothing new was added to
+the object model to get it.
+
+**A NULL POINTER ARGUMENT HAD TO BE ALLOWED.** `CreateDirectoryA(path, 0)` is
+the ordinary spelling of "no security descriptor"; `apy_str_bytes` refused an
+int, which made every native call with a NULL argument a TypeError. C's own
+rule for a pointer parameter admits a null pointer constant, and now so does
+this.
+
+**THE INTERPRETER HAD TO LEARN THE SYMBOLS, and that is the part with real
+weight.** A `ctypes` declaration is resolved by the LINKER, and the IR
+interpreter has none -- so every concrete method trapped there with `call to
+undefined function '_open'`. The interpreter is the ORACLE the C backend is
+measured against, so a module it cannot execute is a module whose compiled
+behaviour nothing checks. `ir/natives_host.py` binds the nine symbols through
+`os`, MARSHALLING each pointer across the boundary between a host object and
+interpreter memory. The write-back half of that marshalling is the subtle one:
+without it a read fills a copy, and the program gets a buffer of the right
+LENGTH full of zeroes with nothing raised.
+
+**TEXT MODE TRANSLATES, so this does too.** CPython's `write_text` goes
+through `open(mode="w")` and puts `\r\n` on the disk for every `\n` on
+Windows; `read_text` turns them back. A program that writes with `write_text`
+and reads with `read_bytes` can see the difference, so matching the oracle
+means doing the translation rather than calling raw bytes "more honest".
+
+**WHAT IS STILL OPEN is the flavour, and it is left open deliberately.** `Path`
+here extends `PurePosixPath`, so `str(Path("a") / "b")` is `a/b` where CPython
+on Windows answers `a\b`. Closing it means a real Windows flavour -- drive
+letters, UNC names, case-insensitive comparison, both separators accepted --
+and doing the SEPARATOR alone would be worse than not doing it at all:
+`Path("C:/x").is_absolute()` would still answer False while the class looked
+native, which is the plausible-wrong-answer this document exists to prevent.
+`as_posix()` agrees on both today.
+
+**THE FLAVOUR IS THE NEXT THING TO WRITE, and it is worth more than it looks**,
+because `cwd`, `home`, `absolute` and `resolve` are all waiting behind it and
+those are the compiler's own most-wanted -- `resolve` 14 uses, `absolute` 7,
+the two largest entries in the count at the top of this section. The CALL is
+already reachable: `GetCurrentDirectoryA` takes a buffer and a `bytearray` is
+one. It is the ANSWER that cannot be received -- `C:\Users\...` read by a
+POSIX parser is a relative path whose first name is `C:`. So the four refuse
+by name today and unblock together, which is one piece of work rather than
+five.
+
+What stays refused past that is `stat`, `iterdir`, `glob`, `rglob` and `walk`,
+and they are blocked on something else entirely: a `struct stat` or a
+`WIN32_FIND_DATA` has to come back, and a native call here returns one machine
+word with no layout declared anywhere. That needs `ctypes.Structure` in
+`cffi.py`, not more of this module. `open` needs an `io`.
 
 ## `re`, the keystone
 
@@ -497,7 +566,8 @@ having, because it says the clear cost coverage and not correctness:
 
 The 35 refusals name exactly what to write next, in this order by how many
 cases each unblocks: `collections` and `collections.abc`, `abc`, `typing`,
-`dataclasses`, `io`, `os`/`pathlib`, `enum`, `numbers`, `decimal`,
+`dataclasses`, `io`, `os` (`pathlib` is written -- see above), `enum`,
+`numbers`, `decimal`,
 `fractions`, `statistics`, `datetime`/`zoneinfo`, `contextvars`, `copy`,
 `unicodedata`, `tomllib`, `annotationlib`.
 

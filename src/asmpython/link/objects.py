@@ -814,10 +814,28 @@ APY_API apy_value apy_bytes_literal(apy_value p, int64_t n) {
    from `ctypes` with whatever the program passed, and handing a native
    function the address of an integer cell is how a ctypes program corrupts
    memory rather than failing. */
+/* Declared here rather than waited for: `apy_kind_name` is defined a
+   couple of thousand lines down, and the refusal below wants to name
+   the kind it was handed. Same in-place idiom as `apy_obj_alloc`
+   above. */
+static const char *apy_kind_name(apy_value v);
+
 APY_API apy_value apy_str_bytes(apy_value s) {
+    /* AN INT IS ALLOWED AND MEANS THE ADDRESS ITSELF, because C's own rule
+       for a pointer parameter is that a null pointer constant fits it -- and
+       `CreateDirectoryA(path, 0)` is the ordinary way to pass "no security
+       descriptor". Refusing it made every native call with a NULL argument a
+       TypeError, which is not what the C being declared says. */
+    if (O(s)->kind == APY_INT_K)
+        return (apy_value)(uintptr_t)O(s)->v.i;
+    /* THE MESSAGE NAMES THE KIND because the same refusal is worded by
+       `objects_host._apy_str_bytes` for the interpreter, and a program that
+       prints the exception would otherwise get different text from the two
+       paths -- which the corpus compares. */
     if (O(s)->kind != APY_STR_K && O(s)->kind != APY_BYTES_K)
-        return apy_fail("TypeError",
-                        "a native pointer argument must be str or bytes");
+        return apy_fail2("TypeError",
+                         "a pointer argument must be str, bytes or int, "
+                         "not %s%s", apy_kind_name(s), "");
     return (apy_value)(uintptr_t)O(s)->v.s.p;
 }
 
