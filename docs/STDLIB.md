@@ -197,9 +197,24 @@ bundled module is ordinary dynamic Python, so it cannot reach a C library at
 all -- and `pathlib` has to be a bundled module. The same is true of any
 module that would need the filesystem.
 
-So the order is: **make `ctypes` reachable from dynamic code, or grow the
-platform floor.** Until one of those happens, `pathlib` can only ship its pure
-half, and shipping it would move a number rather than the constraint.
+**THE FIRST HALF OF THAT IS NOW DONE.** `ctypes` is reachable from dynamic
+code: `_dyn_call` recognises the shape and `dynamic._dyn_ctypes_call` emits the
+same single `Op.CALL` the static path does, with an unbox before each argument
+and a box after the result. The cause was narrow -- `ctypes_calls` was recorded
+only by the static analyser and read only by the static lowerer, so a dynamic
+call lowered as an ordinary attribute access on a name the splice had removed.
+
+**POINTERS ARE STILL REFUSED FROM DYNAMIC CODE** (`E0129`), and that is what
+still stands between here and `pathlib`: `fopen` takes a `const char *`.
+Unboxing an `apy_value` to a machine word is exact for a number; for a pointer
+it means handing the callee the address of a runtime object, or a string's
+bytes without the lifetime that implies. Passing one as a raw integer is how a
+ctypes program corrupts memory rather than failing, so it says so instead.
+
+What that needs is an accessor giving a `str`'s bytes as a pointer, and a rule
+about how long they live. The arena makes the second question easier than it
+was -- a string's bytes are already immortal -- so this is now a smaller
+question than it looked.
 
 ## `re`, the keystone
 

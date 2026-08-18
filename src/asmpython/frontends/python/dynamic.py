@@ -29,6 +29,7 @@ from .analysis import (
     OBJECT_DEFAULTS,
     SemType, TO_IR,
     _EXC_NAMES, _handler_names, _target_names, int_literal,
+    sem_type, span_of,
 )
 from .methods import DICT_PARTS, method_symbol
 from .modules import member, resolve
@@ -1673,7 +1674,84 @@ class DynamicLowering:
         self._dyn_check()
         return out
 
+    #: How a boxed value becomes the machine value a native signature wants,
+    #: and how the answer comes back. Keyed by the IR type `cffi.TYPES` gives.
+    _CFFI_FLOATS = ("f32", "f64")
+
+    def _cffi_width(self, value: int, src: T.Type, dst: T.Type) -> int:
+        """One value at the width the native signature declares.
+
+        The same opcode choice `lower._coerce` makes, and it has to be: the
+        declared width is what the callee reads, so handing it a 64-bit value
+        where it wants 32 is the truncation `cffi.py` refuses to guess about.
+        """
+        if src == dst:
+            return value
+        out = self.b.reg(dst)
+        if src.is_int and dst.is_int and src.bits == dst.bits:
+            op = Op.BITCAST
+        elif src.is_float and dst.is_float:
+            op = Op.FTOF
+        elif src.is_float:
+            op = Op.FTOI
+        elif dst.is_float:
+            op = Op.ITOF
+        elif dst.bits > src.bits:
+            op = Op.EXTEND
+        else:
+            op = Op.TRUNC
+        self.b.emit(Instruction(op, dst, dst=out, args=[value]))
+        return out
+
+    def _dyn_ctypes_call(self, node: ast.Call, native: dict) -> int:
+        """`lib.sqrt(x)` from code with no static types.
+
+        THE SAME ONE `Op.CALL` the static path emits, with a conversion either
+        side of it. A dynamic value is an `apy_value` and a native signature
+        wants a machine word, so each argument is unboxed to the width its
+        `argtypes` declares and the result is boxed back.
+
+        WHY THIS EXISTS AT ALL: every BUNDLED module is dynamic Python, so
+        without it the standard library cannot reach a C library, and
+        `libm.sqrt(x)` inside an untyped function raised `NameError: name
+        'libm' is not defined` -- about a library the source declares three
+        lines above. See docs/STDLIB.md.
+
+        POINTER PARAMETERS ARE REFUSED IN ANALYSIS, not here, so nothing that
+        reaches this has one.
+        """
+        args = []
+        for arg, want in zip(node.args, native["params"]):
+            value = self._dyn_expr(arg)
+            floaty = want in self._CFFI_FLOATS
+            raw = self.b.call(T.F64 if floaty else T.I64,
+                              "apy_as_float" if floaty else "apy_as_int",
+                              [value])
+            self._dyn_check()
+            args.append(self._cffi_width(raw, T.F64 if floaty else T.I64,
+                                         TO_IR[sem_type(want)]))
+        ret = native["ret"]
+        if ret == "void":
+            self.b.call(None, native["symbol"], args)
+            return self.b.call(T.PTR, "apy_none", [])
+        result = self.b.call(TO_IR[sem_type(ret)], native["symbol"], args)
+        floaty = ret in self._CFFI_FLOATS
+        wide = self._cffi_width(result, TO_IR[sem_type(ret)],
+                                T.F64 if floaty else T.I64)
+        return self.b.call(T.PTR,
+                           "apy_from_float" if floaty else "apy_from_int",
+                           [wide])
+
     def _dyn_call(self, node: ast.Call) -> int:
+        # `getattr` AND NOT `self.info.ctypes_calls`. A comprehension and a
+        # lambda are lowered against a `_Synthetic` info that carries only
+        # what those need, so reaching for a real `FunctionInfo` field here
+        # raised AttributeError from inside the compiler -- 28 tests, none of
+        # them about ctypes.
+        table = getattr(self.info, "ctypes_calls", None)
+        native = table.get(id(node)) if table else None
+        if native is not None:
+            return self._dyn_ctypes_call(node, native)
         if (isinstance(node.func, ast.Name) and node.func.id == "dict"
                 and not node.args and node.keywords
                 and "dict" not in self.info.locals):

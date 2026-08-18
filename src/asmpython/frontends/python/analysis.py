@@ -624,13 +624,20 @@ def sem_type(name: str) -> SemType:
     return BY_NAME.get(name) or SemType(name)
 
 
-def is_java(ty: SemType) -> bool:
-    return ty.name.startswith(JAVA)
+def is_java(ty) -> bool:
+    """Whether a type is a handle. A `SemType` OR ITS NAME.
+
+    Both, because a Java signature arrives as names and an expression's type
+    arrives as a `SemType`, and the assignability rules compare one against the
+    other -- `_java_fits(got, want)` is exactly that pair. Insisting on one kind
+    meant a subclass reaching a superclass parameter crashed on `.name`.
+    """
+    return (ty if isinstance(ty, str) else ty.name).startswith(JAVA)
 
 
-def java_class_of(ty: SemType) -> str:
+def java_class_of(ty) -> str:
     """The internal class name behind a handle type."""
-    return ty.name[len(JAVA):]
+    return (ty if isinstance(ty, str) else ty.name)[len(JAVA):]
 
 
 class _IrTypes(dict):
@@ -717,6 +724,19 @@ class FunctionInfo:
     #: `String`. Only literals in a Java argument position are here; the
     #: subset has no string type for them to have anywhere else.
     java_strings: dict[int, str] = field(default_factory=dict)
+    #: Call node id -> the key of the method of a Python class over a Java
+    #: type. `b.tick()` where `tick` is written in THIS source is a direct call
+    #: to an ordinary static function, not an `invokevirtual` -- the class path
+    #: has never heard of the method, and going through the JVM to reach a
+    #: function in the same class file would be slower and no more correct.
+    sub_calls: dict[int, str] = field(default_factory=dict)
+    #: The IR symbol this function must be emitted under, when the backend
+    #: chose it rather than lowering. Only a method of a class over a Java
+    #: type has one: the symbol encodes the generated class, its base, the
+    #: method and its descriptor, and the backend rebuilds the class file from
+    #: exactly that -- so a name invented in lowering would be a second
+    #: spelling of something with one authority.
+    java_symbol: str = ""
     #: True when this function's values are runtime objects rather than
     #: machine words. Set for the module's top-level statements, which have no
     #: annotations at all, and for any function with an unannotated parameter
@@ -1323,6 +1343,7 @@ class Analyzer:
         # further on: `def place(b: MyBlock)` names one, so what those classes
         # are has to be settled before any signature is built either.
         self._collect_ctypes(tree)
+        self._declare_java_subclasses(tree)
 
         defs = [n for n in tree.body if isinstance(n, _DEF_NODES)]
         # WHETHER THERE IS AN ENTRY AT ALL is decided by the RUNNABLE
@@ -1349,6 +1370,7 @@ class Analyzer:
         runnable = [n for n in tree.body
                     if not isinstance(n, _DEF_NODES) and not _is_docstring(n)
                     and not self._is_namespace_import(n)
+                    and not self._is_java_subclass(n)
                     and id(n) not in self.ctypes_stmts]
         # WHAT THE ENTRY CONTAINS keeps the `def` STATEMENTS too, in source
         # order. Their own bodies are analysed separately, through `defs` --
@@ -1358,7 +1380,7 @@ class Analyzer:
         # before the module had bound it, and a decorator naming something the
         # module assigns did the same.
         body = ([n for n in tree.body
-                 if not _is_docstring(n)
+                 if not _is_docstring(n) and not self._is_java_subclass(n)
                  and id(n) not in self.ctypes_stmts]
                 if runnable else [])
 
@@ -1366,7 +1388,8 @@ class Analyzer:
         # read one, and which names exist at module scope is the question that
         # decides whether an unresolved name is a global or a mistake.
         self.module_names = self._module_names(
-            [n for n in tree.body if not isinstance(n, _DEF_NODES)])
+            [n for n in tree.body if not isinstance(n, _DEF_NODES)
+             and not self._is_java_subclass(n)])
         # PEP 695's type parameters, from the DEFINITIONS TOO. `_module_names`
         # is given only the non-definition statements -- a `def`'s body binds
         # its own names, not the module's -- so a `def first[T]` had nowhere
@@ -1407,7 +1430,8 @@ class Analyzer:
                for n in tree.body):
             self.module_names |= {
                 n.name for n in tree.body
-                if isinstance(n, ast.ClassDef)
+                if (isinstance(n, ast.ClassDef)
+                    and not self._is_java_subclass(n))
                 or (isinstance(n, _DEF_NODES)
                     and self.functions[n.name].dynamic)}
 
@@ -1424,6 +1448,8 @@ class Analyzer:
             # looking the name up would compile the survivor twice and the
             # other never.
             self._body(self.functions[self.def_of_node[id(node)]])
+        for key in self._java_method_keys:
+            self._body(self.functions[key])
         for key in self._nested_keys:
             self._body(self.functions[key])
         if entry is not None:
@@ -1520,6 +1546,12 @@ class Analyzer:
             return
         if isinstance(node, ast.ClassDef):
             scope.bound.add(node.name)
+            if self._is_java_subclass(node):
+                # Declared already, and not a class in the sense the rest of
+                # this understands. Its BASE is not a name to resolve either:
+                # it is a namespace attribute, which binds nothing.
+                self._collect_java_subclass(node, scope)
+                return
             for b in node.bases:
                 _expr_names(b, scope)
             key = self._register_class(node, scope, qual or node.name)
@@ -1887,7 +1919,16 @@ class Analyzer:
         return None
 
     # ── signatures ──────────────────────────────────────────────────────────
-    def _signature(self, node: ast.FunctionDef) -> FunctionInfo:
+    def _signature(self, node: ast.FunctionDef,
+                   self_type: SemType | None = None) -> FunctionInfo:
+        """The types of one `def`'s parameters and result.
+
+        `self_type` is given for a method of a class over a Java type, whose
+        first parameter is `self` and carries no annotation -- writing one
+        would mean naming the class inside its own body, which Python does not
+        allow, and demanding it would be ceremony for a type there is only one
+        possible answer to.
+        """
         params: list[Symbol] = []
         seen: set[str] = set()
         # One unannotated parameter makes the WHOLE function dynamic, not just
@@ -1918,11 +1959,13 @@ class Analyzer:
                 return True
             if name is None and isinstance(a, ast.Constant):
                 name = str(a.value)
-            if name is None and self._java_annotation(a) is not None:
+            if self._java_annotation(a) is not None:
                 # A JAVA TYPE is a machine word -- a handle -- so a function
                 # annotated with one stays static. Falling through to the
                 # dynamic path here made every parameter an `object`, which is
-                # a representation the JVM backend has no runtime for.
+                # a representation the JVM backend has no runtime for. The
+                # bare-name form is one of these too, and only for a class
+                # THIS source declares over a Java type.
                 return False
             return name not in BY_NAME or name == "object"
         # A MISSING RETURN ANNOTATION is dynamic too, and this is not a
@@ -1935,17 +1978,24 @@ class Analyzer:
         # -- defaults, arity, the slot map -- is stated against it.
         declared = (list(node.args.posonlyargs) + list(node.args.args)
                     + list(node.args.kwonlyargs))
-        dynamic = (any(_is_dynamic_annotation(a.annotation)
-                       for a in declared)
+        # `self` is already typed and carries no annotation, so it is excluded
+        # from the question the rest of them answer -- including it would make
+        # every such method dynamic on the strength of the one parameter that
+        # cannot be annotated.
+        rest = declared[1:] if self_type is not None else declared
+        dynamic = (any(_is_dynamic_annotation(a.annotation) for a in rest)
                    or _is_dynamic_annotation(node.returns))
-        for arg in declared:
+        for i, arg in enumerate(declared):
             if arg.arg in seen:
                 self._error("E0004",
                             f"duplicate parameter {arg.arg!r}", arg)
             seen.add(arg.arg)
-            ty = (OBJ if dynamic
-                  else self._annotation(arg.annotation, arg,
-                                        f"parameter {arg.arg!r}"))
+            if self_type is not None and i == 0:
+                ty = self_type
+            else:
+                ty = (OBJ if dynamic
+                      else self._annotation(arg.annotation, arg,
+                                            f"parameter {arg.arg!r}"))
             params.append(Symbol(arg.arg, ty, self._span(arg), is_param=True))
         if not dynamic and (node.args.posonlyargs or node.args.kwonlyargs):
             # The static path has no call-site name matching to restrict: its
@@ -2078,23 +2128,19 @@ class Analyzer:
     def _java_annotation(self, ann) -> SemType | None:
         """`block.Block` as a type, or None if this is not one.
 
-        Only the attribute form: a bare `Block` would need the name bound to
-        something, and `import a.b as n` binds `n` rather than what is in it.
-        `from a.b import Block` is the spelling that would bind the bare name,
-        and it is not supported here yet.
+        The attribute form for a type from the class path: a bare `Block` would
+        need the name bound to something, and `import a.b as n` binds `n`
+        rather than what is in it. `from a.b import Block` is the spelling that
+        would bind the bare name, and it is not supported here yet.
+
+        A class THIS source declares over a Java type is the exception, and the
+        bare name is the only spelling it has -- `class MyBlock(block.Block)`
+        binds `MyBlock` and nothing else.
         """
-        if not isinstance(ann, ast.Attribute):
+        if ann is None or not isinstance(ann, (ast.Attribute, ast.Name)):
             return None
-        found = self._namespace_of(ann)
-        if found is None:
-            return None
-        module, path = found
-        if len(path) != 1:
-            return None
-        entry = member(module, path[0])
-        if entry is None or entry[0] != "jclass":
-            return None
-        return sem_type(entry[1]["type"])
+        table = self._java_type_table(ann)
+        return None if table is None else sem_type(table["type"])
 
     # ── bodies ──────────────────────────────────────────────────────────────
     @property
@@ -3313,6 +3359,19 @@ class Analyzer:
         return self._expr(arg)
 
     def _dyn_call(self, node: ast.Call) -> SemType:
+        # A NATIVE CALL FROM DYNAMIC CODE. `cffi.py` resolves a ctypes symbol
+        # while compiling and the STATIC path has always lowered one; this
+        # path never looked, so `libm.sqrt(x)` inside an untyped function
+        # lowered as an ordinary attribute access on `libm` -- a name the
+        # splice removes -- and raised `NameError: name 'libm' is not
+        # defined` at run time, about a library the source plainly declares.
+        #
+        # THAT MATTERS BEYOND THE ANNOYANCE: every BUNDLED module is dynamic
+        # Python, so the standard library could not reach a C library at all.
+        # See docs/STDLIB.md on why that is what stands between here and a
+        # concrete `pathlib`.
+        if self._is_ctypes_call(node):
+            return self._dyn_ctypes_call(node)
         if isinstance(node.func, ast.Name) and node.func.id == "locals"                 and "locals" not in self.current.locals:
             self.current.reads_all_locals = True
         for kw in node.keywords:
@@ -4026,6 +4085,196 @@ class Analyzer:
         self._remember_namespace(alias)
         self._bind_namespace(alias.asname or alias.name.split(".")[0], node)
 
+    # ── extending a Java type ───────────────────────────────────────────────
+    #
+    #     class MyBlock(block.Block):
+    #         def getHardness(self) -> int:
+    #             return 99
+    #
+    # THE OTHER DIRECTION. Everything else here calls INTO the class path;
+    # this declares a type the backend adds TO it, so that Java can call back
+    # -- which is what every mod loader in existence requires, because
+    # registration means handing it something it will invoke.
+    #
+    # It is not a class in the runtime-object sense and never reaches
+    # `self.classes`. `self` is a HANDLE like any other Java value, each method
+    # is an ordinary static function of `(self, ...)`, and `MyBlock()` is a
+    # constructor call resolved exactly as `block.Block()` is. So the static
+    # path needs no notion of objects to gain this, and the dynamic path --
+    # where `class` means what Python means -- is untouched.
+
+    def _declare_java_subclasses(self, tree: ast.Module) -> None:
+        """Find them, name them, and register their methods as functions.
+
+        IN TWO PASSES over the same statements. The first settles which names
+        are types, because a method of one may be annotated with another
+        written further down; the second builds the signatures, which needs
+        every one of those names already to be a type.
+        """
+        classes = [(n, self._java_base(n)) for n in tree.body
+                   if isinstance(n, ast.ClassDef)]
+        classes = [(n, b) for n, b in classes if b is not None]
+        seen: set = set()
+        kept: list = []
+        for node, base in classes:
+            if node.name in seen:
+                # Two of them produce ONE class file, so the second silently
+                # replaces the first -- and a Python programmer reasonably
+                # expects rebinding rather than a merge. Only one can be
+                # generated, so this is refused rather than resolved.
+                self._error("E0110",
+                            f"{node.name} is declared over a Java type twice; "
+                            f"only one class can be generated", node)
+                continue
+            seen.add(node.name)
+            kept.append((node, base))
+        classes = kept
+        for node, base in classes:
+            # Provisional: enough to BE a type -- a name, a handle type, and
+            # what it is assignable to. The constructors and the method
+            # symbols arrive in the second pass, from the backend.
+            self.java_subclasses[node.name] = {
+                "internal": node.name,
+                "type": JAVA + node.name,
+                "supers": [base["internal"]] + list(base["supers"]),
+                "abstract": False, "interface": False,
+                "new": [], "static": base["static"],
+                "instance": base["instance"], "impl": {},
+            }
+            self.java_subclass_methods[node.name] = {}
+        for node, base in classes:
+            self._declare_java_subclass(node, base)
+
+    def _java_base(self, node: ast.ClassDef) -> dict | None:
+        """The Java type this `class` extends, as a table, or None.
+
+        None is the ordinary answer and means "an ordinary Python class",
+        which is checked and lowered by everything that was already here.
+        """
+        if len(node.bases) != 1 or node.keywords:
+            return None
+        return self._java_type_table(node.bases[0])
+
+    def _is_java_subclass(self, node) -> bool:
+        return (isinstance(node, ast.ClassDef)
+                and node.name in self.java_subclasses)
+
+    def _declare_java_subclass(self, node: ast.ClassDef, base: dict) -> None:
+        methods: list = []
+        for stmt in node.body:
+            if isinstance(stmt, _DEF_NODES):
+                key = self._java_method(node, stmt)
+                if key is not None:
+                    info = self.functions[key]
+                    methods.append((stmt.name,
+                                    [p.type.name for p in info.params[1:]],
+                                    info.ret.name))
+            elif isinstance(stmt, ast.Pass) or _is_docstring(stmt):
+                pass
+            else:
+                self._error("E0103",
+                            "only methods are supported in a class over a "
+                            "Java type; there are no fields", stmt)
+        if node.decorator_list:
+            self._error("E0104", "a class over a Java type takes no "
+                                 "decorators", node)
+
+        table = modules.declare_subclass(node.name, base["internal"], methods)
+        if table is None:
+            self._error("E0105",
+                        f"this backend cannot extend {base['internal']}; "
+                        f"a class over a Java type needs the jvm backend",
+                        node)
+            return
+        for where, message in table.get("errors", ()):
+            # Reported at the METHOD when the backend named one, because a
+            # signature that does not override is a fact about that line and
+            # not about the class.
+            at = next((s for s in node.body
+                       if isinstance(s, _DEF_NODES) and s.name == where),
+                      node)
+            self._error("E0106", message, at)
+        table.setdefault("impl", {})
+        self.java_subclasses[node.name] = table
+        for name, key in self.java_subclass_methods[node.name].items():
+            found = table["impl"].get(name)
+            if found is not None:
+                # THE SYMBOL COMES FROM THE BACKEND, like every other Java
+                # symbol: it encodes the generated class, its base and the
+                # descriptor, and the backend rebuilds the whole class file
+                # from it. A name invented here would be a second spelling.
+                self.functions[key].java_symbol = found["symbol"]
+
+    def _java_method(self, node: ast.ClassDef, stmt) -> str | None:
+        """Register one method as a static function of `(self, ...)`."""
+        if isinstance(stmt, ast.AsyncFunctionDef):
+            self._error("E0107", "a method of a class over a Java type cannot "
+                                 "be `async`", stmt)
+            return None
+        if not stmt.args.args or stmt.args.args[0].annotation is not None:
+            self._error("E0108",
+                        "the first parameter of such a method is `self` and "
+                        "is not annotated", stmt)
+            return None
+        key = f"{node.name}.{stmt.name}"
+        if key in self.functions:
+            self._error("E0109", f"{node.name} defines {stmt.name!r} twice",
+                        stmt)
+            return None
+        info = self._signature(stmt, self_type=sem_type(JAVA + node.name))
+        info.name = key
+        info.qualname = key
+        self.functions[key] = info
+        self.def_of_node[id(stmt)] = key
+        self.java_subclass_methods[node.name][stmt.name] = key
+        self._java_method_keys.append(key)
+        return key
+
+    def _collect_java_subclass(self, node: ast.ClassDef,
+                               scope: _Scope) -> None:
+        """Scopes for its methods. Each is a MODULE-LEVEL function.
+
+        Not a class scope: there is no class body to run, no attribute to bind
+        and nothing to capture. A method here is a `def` that happens to be
+        written indented, and treating it as one is what lets closures, name
+        resolution and everything else stay exactly as they were.
+        """
+        for stmt in node.body:
+            key = self.def_of_node.get(id(stmt))
+            if key is None or not isinstance(stmt, _DEF_NODES):
+                continue
+            child = self._new_scope(key, "function", scope, stmt)
+            for a in stmt.args.args:
+                child.bound.add(a.arg)
+            for s in stmt.body:
+                self._collect(s, child)
+
+    def _java_type_table(self, node) -> dict | None:
+        """The backend's table for a Java type named by an expression.
+
+        `block.Block` and `jvm.com.minecraft.block.Block` -- the attribute
+        forms -- and the bare name of a class this source declares over one.
+        """
+        if isinstance(node, ast.Name):
+            return self.java_subclasses.get(node.id)
+        if not isinstance(node, ast.Attribute):
+            return None
+        found = self._namespace_of(node)
+        if found is None:
+            return None
+        module, path = found
+        if len(path) != 1:
+            return None
+        entry = member(module, path[0])
+        if entry is None or entry[0] != "jclass":
+            return None
+        return entry[1]
+
+    def _type_table(self, internal: str) -> dict | None:
+        """Everything known about one handle type, generated or found."""
+        found = self.java_subclasses.get(internal)
+        return found if found is not None else modules.type_of(internal)
+
     def _remember_namespace(self, alias) -> None:
         """Record what an `import` makes nameable, for every later function."""
         if alias.asname:
@@ -4110,6 +4359,12 @@ class Analyzer:
         name = node.func.id
         if node.keywords:
             self._error("E0051", "keyword arguments are not supported", node)
+        if name in self.java_subclasses:
+            # `MyBlock(7)` -- CONSTRUCTING the generated class. Resolved
+            # against the same overload set the base's constructors give, so
+            # `MyBlock(7)` and `block.Block(7)` agree about which one they
+            # mean and disagree only about which class comes out.
+            return self._pick(node, self.java_subclasses[name]["new"], name)
         if name == "print":
             for a in node.args:
                 self._arg_expr(a)
@@ -4320,6 +4575,58 @@ class Analyzer:
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id in self.ctypes_libs)
 
+    def _dyn_ctypes_call(self, node: ast.Call) -> SemType:
+        """The same call from code with no static types.
+
+        THE SIGNATURE IS STILL REQUIRED and still not guessed -- that rule is
+        about the CALLEE and does not depend on what the caller knows. What
+        changes is the arguments: a dynamic value's type is a run-time fact,
+        so each one is CONVERTED at the call rather than checked at the
+        compile. That is what CPython's ctypes does, and here it is the only
+        thing available -- refusing every dynamic argument would refuse the
+        feature.
+        """
+        local, symbol = node.func.value.id, node.func.attr
+        signature = self.ctypes_sigs.get((local, symbol), {})
+        params = signature.get("params")
+        if params is None:
+            self._error("E0125",
+                        f"{local}.{symbol} has no argtypes; this frontend "
+                        f"will not guess a native signature", node)
+            for a in node.args:
+                self._expr(a)
+            return OBJ
+        ret = signature.get("ret", cffi.DEFAULT_RESTYPE)
+        if len(node.args) != len(params):
+            self._error("E0126",
+                        f"{local}.{symbol}() takes {len(params)} argument(s) "
+                        f"by its argtypes, got {len(node.args)}", node)
+        for a in node.args:
+            self._expr(a)
+        # A POINTER IS REFUSED FROM DYNAMIC CODE, and by name. Unboxing an
+        # `apy_value` to a machine word is exact for a number; for a pointer
+        # it would mean handing the callee the address of a runtime object, or
+        # a string's bytes without the lifetime that implies. Passing one as a
+        # raw integer is how a ctypes program corrupts memory rather than
+        # failing, so the static path -- which knows what it holds -- keeps
+        # that job until there is an accessor written for it.
+        wide = [cffi.TYPES[p] for p in params]
+        if "ptr" in wide or cffi.TYPES[ret] == "ptr":
+            self._error("E0129",
+                        f"{local}.{symbol}() has a pointer in its signature "
+                        f"and is called from code with no static types; "
+                        f"this frontend cannot pass one that way yet", node)
+            return OBJ
+        if self.current is not None:
+            self.current.ctypes_calls[id(node)] = {
+                "symbol": symbol,
+                "params": wide,
+                "ret": cffi.TYPES[ret],
+                "library": self.ctypes_libs.get(local, ""),
+                "dynamic": True,
+            }
+        return OBJ
+
     def _ctypes_call(self, node: ast.Call) -> SemType:
         """`lib.sqrt(9.0)` -- an ordinary call to an external symbol."""
         local, symbol = node.func.value.id, node.func.attr
@@ -4383,7 +4690,15 @@ class Analyzer:
                         f"only direct calls by name are supported; "
                         f"{ast.unparse(node.func.value)} is {receiver}", node)
             return ERROR
-        table = modules.type_of(java_class_of(receiver))
+        # A method written in THIS source, on a class this source declares.
+        # Called directly: the class path has never heard of it, and reaching
+        # a function in the same class file through the JVM's dispatch would
+        # be slower and no more correct.
+        own = self.java_subclass_methods.get(
+            java_class_of(receiver), {}).get(node.func.attr)
+        if own is not None:
+            return self._sub_call(node, own)
+        table = self._type_table(java_class_of(receiver))
         if table is None:
             self._error("E0093", f"nothing is known about {receiver}", node)
             return ERROR
@@ -4394,6 +4709,30 @@ class Analyzer:
                         f"method {node.func.attr!r}", node)
             return ERROR
         return self._pick(node, overloads, node.func.attr, receiver=True)
+
+    def _sub_call(self, node: ast.Call, key: str) -> SemType:
+        """`b.tick(2)` where `tick` is a method of a class declared here.
+
+        An ordinary call to an ordinary function, with the receiver as the
+        first argument -- which is what `self` already is.
+        """
+        info = self.functions[key]
+        params, ret = info.signature
+        if len(node.args) != len(params) - 1:
+            self.sink.report(
+                error("E0053", f"{key}() takes {len(params) - 1} argument(s), "
+                               f"got {len(node.args)}")
+                .at(self._span(node))
+                .also(self._span_of_def(info), f"{key} is defined here"))
+        for arg, want in zip(node.args, params[1:]):
+            got = self._java_arg(arg, want.name)
+            self._check_assignable(got, want, arg,
+                                   what=f"argument to {key}()")
+        for extra in node.args[len(params) - 1:]:
+            self._expr(extra)
+        if self.current is not None:
+            self.current.sub_calls[id(node)] = key
+        return ret
 
     def _namespace_call(self, node, module: str, path: list) -> SemType:
         if not path:
@@ -4493,7 +4832,7 @@ class Analyzer:
             # A subclass fills a superclass parameter, and a class fills an
             # interface it implements. Java's own rule, and the one that makes
             # an API usable: nearly every method in one takes a base type.
-            table = modules.type_of(java_class_of(got))
+            table = self._type_table(java_class_of(got))
             return bool(table) and java_class_of(want) in table["supers"]
         if want in ("int", "float", "bool"):
             # The same widening the language already does between its own
