@@ -3516,6 +3516,29 @@ class Analyzer:
                             f"{name}() takes exactly {want} argument(s), "
                             f"got {len(node.args)}", node)
             return OBJ
+        if name in HOSTSVC and name not in self.functions \
+                and name not in self.current.locals:
+            # A HOST SERVICE FROM DYNAMIC CODE, which is the shape every
+            # BUNDLED module has. The static path admits these through
+            # `_hostsvc_call`; without this the same call from an untyped
+            # function was `call to unknown function 'host_file_kind'`, and
+            # the standard library is entirely untyped -- so `pathlib` could
+            # not reach the layer built for it. Exactly the gap `ctypes` had
+            # before `_dyn_ctypes_call`, and fixed the same way.
+            want = len(HOSTSVC[name][0])
+            if not any(isinstance(a, ast.Starred) for a in node.args) \
+                    and len(node.args) != want:
+                self._error("E0054",
+                            f"{name}() takes exactly {want} argument(s), "
+                            f"got {len(node.args)}", node)
+            for a in node.args:
+                self._arg_expr(a)
+            # OBJ, NOT INT, even though every host service answers `i64`.
+            # `_dyn_hostsvc_call` boxes the result with `apy_from_int`, so
+            # what the surrounding dynamic code receives is an object like
+            # every other value it handles -- and claiming INT here made the
+            # analyser reject the assignment that stores it.
+            return OBJ
         info = self.functions.get(name)
         if info is None:
             # Not a module-level `def`. It may still be a callable VALUE -- a

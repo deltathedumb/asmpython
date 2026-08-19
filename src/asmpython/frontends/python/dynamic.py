@@ -209,6 +209,22 @@ _DESCRIPTOR_KINDS = {"property": 0, "classmethod": 1, "staticmethod": 2}
 #: Only the names that HAVE a value form -- see `_VALUE_BUILTINS` in
 #: analysis. `type` and `object` are not among them, and listing them here
 #: would have claimed a flag for a value that cannot be produced.
+def _hostsvc_names():
+    """The host-service names, minus the platform floor.
+
+    THE FLOOR IS EXCLUDED because it is reachable from the static path only
+    and has always been: `plat_write` from dynamic code would need the same
+    boxing, and nothing asks for it. Widening that is a separate decision.
+    """
+    from ...link import hostsvc as _hs
+    return [n for n in _hs.ALL if _hs.GROUP_OF[n] not in _hs.MANDATORY]
+
+
+#: Every host service, for recognising one at a dynamic call site. Read from
+#: `link/hostsvc.py` rather than listed here, because a hand-kept second copy
+#: of a name list is the thing that has drifted in this project three times.
+_HOSTSVC_NAMES = frozenset(_hostsvc_names())
+
 _BUILTIN_TYPE_VALUES = frozenset({
     "int", "float", "bool", "str", "bytes", "list", "tuple", "dict", "set",
     "frozenset"})
@@ -1754,6 +1770,36 @@ class DynamicLowering:
                            "apy_from_float" if floaty else "apy_from_int",
                            [wide])
 
+    def _dyn_hostsvc_call(self, node: ast.Call, name: str) -> int:
+        """`host_file_kind(path, n)` from code with no static types.
+
+        THE SAME ONE `Op.CALL` the static path emits, with a conversion either
+        side of it -- the arrangement `_dyn_ctypes_call` already uses, and
+        simpler here because every host service answers `i64` and takes only
+        `i64` and `ptr`. There are no float widths and no `void` to special
+        case.
+
+        A POINTER ARGUMENT IS A STRING'S BYTES, checked at run time by
+        `apy_str_bytes` because a dynamic value's kind is a run-time fact.
+        That accessor already admits `str`, `bytes`, `bytearray` and an int
+        meaning an address, which is every shape a path or a buffer arrives
+        in.
+        """
+        from ...link import hostsvc as _hostsvc
+
+        params, _ = _hostsvc.ALL[name]
+        args = []
+        for arg, want in zip(node.args, params):
+            value = self._dyn_expr(arg)
+            if want == "ptr":
+                args.append(self.b.call(T.PTR, "apy_str_bytes", [value]))
+            else:
+                args.append(self.b.call(T.I64, "apy_as_int", [value]))
+            self._dyn_check()
+        out = self.b.call(T.I64, name, args)
+        self._dyn_check()
+        return self.b.call(T.PTR, "apy_from_int", [out])
+
     def _dyn_call(self, node: ast.Call) -> int:
         # `getattr` AND NOT `self.info.ctypes_calls`. A comprehension and a
         # lambda are lowered against a `_Synthetic` info that carries only
@@ -1764,6 +1810,14 @@ class DynamicLowering:
         native = table.get(id(node)) if table else None
         if native is not None:
             return self._dyn_ctypes_call(node, native)
+        if isinstance(node.func, ast.Name) and node.func.id in _HOSTSVC_NAMES \
+                and self.info.locals.get(node.func.id) is None:
+            # A HOST SERVICE. Recognised by NAME rather than recorded by the
+            # analyser, because the set is closed and known at import -- there
+            # is nothing per-call to remember, which is the difference from
+            # `ctypes` where the signature comes from the program's own
+            # `argtypes`.
+            return self._dyn_hostsvc_call(node, node.func.id)
         if (isinstance(node.func, ast.Name) and node.func.id == "dict"
                 and not node.args and node.keywords
                 and "dict" not in self.info.locals):

@@ -19,44 +19,45 @@ it: `Path("C:/x").is_absolute()` would still answer False while the class
 looked native, which is the plausible-wrong-answer this file exists to avoid.
 It is one thing to add, not four, and it is declared here until then.
 
-THE CONCRETE HALF IS WINDOWS-ONLY, stated rather than discovered. It reaches
-the platform through `ctypes`, which resolves a symbol at COMPILE time -- so
-the name must be a literal, and these are the Windows spellings: `_open`,
-`_read`, `_write`, `_close` and `_lseek` from the C runtime, and
-`GetFileAttributesA`, `CreateDirectoryA`, `DeleteFileA` and
-`RemoveDirectoryA` from kernel32. A POSIX build wants the same module with a
-different list, and choosing between them needs a compile-time platform switch
-this frontend does not have. Nothing fails silently elsewhere: the LINK fails,
-which is the right kind of loud.
+THE CONCRETE HALF GOES THROUGH `link/hostsvc.py`, which is the contract every
+backend implements: `host_file_open`, `host_file_read`, `host_file_kind` and
+six more. Nothing is imported and nothing is declared -- those names are part
+of the frontend/backend contract exactly as `plat_write` is, so they are
+reachable the way the platform floor is.
 
-WHY THE DIRECTORY CALLS COME FROM kernel32 AND NOT FROM libc, since the file
-calls do. Two reasons that agree. `_unlink` and `_mkdir` are declared in
-MinGW's own `<stdio.h>`, which the runtime includes, so the backend's `extern`
-for them CONFLICTS -- the obstacle `cffi.py` documents. And
-`GetFileAttributesA` answers `is_dir` outright, where libc offers nothing
-short of `stat` and a struct this frontend cannot receive.
+IT USED TO BE `ctypes`, AND THAT IS WORTH RECORDING because the reason it
+changed is the reason the layer exists. A `ctypes` declaration is resolved by
+the LINKER at compile time -- a promise, not a `dlopen` -- so the name has to
+be a literal and the literal has to be a platform spelling. This module named
+eight: `_open`, `_read`, `_write`, `_close` and `_lseek` from the MSVC C
+runtime, and `GetFileAttributesA`, `CreateDirectoryA`, `DeleteFileA` and
+`RemoveDirectoryA` from kernel32. It worked, and it worked only where a linker
+could find those symbols: the C backend, on Windows. The JVM has no linker and
+no `_open`; a bare-metal target has neither.
 
-WHY THIS CAN EXIST AT ALL, since docs/STDLIB.md said for two days that it could
-not. `ctypes` reached only statically typed code and a bundled module is
-ordinary dynamic Python; that was fixed, then pointer arguments were -- which
-needed an accessor for a string's bytes plus answers about NUL-termination and
-lifetime that the arena had already made true. Reading needs a WRITABLE buffer
-and `bytearray` is one: its cell is a string's cell with the mutable flag set,
-so a native call writes into it directly.
+WHAT WENT WITH THEM was every platform constant. `_O_BINARY` was 32768 because
+that is MSVC's number, `_S_IWRITE` was 128 for the same reason, and `_INVALID`
+was `GetFileAttributesA`'s sentinel. A module with no business knowing which
+operating system it is on no longer does. The open modes, the kinds and the
+error codes below are the LAYER's, defined once in `hostsvc.py` and the same
+on every target.
 
-LIBC'S STDIO IS NOT REACHABLE, which is why this uses the low-level calls.
-`objects.py` includes `<stdio.h>`, so the backend's `extern` for `fopen`
-conflicts with the header's declaration; `<fcntl.h>` and `<io.h>` are not
-included, so `_open` and its family have nothing to conflict with. See
-`cffi.py`.
+BINARY IS NOT A FLAG ANY MORE. `host_file_open` is always binary by contract,
+because newline translation is a property of TEXT and text is a language
+concept -- so `read_text` and `write_text` are the only things in this module
+that know what a line ending is, which is where that knowledge belongs.
+
+WHAT IS STILL PLATFORM-SPECIFIC IS THE FLAVOUR AND NOT THE HOST. `Path` is
+POSIX-flavoured, so `str()` renders `/`; see above. That is a question about
+what a path MEANS, which no host service can answer.
 
 THE INTERPRETER RUNS THIS TOO, which is not free and is the reason it can be
-trusted. A `ctypes` declaration is resolved by the LINKER and the IR
-interpreter has none, so every method below traps there unless something binds
-the symbols -- `ir/natives_host.py` does, through `os`, marshalling each
-pointer across the boundary between a host object and interpreter memory.
-Without it the oracle could not execute the module and the compiled behaviour
-would be measured against nothing.
+trusted. `ir/hostsvc_host.py` answers the same names through Python's `os`,
+marshalling each buffer across the boundary between a host object and
+interpreter memory -- including the WRITE-BACK, without which a read fills a
+copy and `read_bytes` answers the right number of zero bytes. Without the
+interpreter the oracle could not execute this module and the compiled
+behaviour would be measured against nothing.
 
 POSIX SEMANTICS, spelled out: `/` separates, a leading `/` means absolute, `.`
 segments are dropped and `..` is KEPT -- resolving it needs to know what the
@@ -277,59 +278,65 @@ class PureWindowsPath(PurePosixPath):
 
 # ── the concrete half ───────────────────────────────────────────────────────
 #
-# THE FLAGS ARE MSVC'S, written out because a symbol resolved at compile time
-# cannot come from a variable. `_O_BINARY` matters on this platform and on no
-# other: without it the C library rewrites newlines on the way through, so
-# `read_bytes` would answer bytes the file does not contain.
+# NOTHING HERE NAMES A PLATFORM. It did: the flags were MSVC's numbers, the
+# file calls were MSVC's spellings, and the metadata call was kernel32's. All
+# of that is now `link/hostsvc.py`'s problem, which is what makes this half of
+# the module portable rather than Windows-and-C-only.
+#
+# BINARY IS NOT A FLAG ANY MORE either. `host_file_open` is always binary by
+# contract, because newline translation is a property of TEXT and text is a
+# language concept -- so the CRLF handling in `read_text`/`write_text` below
+# is the only place in this module that knows what a line ending is, which is
+# where it belongs.
 
-import ctypes
+#: THE HOST SERVICE LAYER, and not `ctypes`. This module used to declare
+#: `_open`, `_read`, `GetFileAttributesA` and five more through `ctypes`,
+#: which `frontends/python/cffi.py` resolves at COMPILE time -- a promise to
+#: the linker rather than a `dlopen`. That works, and it is why this module
+#: worked; it is also why it worked ONLY on the C backend, because the JVM has
+#: no linker and no `_open`, and because the names themselves are platform
+#: spellings: `_open` is MSVC's, `open` is POSIX's, `java.nio` is neither.
+#:
+#: `link/hostsvc.py` names the same operations once and lets each backend
+#: satisfy them however it can. Nothing is imported and nothing is declared:
+#: the names below are part of the contract every backend implements, exactly
+#: as `plat_write` is, so they are reachable without an import.
+#:
+#: WHAT THE MIGRATION REMOVED, and it is the point of the exercise: every
+#: platform constant. `_O_BINARY` was 32768 because that is MSVC's number,
+#: `_S_IWRITE` was 128 for the same reason, and `_INVALID` was
+#: `GetFileAttributesA`'s sentinel. All three were this module knowing which
+#: operating system it was on, in a file that has no business knowing.
 
-_libc = ctypes.CDLL("c")
-_libc._open.restype = ctypes.c_int
-_libc._open.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
-_libc._close.restype = ctypes.c_int
-_libc._close.argtypes = [ctypes.c_int]
-_libc._read.restype = ctypes.c_int
-_libc._read.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
-_libc._write.restype = ctypes.c_int
-_libc._write.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
-_libc._lseek.restype = ctypes.c_long
-_libc._lseek.argtypes = [ctypes.c_int, ctypes.c_long, ctypes.c_int]
-#: THE METADATA AND MUTATION CALLS COME FROM kernel32 AND NOT FROM libc, for
-#: two reasons that happen to agree. `_unlink` and `_mkdir` are declared in
-#: MinGW's own `<stdio.h>`, which `objects.py` includes, so the backend's
-#: `extern` for them CONFLICTS -- the obstacle `cffi.py` documents. And
-#: `GetFileAttributesA` answers `is_dir` outright, where libc offers nothing
-#: short of `stat` and a struct this frontend cannot receive.
-_k32 = ctypes.CDLL("kernel32")
-_k32.GetFileAttributesA.restype = ctypes.c_uint32
-_k32.GetFileAttributesA.argtypes = [ctypes.c_char_p]
-_k32.CreateDirectoryA.restype = ctypes.c_int
-_k32.CreateDirectoryA.argtypes = [ctypes.c_char_p, ctypes.c_void_p]
-_k32.DeleteFileA.restype = ctypes.c_int
-_k32.DeleteFileA.argtypes = [ctypes.c_char_p]
-_k32.RemoveDirectoryA.restype = ctypes.c_int
-_k32.RemoveDirectoryA.argtypes = [ctypes.c_char_p]
+#: How `host_file_open` is asked, from `hostsvc.OPEN_MODES`. Numbers rather
+#: than a name because a bundled module has no import to get them from -- the
+#: same reason the C's `apy_str_kind()` is a function returning a literal.
+_OPEN_READ = 0
+_OPEN_WRITE = 1
+_OPEN_APPEND = 2
 
-#: What `GetFileAttributesA` answers for a path that is not there, and the bit
-#: that says "directory". Written out because a compile-time symbol cannot
-#: come from a variable and neither can these.
-_INVALID = 4294967295
-_ATTR_DIRECTORY = 16
+#: What `host_file_kind` answers, from `hostsvc.KINDS`.
+_KIND_MISSING = 0
+_KIND_FILE = 1
+_KIND_DIR = 2
 
-#: What text mode writes for `\n`. This module already calls
-#: kernel32, so the platform is not in doubt; it is a named constant so
-#: the POSIX variant is a one-line change rather than a search.
-_LINESEP = "\r\n"
-
-_O_RDONLY = 0
-_O_WRONLY = 1
-_O_CREAT = 256
-_O_TRUNC = 512
-_O_BINARY = 32768
-_S_IWRITE = 128
-_SEEK_END = 2
+#: Where a seek starts, from `hostsvc.SEEK`.
 _SEEK_SET = 0
+_SEEK_END = 2
+
+#: The failures this module tells apart, from `hostsvc.ERRORS`. NOT `errno`:
+#: those numbers differ between platforms, which is the bug the table exists
+#: to close, and a module that branched on them would be platform-specific
+#: again in the one place that matters most.
+_ENOENT = -2
+_EACCES = -3
+_EEXIST = -4
+_ENOTEMPTY = -6
+
+#: What text mode writes for `\n`. This module is POSIX-flavoured
+#: and Windows-hosted, which the docstring records; it is a named constant
+#: so the POSIX variant is a one-line change rather than a search.
+_LINESEP = "\r\n"
 
 
 def _glob_match(name, pattern):
@@ -429,22 +436,27 @@ class Path(PurePosixPath):
     negative file descriptor leaking into the program.
     """
 
-    def _fd(self, flags, mode=0):
-        return _libc._open(_fsencode(self), flags, mode)
+    def _fd(self, how):
+        raw = _fsencode(self)
+        return host_file_open(raw, len(raw), how)
 
-    def _attrs(self):
-        return _k32.GetFileAttributesA(_fsencode(self))
+    def _kind(self):
+        """What the path is: missing, a file, a directory, or something else.
+
+        ONE CALL FOR THE THREE QUESTIONS, which is what `host_file_kind`
+        answers and why it answers a small number rather than a `struct
+        stat`. This used to be `GetFileAttributesA` and a bit test."""
+        raw = _fsencode(self)
+        return host_file_kind(raw, len(raw))
 
     def exists(self):
-        return self._attrs() != _INVALID
+        return self._kind() != _KIND_MISSING
 
     def is_dir(self):
-        got = self._attrs()
-        return got != _INVALID and (got & _ATTR_DIRECTORY) != 0
+        return self._kind() == _KIND_DIR
 
     def is_file(self):
-        got = self._attrs()
-        return got != _INVALID and (got & _ATTR_DIRECTORY) == 0
+        return self._kind() == _KIND_FILE
 
     def read_bytes(self):
         """The whole file, READ UNTIL IT ENDS rather than once.
@@ -472,25 +484,25 @@ class Path(PurePosixPath):
         the loop reads to EOF regardless -- in chunks of whatever it was told,
         or of 4096 if it was told nothing usable.
         """
-        fd = self._fd(_O_RDONLY | _O_BINARY)
+        fd = self._fd(_OPEN_READ)
         if fd < 0:
             raise FileNotFoundError(
                 "[Errno 2] No such file or directory: " + repr(str(self)))
-        size = _libc._lseek(fd, 0, _SEEK_END)
-        _libc._lseek(fd, 0, _SEEK_SET)
+        size = host_file_seek(fd, 0, _SEEK_END)
+        host_file_seek(fd, 0, _SEEK_SET)
         room = size if size > 0 else 4096
         out = b""
         while True:
             chunk = bytearray(room)
-            got = _libc._read(fd, chunk, room)
+            got = host_file_read(fd, chunk, room)
             if got < 0:
-                _libc._close(fd)
+                host_file_close(fd)
                 raise OSError(
                     "[Errno 5] Input/output error: " + repr(str(self)))
             if got == 0:
                 break
             out = out + bytes(chunk[:got])
-        _libc._close(fd)
+        host_file_close(fd)
         return out
 
     def read_text(self, encoding=None, errors=None):
@@ -518,20 +530,20 @@ class Path(PurePosixPath):
         slicing gives a new object with its own contiguous bytes -- so the
         loop does not need the pointer arithmetic the read side lacks.
         """
-        fd = self._fd(_O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY, _S_IWRITE)
+        fd = self._fd(_OPEN_WRITE)
         if fd < 0:
             raise OSError("[Errno 13] Permission denied: " + repr(str(self)))
         total = 0
         rest = data
         while len(rest) > 0:
-            wrote = _libc._write(fd, rest, len(rest))
+            wrote = host_file_write(fd, rest, len(rest))
             if wrote <= 0:
-                _libc._close(fd)
+                host_file_close(fd)
                 raise OSError(
                     "[Errno 5] Input/output error: " + repr(str(self)))
             total = total + wrote
             rest = rest[wrote:]
-        _libc._close(fd)
+        host_file_close(fd)
         return total
 
     def write_text(self, data, encoding=None, errors=None):
@@ -559,8 +571,10 @@ class Path(PurePosixPath):
             ups.reverse()
             for up in ups:
                 if str(up) != "." and str(up) != "/":
-                    _k32.CreateDirectoryA(_fsencode(up), 0)
-        if _k32.CreateDirectoryA(_fsencode(self), 0) == 0:
+                    raw = _fsencode(up)
+                    host_dir_make(raw, len(raw))
+        raw = _fsencode(self)
+        if host_dir_make(raw, len(raw)) != 0:
             if exist_ok and self.is_dir():
                 return None
             raise FileExistsError("[Errno 17] File exists: " + repr(str(self)))
@@ -576,7 +590,8 @@ class Path(PurePosixPath):
         return None
 
     def unlink(self, missing_ok=False):
-        if _k32.DeleteFileA(_fsencode(self)) == 0:
+        raw = _fsencode(self)
+        if host_file_remove(raw, len(raw)) != 0:
             if missing_ok:
                 return None
             raise FileNotFoundError(
@@ -584,7 +599,8 @@ class Path(PurePosixPath):
         return None
 
     def rmdir(self):
-        if _k32.RemoveDirectoryA(_fsencode(self)) == 0:
+        raw = _fsencode(self)
+        if host_dir_remove(raw, len(raw)) != 0:
             raise OSError("[Errno 41] Directory not empty: " + repr(str(self)))
         return None
 

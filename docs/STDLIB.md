@@ -95,7 +95,7 @@ rather than a bundled module, and is unaffected.
 | `enum` | `Enum`, `IntEnum`, `StrEnum`, `Flag`, `IntFlag`, `auto`, `unique`, aliases, `__members__`; NOT `verify`/`EnumCheck`, `boundary=`, `global_enum`, `member`/`nonmember`, `_missing_`, functional creation |
 | `copy` | `copy`, `deepcopy`, the hooks, the memo; NOT `__reduce__`, `__getstate__`, `copyreg`, `copy.replace` |
 | `dataclasses` | `dataclass` with init/repr/eq/order/unsafe_hash/frozen/match_args/kw_only, `field` with all eight arguments, `Field`, `fields`, `is_dataclass`, `asdict`/`astuple` recursing, `replace`, `make_dataclass`, `InitVar`, `KW_ONLY`, `MISSING`, `FrozenInstanceError`, `__post_init__`, ClassVar exclusion, inheritance; NOT `slots`, `weakref_slot` (refused BY NAME), `field(doc=)`, `Field[int]` |
-| `pathlib` | the whole PURE half -- `PurePosixPath`, `parts`, `name`, `stem`, `suffix`, `suffixes`, `parent`, `parents`, `root`, `anchor`, `is_absolute`, `joinpath`, `with_name`, `with_suffix`, `with_stem`, `relative_to`, `match`, `as_posix`, `/`, comparison, `__fspath__`; and a CONCRETE `Path` with `exists`, `is_file`, `is_dir`, `read_bytes`, `read_text`, `write_bytes`, `write_text`, `mkdir`, `touch`, `unlink`, `rmdir`. NOT `iterdir`, `glob`, `rglob`, `stat`, `resolve`, `absolute`, `open`, symlinks -- each refused BY NAME -- and `Path` is POSIX-flavoured, so `str()` renders `/` where CPython on Windows renders `\`. Windows-only concrete half. |
+| `pathlib` | the whole PURE half -- `PurePosixPath`, `parts`, `name`, `stem`, `suffix`, `suffixes`, `parent`, `parents`, `root`, `anchor`, `is_absolute`, `joinpath`, `with_name`, `with_suffix`, `with_stem`, `relative_to`, `match`, `as_posix`, `/`, comparison, `__fspath__`; and a CONCRETE `Path` with `exists`, `is_file`, `is_dir`, `read_bytes`, `read_text`, `write_bytes`, `write_text`, `mkdir`, `touch`, `unlink`, `rmdir`. NOT `iterdir`, `glob`, `rglob`, `stat`, `resolve`, `absolute`, `open`, symlinks -- each refused BY NAME -- and `Path` is POSIX-flavoured, so `str()` renders `/` where CPython on Windows renders `\`. Its concrete half now goes through `link/hostsvc.py` rather than `ctypes`, so it is no longer Windows-and-C-only -- see below. |
 | `abc` | `ABCMeta`, `ABC`, `abstractmethod`, `register`, `__abstractmethods__`, `__subclasshook__`, `update_abstractmethods`, `get_cache_token`, `@property`/`@classmethod` stacked over `@abstractmethod`; the three deprecated decorators are FUNCTIONS rather than subclasses of `property`/`classmethod`/`staticmethod`, which this frontend cannot extend. NOT the per-class negative cache. |
 | `collections` | `namedtuple` (positional and keyword construction, `defaults`, `rename`, `_make`/`_replace`/`_asdict`/`_fields`/`_field_defaults`), `deque` (both ends, `maxlen`, `rotate`, `extendleft`), `defaultdict`, `Counter` (all four operators, `most_common`, `elements`, `subtract`, `total`), `OrderedDict` (`move_to_end`, order-sensitive `__eq__`), `ChainMap`, `UserDict`, `UserList`, `UserString`. NOT `deque`'s O(1) ends -- it is a list inside, so the answers match and the costs do not -- and `namedtuple` has no `__slots__`. |
 | `collections.abc` | all twenty-five ABCs, the mixin methods for `Sequence`/`MutableSequence`/`Set`/`MutableSet`/`Mapping`/`MutableMapping`, `__subclasshook__` for the structural protocols, and the builtin registrations. NOT `range`, `bytearray` or `memoryview`, which cannot be named as values in this frontend and so cannot be registered; `MappingView` and its three subclasses are names rather than working views. |
@@ -296,6 +296,28 @@ and doing the SEPARATOR alone would be worse than not doing it at all:
 `Path("C:/x").is_absolute()` would still answer False while the class looked
 native, which is the plausible-wrong-answer this document exists to prevent.
 `as_posix()` agrees on both today.
+
+### It is off `ctypes` now, and that is what the layer was for
+
+`link/hostsvc.py` names the operations a backend provides -- open a file, read
+the clock -- and each backend satisfies them however it can. `pathlib` was the
+module it was designed around, and it is the first to use it.
+
+**What that removed.** The `ctypes` block declared eight symbols in two
+platform spellings: `_open`, `_read`, `_write`, `_close` and `_lseek` from the
+MSVC C runtime, and `GetFileAttributesA`, `CreateDirectoryA`, `DeleteFileA`
+and `RemoveDirectoryA` from kernel32. With them went every platform constant
+-- `_O_BINARY` 32768, `_S_IWRITE` 128, `_INVALID` 4294967295 -- each of which
+was this module knowing which operating system it was on.
+
+**What it did not remove.** The separator is still `/`, because that is a
+flavour question and not a host one; see above. And the concrete half is still
+the same set of operations, so nothing about coverage changed.
+
+**Why it could not have been done sooner.** The layer reached the statically
+typed path first, and every bundled module is untyped Python -- so `pathlib`
+could not call it until `_dyn_hostsvc_call` existed. That is the same gap
+`ctypes` had before `_dyn_ctypes_call`, closed the same way.
 
 **THE FLAVOUR IS THE NEXT THING TO WRITE, and it is worth more than it looks**,
 because `cwd`, `home`, `absolute` and `resolve` are all waiting behind it and

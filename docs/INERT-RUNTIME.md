@@ -719,7 +719,28 @@ and detects a directory with `opendir` rather than `stat`.
 in the table and implemented nowhere, which is an honest absence a program
 gets told about. The JVM backend provides none and refuses cleanly.
 
-`pathlib` has NOT been migrated off `ctypes` yet, and that is the obvious next
-step -- it is the module the layer was designed around. It needs the dynamic
-path to reach a host service the way `dynamic._dyn_ctypes_call` reaches a
-native one; the static path already can.
+**`pathlib` IS MIGRATED, and it is the layer's first real customer.** It
+needed the dynamic path to reach a host service the way `_dyn_ctypes_call`
+reaches a native one -- every bundled module is untyped Python, so a
+static-path-only layer was no use to the standard library at all. That is
+`analysis._dyn_hostsvc_call` and `dynamic._dyn_hostsvc_call`: unbox each
+argument to a machine word, one `Op.CALL`, box the answer back. Simpler than
+the `ctypes` version beside it, because every host service answers `i64` and
+takes only `i64` and `ptr`.
+
+What came out of `bundled/pathlib.py` with the `ctypes` block is every
+platform constant it had: `_O_BINARY` was 32768 because that is MSVC's number,
+`_S_IWRITE` was 128 for the same reason, and `_INVALID` was
+`GetFileAttributesA`'s sentinel. A module that had no business knowing which
+operating system it was on no longer does.
+
+**The measurable difference is what the JVM says.** Before, `pathlib` on any
+backend but C was not a diagnostic but an impossibility -- `_open` is a symbol
+only a linker can find. Now:
+
+    error[E9103]: the jvm backend cannot compile this program for jvm
+      = note: this program needs host services the jvm backend does not
+        provide: 'file' (for host_file_open).
+
+Still a refusal, and now an actionable one: it names work someone can do,
+rather than a property of the design.

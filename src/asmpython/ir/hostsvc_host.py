@@ -58,6 +58,24 @@ def _bytes(interp, addr: int, n: int) -> bytes:
     return bytes(interp.mem.buf[addr:addr + n])
 
 
+def _fill(interp, addr: int, data: bytes) -> None:
+    """Put `data` at `addr`, and into the host object that lives there.
+
+    THE SECOND HALF IS THE ONE THAT FAILS QUIETLY. A `bytearray` handed to one
+    of these arrives as an ADDRESS, because `objects_host._apy_str_bytes`
+    COPIES the host object's bytes into interpreter memory and answers where.
+    Writing only to that copy leaves the program holding a buffer of the right
+    LENGTH full of zeroes -- no error, just the wrong answer, which is exactly
+    what `pathlib.read_bytes` returned until this was here.
+
+    `natives_host` already had to solve this for the `ctypes` route; the same
+    helper serves both rather than a second copy of the rule.
+    """
+    interp.mem.buf[addr:addr + len(data)] = data
+    from .natives_host import _writeback
+    _writeback(interp, addr, data)
+
+
 def _path(interp, addr: int, n: int):
     """A path from a pointer and a length, or None if it holds a NUL.
 
@@ -138,7 +156,7 @@ def _host_file_read(interp, a):
             got = f.read(n)
     except OSError as exc:
         return _err(exc)
-    interp.mem.buf[addr:addr + len(got)] = got
+    _fill(interp, addr, got)
     return len(got)
 
 
@@ -267,7 +285,7 @@ def _host_random_bytes(interp, a):
     addr, n = int(a[0]), int(a[1])
     if n < 0:
         return _EINVAL
-    interp.mem.buf[addr:addr + n] = os.urandom(n)
+    _fill(interp, addr, os.urandom(n))
     return n
 
 
@@ -281,7 +299,7 @@ def _host_env_get(interp, a):
         # ABSENT AND EMPTY STAY DISTINCT, which is why this is not 0.
         return _ENOENT
     raw = os.fsencode(got)
-    interp.mem.buf[out:out + min(len(raw), cap)] = raw[:cap]
+    _fill(interp, out, raw[:cap])
     # THE LENGTH IT NEEDED, not the length written -- a caller that guessed
     # too small sees a number larger than its buffer and calls again.
     return len(raw)
@@ -297,7 +315,7 @@ def _host_arg_get(interp, a):
     if i < 0 or i >= len(argv):
         return _EINVAL
     raw = os.fsencode(str(argv[i]))
-    interp.mem.buf[out:out + min(len(raw), cap)] = raw[:cap]
+    _fill(interp, out, raw[:cap])
     return len(raw)
 
 
