@@ -62,10 +62,22 @@ _PRELUDE_TEMPLATE = """\
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+/* For the host services this backend declares -- see `link/hostsvc.py`.
+   ONLY THESE TWO, and that is a hard-won constraint rather than minimalism.
+   `<sys/stat.h>` and `<direct.h>` both drag in `<io.h>` on MinGW, which
+   declares `_open`, `_read`, `_write` and `_close` -- exactly the names a
+   `ctypes` program declares for itself, and two prototypes for one symbol do
+   not compile. Adding them here re-created, from the other side, the obstacle
+   `cffi.py` documents and this layer exists to retire. So the host services
+   declare the handful of platform functions they need themselves; see
+   `link/hostsvc.py`. */
+#include <errno.h>
+#include <time.h>
 
 /* The host functions the IR may call. A frontend emits calls to these by
    name; a real target would resolve them from a runtime library. */
 @HOST@
+@HOSTSVC@
 static int  putchar_(int64_t c) { return putchar((int)c); }
 
 @OBJECTS@
@@ -88,8 +100,21 @@ from ...link.objects_ir import (  # noqa: E402
 from ...link.runtime import (  # noqa: E402
     HOST_NAMES as _HOST_NAMES, host_functions as _host_functions,
 )
+from ...link import hostsvc as _hostsvc  # noqa: E402
+
+#: WHAT THIS BACKEND CAN DO FOR A PROGRAM, beyond the floor. It emits C and
+#: links against a hosted libc, so it has a filesystem, a clock, entropy and
+#: an environment. `net` is not here yet and `text` would need the Unicode
+#: table wired to these names -- both are honest absences, and a program that
+#: needs one is refused by `Backend.check_host_services` naming the group.
+_HOSTSVC_GROUPS = frozenset({"file", "time", "random", "env"})
 
 _HOST_C = _host_functions(static=True, strptr="uintptr_t", ptr="uintptr_t")
+
+#: The host services this backend provides, as C. `static` and `uintptr_t` for
+#: the same reason the host functions are: this backend inlines everything and
+#: passes pointers as an integer.
+_HOSTSVC_C = _hostsvc.c_source(_HOSTSVC_GROUPS, static=True, ptr="uintptr_t")
 
 
 def _prelude(module) -> str:
@@ -102,7 +127,7 @@ def _prelude(module) -> str:
     ported code it never reaches.
     """
     return (_PRELUDE_TEMPLATE
-            .replace("@HOST@", _HOST_C)
+            .replace("@HOST@", _HOST_C).replace("@HOSTSVC@", _HOSTSVC_C)
             .replace("@OBJECTS@",
                      _objects_c(static=True, omit=_omitted_by(module),
                                 split=_split_by(module))))
@@ -133,6 +158,9 @@ class CBackend(Backend):
     default_target = "c"
     #: The emitted C defines its own `main` and its own host functions.
     self_contained = True
+    #: See `_HOSTSVC_GROUPS` above for what these are and why `net` is not
+    #: among them.
+    host_services = _HOSTSVC_GROUPS
     #: WHAT THIS BACKEND MAKES IMPORTABLE. Reached as `import cinfo` -- and as
     #: `import c.cinfo`, which always works whether or not the bare name is
     #: free. `math` is here to demonstrate the collision rule and to be

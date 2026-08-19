@@ -28,6 +28,7 @@ from ...diagnostics import (DiagnosticSink, SourceFile, Span, error,
                             warning)
 from ...ir import types as T
 from ...link.platform import FLOOR as _FLOOR
+from ...link import hostsvc as _hostsvc
 
 #: `object.<dunder>` -- the DEFAULT implementations, and the runtime call each
 #: one is. A class that overrides a dunder reaches its default this way, which
@@ -195,6 +196,23 @@ BY_NAME = {"int": INT, "float": FLOAT, "bool": BOOL, "None": NONE,
 PLATFORM = {name: (tuple(BY_NAME[a] for a in args),
                    NONE if ret == "void" else BY_NAME[ret])
             for name, (args, ret) in _FLOOR.items()}
+
+#: THE HOST SERVICES, callable from the static path exactly as the floor is.
+#:
+#: Everything in `link/hostsvc.py` EXCEPT its `core` group, which is the floor
+#: and is already above -- one name declared twice would be two IR imports of
+#: the same symbol, and the second would win silently.
+#:
+#: NOT AN IMPORT, for the same reason the floor is not: these are the contract
+#: between a frontend and a backend rather than a library, and a program that
+#: uses one should read as though it is reaching for the machine. What differs
+#: from the floor is that a backend may not HAVE the group -- which is checked
+#: where the backend is known (`Backend.check_host_services`) rather than here,
+#: because the frontend does not know which backend it is compiling for.
+HOSTSVC = {name: (tuple(BY_NAME[a] for a in args),
+                  NONE if ret == "void" else BY_NAME[ret])
+           for name, (args, ret) in _hostsvc.ALL.items()
+           if _hostsvc.GROUP_OF[name] not in _hostsvc.MANDATORY}
 
 
 def _object_runtime() -> dict:
@@ -3978,6 +3996,21 @@ class Analyzer:
             "it is the platform floor -- see link/platform.py for what each "
             "argument means")
 
+    def _hostsvc_call(self, name: str, node: ast.Call) -> SemType:
+        """One host service, called like any other declared function.
+
+        THE SAME SHAPE AS `_platform_call`, deliberately: a host service is a
+        call with a signature and nothing more, which is the argument for not
+        making it an opcode. What it is NOT checked for here is whether the
+        backend provides its group -- the frontend does not know the backend,
+        and `Backend.check_host_services` asks that question where the answer
+        exists.
+        """
+        return self._declared_call(
+            name, HOSTSVC[name], node,
+            "it is a host service -- see link/hostsvc.py for what each "
+            "argument means and which backends provide it")
+
     def _declared_call(self, name: str, signature, node: ast.Call,
                        note: str) -> SemType:
         """One call to a function declared outside this module."""
@@ -4417,6 +4450,8 @@ class Analyzer:
             return self._memory_intrinsic(name, node)
         if name in PLATFORM and name not in self.functions:
             return self._platform_call(name, node)
+        if name in HOSTSVC and name not in self.functions:
+            return self._hostsvc_call(name, node)
         if name in OBJECT_RUNTIME and name not in self.functions:
             return self._runtime_call(name, node)
         info = self.functions.get(name)

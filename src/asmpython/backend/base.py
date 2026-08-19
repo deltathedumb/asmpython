@@ -104,6 +104,18 @@ class Backend(abc.ABC):
     #: opt-out for a whole BUILD rather than for a backend, and either one
     #: leaves the C runtime exactly as it was before any of it was ported.
     object_runtime: frozenset[str] = frozenset()
+    #: HOST SERVICE GROUPS THIS BACKEND PROVIDES -- "file", "net", "time",
+    #: "random", "env", "text". See `link/hostsvc.py` for the operations in
+    #: each and for why they are optional rather than part of the floor.
+    #:
+    #: EMPTY IS A COMPLETE BACKEND. That is the whole reason this is declared
+    #: rather than assumed: the platform floor is three functions because
+    #: making it five was a cost every backend paid forever, and a filesystem
+    #: is not something a bare-metal target has. A program that opens a file
+    #: is refused HERE, at compile time, naming the operation and the
+    #: capability -- not at link time as an undefined symbol, and not at run
+    #: time as a wrong answer.
+    host_services: frozenset[str] = frozenset()
     #: MODULES THIS BACKEND MAKES IMPORTABLE, as {name: {member: spec}} in the
     #: shape `frontends/python/modules.py` documents.
     #:
@@ -142,6 +154,43 @@ class Backend(abc.ABC):
         ever gets here.
         """
         return self
+
+    def check_host_services(self, module: Module) -> None:
+        """Refuse a program that needs a capability this backend has not got.
+
+        HERE RATHER THAN AT LINK TIME, which is the whole point. A frontend
+        emits `host_file_open` as an ordinary external call, so without this
+        the failure is an undefined symbol naming an object file -- or, for a
+        backend that resolves lazily, nothing at all until the program runs.
+        Neither says "this target has no filesystem".
+
+        NAMED BY CAPABILITY AND NOT ONLY BY FUNCTION, because the answer is
+        never to implement one operation: a target with files has all of them
+        or none. Telling an author that `host_file_open` is missing invites
+        them to add one function; telling them the `file` group is missing
+        says what the work actually is.
+
+        The `core` group is not checked. It is the platform floor, every
+        backend owes it, and a backend that has not implemented it fails in
+        ways this could only describe worse.
+        """
+        from ..link import hostsvc
+
+        wanted: dict[str, str] = {}
+        for fn in module.functions:
+            if not fn.external:
+                continue
+            group = hostsvc.group_of(fn.name)
+            if group is not None and group not in hostsvc.MANDATORY                     and group not in self.host_services:
+                wanted.setdefault(group, fn.name)
+        if not wanted:
+            return
+        listed = ", ".join(
+            f"{g!r} (for {wanted[g]})" for g in sorted(wanted))
+        raise BackendUnsupported(
+            f"this program needs host services the {self.name} backend does "
+            f"not provide: {listed}. See link/hostsvc.py for what each group "
+            f"is, and `Backend.host_services` for how a backend declares one.")
 
     @abc.abstractmethod
     def emit(self, module: Module, target: Target) -> dict[str, bytes]:

@@ -659,3 +659,67 @@ releases is exactly the size the next one up asks for. Past the last class
 
 **The C keeps its version**, over malloc, and `--object-runtime c` uses it --
 the same arrangement every stage has had, and the reason both are tested.
+
+## Host services: the other end of the same project
+
+This document is one half of an argument. It shrinks what a backend owes by
+writing the runtime in the subset -- 24 of 418 symbols so far, 394 to go. The
+other half is `link/hostsvc.py`, which NAMES what a backend owes so that it
+stops growing.
+
+**The two meet at a number.** When stage 6 lands, a backend owes the platform
+floor and nothing else -- and "nothing else" has to be written down or it is
+not a claim. So `hostsvc.py` is one table of operations with fixed signatures,
+the floor is its mandatory `core` group, and everything a real program needs
+beyond the floor is an OPTIONAL group a backend declares: a filesystem, a
+clock, entropy, an environment, a network, a character database.
+
+**What forced it was `pathlib`.** That module reaches `_open`, `_read` and
+`GetFileAttributesA` through `ctypes`, which `frontends/python/cffi.py`
+resolves at COMPILE time -- a promise to the linker rather than a `dlopen`.
+That is exactly right for what it is, and it means `pathlib` works on the C
+backend and can never work on the JVM, which has no linker and no `_open`. The
+symbol names are the problem: `_open` is MSVC's spelling, `open` is POSIX's,
+`java.nio` is neither.
+
+**Optional and declared, not a bigger floor.** Stage 2's whole achievement was
+five functions down to three. A mandatory thirty would undo it and would make
+a target without a filesystem impossible to write a backend for. So a program
+using a group its backend has not got is refused at COMPILE time naming the
+group -- not as an undefined symbol at link time naming an object file, and
+not as a wrong answer at run time.
+
+**The floor's own rule is inherited unchanged.** Nothing may know what a
+Python value is. Every signature is machine words and pointers to bytes, and
+`tests/asmpython/integration/test_hostsvc.py` asserts it, because the moment
+one takes a `str` every backend implementing it owes the LANGUAGE rather than
+the machine -- which is the argument `link/platform.py` makes for why the
+floor is three functions and not the five it used to be.
+
+**Not an opcode, and the floor is the precedent.** `plat_write` is an ordinary
+`Op.CALL` of an external symbol; nothing in the instruction set knows it
+exists. An opcode would have to be implemented by five backends plus the
+verifier, printer, liveness and interpreter -- eleven places -- to express
+what a call with a signature already expresses. An opcode buys a new SHAPE of
+instruction, and these are not a new shape.
+
+**What it cost to find out, and it is the same trap as before.** The first
+version had the C backend `#include <sys/stat.h>` and `<direct.h>` for the
+file group. Both drag in `<io.h>` on MinGW, which declares `_open`, `_read`,
+`_write` and `_close` -- exactly the names a `ctypes` program declares for
+itself -- and two prototypes for one symbol do not compile. Adding them
+re-created, from the other side, the obstacle `cffi.py` documents and this
+layer exists to retire, and it broke every compiled program that reaches libc
+through `ctypes`, `pathlib` included. So the file group includes no header
+beyond `<errno.h>`: it declares the five platform functions it needs itself,
+and detects a directory with `opendir` rather than `stat`.
+
+**Where it stands.** The C backend provides `file`, `time`, `random` and
+`env`; the IR interpreter provides the same four; `net` and `text` are named
+in the table and implemented nowhere, which is an honest absence a program
+gets told about. The JVM backend provides none and refuses cleanly.
+
+`pathlib` has NOT been migrated off `ctypes` yet, and that is the obvious next
+step -- it is the module the layer was designed around. It needs the dynamic
+path to reach a host service the way `dynamic._dyn_ctypes_call` reaches a
+native one; the static path already can.

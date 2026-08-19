@@ -242,6 +242,9 @@ def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
         else target_registry.get(be.default_target)
     result.target = target
     try:
+        # BEFORE `emit`, so a missing capability is a diagnostic naming the
+        # group rather than an undefined symbol naming an object file.
+        be.check_host_services(module)
         result.artifacts = be.emit(module, target)
     except BackendUnsupported as exc:
         sink.report(

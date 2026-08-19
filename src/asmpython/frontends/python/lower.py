@@ -36,7 +36,7 @@ from ...ir.module import Global, Instruction, Linkage
 from ...ir.opcodes import Op
 from .analysis import (
     BOOL, ENTRY_NAME, FLOAT, INT, MACHINE, MEMORY_INTRINSICS, NONE, OBJ,
-    OBJECT_RUNTIME, PLATFORM, FunctionInfo, SemType,
+    HOSTSVC, OBJECT_RUNTIME, PLATFORM, FunctionInfo, SemType,
     TO_IR, sem_type,
     const_int, int_literal, span_of,
 )
@@ -109,6 +109,11 @@ _OBJECT_RUNTIME = {
 #: platform for anything acquires no dependency on it.
 _PLATFORM_IR = {name: ([TO_IR[a] for a in args], TO_IR[ret])
                 for name, (args, ret) in PLATFORM.items()}
+
+#: The host services as IR signatures. Declared and pruned exactly as the
+#: floor is -- a program that names none acquires no imports.
+_HOSTSVC_IR = {name: ([TO_IR[a] for a in args], TO_IR[ret])
+               for name, (args, ret) in HOSTSVC.items()}
 
 #: `int(x)`/`float(x)`/`bool(x)`. Lowered as coercions, not calls -- there is
 #: nothing to call, and emitting a call would make every backend depend on a
@@ -285,6 +290,7 @@ class Lowerer(DynamicLowering):
             self.module.functions.append(fn)
 
         for name, (params, ret) in {**_RUNTIME, **_PLATFORM_IR,
+                                    **_HOSTSVC_IR,
                                     **_OBJECT_RUNTIME}.items():
             fn = Function(name, ret, external=True, linkage=Linkage.IMPORT)
             for i, ty in enumerate(params):
@@ -327,6 +333,7 @@ class Lowerer(DynamicLowering):
         self.module.functions = [
             f for f in self.module.functions
             if not (f.external and (f.name in _RUNTIME or f.name in _PLATFORM_IR
+                                    or f.name in _HOSTSVC_IR
                                     or f.name in _OBJECT_RUNTIME)
                     and f.name not in called)]
         return self.module
@@ -1066,7 +1073,8 @@ class Lowerer(DynamicLowering):
 
         # The platform floor and the object runtime: both are calls to symbols
         # declared elsewhere, and neither needs anything the other does not.
-        declared = (PLATFORM.get(name) if name not in self.infos else None) \
+        declared = (PLATFORM.get(name) or HOSTSVC.get(name)
+                    if name not in self.infos else None) \
             or (OBJECT_RUNTIME.get(name) if name not in self.infos else None)
         if declared is not None:
             params, ret = declared

@@ -229,6 +229,15 @@ class Interpreter:
             end = self.mem.buf.index(0, addr)
             self._emit(bytes(self.mem.buf[addr:end]).decode("utf-8", "replace"))
             return None
+        # THE HOST SERVICES (`link/hostsvc.py`), which are the contract every
+        # backend implements -- so the interpreter implements them too, and
+        # is a backend like any other in that respect. Before the ctypes
+        # bindings below, because these are the arrangement those exist to
+        # replace and a name should mean the portable one where both exist.
+        from .hostsvc_host import NOT_MINE as _HS_NOT_MINE, call as _hs_call
+        result = _hs_call(self, name, args)
+        if result is not _HS_NOT_MINE:
+            return result
         # THE NATIVE SYMBOLS A `ctypes` DECLARATION REACHES, last, because a
         # bundled module's declaration is the only thing that puts one in an
         # IR module and the name could otherwise shadow a runtime function.
