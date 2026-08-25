@@ -107,7 +107,7 @@ REPLACES: dict[str, tuple[str, ...]] = {
     "slicing.py": ("apy_index_arg_of", "apy_slice_indices"),
     # AND WHAT WAS BEHIND THE WALL. Two containers, four failure modes, and
     # CPython's own wording for each -- see the file.
-    "delitem.py": ("apy_delitem",),
+    "delitem.py": ("apy_delitem", "apy_default_delattr"),
     "int_cell.py": ("apy_from_int", "apy_as_int"),
     # THE THREE STRING CONSTRUCTORS THAT BORROW THEIR BYTES. The ones that OWN
     # them -- `apy_str_take`, `apy_str_copy` -- were `static` when this was

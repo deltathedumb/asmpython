@@ -129,3 +129,35 @@ def apy_del_span(seq: ptr, key: ptr) -> ptr:
         to = to + 1
     store(i64, n - (stop - start), offset(seq, apy_q_n_offset()))
     return apy_none()
+
+
+def apy_default_delattr(obj: ptr, name: ptr) -> ptr:
+    """`del obj.name` -- `object.__delattr__`, after the hooks have declined.
+
+    ONE MESSAGE FOR TWO FAILURES, deliberately: an object with no instance
+    dict at all and an object whose dict does not hold the name are the same
+    thing from the program's side, and CPython reports them alike.
+
+    THE LOOKUP IS SEPARATE FROM THE DELETE because `apy_delitem` reports a
+    KeyError and this owes an AttributeError. Letting the delete raise its own
+    message would name a dict the program never wrote.
+    """
+    if i64(load(i32, offset(obj, 0))) != apy_inst_kind():
+        return apy_no_such_attr(obj, name)
+    d: ptr = ptr(load(u64, offset(obj, apy_o_dict_offset())))
+    if apy_dict_find_of(d, name) < 0:
+        return apy_no_such_attr(obj, name)
+    return apy_delitem(d, name)
+
+
+def apy_no_such_attr(obj: ptr, name: ptr) -> ptr:
+    """`'C' object has no attribute 'x'`.
+
+    THE NAME'S BYTES AND NOT ITS CELL: `apy_raise_fmt` copies both arguments
+    with `apy_cstr_into`, so it wants C strings.
+    """
+    return apy_raise_fmt(
+        rodata(b"AttributeError\0"),
+        rodata(b"'%s' object has no attribute '%s'\0"),
+        apy_kind_name_of(obj),
+        ptr(load(u64, offset(name, apy_str_ptr_offset()))))

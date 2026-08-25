@@ -7068,6 +7068,14 @@ def _apy_default_delattr(h, a):
         if isinstance(found, Descr) and found.del_ is not None:
             return _user(h, lambda: h._value(
                 h._invoke(found.del_, [obj])))
+        # A PROPERTY WITH NO DELETER REFUSES; it does not fall through to the
+        # instance dict. The dict never holds a property's name, so falling
+        # through reported a missing attribute for one the class plainly
+        # defines -- `del p.p` on a read-only property said
+        # `'P' object has no attribute 'p'` here while both compiled paths
+        # said `can't delete attribute`. Mirrors the C's `apy_delattr`.
+        if isinstance(found, Descr) and _is_data_descriptor(found):
+            return h._fail("AttributeError", "can't delete attribute")
     if not isinstance(obj, Instance) or name not in obj.dict:
         return h._fail("AttributeError",
                        f"'{h.kind_name(obj)}' object has no attribute "

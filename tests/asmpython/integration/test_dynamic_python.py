@@ -2996,6 +2996,67 @@ PROGRAMS = {
         print((7).conjugate(), (7).real, (7).imag)
         print((2.5).real, (2.5).imag, type((7).imag).__name__)
     """,
+    "deletion_reports_what_it_could_not_find": """
+        # FOUR SHAPES THAT LOOK ALIKE AND ARE NOT. A dict deletes by KEY and
+        # names the key; a list deletes by INDEX and names a range; a slice
+        # deletes a SPAN and is not an index at all; an attribute deletes from
+        # the instance dict and owes an AttributeError rather than the
+        # KeyError the dict underneath it would raise.
+        d = {"a": 1, "b": 2, "c": 3}
+        del d["b"]
+        print(d, list(d))
+        try:
+            del d["zz"]
+        except KeyError as e:
+            print("KeyError:", e)
+        xs = list(range(10))
+        del xs[3]
+        del xs[-1]
+        del xs[1:4]
+        print(xs)
+        try:
+            del xs[50]
+        except IndexError as e:
+            print("IndexError:", e)
+        try:
+            del (1, 2)[0]
+        except TypeError as e:
+            print("TypeError:", e)
+
+        class Box:
+            def __init__(self): self.d = {}
+            def __delitem__(self, k):
+                print("__delitem__", k)
+
+        del Box()["x"]
+
+        class C:
+            def __init__(self): self.x = 1
+
+            @property
+            def p(self): return 1
+
+        c = C()
+        del c.x
+        print(hasattr(c, "x"))
+        try:
+            del c.x
+        except AttributeError as e:
+            print("AttributeError:", e)
+        # A PROPERTY WITH NO DELETER REFUSES rather than falling through to
+        # the instance dict, which never held it.
+        #
+        # THE TYPE AND NOT THE MESSAGE, because CPython's wording here --
+        # `property 'p' of 'C' object has no deleter` -- is one this runtime
+        # does not reproduce, and a case that asserted it would be asserting
+        # a known divergence rather than the behaviour. What matters and is
+        # checked is that it refuses at all: it used to report a missing
+        # attribute for one the class plainly defines.
+        try:
+            del c.p
+        except AttributeError as e:
+            print("refused:", type(e).__name__)
+    """,
     "ascii_escapes_what_repr_keeps": """
         # `ascii(x)` IS `repr(x)` WITH NOTHING ABOVE 0x7F LEFT IN IT. The two
         # agree for every ASCII value, which is why `!a` could be folded into

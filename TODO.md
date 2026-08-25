@@ -494,6 +494,24 @@ indexes. So the clamping belongs in `apy_slice_indices`, asking about the big
 BEFORE it calls `apy_index_arg` -- not in `apy_index_arg` itself, which would
 silently turn eight correct errors into wrong answers.
 
+## Three AttributeError messages CPython words differently
+
+All three paths agree with each other; none matches CPython's newer wording.
+Each is a message-only divergence -- the behaviour is right and the exception
+type is right, so the cost of each is a reader seeing a shorter explanation.
+
+| written                    | CPython                                                            | ours                                  |
+|----------------------------|--------------------------------------------------------------------|---------------------------------------|
+| `del (5).zz`               | `'int' object has no attribute 'zz' and no __dict__ for setting new attributes` | `'int' object has no attribute 'zz'` |
+| `del c.p` (no deleter)     | `property 'p' of 'C' object has no deleter`                        | `can't delete attribute`              |
+| `del d[[1]]`               | `cannot use 'list' as a dict key (unhashable type: 'list')`        | `unhashable type: 'list'`             |
+
+The first two want the object's `__dict__`-ness and the property's own name
+threaded into the message; the third is `apy_unhashable`'s wording and is the
+easiest of the three. `deletion_reports_what_it_could_not_find` asserts the
+exception TYPE for the property case rather than the text, so it does not
+freeze the divergence in place.
+
 ## What is left
 
 29 counted cases at the 1639 measurement, of which TEN were reachable and
