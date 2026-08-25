@@ -7076,6 +7076,17 @@ def _apy_default_delattr(h, a):
         # said `can't delete attribute`. Mirrors the C's `apy_delattr`.
         if isinstance(found, Descr) and _is_data_descriptor(found):
             return h._fail("AttributeError", "can't delete attribute")
+        # A USER DESCRIPTOR'S `__delete__` IS THE THIRD OF THE THREE, and it
+        # is not a `Descr` -- it is an ordinary instance whose class defines
+        # the method. Only the property form was handled here, so
+        # `del h.d` on a class-level descriptor object looked in the instance
+        # dict, found nothing, and reported an attribute the class plainly
+        # has. Mirrors the C's `apy_delattr`.
+        if isinstance(found, Instance):
+            drop = found.cls.find("__delete__")
+            if drop is not None:
+                return _user(h, lambda: h._value(
+                    h._invoke(drop, [found, obj])))
     if not isinstance(obj, Instance) or name not in obj.dict:
         return h._fail("AttributeError",
                        f"'{h.kind_name(obj)}' object has no attribute "

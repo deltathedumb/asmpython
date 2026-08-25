@@ -161,3 +161,52 @@ def apy_no_such_attr(obj: ptr, name: ptr) -> ptr:
         rodata(b"'%s' object has no attribute '%s'\0"),
         apy_kind_name_of(obj),
         ptr(load(u64, offset(name, apy_str_ptr_offset()))))
+
+
+def apy_delattr(obj: ptr, name: ptr) -> ptr:
+    """`del obj.name`, with the hooks that may take it first.
+
+    THREE CHANCES BEFORE THE INSTANCE DICT, in CPython's order:
+
+      `__delattr__` on the class takes EVERY delete, whatever the name --
+      the same rule `__setattr__` has, and the reason it is asked before
+      anything is looked up at all.
+
+      A DATA DESCRIPTOR TAKES THE DELETE exactly as it takes the write.
+      `__delete__` is the third of the three, and a property or a user
+      descriptor defining it never reaches the instance dict. Without this,
+      `del c.d` on a descriptor attribute looked in the dict, found nothing
+      -- a descriptor never puts anything there -- and reported an attribute
+      the class plainly has.
+
+      A PROPERTY WITH NO DELETER REFUSES rather than falling through, for
+      the same reason: falling through would report the attribute missing.
+
+    ANYTHING ELSE IS `object.__delattr__`.
+    """
+    if i64(load(i32, offset(obj, 0))) == apy_inst_kind():
+        cls: ptr = ptr(load(u64, offset(obj, apy_o_cls_offset())))
+        hook: ptr = apy_class_find_of(cls, apy_name_of(rodata(b"__delattr__\0")))
+        if hook:
+            argv: ptr = alloca(8)
+            store(u64, u64(name), argv)
+            return apy_call(apy_bind_of(hook, obj), argv, 1)
+        found: ptr = apy_class_find_of(cls, name)
+        if found:
+            if apy_is_data_descriptor_of(found):
+                one: ptr = alloca(8)
+                store(u64, u64(obj), one)
+                if i64(load(i32, offset(found, 0))) == apy_prop_kind():
+                    dele: ptr = ptr(load(
+                        u64, offset(found, apy_prop_del_offset())))
+                    if not dele:
+                        return apy_raise_at(
+                            rodata(b"AttributeError\0"),
+                            rodata(b"can't delete attribute\0"))
+                    return apy_call(dele, one, 1)
+                m: ptr = apy_class_find_of(
+                    ptr(load(u64, offset(found, apy_o_cls_offset()))),
+                    apy_name_of(rodata(b"__delete__\0")))
+                if m:
+                    return apy_call(apy_bind_of(m, found), one, 1)
+    return apy_default_delattr(obj, name)

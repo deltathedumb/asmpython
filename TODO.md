@@ -512,6 +512,30 @@ easiest of the three. `deletion_reports_what_it_could_not_find` asserts the
 exception TYPE for the property case rather than the text, so it does not
 freeze the divergence in place.
 
+## `str.translate` takes only a dict, and `str.maketrans` only three strings
+
+CPython's `str.translate` accepts ANY object with `__getitem__`, keyed by code
+point, and treats a `LookupError` from it as "leave this character alone".
+So `'abc'.translate([1, 2])` is `'abc'` there -- a list IS a mapping from
+index to value, and 97 is simply out of range -- and a class defining
+`__getitem__` works as a table. Here both are a TypeError.
+
+`str.maketrans` has the matching gap at the other end: the one-argument DICT
+form (`str.maketrans({"a": "AAA", "b": None})`) is refused with
+`maketrans() arguments must be strings`, so the two most natural ways to build
+a table by hand are unavailable and a literal `{ord(c): ...}` is the only one
+that works. The survey has `apy_str_maketrans` waiting on `apy_str_chars`.
+
+Neither is a port artefact -- the C does the same and the IR half matches it
+exactly. Widening `translate` means routing the lookup through `apy_getitem`
+and swallowing LookupError, which also makes it work for a list; widening
+`maketrans` means accepting one argument and walking it as a dict.
+
+ALSO A MESSAGE GAP while the value is being checked: a table mapping to
+something that is not an int, a str or None says
+`character mapping must be in range(0x110000)` here and
+`character mapping must return integer, None or str` in CPython.
+
 ## What is left
 
 29 counted cases at the 1639 measurement, of which TEN were reachable and
