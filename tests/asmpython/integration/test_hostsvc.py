@@ -1,6 +1,6 @@
 """Host services: the contract between a frontend and a backend.
 
-`link/hostsvc.py` names a set of operations -- open a file, read the clock,
+`objects/hostsvc.py` names a set of operations -- open a file, read the clock,
 ask for entropy -- with fixed signatures, and each backend satisfies them
 however it can. These tests are for the three things that arrangement is FOR,
 in the order they matter:
@@ -207,7 +207,7 @@ class TestTheTableItself:
         """One list, because two drifted three times in one afternoon."""
         sys.path.insert(0, str(SRC))
         try:
-            from asmpython.link import hostsvc, platform
+            from asmpython.objects import hostsvc, floor as platform
         finally:
             del sys.path[0]
         assert hostsvc.GROUPS["core"] == dict(platform.FLOOR)
@@ -217,11 +217,11 @@ class TestTheTableItself:
         """THE FLOOR'S RULE, INHERITED. Every signature is machine words and
         pointers to bytes. The moment one takes a `str`, every backend that
         implements it owes the language rather than the machine -- which is
-        the argument `link/platform.py` makes for why the floor is three
+        the argument `objects/floor.py` makes for why the floor is three
         functions and not the five it used to be."""
         sys.path.insert(0, str(SRC))
         try:
-            from asmpython.link import hostsvc
+            from asmpython.objects import hostsvc
         finally:
             del sys.path[0]
         allowed = {"i64", "f64", "ptr", "void"}
@@ -232,7 +232,7 @@ class TestTheTableItself:
     def test_every_operation_belongs_to_exactly_one_group(self):
         sys.path.insert(0, str(SRC))
         try:
-            from asmpython.link import hostsvc
+            from asmpython.objects import hostsvc
         finally:
             del sys.path[0]
         seen: dict[str, str] = {}
@@ -248,7 +248,7 @@ class TestTheTableItself:
         which names an object file rather than the group that was claimed."""
         sys.path.insert(0, str(SRC))
         try:
-            from asmpython.link import hostsvc
+            from asmpython.objects import hostsvc
             from asmpython.backends.c.emit import CBackend
         finally:
             del sys.path[0]
@@ -260,7 +260,7 @@ class TestTheTableItself:
     def test_the_interpreter_implements_what_it_declares(self):
         sys.path.insert(0, str(SRC))
         try:
-            from asmpython.link import hostsvc
+            from asmpython.objects import hostsvc
             from asmpython.ir import hostsvc_host
         finally:
             del sys.path[0]
@@ -269,3 +269,137 @@ class TestTheTableItself:
                 assert name in hostsvc_host._TABLE, (
                     f"{name} is in the {group!r} group the interpreter "
                     f"declares, and it has no binding")
+
+
+# ── the dynamic loader ──────────────────────────────────────────────────────
+#
+# WHY THIS GROUP IS TESTED AGAINST A REAL LIBRARY rather than a fixture. The
+# whole of `dynlib` is three calls into the platform, and the only thing that
+# can be wrong with them is the platform declaration: `LoadLibraryA` and
+# `dlopen` are declared by hand in `objects/hostsvc.py` because including
+# their headers would break every `ctypes` program (see the `file` group for
+# the same argument at length). A hand-written prototype that disagrees with
+# the platform is undefined behaviour rather than a compile error, so the test
+# has to actually load something.
+#
+# THE LIBRARY IS THE PLATFORM'S OWN, and always present: no fixture to build,
+# and nothing that can be missing on the machine running the suite.
+_LOADABLE = {
+    "win32": ("kernel32.dll", "GetTickCount"),
+    "darwin": ("libSystem.dylib", "sqrt"),
+}
+_DEFAULT_LOADABLE = ("libm.so.6", "sqrt")
+
+
+def _bytes_into(var: str, text: str, indent: str = "        ") -> str:
+    """The machine subset has no string literals, so a name is stored a byte
+    at a time. Generated rather than written out because a wrong byte here is
+    a test that fails for a reason that has nothing to do with the loader."""
+    return "\n".join(f"{indent}put({var}, {i}, {b})"
+                     for i, b in enumerate(text.encode("ascii")))
+
+
+#: A ROUND TRIP THROUGH `dynlib`, reporting WHICH claim failed as the exit
+#: status. A bare pass/fail would say "the loader is broken"; a number says
+#: which of six statements about it is the false one.
+DL_ROUND_TRIP = """\
+    def put(p: ptr, i: i64, c: i64) -> i64:
+        store(u8, u8(c), offset(p, i))
+        return 0
+
+    def main() -> int:
+        lib: ptr = alloca(256)
+{lib}
+        sym: ptr = alloca(256)
+{sym}
+        gone: ptr = alloca(256)
+{gone}
+        h: i64 = host_dl_open(lib, {lib_n})
+        if h < 0:
+            return 1
+        if h == 0:
+            return 2
+        a: i64 = host_dl_sym(h, sym, {sym_n})
+        if a < 0:
+            return 3
+        if a == 0:
+            return 4
+        b: i64 = host_dl_sym(h, gone, {gone_n})
+        if b < 0:
+            return 5
+        if b != 0:
+            return 6
+        if host_dl_close(h) != 0:
+            return 7
+        return 0
+"""
+
+#: Opening something that is not there answers `HOST_ENOENT` and not a crash.
+DL_MISSING = """\
+    def put(p: ptr, i: i64, c: i64) -> i64:
+        store(u8, u8(c), offset(p, i))
+        return 0
+
+    def main() -> int:
+        lib: ptr = alloca(256)
+{lib}
+        h: i64 = host_dl_open(lib, {lib_n})
+        if h == -2:
+            return 0
+        if h < 0:
+            return 1
+        return 2
+"""
+
+
+class TestTheDynamicLoader:
+    """`dynlib`: the RUN-TIME half of what `ctypes` does at link time.
+
+    `frontends/python/cffi.py` resolves a literal `CDLL("m")` by promising the
+    linker, which is right and needs nothing from this group. What it cannot
+    do is a name that is not known until the program runs -- `E0112` refuses
+    every such program -- and that is what these three operations are for.
+    """
+
+    def _names(self):
+        return _LOADABLE.get(sys.platform, _DEFAULT_LOADABLE)
+
+    @harness.needs("gcc")
+    def test_a_library_opens_and_a_symbol_resolves(self, tmp_path):
+        library, symbol = self._names()
+        missing = "no_symbol_is_called_this"
+        source = DL_ROUND_TRIP.format(
+            lib=_bytes_into("lib", library),
+            sym=_bytes_into("sym", symbol),
+            gone=_bytes_into("gone", missing),
+            lib_n=len(library), sym_n=len(symbol), gone_n=len(missing))
+        ran = build_and_run(tmp_path, source)
+        assert ran.returncode == 0, (
+            f"claim {ran.returncode} failed for {library}/{symbol}: "
+            f"1 open errored, 2 open answered zero, 3 sym errored, "
+            f"4 sym missed a symbol that is there, 5 sym errored on an "
+            f"absent name, 6 an absent name did not answer zero, "
+            f"7 close failed")
+
+    @harness.needs("gcc")
+    def test_a_library_that_is_not_there_is_enoent_and_not_a_crash(
+            self, tmp_path):
+        """The layer's own error code, not `errno` and not a signal.
+
+        A loader that abends on a missing library cannot be used to implement
+        an optional dependency, which is most of what a loader is for.
+        """
+        missing = "libthereisnosuchlibraryhere.so.99"
+        ran = build_and_run(tmp_path, DL_MISSING.format(
+            lib=_bytes_into("lib", missing), lib_n=len(missing)))
+        assert ran.returncode == 0, (
+            "1 means it failed with something other than HOST_ENOENT; "
+            "2 means opening a library that does not exist SUCCEEDED")
+
+    def test_the_group_is_declared_by_the_c_backend(self):
+        sys.path.insert(0, str(SRC))
+        try:
+            from asmpython.backends.c.emit import CBackend
+        finally:
+            del sys.path[0]
+        assert "dynlib" in CBackend.host_services

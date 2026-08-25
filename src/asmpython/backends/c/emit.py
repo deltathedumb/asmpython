@@ -62,7 +62,7 @@ _PRELUDE_TEMPLATE = """\
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
-/* For the host services this backend declares -- see `link/hostsvc.py`.
+/* For the host services this backend declares -- see `objects/hostsvc.py`.
    ONLY THESE TWO, and that is a hard-won constraint rather than minimalism.
    `<sys/stat.h>` and `<direct.h>` both drag in `<io.h>` on MinGW, which
    declares `_open`, `_read`, `_write` and `_close` -- exactly the names a
@@ -70,7 +70,7 @@ _PRELUDE_TEMPLATE = """\
    not compile. Adding them here re-created, from the other side, the obstacle
    `cffi.py` documents and this layer exists to retire. So the host services
    declare the handful of platform functions they need themselves; see
-   `link/hostsvc.py`. */
+   `objects/hostsvc.py`. */
 #include <errno.h>
 #include <time.h>
 
@@ -85,29 +85,35 @@ static int  putchar_(int64_t c) { return putchar((int)c); }
 
 # The runtime owns the host functions; this backend inlines them because its
 # output is self-contained. Importing rather than repeating is what stops the
-# two from drifting -- see `link.runtime.HOST_FUNCTIONS`. A `static` function
+# two from drifting -- see `objects.support.HOST_FUNCTIONS`. A `static` function
 # nothing calls draws a warning from some compilers, so the emitter drops the
 # ones a given module never mentions.
-from ...link.objects import (  # noqa: E402
+from ...objects.csource import (  # noqa: E402
     OBJECT_NAMES as _OBJECT_NAMES, objects_c as _objects_c,
 )
 # The `apy_*` the C no longer defines because the IR does. See
-# `link/objects_ir.py`; the prelude keeps a declaration for each so the
+# `objects/ir.py`; the prelude keeps a declaration for each so the
 # runtime's own hundred-odd callers still have one in scope.
-from ...link.objects_ir import (  # noqa: E402
+from ...objects.ir import (  # noqa: E402
     omitted_by as _omitted_by, split_by as _split_by,
 )
-from ...link.runtime import (  # noqa: E402
+from ...objects.support import (  # noqa: E402
     HOST_NAMES as _HOST_NAMES, host_functions as _host_functions,
 )
-from ...link import hostsvc as _hostsvc  # noqa: E402
+from ...objects import hostsvc as _hostsvc  # noqa: E402
+from .alib import ALIB
 
 #: WHAT THIS BACKEND CAN DO FOR A PROGRAM, beyond the floor. It emits C and
-#: links against a hosted libc, so it has a filesystem, a clock, entropy and
-#: an environment. `net` is not here yet and `text` would need the Unicode
-#: table wired to these names -- both are honest absences, and a program that
-#: needs one is refused by `Backend.check_host_services` naming the group.
-_HOSTSVC_GROUPS = frozenset({"file", "time", "random", "env"})
+#: links against a hosted libc, so it has a filesystem, a clock, entropy, an
+#: environment and a dynamic loader. `net` is not here yet and `text` would
+#: need the Unicode table wired to these names -- both are honest absences,
+#: and a program that needs one is refused by `Backend.check_host_services`
+#: naming the group.
+#:
+#: `dynlib` IS THE RUN-TIME HALF OF `ctypes`, not a replacement for it: a
+#: literal `CDLL("m")` is still a promise to the linker and still needs
+#: nothing here. See the group's own commentary in `objects/hostsvc.py`.
+_HOSTSVC_GROUPS = frozenset({"file", "time", "random", "env", "dynlib"})
 
 _HOST_C = _host_functions(static=True, strptr="uintptr_t", ptr="uintptr_t")
 
@@ -122,7 +128,7 @@ def _prelude(module) -> str:
 
     Per-module rather than a constant because the object runtime's C omits
     exactly the definitions this module supplies in IR -- see
-    `link/objects_ir.py`. A program with no spliced runtime keeps the C's,
+    `objects/ir.py`. A program with no spliced runtime keeps the C's,
     which is what stops a program that merely prints from carrying the
     ported code it never reaches.
     """
@@ -154,7 +160,12 @@ _PROVIDED = (set(_HOST_NAMES) | set(_OBJECT_NAMES) | {"putchar"}
 
 class CBackend(Backend):
     name = "c"
+    #: This backend's architecture library; see `backend/alib.py`.
+    alib = ALIB
     description = "portable C99 source; one local per register, no allocation"
+    #: SOURCE IN ANOTHER LANGUAGE, so text is the artifact rather than a
+    #: stage short of one. A C compiler does the encoding.
+    kind = "language"
     default_target = "c"
     #: The emitted C defines its own `main` and its own host functions.
     self_contained = True
@@ -250,7 +261,15 @@ class CBackend(Backend):
             case Op.GLOBAL_ADDR:
                 return f"{d} = (uintptr_t)g_{_cname(ins.sym)};"
             case Op.FUNC_ADDR:
-                return f"{d} = (uintptr_t)&{ins.sym};"
+                # THROUGH `_cname`, like the other two symbol sites. It was
+                # the only one of the three that was not, and the reason it
+                # survived is that nothing emitted this instruction until the
+                # subset grew `funcaddr`: a Python program with a function
+                # called `double`, `int` or `register` produced C that said
+                # `&double` and did not compile. `GLOBAL_ADDR` and `CALL` next
+                # to it were right all along, which is what made the omission
+                # invisible to a reader checking the neighbours.
+                return f"{d} = (uintptr_t)&{_cname(ins.sym)};"
 
             case Op.REM if ty.is_float:
                 # C's `%` does not accept doubles at all, so this was a

@@ -15,13 +15,13 @@ asmpython`.
 So the new compiler owns the name at `src/asmpython/`, and this one moved down
 a level. Nothing inside it changed: the move is a directory rename, and every
 import in here is either relative or absolute-to-itself, both of which still
-resolve once `legacy/` is the path entry.
+resolve once `archived/legacy/` is the path entry.
 
 ## Using it
 
 ```bash
-PYTHONPATH=legacy python -m asmpython._compiler --help
-PYTHONPATH=legacy python -m pytest tests/test_something.py
+PYTHONPATH=archived/legacy python -m asmpython._compiler --help
+PYTHONPATH=archived/legacy python -m pytest tests/test_something.py
 ```
 
 `asmpython.sh` and `asmpython.bat` at the repo root already do this — they are
@@ -34,4 +34,4 @@ a name, not something a path trick can work around.
 
 `tests/*.py` (the loose files; `tests/asmpython/` belongs to the new tree),
 `selfhost/`, `examples/`, `conformance/` and `archived/` all import
-`asmpython` expecting this one. They need `PYTHONPATH=legacy`.
+`asmpython` expecting this one. They need `PYTHONPATH=archived/legacy`.

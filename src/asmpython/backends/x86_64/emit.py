@@ -47,6 +47,9 @@ from ...backend.regalloc import (
 from ...ir import Function, Module, types as T
 from ...ir.module import Global, Instruction, Linkage, Register
 from ...ir.opcodes import Op
+from ...backend.alib import alib_modules, intrinsic_named
+from .alib import ALIB
+from . import alib_emit
 
 @dataclass(frozen=True, slots=True)
 class ABI:
@@ -163,6 +166,18 @@ class AsmDialect:
     def file_footer(self) -> list[str]:
         return []
 
+    def align(self, bytes_: int) -> str:
+        """Align to `bytes_`, however this assembler spells it.
+
+        A HOOK BECAUSE `.align` MEANS TWO DIFFERENT THINGS. On ELF and COFF
+        for x86 it is a byte count; on Mach-O it is a POWER OF TWO, so the
+        `.align 8` written for both here would ask a Mach-O assembler for
+        256-byte alignment. Over-aligned rather than wrong, and silent, which
+        is the kind of difference that survives until someone measures a
+        binary and wonders.
+        """
+        return f"\t.align {bytes_}"
+
 
 class ElfDialect(AsmDialect):
     def function_header(self, name: str, exported: bool) -> list[str]:
@@ -182,6 +197,35 @@ class CoffDialect(AsmDialect):
     def function_header(self, name: str, exported: bool) -> list[str]:
         out = [f"	.globl {name}"] if exported else []
         return out + [f"	.def {name}; .scl 2; .type 32; .endef", f"{name}:"]
+
+
+class MachoDialect(AsmDialect):
+    """Mach-O, which is neither of the other two and was silently treated as ELF.
+
+    `dialect_for` answered COFF or ELF, so `--target x86_64-macos` produced
+    output byte-identical to the Linux one -- `.type`, `.size` and
+    `.note.GNU-stack`, none of which a Mach-O assembler accepts, and no
+    leading underscore on any symbol, so nothing would have resolved even if
+    it had assembled. The target has been registered since the beginning and
+    that is exactly the failure the `Target` docstring warns about: a platform
+    a backend never asked about is a platform it gets wrong quietly.
+
+    EVERY SYMBOL WEARS AN UNDERSCORE. Mach-O's C ABI prefixes them, so `main`
+    is `_main` and a call to `printf` is a call to `_printf`. `symbol_prefix`
+    already existed for exactly this and had no user; `Backend.symbol` applies
+    it to definitions and call sites alike, which is what keeps the two from
+    disagreeing.
+    """
+
+    def function_header(self, name: str, exported: bool) -> list[str]:
+        # No `.type`: Mach-O has no such directive, and its assembler stops.
+        out = [f"	.globl {name}"] if exported else []
+        return out + [f"{name}:"]
+
+    def align(self, bytes_: int) -> str:
+        # A POWER OF TWO here, not a byte count. `.p2align` says so in the
+        # spelling rather than in a comment, and means the same on all three.
+        return f"\t.p2align {max(0, (bytes_ - 1).bit_length())}"
 
 
 def _clobbers_volatiles(ins: Instruction) -> bool:
@@ -278,7 +322,17 @@ def block_label(fn_name: str, label: str) -> str:
 
 
 def dialect_for(target: Target) -> AsmDialect:
-    return CoffDialect() if target.object_format == "coff" else ElfDialect()
+    """The directives for this target's object format.
+
+    A TABLE RATHER THAN A CHAIN OF GUESSES. The two-way `coff else elf` this
+    replaces gave Mach-O the ELF dialect, so macOS was wrong and said nothing;
+    an unknown format now falls to ELF deliberately and in one visible place.
+    """
+    if target.object_format == "coff":
+        return CoffDialect()
+    if target.object_format == "macho":
+        return MachoDialect(symbol_prefix="_")
+    return ElfDialect()
 
 #: 64-bit name -> the sub-register of a given width. Needed because a `mov`
 #: into `al` leaves the upper 56 bits of `rax` untouched, so a comparison
@@ -505,6 +559,16 @@ class _Emitter:
 
 class X86_64Backend(Backend):
     name = "x86-64"
+    #: This backend's architecture library; see `backend/alib.py`.
+    alib = ALIB
+    #: AND THE SAME LIBRARY AS AN IMPORTABLE MODULE. An alib reaches a program
+    #: through `Backend.modules` -- `from x86_64.alib import outb` is an
+    #: ordinary import of an ordinary module, resolved by the table every
+    #: backend already offers things through. There is no second mechanism and
+    #: no new syntax; what the module holds is instructions rather than
+    #: functions, and `alib_emit.py` splices each one where its call would
+    #: have gone.
+    modules = alib_modules(ALIB)
     description = "x86-64 assembly; ABI and dialect chosen by target"
     # The machine this is running on, not a platform fixed at
     # authoring time: `asmpython build --backend x86-64` on Windows used to
@@ -542,15 +606,15 @@ class X86_64Backend(Backend):
         if module.globals:
             out.append("\t.data")
             for g in module.globals:
-                out.extend(self._global(g))
+                out.extend(self._global(g, dialect))
 
         out.extend(dialect.file_footer())
         return {"out.s": ("\n".join(out) + "\n").encode("utf-8")}
 
     # ── globals ─────────────────────────────────────────────────────────────
-    def _global(self, g: Global) -> list[str]:
+    def _global(self, g: Global, dialect: AsmDialect) -> list[str]:
         lines = [f"\t.globl {g.name}"] if g.linkage is Linkage.EXPORT else []
-        lines.append(f"\t.align {g.align or 8}")
+        lines.append(dialect.align(g.align or 8))
         lines.append(f"{g.name}:")
         if g.data is None:
             lines.append(f"\t.zero {max(1, g.size)}")
@@ -1041,7 +1105,25 @@ class X86_64Backend(Backend):
                 adjust = self._place_arguments(e, ins, abi,
                                                skip_first=op is Op.CALL_PTR)
                 if op is Op.CALL:
-                    e.emit(f"call {self.symbol(ins.sym, dialect)}")
+                    # AN INTRINSIC IS SPLICED, NOT CALLED. The arguments are
+                    # already where the ABI puts them, which is exactly what
+                    # a sequence in `alib_emit` expects -- so the instruction
+                    # goes here, in place of the call that would have been.
+                    #
+                    # REFUSED BY NAME if this backend declares the intrinsic
+                    # and does not lower it: emitting the call instead would
+                    # leave an undefined `__alib_` symbol at link time, which
+                    # says nothing about which instruction was missing.
+                    wanted = intrinsic_named(ins.sym)
+                    if wanted:
+                        if not alib_emit.is_lowered(wanted):
+                            raise UnsupportedOperation(
+                                f"x86_64.alib declares {wanted!r} but this "
+                                f"backend does not emit it yet")
+                        for line in alib_emit.lines(wanted):
+                            e.emit(line)
+                    else:
+                        e.emit(f"call {self.symbol(ins.sym, dialect)}")
                 else:
                     # The callee address is an ordinary value. Loaded into r11
                     # -- reserved, so the allocator never put an argument

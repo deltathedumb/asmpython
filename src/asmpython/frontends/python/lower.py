@@ -40,7 +40,7 @@ from .analysis import (
     TO_IR, sem_type,
     const_int, int_literal, span_of,
 )
-from ...link.objects import signatures as object_signatures
+from ...objects.csource import signatures as object_signatures
 from .dynamic import DynamicLowering
 from .methods import DYN_METHOD_TABLE
 
@@ -71,7 +71,7 @@ _RUNTIME = {
     #: `x ** n` for a non-negative integral n. NOT libm's `pow`: mingw's is a
     #: ulp off where CPython's is correctly rounded, so every float `**` in a
     #: compiled program printed a different last digit. See `py_pow_int` in
-    #: link/runtime.py.
+    #: objects/support.py.
     "py_pow_int": ([T.F64, T.I64], T.F64),
 }
 
@@ -142,6 +142,10 @@ class Lowerer(DynamicLowering):
         self.java_strings: dict[str, str] = {}
         #: `reserve` names already given a global. See `_memory`.
         self.reserved: set[str] = set()
+        #: Constant bytes -> the global holding them. Keyed on the CONTENT so
+        #: two `rodata(b"TypeError")` are one global, which a runtime naming
+        #: the same handful of strings everywhere very much wants.
+        self.rodata: dict[bytes, str] = {}
         self.source = source
         #: What the `class` statements bound, and the two node-id indexes that
         #: get from a statement back to what analysis registered for it.
@@ -282,7 +286,8 @@ class Lowerer(DynamicLowering):
         # to be in the module before a call can name it.
         for symbol, (params, ret) in sorted(
                 {**self._java_externals(),
-                 **self._ctypes_externals()}.items()):
+                 **self._ctypes_externals(),
+                 **self._intrinsic_externals()}.items()):
             fn = Function(symbol, ret, external=True, linkage=Linkage.IMPORT)
             for i, ty in enumerate(params):
                 fn.params.append(i)
@@ -669,6 +674,15 @@ class Lowerer(DynamicLowering):
                 return out
             case ast.UnaryOp(op=ast.USub()):
                 ty = TO_IR[self._type_of(node.operand)]
+                # A NEGATED LITERAL IS ONE CONSTANT. `-9223372036854775808` is
+                # parsed as a negation of a POSITIVE literal that does not fit
+                # an int64, so emitting the positive and negating it wrote
+                # 2**63 into an i64 -- which wraps, and happens to wrap to the
+                # value wanted here. It does not wrap to what is wanted
+                # anywhere else, and the intermediate is a lie either way.
+                lit = int_literal(node)
+                if lit is not None and ty.name[0] in "iu":
+                    return self.b.const(ty, lit)
                 out = self.b.reg(ty)
                 self.b.emit(Instruction(Op.NEG, ty, dst=out,
                                         args=[self._expr(node.operand)]))
@@ -1107,6 +1121,43 @@ class Lowerer(DynamicLowering):
             ty = self._type_of(node)
             size = TO_IR[self._type_arg(node.args[0])].size
             return self.b.const(TO_IR[ty] if ty.is_machine else T.I64, size)
+        if name == "funcaddr":
+            # THE SYMBOL, not the source name. `self.symbols` is what the
+            # module actually exports a function under, and a call site that
+            # used the source name would resolve to nothing on any backend
+            # that renames -- which every one of them does for `main`.
+            out = self.b.reg(T.PTR)
+            self.b.emit(Instruction(Op.FUNC_ADDR, T.PTR, dst=out,
+                                    sym=self.symbols[node.args[0].id]))
+            return out
+        if name == "callptr":
+            # OPERAND ORDER IS THE OPCODE'S: the address first, the arguments
+            # after. Every backend and the interpreter already implement this
+            # -- nothing emitted it until now, which is why it is the one
+            # instruction in the table with no frontend behind it.
+            ty = TO_IR[self._type_arg(node.args[0])]
+            addr = self._expr(node.args[1])
+            args = [self._expr(a) for a in node.args[2:]]
+            out = self.b.reg(ty) if ty is not T.VOID else None
+            self.b.emit(Instruction(Op.CALL_PTR, ty, dst=out,
+                                    args=[addr, *args]))
+            return out if out is not None else self.b.const(T.I64, 0)
+        if name == "rodata":
+            # ONE GLOBAL PER DISTINCT VALUE. A runtime names `b"TypeError"`
+            # in many places and they are the same bytes; keying the table on
+            # the CONTENT rather than on a counter is what makes them one
+            # global instead of forty.
+            data = node.args[0].value
+            symbol = self.rodata.get(data)
+            if symbol is None:
+                symbol = f"__rodata{len(self.rodata)}"
+                self.rodata[data] = symbol
+                self.module.globals.append(Global(
+                    name=symbol, size=len(data), data=data, readonly=True))
+            out = self.b.reg(T.PTR)
+            self.b.emit(Instruction(Op.GLOBAL_ADDR, T.PTR, dst=out,
+                                    sym=symbol))
+            return out
         if name == "alloca":
             return self.b.alloca(const_int(node.args[0], self.infos))
         if name == "reserve":
@@ -1174,6 +1225,46 @@ class Lowerer(DynamicLowering):
         ret = sem_type(native["ret"])
         result = self.b.call(TO_IR[ret], native["symbol"], args)
         return result if result is not None else self.b.const(T.I64, 0)
+
+    def _intrinsic_externals(self) -> dict:
+        """Every intrinsic the backend offers, as an IR signature.
+
+        DECLARED FROM THE TABLE, not from the call sites, and this is the one
+        place that rule is inverted. Every other external is declared only if
+        something calls it, so a program does not acquire a link dependency it
+        does not use -- but an intrinsic is not a dependency. It is spliced
+        inline, so an unused declaration costs a line of IR and no bytes at
+        all, and a member is only discovered while lowering a body, which is
+        after declarations have to exist.
+        """
+        from .modules import backend_modules
+        from ...backend.alib import INTRINSIC_KIND
+
+        out: dict = {}
+        for table in backend_modules().values():
+            # ONLY A REAL DICT IS ENUMERATED. A backend's module table may be
+            # LAZY: the JVM's `_Package` resolves a class on first use and
+            # says why in its own docstring -- "the class path may hold tens
+            # of thousands of classes and a program names a handful", so it
+            # implements `.get` and not `.values`. Asking it to enumerate
+            # raised AttributeError and took every Java-interop test with it,
+            # and making it enumerable would have been worse than the crash:
+            # it would have walked a whole classpath on every compile to find
+            # intrinsics that cannot be there.
+            #
+            # AN ALIB TABLE IS ALWAYS A PLAIN DICT, because intrinsics are
+            # DECLARED -- `backends/<name>/alib.py` is written out -- rather
+            # than discovered from something on disk. So skipping what cannot
+            # be enumerated skips nothing this is looking for.
+            if not isinstance(table, dict):
+                continue
+            for spec in table.values():
+                if not spec or spec[0] != INTRINSIC_KIND:
+                    continue
+                _, symbol, params, ret = spec
+                out[symbol] = ([TO_IR[sem_type(p)] for p in params],
+                               TO_IR[sem_type(ret)])
+        return out
 
     def _ctypes_externals(self) -> dict:
         """Every native function this module calls, as an IR signature.

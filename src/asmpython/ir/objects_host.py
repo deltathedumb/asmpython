@@ -1,6 +1,6 @@
 """The object runtime, for the reference interpreter.
 
-`link/objects.py` is the dynamic runtime as C, linked into every compiled
+`objects/csource.py` is the dynamic runtime as C, linked into every compiled
 program. The interpreter cannot link C, so `asmpython run` trapped on
 `apy_from_int` -- which is to say it could not run any program the frontend
 now compiles dynamically, which is most of them. That breaks the project's
@@ -36,7 +36,7 @@ Python:
     reproduce, so most come free. The handful that do not are listed at
     `_C_DECIDES` below with what the C says and why.
   * FLOAT REPR is Python's `repr`, which is what `py_repr_double` in
-    link/runtime.py computes the hard way. That one agrees by construction.
+    objects/support.py computes the hard way. That one agrees by construction.
 
 A NULL HANDLE IS NOT A VALUE. In C a failed operation returns NULL and the
 frontend is expected to check the error flag before using the result; passing
@@ -467,6 +467,26 @@ class ObjectHost:
         return type(v).__name__
 
     # ── text ────────────────────────────────────────────────────────────────
+    def _under_oserror(self, name: str) -> bool:
+        """Is `name` anywhere under `OSError`?
+
+        PYTHON'S OWN CLASS TREE FIRST, which is where `_apy_exc_parent_of`
+        reads the hierarchy from too -- one source here, so the two cannot
+        drift. A user class declared with an `OSError` base is not in
+        builtins, so `user_exc` is walked after it.
+        """
+        seen = set()
+        at = name
+        while at is not None and at not in seen:
+            if at == "OSError":
+                return True
+            seen.add(at)
+            cls = getattr(__import__("builtins"), at, None)
+            if isinstance(cls, type) and issubclass(cls, BaseException):
+                return issubclass(cls, OSError)
+            at = self.user_exc.get(at)
+        return False
+
     def _text(self, v, quoted: bool) -> str:
         if isinstance(v, Class):
             # PRINTING A CLASS IS THE METACLASS'S BUSINESS when it says so.
@@ -523,6 +543,20 @@ class ObjectHost:
             held = v.cls if v.cls is not None else self.exc_class.get(v.name)
             shown_name = held.name if held is not None else v.name
             argv = getattr(v, "argv", None)
+            # `[Errno 2] No such file`, and `: 'f.txt'` when a filename came
+            # too. THE WHOLE FAMILY ARRIVES UNDER ITS OWN NAME -- opening a
+            # missing file raises FileNotFoundError -- so this walks the
+            # hierarchy rather than testing for `OSError` itself. Mirrors the
+            # C's `apy_os_text` and IR's `apy_errno_text`; the three have to
+            # agree, and before they did the compiled paths said
+            # `[Errno 2] No such file` while `asmpython run` said
+            # `(2, 'No such file')`.
+            if not quoted and argv is not None and 2 <= len(argv) <= 3:
+                if self._under_oserror(v.name) and isinstance(argv[0], int):
+                    body = f"[Errno {argv[0]}] " + self._text(argv[1], False)
+                    if len(argv) == 3:
+                        body += ": " + self._text(argv[2], True)
+                    return body
             if argv is not None and len(argv) > 1:
                 shown = self._text(tuple(argv), True)
                 # The tuple's own parentheses ARE the call's.
@@ -914,7 +948,7 @@ class ObjectHost:
 
         `env` is the function object itself and it is passed FIRST, which is
         the calling convention every backend shares -- see the comment on
-        `apy_func_new` in link/objects.py. The env is a fresh handle for the
+        `apy_func_new` in objects/csource.py. The env is a fresh handle for the
         BOUND method rather than for the underlying function, because the
         receiver travels in the value and the callee reads its cells out of
         whichever object the call came through.
@@ -1083,17 +1117,52 @@ def _apy_from_bytes(h, a):
 # No kind check, matching the C: the frontend calls these only where it has
 # proved the kind, and a check here would hide a compiler bug behind a zero.
 
+#: What a slice bound past any real length becomes. The compiled runtime uses
+#: `1 << 62` so that adding a length cannot overflow; the host matches it so
+#: the two clamp to the same place.
+_HUGE_BOUND = 1 << 62
+
+
+def _apy_slice_bound(h, a):
+    """A SLICE BOUND, WHICH IS NOT AN INDEX.
+
+    `xs[2 ** 100]` is a request neither runtime can serve and CPython refuses
+    it too; `xs[:2 ** 100]` is the whole list, and refusing THAT would be
+    wrong. A value too large clamps, keeping its sign so that
+    `xs[-(2 ** 100):]` is the whole list as well.
+    """
+    v = h._get(a[0], "apy_slice_bound")
+    if _is_int_like(v) and not -(1 << 63) <= int(v) < (1 << 63):
+        return -_HUGE_BOUND if int(v) < 0 else _HUGE_BOUND
+    return _apy_index(h, a)
+
+
 def _apy_index(h, a):
-    """A VALUE AS AN INDEX, checked -- a slice bound or a `range` argument,
-    which came from the program and may be anything, including a user object
-    with `__index__`."""
+    """A VALUE AS AN INDEX, checked -- a `range` argument or a subscript, which
+    came from the program and may be anything, including a user object with
+    `__index__`.
+
+    AN INTEGER THAT DOES NOT FIT IS REFUSED rather than truncated. It used to
+    go through `_wrap64`, which turned `2 ** 100` into whatever its low 64
+    bits happened to be -- a silent wrong index. The compiled runtime had the
+    same bug from the other direction: it tested `apy_is_int_like` first,
+    which is true of a big, and read the limb POINTER as the value.
+    """
     v = h._get(a[0], "apy_index")
+    if _is_int_like(v) and not -(1 << 63) <= int(v) < (1 << 63):
+        h._fail("OverflowError",
+                "cannot fit 'int' into an index-sized integer")
+        return 0
     if _is_int_like(v):
         return _wrap64(int(v))
     if isinstance(v, Instance) and v.cls.find("__index__") is not None:
         try:
             got = v._send("__index__")
         except _UserFailed:
+            return 0
+        if _is_int_like(got) and not -(1 << 63) <= int(got) < (1 << 63):
+            h._fail("OverflowError",
+                    "cannot fit 'int' into an index-sized integer")
             return 0
         if _is_int_like(got):
             return _wrap64(int(got))
@@ -1122,6 +1191,990 @@ def _apy_as_bool(h, a):
 
 
 # ── inspection ──────────────────────────────────────────────────────────────
+
+def _apy_bind_of(h, a):
+    """A bound method: the function plus the receiver it was found on."""
+    f = h._get(a[0], "apy_bind_of")
+    self_ = h._get(a[1], "apy_bind_of")
+    return h._new(f.__get__(self_) if hasattr(f, "__get__") else f)
+
+
+def _apy_dunder_of(h, a):
+    """The bound `name` method of an instance, or 0.
+
+    ONLY AN INSTANCE HAS ONE, and only when the CLASS defines it -- looking on
+    the instance would find an attribute that happened to share the name, which
+    is not how Python resolves a dunder.
+    """
+    v = h._get(a[0], "apy_dunder_of")
+    name = str(h._get(a[1], "apy_dunder_of"))
+    m = getattr(type(v), name, None)
+    if m is None or not callable(m):
+        return 0
+    return h._new(m.__get__(v))
+
+
+def _apy_unary_dunder_of(h, a):
+    """`v.__name__()`, or 0 when the class does not define one.
+
+    ZERO MEANS TWO THINGS and the caller tells them apart by the error flag:
+    "no such method" and "it ran and failed". Every operator dispatch in this
+    runtime reads it that way, which is why nothing is returned to say which.
+    """
+    m = _apy_dunder_of(h, a)
+    if m == 0:
+        return 0
+    try:
+        return h._value(h._invoke(h._get(m, "apy_unary_dunder_of"), []))
+    except _UserFailed:
+        return 0
+
+
+def _apy_method1_of(h, a):
+    """`v.__name__(arg)`, or 0 when the class does not define one."""
+    m = _apy_dunder_of(h, a[:2])
+    if m == 0:
+        return 0
+    arg = h._get(a[2], "apy_method1_of")
+    try:
+        return h._value(h._invoke(h._get(m, "apy_method1_of"), [arg]))
+    except _UserFailed:
+        return 0
+
+
+def _apy_clamp_range_of(h, a):
+    """Slice bounds, which the host does not keep in memory.
+
+    THE COMPILED VERSION WRITES THROUGH TWO POINTERS and the host has no
+    addresses to write to -- every function that would clamp a range is itself
+    bound in this file and uses Python's own slicing.
+    """
+    raise RuntimeError(
+        "apy_clamp_range_of has no host equivalent: it writes through two "
+        "int64 pointers, and the interpreter slices with Python's own rules")
+
+
+def _apy_int_arg_of(h, a):
+    """An integer argument, which the host reads without an out-parameter."""
+    raise RuntimeError(
+        "apy_int_arg_of has no host equivalent: it writes through an int64 "
+        "pointer, and the interpreter passes values")
+
+
+def _apy_slice_arg_of(h, a):
+    """A slice bound. See `_apy_int_arg_of`."""
+    raise RuntimeError(
+        "apy_slice_arg_of has no host equivalent: it writes through an int64 "
+        "pointer, and the interpreter passes values")
+
+
+def _apy_affix1_of(h, a):
+    """Does a prefix or suffix sit at one end of a window?"""
+    s = h._get(a[0], "apy_affix1_of")
+    fix = h._get(a[1], "apy_affix1_of")
+    lo, hi, at_end = int(a[2]), int(a[3]), int(a[4])
+    window = s[lo:hi]
+    return 1 if (window.endswith(fix) if at_end
+                 else window.startswith(fix)) else 0
+
+
+def _apy_name_of(h, a):
+    """An interned str cell for an attribute name.
+
+    NO CACHE HERE, because there is nothing to save: the compiled runtime
+    interns to avoid allocating a str cell per attribute access, and the host
+    is handing back a Python string it already has.
+    """
+    return h._new(str(h._get(a[0], "apy_name_of")))
+
+
+def _apy_name_rows(h, a):
+    """The cache's table, which the host does not have. See `_apy_name_of`."""
+    raise RuntimeError(
+        "apy_name_rows has no host equivalent: the interpreter does not "
+        "intern attribute names, so there is no table")
+
+
+def _apy_name_slot(h, a):
+    """The cache's count. See `_apy_name_rows`."""
+    raise RuntimeError(
+        "apy_name_slot has no host equivalent: the interpreter does not "
+        "intern attribute names, so there is nothing to count")
+
+
+def _apy_type_for(h, a):
+    """`type(v)` -- the object, not the name.
+
+    PYTHON'S OWN `type`, which interns by construction: `type(1) is type(2)`
+    is true here because there is one `int`, where the compiled runtime has
+    to remember the cell it made.
+    """
+    return h._new(h._type_of(h._get(a[0], "apy_type_for")))
+
+
+def _apy_type_rows(h, a):
+    """The interning table, which the host does not keep. See `_apy_type_for`."""
+    raise RuntimeError(
+        "apy_type_rows has no host equivalent: the interpreter uses Python's "
+        "own type objects, which are already unique")
+
+
+def _apy_type_slot_count(h, a):
+    """The table's count. See `_apy_type_rows`."""
+    raise RuntimeError(
+        "apy_type_slot_count has no host equivalent: there is no table to "
+        "count")
+
+
+def _apy_canonical_slot(h, a):
+    """Where program-declared classes are remembered.
+
+    THE HOST KEEPS THEM ON ITSELF -- `h.exc_class` and the class objects it
+    builds -- so there is no single word to hand out.
+    """
+    raise RuntimeError(
+        "apy_canonical_slot has no host equivalent: the interpreter keeps "
+        "declared classes on the host object")
+
+
+def _apy_gen_step_of(h, a):
+    """Resume a generator once, filling `done` with whether it finished.
+
+    THE HOST'S GENERATORS ARE REAL PYTHON ONES, resumed by `send` and ended
+    by a StopIteration the interpreter catches -- there is no state word to
+    read and no `done` cell in its memory to write. Every caller of this is
+    bound in this file and steps them that way.
+    """
+    raise RuntimeError(
+        "apy_gen_step_of has no host equivalent: the interpreter resumes "
+        "real Python generators")
+
+
+def _apy_is_data_descriptor_of(h, a):
+    """Does `v` want to intercept a WRITE as well as a read?
+
+    `_apy_default_setattr` DOES THIS INLINE, through `_descr_set` -- the
+    compiled runtime factors the question out because two callers want it and
+    the interpreter has only the one.
+    """
+    raise RuntimeError(
+        "apy_is_data_descriptor_of has no host equivalent: the interpreter "
+        "asks inside its own setattr")
+
+
+def _apy_descr_set_of(h, a):
+    """Hand a write to a data descriptor. See `_apy_is_data_descriptor_of`."""
+    raise RuntimeError(
+        "apy_descr_set_of has no host equivalent: the interpreter hands a "
+        "write to a descriptor inside its own setattr")
+
+
+def _apy_slot_allows_of(h, a):
+    """May `name` be stored on an instance of `cls`? Same reason."""
+    raise RuntimeError(
+        "apy_slot_allows_of has no host equivalent: the interpreter checks "
+        "__slots__ inside its own setattr")
+
+
+def _apy_binary_dunder_of(h, a):
+    """`a.__op__(b)` first, then `b.__rop__(a)`.
+
+    EVERY CALLER IS BOUND IN THIS FILE. The interpreter dispatches each
+    operator to Python's own, which already tries the reflected form and
+    already understands `NotImplemented` -- so there is nothing left for a
+    shared worker to do.
+    """
+    raise RuntimeError(
+        "apy_binary_dunder_of has no host equivalent: the interpreter lets "
+        "Python try the reflected operator itself")
+
+
+def _apy_extreme_of(h, a):
+    """`max(xs)` and `min(xs)` over one sequence.
+
+    `_apy_max` AND `_apy_min` EACH DO IT DIRECTLY, through Python's own --
+    the compiled runtime shares one body because the two differ by a sign and
+    the interpreter has two small ones.
+    """
+    raise RuntimeError(
+        "apy_extreme_of has no host equivalent: the interpreter binds max() "
+        "and min() to Python's own")
+
+
+def _apy_extreme_by_of(h, a):
+    """`max(xs, key=f)`. See `_apy_extreme_of`."""
+    raise RuntimeError(
+        "apy_extreme_by_of has no host equivalent: the interpreter binds "
+        "max() and min() to Python's own")
+
+
+def _apy_base_text_of(h, a):
+    """`bin`, `oct` and `hex`, which are one body three times.
+
+    `_apy_bin`, `_apy_oct` AND `_apy_hex` EACH REACH PYTHON'S OWN, so the
+    shared worker has no caller on this path -- the compiled runtime shares
+    one because the three differ by a base and a prefix.
+    """
+    raise RuntimeError(
+        "apy_base_text_of has no host equivalent: the interpreter binds bin, "
+        "oct and hex to Python's own")
+
+
+def _apy_big_base_text_of(h, a):
+    """The same for a big. See `_apy_base_text_of` -- Python's integers are
+    already arbitrary-precision here, so there is no separate path."""
+    raise RuntimeError(
+        "apy_big_base_text_of has no host equivalent: the interpreter's "
+        "integers are Python's, which need no separate big path")
+
+
+def _apy_splitlines_impl_of(h, a):
+    """`s.splitlines()`. `_apy_str_splitlines` and its keepends twin each
+    reach Python's own, so the shared worker has no caller here."""
+    raise RuntimeError(
+        "apy_splitlines_impl_of has no host equivalent: the interpreter "
+        "binds splitlines to Python's own")
+
+
+def _apy_arg_must_be_str_of(h, a):
+    """The TypeError a string method raises for a non-string argument.
+
+    THE HOST LETS PYTHON RAISE IT. Its string methods are Python's own, so
+    the refusal and its wording both come from there -- there is nothing for
+    a shared message builder to do.
+    """
+    raise RuntimeError(
+        "apy_arg_must_be_str_of has no host equivalent: Python's own string "
+        "methods raise this")
+
+
+def _apy_inst_held_of(h, a):
+    """The builtin an instance wraps.
+
+    THE HOST READS `Instance.held` DIRECTLY wherever it needs it, so the
+    accessor the compiled runtime factors out has no caller on this path.
+    """
+    v = h._get(a[0], "apy_inst_held_of")
+    if not isinstance(v, Instance) or v.held is None:
+        return 0
+    return h._new(v.held)
+
+
+def _apy_str_count_in_of(h, a):
+    """`s.count(sub)` with bounds. `_apy_str_count2` and its three-argument
+    twin each reach Python's own, so the shared worker has no caller here."""
+    raise RuntimeError(
+        "apy_str_count_in_of has no host equivalent: the interpreter binds "
+        "count to Python's own")
+
+
+def _apy_group_select_of(h, a):
+    """The part of an exception group matching a type.
+
+    `_apy_group_split`, `_apy_group_subgroup` AND `_apy_group_dispatch` each
+    walk the group themselves here, so the shared selector the compiled
+    runtime factors out has no caller on this path.
+    """
+    raise RuntimeError(
+        "apy_group_select_of has no host equivalent: the interpreter walks "
+        "an exception group inside each of split, subgroup and dispatch")
+
+
+def _apy_descr_get_of(h, a):
+    """Read through a descriptor.
+
+    THE HOST'S ATTRIBUTE LOOKUP DOES THIS INLINE, through `_descr_get` -- the
+    compiled runtime factors it out because two callers want it, and the
+    interpreter reaches it from one place.
+    """
+    raise RuntimeError(
+        "apy_descr_get_of has no host equivalent: the interpreter reads "
+        "through a descriptor inside its own getattr")
+
+
+def _apy_kind_class(h, a):
+    """The class object standing for a builtin kind.
+
+    THE HOST ANSWERS PYTHON'S OWN TYPE, which is already one object per kind
+    -- there is no cache to keep because Python keeps it.
+    """
+    raise RuntimeError(
+        "apy_kind_class has no host equivalent: the interpreter answers "
+        "Python's own type object for a builtin")
+
+
+def _apy_member_descriptor(h, a):
+    """One `member_descriptor`, which is what a slot reads as on the class."""
+    raise RuntimeError(
+        "apy_member_descriptor has no host equivalent: the interpreter "
+        "answers a slot read on the class its own way")
+
+
+def _apy_object_default(h, a):
+    """`object`'s own implementation of a dunder, by name.
+
+    THE HOST HAS NO SELECTORS. Its dunders are Python functions found on real
+    classes, so there is nothing to hand back by name -- every caller of this
+    is bound in this file and looks the method up instead.
+    """
+    raise RuntimeError(
+        "apy_object_default has no host equivalent: the interpreter finds "
+        "object's dunders on real Python classes")
+
+
+def _apy_kind_attr(h, a):
+    """The builtin method or field a name means on a builtin value.
+
+    THE HOST ASKS PYTHON. Its lists and dicts are Python's, so `getattr` on
+    one answers a real bound method and there is no table of what exists to
+    consult -- the compiled runtime needs one because the methods live in the
+    frontend's dispatch and not in any class.
+    """
+    raise RuntimeError(
+        "apy_kind_attr has no host equivalent: the interpreter asks Python "
+        "for a builtin's attributes")
+
+
+def _apy_kind_attr_of(h, a):
+    """The same, unbound. See `_apy_kind_attr`."""
+    raise RuntimeError(
+        "apy_kind_attr_of has no host equivalent: the interpreter asks "
+        "Python for a builtin's attributes")
+
+
+def _apy_kind_method_of(h, a):
+    """One builtin method as a callable value. See `_apy_kind_attr`."""
+    raise RuntimeError(
+        "apy_kind_method_of has no host equivalent: the interpreter answers "
+        "Python's own bound method")
+
+
+def _apy_kind_prototype(h, a):
+    """An empty value of a named builtin kind. See `_apy_kind_attr`."""
+    raise RuntimeError(
+        "apy_kind_prototype has no host equivalent: the interpreter asks "
+        "Python's own type for a builtin's attributes")
+
+
+def _apy_no_attribute(h, a):
+    """The last thing attribute lookup tries, and the error if it fails.
+
+    `_apy_default_getattr` RAISES IT DIRECTLY here, because the host has no
+    separate table of builtin attributes to consult first.
+    """
+    raise RuntimeError(
+        "apy_no_attribute has no host equivalent: the interpreter raises "
+        "the AttributeError from its own getattr")
+
+
+def _apy_traceback_of(h, a):
+    """`e.__traceback__`.
+
+    THE HOST BUILDS ITS OWN, from the position it keeps on the interpreter
+    rather than from a table the compiled runtime reserves.
+    """
+    raise RuntimeError(
+        "apy_traceback_of has no host equivalent: the interpreter builds a "
+        "traceback from its own position record")
+
+
+def _apy_exc_shown_of(h, a):
+    """The name an exception SHOWS, which is not always the one it matches.
+
+    THE HOST'S EXCEPTIONS ARE REAL PYTHON CLASSES, so the name it shows is
+    already the name it has -- the mangling this exists to hide belongs to
+    the compiled path's bundled-module splice.
+    """
+    name = str(h._get(a[0], "apy_exc_shown_of"))
+    cls = h.exc_class.get(name)
+    return h._new(cls.name if cls is not None else name)
+
+
+def _apy_special_form_class(h, a):
+    """The class every interned typing form is an instance of.
+
+    THE HOST KEEPS ITS TYPING FORMS AS PYTHON OBJECTS, so there is no single
+    class cell to hand out -- `_apy_is_special_form` asks about them
+    directly.
+    """
+    raise RuntimeError(
+        "apy_special_form_class has no host equivalent: the interpreter "
+        "keeps typing forms as Python objects")
+
+
+def _apy_text_result_of(h, a):
+    """What a user `__repr__` answered, if it answered a string.
+
+    THE HOST CHECKS INLINE wherever it calls one, because Python's own
+    `repr()` already refuses a non-string and there is one place that has to
+    reproduce the wording.
+    """
+    raise RuntimeError(
+        "apy_text_result has no host equivalent: the interpreter checks a "
+        "dunder's result where it calls it")
+
+
+def _apy_bytes_repr(h, a):
+    """`repr(b"...")`, and `bytearray(...)` around a mutable one.
+
+    THE HOST ASKS PYTHON, whose bytes and bytearray already render
+    themselves -- including the quote choice and the escapes this exists to
+    reproduce on the compiled path.
+    """
+    v = h._get(a[0], "apy_bytes_repr")
+    return h._new(repr(v))
+
+
+def _apy_text_of(h, a):
+    """`str(v)` or `repr(v)`, depending on the flag.
+
+    THE HOST ASKS PYTHON, which renders its own objects -- and for the kinds
+    the interpreter keeps as real Python values that is the same answer the
+    compiled runtime builds by hand.
+    """
+    v = h._get(a[0], "apy_text_of")
+    quoted = int(h._get(a[1], "apy_text_of"))
+    return h._new(repr(v) if quoted else str(v))
+
+
+def _apy_exc_text_of(h, a):
+    """`repr(e)` and `str(e)`.
+
+    THE HOST ASKS PYTHON, whose exceptions already know both spellings --
+    including the two the compiled version is written out for: the tuple an
+    exception with several arguments shows, and the `[Errno n] msg` form the
+    OSError family puts on a message.
+    """
+    v = h._get(a[0], "apy_exc_text_of")
+    quoted = int(h._get(a[1], "apy_exc_text_of"))
+    return _user(h, lambda: h._new(repr(v) if quoted else str(v)))
+
+
+def _apy_seq_text_of(h, a):
+    """`[1, 2]` and `(1, 2)`.
+
+    THE HOST ASKS PYTHON, whose lists and tuples already render themselves --
+    including the one-element tuple's comma and the `[...]` a cycle prints,
+    which are the two things the compiled version exists to get right.
+    """
+    return _user(h, lambda: h._new(repr(h._get(a[0], "apy_seq_text_of"))))
+
+
+def _apy_dict_text_of(h, a):
+    """`{'a': 1}`. THE HOST ASKS PYTHON, as above."""
+    return _user(h, lambda: h._new(repr(h._get(a[0], "apy_dict_text_of"))))
+
+
+def _apy_set_text_of(h, a):
+    """`{1, 2}` and `frozenset({1, 2})`. THE HOST ASKS PYTHON, as above."""
+    return _user(h, lambda: h._new(repr(h._get(a[0], "apy_set_text_of"))))
+
+
+def _apy_big_text(h, a):
+    """A big in base ten.
+
+    THE HOST'S INTEGERS ARE PYTHON'S, which are already arbitrary-precision
+    and already know how to print themselves -- there is no separate big
+    representation here to render.
+    """
+    raise RuntimeError(
+        "apy_big_text has no host equivalent: the interpreter's integers are "
+        "Python's own")
+
+
+def _apy_every_of(h, a):
+    """`all(v)` and `any(v)`, which are one walk with two answers.
+
+    `_apy_all` AND `_apy_any` BELOW EACH DO IT DIRECTLY, so nothing on this
+    path reaches the shared worker -- the compiled runtime shares one body
+    because it is the same walk, and the interpreter has two small ones.
+    """
+    raise RuntimeError(
+        "apy_every_of has no host equivalent: the interpreter binds all() "
+        "and any() to their own walks")
+
+
+def _apy_gen_stop(h, a):
+    """The StopIteration a finished generator ends with, carrying its return.
+
+    THE HOST\'S GENERATORS ARE REAL PYTHON ONES, so the StopIteration is
+    raised by Python itself and already carries the value -- there is no
+    result slot here to read one out of.
+    """
+    raise RuntimeError(
+        "apy_gen_stop has no host equivalent: the interpreter lets Python "
+        "raise its own StopIteration")
+
+
+def _apy_exc_class_named_of(h, a):
+    """The class a program declared for exceptions of this name, or 0.
+
+    THE HOST KEEPS THE TABLE ON ITSELF -- `h.exc_class`, keyed by name -- so
+    this reads it directly rather than through the slot the compiled runtime
+    reserves.
+    """
+    name = str(h._get(a[0], "apy_exc_class_named_of"))
+    cls = h.exc_class.get(name)
+    return h._new(cls) if cls is not None else 0
+
+
+def _apy_exc_construct_of(h, a):
+    """Run a program-written exception class's `__init__` over a raised cell.
+
+    THE HOST BUILDS ITS EXCEPTIONS AS REAL PYTHON OBJECTS, so a class it
+    declared is instantiated by Python itself and there is no separate cell
+    to run a constructor over afterwards. Every caller of this is bound in
+    this file and builds the exception the host's own way.
+    """
+    raise RuntimeError(
+        "apy_exc_construct_of has no host equivalent: the interpreter builds "
+        "exceptions as real Python objects")
+
+
+def _apy_exc_class_slot(h, a):
+    """Where the name-to-class table for program exceptions lives.
+
+    THE HOST KEEPS IT ON ITSELF -- `h.exc_class`, a real dict keyed by name --
+    so there is no single word to hand out. `apy_exc_class_bind` and the
+    lookup beside it are both bound in this file and reach it directly.
+    """
+    raise RuntimeError(
+        "apy_exc_class_slot has no host equivalent: the interpreter keeps "
+        "the exception-class table on the host object")
+
+
+def _apy_live_agens_slot(h, a):
+    """Where the list of started async generators lives.
+
+    THE HOST TRACKS THEM ON ITSELF, because its generators are real Python
+    ones and the shutdown walk is a list on the interpreter rather than a
+    runtime value.
+    """
+    raise RuntimeError(
+        "apy_live_agens_slot has no host equivalent: the interpreter keeps "
+        "live async generators on the host object")
+
+
+def _apy_tasks_slot(h, a):
+    """Where the list of handed-over tasks lives.
+
+    THE HOST RUNS ITS OWN LOOP over a list it keeps, so there is no runtime
+    value holding them and nothing to hand back.
+    """
+    raise RuntimeError(
+        "apy_tasks_slot has no host equivalent: the interpreter keeps the "
+        "task list on the host object")
+
+
+def _apy_affix_of(h, a):
+    """`startswith`/`endswith` with bounds and a tuple of prefixes.
+
+    EVERY CALLER IS BOUND IN THIS FILE -- the six exported spellings each
+    reach Python's own method directly -- so the shared worker is never the
+    thing the interpreter is asked for.
+    """
+    raise RuntimeError(
+        "apy_affix_of has no host equivalent: the interpreter binds each "
+        "startswith/endswith spelling to Python's own method")
+
+
+def _apy_str_slice_of(h, a):
+    """`s[lo:hi]` by BYTE bounds.
+
+    THE HOST HAS NO BYTE BOUNDS TO SLICE BY. Its strings are Python strings
+    and its indices are characters, so a byte-addressed cut has no meaning
+    here -- every caller of this is itself bound in this file and slices
+    with Python's own indices.
+    """
+    raise RuntimeError(
+        "apy_str_slice_of has no host equivalent: the interpreter slices "
+        "Python strings by character")
+
+
+def _apy_split_ws_of(h, a):
+    """Split on runs of whitespace.
+
+    EVERY CALLER IS BOUND IN THIS FILE -- the six exported split spellings
+    each reach Python's own `split`/`rsplit`, which is the same algorithm
+    including the two modes.
+    """
+    raise RuntimeError(
+        "apy_split_ws_of has no host equivalent: the interpreter binds each "
+        "split spelling to Python's own method")
+
+
+def _apy_split_sep_of(h, a):
+    """Split on each occurrence of a separator. See `_apy_split_ws_of`."""
+    raise RuntimeError(
+        "apy_split_sep_of has no host equivalent: the interpreter binds each "
+        "split spelling to Python's own method")
+
+
+def _apy_str_split_impl_of(h, a):
+    """Which split algorithm a call means. See `_apy_split_ws_of`."""
+    raise RuntimeError(
+        "apy_str_split_impl_of has no host equivalent: the interpreter binds "
+        "each split spelling to Python's own method")
+
+
+def _apy_native_of(h, a):
+    """The runtime's own implementation of a dunder, as a callable value.
+
+    THE HOST HAS NO SELECTORS. Its dunders are Python functions found on real
+    classes, so there is nothing to cache and nothing to hand back -- every
+    caller of this is itself bound in this file and looks the method up
+    instead.
+    """
+    raise RuntimeError(
+        "apy_native_of has no host equivalent: the interpreter finds dunders "
+        "on real Python classes rather than by selector")
+
+
+def _apy_type_class(h, a):
+    """The class `type` itself is."""
+    return h._new(type)
+
+
+def _apy_abs64_of(h, a):
+    """|v|, with INT64_MIN answering its own bit pattern.
+
+    THE WRAP IS DELIBERATE and matches the compiled half: the magnitude of the
+    most negative int64 does not fit an int64, and every caller wants the bits
+    rather than a number to do arithmetic on.
+    """
+    return _wrap64(abs(int(a[0])))
+
+
+def _apy_binop_error_of(h, a):
+    """`unsupported operand type(s) for OP` -- what every operator refuses with."""
+    op = str(h._get(a[0], "apy_binop_error_of"))
+    x = h._get(a[1], "apy_binop_error_of")
+    y = h._get(a[2], "apy_binop_error_of")
+    h.err = ("TypeError",
+             f"unsupported operand type(s) for {op}: "
+             f"'{h.kind_name(x)}' and '{h.kind_name(y)}'")
+    h.err_value = None
+    h.pos_err = h.pos_here
+    return 0
+
+
+def _set_rhs(h, b, who):
+    """The right operand as a set, or None if it cannot be one."""
+    if isinstance(b, (set, frozenset)):
+        return b
+    try:
+        return set(b)
+    except TypeError:
+        return None
+
+
+def _apy_set_algebra_of(h, a):
+    """`|`, `&`, `-` and `^`, and the methods that spell them out.
+
+    THE RESULT KEEPS THE LEFT SIDE'S KIND, so `frozenset({1}) | {2}` is a
+    frozenset -- which Python's own operators do, so the four are reached
+    through the type of the left operand rather than reimplemented.
+    """
+    op = str(h._get(a[0], "apy_set_algebra_of"))
+    x = h._get(a[1], "apy_set_algebra_of")
+    y = h._get(a[2], "apy_set_algebra_of")
+    which, strict = int(a[3]), int(a[4])
+    if not isinstance(x, (set, frozenset)):
+        return _apy_binop_error_of(h, a[:3])
+    if strict and not isinstance(y, (set, frozenset)):
+        return _apy_binop_error_of(h, a[:3])
+    rhs = _set_rhs(h, y, op)
+    if rhs is None:
+        return _apy_binop_error_of(h, a[:3])
+    made = (x | rhs if which == 0 else x & rhs if which == 1
+            else x - rhs if which == 2 else x ^ rhs)
+    return h._new(made)
+
+
+def _apy_set_method_of(h, a):
+    """`s.union(x)` and its three siblings -- the non-strict spelling."""
+    x = h._get(a[1], "apy_set_method_of")
+    if not isinstance(x, (set, frozenset)):
+        name = str(h._get(a[0], "apy_set_method_of"))
+        h.err = ("AttributeError",
+                 f"'{h.kind_name(x)}' object has no attribute '{name}'")
+        h.err_value = None
+        h.pos_err = h.pos_here
+        return 0
+    return _apy_set_algebra_of(h, (a[0], a[1], a[2], a[3], 0))
+
+
+def _apy_set_relate_of(h, a):
+    """`issubset`, `issuperset` and `isdisjoint` -- all answer a bool."""
+    name = str(h._get(a[0], "apy_set_relate_of"))
+    x = h._get(a[1], "apy_set_relate_of")
+    y = h._get(a[2], "apy_set_relate_of")
+    which = int(a[3])
+    if not isinstance(x, (set, frozenset)):
+        h.err = ("AttributeError",
+                 f"'{h.kind_name(x)}' object has no attribute '{name}'")
+        h.err_value = None
+        h.pos_err = h.pos_here
+        return 0
+    rhs = _set_rhs(h, y, name)
+    if rhs is None:
+        return _apy_binop_error_of(h, (a[0], a[1], a[2]))
+    got = (x <= rhs if which == 0 else x >= rhs if which == 1
+           else x.isdisjoint(rhs))
+    return h._new(bool(got))
+
+
+def _apy_hash_raw_of(h, a):
+    """A hash for anything that can be a key.
+
+    PYTHON'S OWN `hash`, which gets every rule for free -- `hash(5) ==
+    hash(5.0)`, a tuple ordered and a frozenset not, a class's `__hash__`.
+    The compiled runtime reproduces those; here they are the definition.
+    """
+    return _wrap64(hash(h._get(a[0], "apy_hash_raw_of")))
+
+
+def _apy_set_mask_of(h, a):
+    """The mask an n-element set orders by. Arithmetic, so it is the same."""
+    n, size = int(a[0]), 8
+    while n * 5 >= size * 3:
+        size *= 2
+    return size - 1
+
+
+def _apy_q_append_of(h, a):
+    """Append to a sequence, which on this side is a Python list."""
+    h._get(a[0], "apy_q_append_of").append(h._get(a[1], "apy_q_append_of"))
+    return None
+
+
+def _apy_set_find_of(h, a):
+    """Where an item sits in a set, or -1.
+
+    BY POSITION, because the compiled set is an ordered table its callers
+    index. The host keeps a Python set, which has no positions -- so the
+    order is the one iteration gives, which is what every caller of this
+    actually uses it for.
+    """
+    s = h._get(a[0], "apy_set_find_of")
+    item = h._get(a[1], "apy_set_find_of")
+    for i, v in enumerate(s):
+        if v == item and type(v) is type(item):
+            return i
+    return -1
+
+
+def _apy_set_reorder_of(h, a):
+    """Put a set back in hash order, which the host does not keep."""
+    return None
+
+
+def _apy_unhashable_elem_of(h, a):
+    """The TypeError a SET raises for an element it cannot hash."""
+    item = h._get(a[0], "apy_unhashable_elem_of")
+    inner = str(h._get(a[1], "apy_unhashable_elem_of"))
+    h.err = ("TypeError",
+             f"cannot use '{h.kind_name(item)}' as a set element "
+             f"(unhashable type: '{inner}')")
+    h.err_value = None
+    h.pos_err = h.pos_here
+    return 0
+
+
+def _apy_subset_of(h, a):
+    """Is every element of the first in the second?"""
+    x = h._get(a[0], "apy_subset_of")
+    y = h._get(a[1], "apy_subset_of")
+    return 1 if all(v in y for v in x) else 0
+
+
+def _apy_mutable_set_of(h, a):
+    """Is this a set that may be changed? A frozenset is not."""
+    name = str(h._get(a[0], "apy_mutable_set_of"))
+    s = h._get(a[1], "apy_mutable_set_of")
+    if isinstance(s, set) and not isinstance(s, frozenset):
+        return 1
+    h.err = ("AttributeError",
+             f"'{h.kind_name(s)}' object has no attribute '{name}'")
+    h.err_value = None
+    h.pos_err = h.pos_here
+    return 0
+
+
+def _apy_set_insert_of(h, a):
+    """Add to a set. 1 if new, 0 if already there, -1 if unhashable."""
+    s = h._get(a[0], "apy_set_insert_of")
+    item = h._get(a[1], "apy_set_insert_of")
+    try:
+        hash(item)
+    except TypeError:
+        return _apy_unhashable_elem_of(
+            h, (a[1], h._new(h.kind_name(item)))) or -1
+    if item in s:
+        return 0
+    s.add(item)
+    return 1
+
+
+def _apy_set_from_of(h, a):
+    """A set or frozenset holding everything in the source."""
+    kind = int(a[0])
+    src = h._get(a[1], "apy_set_from_of")
+    try:
+        made = {v for v in src}
+    except TypeError:
+        return _apy_unhashable_elem_of(h, (a[1], h._new("list"))) or 0
+    return h._new(frozenset(made) if kind == 10 else made)
+
+
+def _apy_unhashable_of(h, a):
+    """The kind name to complain about, or 0 if this may be a key.
+
+    ASKED OF PYTHON ITSELF, by trying to hash it -- which gets the tuple
+    recursion and the `__eq__`-without-`__hash__` rule for free, and cannot
+    drift from what the host's own dicts will accept.
+    """
+    v = h._get(a[0], "apy_unhashable_of")
+    try:
+        hash(v)
+    except TypeError:
+        return h._new(h.kind_name(v))
+    return 0
+
+
+def _apy_unhashable_key_of(h, a):
+    """The TypeError a dict raises for a key it cannot hash."""
+    key = h._get(a[0], "apy_unhashable_key_of")
+    inner = str(h._get(a[1], "apy_unhashable_key_of"))
+    h.err = ("TypeError",
+             f"cannot use '{h.kind_name(key)}' as a dict key "
+             f"(unhashable type: '{inner}')")
+    h.err_value = None
+    h.pos_err = h.pos_here
+    return 0
+
+
+def _apy_dict_find_of(h, a):
+    """Where a key sits in a dict, or -1.
+
+    BY POSITION, because the compiled dict keeps two parallel arrays and its
+    callers index them. The host keeps a Python dict, so the position is
+    recovered by walking the keys -- which is what the compiled version does
+    anyway, and at the same cost.
+    """
+    d = h._get(a[0], "apy_dict_find_of")
+    if not isinstance(d, dict):
+        return -1
+    key = h._get(a[1], "apy_dict_find_of")
+    for i, k in enumerate(d):
+        if k == key and type(k) is type(key):
+            return i
+    return -1
+
+
+def _apy_class_find_of(h, a):
+    """Find a name on a class or above it, or 0.
+
+    THROUGH PYTHON'S OWN LOOKUP, which walks the real MRO -- the same order
+    the compiled version walks, because that list is what built this class.
+    """
+    cls = h._get(a[0], "apy_class_find_of")
+    name = str(h._get(a[1], "apy_class_find_of"))
+    if not isinstance(cls, type):
+        return 0
+    for base in getattr(cls, "__mro__", (cls,)):
+        if name in vars(base):
+            return h._new(vars(base)[name])
+    return 0
+
+
+def _apy_str_cmp_of(h, a):
+    """-1, 0 or 1 for two strings or two bytes.
+
+    PYTHON'S OWN COMPARISON, which orders strings by code point and bytes by
+    byte -- the same order the compiled version reaches by comparing UTF-8
+    bytes, because that encoding was designed so the two agree.
+    """
+    x = h._get(a[0], "apy_str_cmp_of")
+    y = h._get(a[1], "apy_str_cmp_of")
+    return 0 if x == y else (-1 if x < y else 1)
+
+
+def _apy_cursor_of(h, a):
+    """A cursor cell, which the host does not build.
+
+    THE INTERPRETER MAKES REAL PYTHON ITERATORS -- `map`, `filter` and the
+    rest are the builtins on this side -- so nothing reaches here: every
+    function that would make a cursor is itself bound in this file. It raises
+    rather than answering, for the reason `_apy_err_slots` does.
+    """
+    raise RuntimeError(
+        "apy_cursor_of has no host equivalent: the interpreter uses Python's "
+        "own iterators rather than a cursor cell")
+
+
+def _apy_is_int_like_of(h, a):
+    """Is this an integer, in the sense Python means? A bool is one.
+
+    ANSWERED FROM PYTHON'S OWN TYPES here, which gets the same three kinds:
+    `bool` is a subclass of `int`, and the host has no separate big -- an
+    integer that outgrew a machine word is still an `int` on this side.
+    """
+    v = h._get(a[0], "apy_is_int_like_of")
+    return 1 if isinstance(v, (int, bool)) and not isinstance(v, float) else 0
+
+
+def _apy_is_num_of(h, a):
+    """The same three, plus float. No complex: the callers want a double."""
+    v = h._get(a[0], "apy_is_num_of")
+    return 1 if isinstance(v, (int, bool, float)) else 0
+
+
+def _apy_str_self_of(h, a):
+    """Is this a str or bytes receiver? Raises naming the method if not.
+
+    RAISES AS A SIDE EFFECT AND ANSWERS A NUMBER, which is the C's shape --
+    forty-odd string methods open with it -- and the host has to keep it so
+    that a compiled program and an interpreted one refuse the same call the
+    same way.
+    """
+    name = str(h._get(a[0], "apy_str_self_of"))
+    v = h._get(a[1], "apy_str_self_of")
+    if isinstance(v, (str, bytes, bytearray)):
+        return 1
+    h.err = ("AttributeError",
+             f"'{h.kind_name(v)}' object has no attribute '{name}'")
+    h.err_value = None
+    h.pos_err = h.pos_here
+    return 0
+
+
+def _apy_seq_new_of(h, a):
+    """An empty sequence of the given kind.
+
+    THE KIND IS A NUMBER on the compiled side and a Python type here, so this
+    maps the three the C uses. Anything else would be a kind the frontend
+    never emits.
+    """
+    kind = int(a[0])
+    from asmpython.objects.ir import PORTED  # noqa: F401  (import kept local)
+    made = {9: set(), 10: frozenset(), 7: (), 6: []}.get(kind)
+    return h._new([] if made is None else made)
+
+
+def _apy_kind_name_of(h, a):
+    """The type name a message would use, as a host string.
+
+    THE COMPILED RUNTIME ANSWERS A C STRING POINTER and this answers a value,
+    which is the ordinary difference between the two sides -- everything that
+    reads it is bound in this file and takes a value either way.
+
+    THROUGH THE SAME `kind_name` the rest of this file uses, so the fused
+    `type(x).__name__` and a TypeError about `x` cannot disagree about what
+    `x` is.
+    """
+    return h._new(h.kind_name(h._get(a[0], "apy_kind_name_of")))
+
 
 def _apy_type_name(h, a):
     """`type(x).__name__`, fused by the frontend into one call.
@@ -2408,7 +3461,27 @@ def _apy_update(h, a):
     target = h._get(a[0], "apy_update")
     src = h._get(a[1], "apy_update")
     if not isinstance(target, dict):
-        return h._fail("TypeError",
+        # A SET UPDATES TOO, and `d.update` and `s.update` are one runtime
+        # function -- so refusing everything that is not a dict here made
+        # `s.update(x)` report a missing attribute for a method sets have.
+        # A frozenset genuinely has none, and is refused BY NAME the way
+        # every other set mutator refuses one.
+        if isinstance(target, set):
+            items = _seq_items(h, src, "apy_update")
+            if items is None:
+                return 0
+            for item in items:
+                bad = _unhashable_name(item)
+                if bad:
+                    return h._fail("TypeError",
+                                   f"cannot use '{bad}' as a set element "
+                                   f"(unhashable type: '{bad}')")
+                try:
+                    target.add(item)
+                except TypeError as exc:
+                    return h._fail_like(exc)
+            return h._none
+        return h._fail("AttributeError",
                        f"'{h.kind_name(target)}' object has no attribute "
                        f"'update'")
     if isinstance(src, dict):
@@ -2419,13 +3492,16 @@ def _apy_update(h, a):
     items = _seq_items(h, src, "apy_update")
     if items is None:
         return 0
-    for pair in items:
+    for at, pair in enumerate(items):
         got = list(pair) if isinstance(pair, (list, tuple, str)) else None
         if got is None or len(got) != 2:
+            # THE INDEX IS PART OF THE MESSAGE, which CPython and the compiled
+            # runtime both say and this did not -- a program with a long
+            # sequence was told a length and not which element had it.
             return h._fail("ValueError",
-                           "dictionary update sequence element has length "
-                           f"{len(got) if got is not None else 1}; 2 is "
-                           "required")
+                           f"dictionary update sequence element #{at} has "
+                           f"length {len(got) if got is not None else 1}; "
+                           "2 is required")
         if _dict_set(h, target, got[0], got[1]) == 0:
             return 0
     return h._none
@@ -2634,12 +3710,32 @@ def _apy_raise(h, a):
     return h._fail_raised(exc)
 
 
+def _apy_user_exc_rows(h, a):
+    """The table's address, which the host does not have.
+
+    THE REGISTRATIONS ARE A DICT here -- `h.user_exc`, keyed by name -- so
+    everything that would walk sixty-four rows walks that instead, and is
+    itself bound in this file. It raises for the reason `_apy_err_slots`
+    does: a zero would be indexed.
+    """
+    raise RuntimeError(
+        "apy_user_exc_rows has no host equivalent: the interpreter keeps "
+        "user exception classes in a dict on the host object, not a table")
+
+
+def _apy_user_exc_slot(h, a):
+    """Where the count lives, which for the same reason is nowhere."""
+    raise RuntimeError(
+        "apy_user_exc_slot has no host equivalent: the interpreter counts "
+        "user exception classes with len(), not a stored word")
+
+
 def _apy_exc_register(h, a):
     """A `class MyError(ValueError):` the program wrote.
 
     Registered into the same hierarchy the builtins use, so `except
     ValueError:` catches it through the code path that already makes `except
-    LookupError:` catch a KeyError. See `apy_exc_register` in link/objects.py
+    LookupError:` catch a KeyError. See `apy_exc_register` in objects/csource.py
     for why this is a NAME and not a type object, and what that costs.
     """
     h.user_exc[str(h._get(a[0], "apy_exc_register"))] = str(
@@ -2697,6 +3793,30 @@ def _apy_raise_from(h, a):
         exc.suppress = True
         exc.cause = cause if int(a[2]) and isinstance(cause, Exc) else None
     return _apy_raise(h, [a[0]])
+
+
+def _apy_exc_parent_of(h, a):
+    """The name of an exception's base class, or 0 if it has none.
+
+    ANSWERED FROM PYTHON'S OWN CLASS TREE, the way `_apy_error_matches` below
+    answers its question -- one source for the hierarchy here, so the two
+    cannot drift. The compiled runtime reads a packed table instead, and
+    `tests/asmpython/integration/test_exc_tree.py` is what keeps THAT in step
+    with the C's.
+
+    USER CLASSES FIRST HERE, and built-ins first in the compiled version --
+    which is not a disagreement: `h.user_exc` cannot contain a built-in name,
+    because the compiled table is consulted before a name reaches it.
+    """
+    name = str(h._get(a[0], "apy_exc_parent_of"))
+    if name in h.user_exc:
+        return h._new(h.user_exc[name])
+    cls = getattr(__import__("builtins"), name, None)
+    if isinstance(cls, type) and issubclass(cls, BaseException):
+        bases = cls.__bases__
+        if bases and bases[0] is not object:
+            return h._new(bases[0].__name__)
+    return 0
 
 
 def _apy_error_matches(h, a):
@@ -2760,6 +3880,84 @@ def _apy_error_value(h, a):
     # statements have already moved the cursor by the time this is built.
     built.pos = h.pos_err
     return h._new(built)
+
+
+def _apy_err_slots(h, a):
+    """THE HOST HAS NO SUCH STORAGE, and that is not a gap.
+
+    The compiled runtime keeps the pending error in two words and 256 bytes,
+    and these two functions hand out their addresses so the C and the IR can
+    share them. The host keeps the same state as Python objects on `h` --
+    `h.err` and `h.err_value` -- because it is not compiling anything and has
+    nowhere to put a buffer.
+
+    So nothing reaches here: every function that would read those words is
+    itself bound in this file and reads `h.err` instead. The binding exists
+    because `objects_host.py` must answer for every exported symbol, and
+    answering with a raise is more honest than answering with a zero that
+    would be dereferenced.
+    """
+    raise RuntimeError(
+        "apy_err_slots has no host equivalent: the interpreter keeps the "
+        "pending error on the host object, not in runtime memory")
+
+
+def _apy_err_text(h, a):
+    """The message buffer's address. See `_apy_err_slots`."""
+    raise RuntimeError(
+        "apy_err_text has no host equivalent: the interpreter keeps the "
+        "pending error's message on the host object, not in a buffer")
+
+
+def _apy_raise_at(h, a):
+    """Record a pending error, first writer winning.
+
+    THE HOST HAS THE SAME TWO RULES and keeps them in Python: `h.err` is the
+    pair, and a second failure while one is pending changes nothing. What it
+    does not have is the 256-byte buffer, so nothing here truncates -- a
+    difference only a message longer than 255 bytes could see, and the C's
+    own messages are literals well short of it.
+    """
+    if h.err is not None:
+        return 0
+    h.pos_err = h.pos_here
+    h.err = (str(h._get(a[0], "apy_raise_at")),
+             str(h._get(a[1], "apy_raise_at")))
+    h.err_value = None
+    return 0
+
+
+def _apy_raise_over(h, a):
+    """Record a pending error, replacing whatever was there. A `raise`."""
+    h.pos_err = h.pos_here
+    h.err = (str(h._get(a[0], "apy_raise_over")),
+             str(h._get(a[1], "apy_raise_over")))
+    h.err_value = None
+    return 0
+
+
+def _apy_raise_fmt(h, a):
+    """Record a pending error whose text is a template with two strings in it.
+
+    `%s` AND NOTHING ELSE, which is not a simplification: all 153 call sites
+    in the C pass 280 conversions between them and every one is `%s`. Python's
+    own `%` operator would accept more, so the substitution is written out to
+    keep the host and the compiled runtime agreeing about what a format may
+    contain.
+    """
+    fmt = str(h._get(a[1], "apy_raise_fmt"))
+    args = [str(h._get(a[2], "apy_raise_fmt")),
+            str(h._get(a[3], "apy_raise_fmt"))]
+    out, i, which = [], 0, 0
+    while i < len(fmt):
+        if fmt.startswith("%s", i):
+            out.append(args[which] if which < 2 else "")
+            which += 1
+            i += 2
+        else:
+            out.append(fmt[i])
+            i += 1
+    return _apy_raise_at(h, (a[0], h._new("".join(out))))
 
 
 def _apy_error_occurred(h, a):
@@ -5334,8 +6532,13 @@ def _call_kwargs(h, f, args, kwargs):
     if not isinstance(target, Func):
         # No signature to match against. `_invoke` words both the missing
         # `__init__` and the non-callable, so let it.
+        #
+        # WITH THE KEYWORDS, which this used to drop: `class C(dict): pass`
+        # then `C(a=1)` has no `__init__` to match against and arrived here,
+        # so the names went nowhere and the instance came back with an EMPTY
+        # dict and no error -- a wrong answer where a refusal was intended.
         try:
-            return h._value(h._invoke(f, args))
+            return h._value(h._invoke(f, args, kwrest=kwargs))
         except _UserFailed:
             return 0
     declared = (target.arity - (1 if target.vararg else 0)
@@ -5725,6 +6928,27 @@ def _meta_check(h, cls, other, hook_name):
     return h._new(bool(h._invoke(hook, [cls, other])))
 
 
+def _names_object(h, v) -> bool:
+    """Is `v` the `object` type, however it was spelled?
+
+    TWO SPELLINGS REACH HERE. `object` in source is the one class cell the
+    runtime hands out; a builtin type name held in a variable arrives as a
+    function marked as standing for a type. Both carry the name.
+    """
+    if isinstance(v, Class):
+        return v.name == "object"
+    if isinstance(v, Func) and getattr(v, "is_type", False):
+        return str(v.name) == "object"
+    return v == "object"
+
+
+def _is_classlike(v) -> bool:
+    """Is `v` something `issubclass` may be ASKED about?"""
+    if isinstance(v, Class):
+        return True
+    return isinstance(v, Func) and getattr(v, "is_type", False)
+
+
 def _apy_is_subclass(h, a):
     x = h._get(a[0], "apy_is_subclass")
     y = h._get(a[1], "apy_is_subclass")
@@ -5737,16 +6961,24 @@ def _apy_is_subclass(h, a):
     decided = _meta_check(h, y, x, "__subclasscheck__")
     if decided is not None:
         return decided
+    # EVERYTHING IS A SUBCLASS OF `object`, and nothing's base chain contains
+    # it: `object` is one class cell that no class names as a base, so the
+    # walk below answered False for every class -- and `issubclass(int,
+    # object)`, where the first argument is a builtin NAME, was refused
+    # outright. Both are wrong about the most basic relation there is.
+    if _names_object(h, y) and _is_classlike(x):
+        return h._bool(True)
     if not isinstance(x, Class):
         return h._fail("TypeError", "issubclass() arg 1 must be a class")
     if not isinstance(y, Class):
         return h._fail("TypeError", "issubclass() arg 2 must be a class or "
                                     "tuple of classes")
-    seen = x
-    while isinstance(seen, Class):
-        if seen is y:
-            return h._bool(True)
-        seen = seen.base
+    # THROUGH THE ORDER, not the base chain. With several bases the two are
+    # different walks, and the chain from `class M(A, C)` reaches only A --
+    # so `issubclass(M, C)` answered False for a class that names C as a
+    # base. `is_sub` is the same linearisation attribute lookup uses.
+    if x.is_sub(y):
+        return h._bool(True)
     # An EXCEPTION type has no base pointer -- the builtin hierarchy is a
     # table of NAMES, because `raise` and `except` match on the name and never
     # hold a class. So the same question is asked again, of that table.
@@ -6083,6 +7315,29 @@ def _apy_pos_add(h, a):
     h.positions.append((str(h._get(a[0], "apy_pos_add")),
                         int(a[1]), int(a[2]), int(a[3]), int(a[4])))
     return h._none
+
+
+def _apy_pos_count(h, a):
+    """How many positions have been recorded.
+
+    A REAL ANSWER HERE, unlike `_apy_pos_rows` below: the count is a number
+    whatever the table is made of, and the C asks it to decide whether a
+    program was compiled with positions at all.
+    """
+    return len(h.positions)
+
+
+def _apy_pos_rows(h, a):
+    """The table's address, which the host does not have.
+
+    THE POSITIONS ARE A LIST OF TUPLES here, not rows of a struct -- see
+    `_apy_pos_add`. Everything that would walk the rows is itself bound in
+    this file and walks the list instead, so nothing reaches this. It raises
+    for the reason `_apy_err_slots` does: a zero would be indexed.
+    """
+    raise RuntimeError(
+        "apy_pos_rows has no host equivalent: the interpreter keeps source "
+        "positions as a list on the host object, not as a table in memory")
 
 
 def _apy_at(h, a):
@@ -6456,6 +7711,15 @@ def _apy_isinstance(h, a):
         if isinstance(v, Exc):
             return _apy_isinstance(h, [a[0], h._new(want.name)])
         return h._bool(isinstance(v, Instance) and v.cls.is_sub(want))
+    # ANYTHING ELSE IS NOT A TYPE. A tuple, a union and a class are each
+    # handled above, so what is left here is a builtin kind's NAME -- and if
+    # it is not even that, the argument was never a type at all. This used to
+    # fall through to the name comparison below and answer False, which is a
+    # wrong answer where the compiled runtime refuses.
+    if not isinstance(want, str):
+        return h._fail("TypeError",
+                       "isinstance() arg 2 must be a type, a tuple of "
+                       "types, or a union")
     have = h.kind_name(v)
     # An INSTANCE never matches a builtin name. Its kind_name is its class's
     # name, so without this a class called `int` would answer True.
@@ -6606,7 +7870,14 @@ def _apy_count_of(h, a):
     # Substring counting for a str or bytes, for the same reason `index`
     # splits.
     if isinstance(_v, (str, bytes)):
-        return h._int(_v.count(h._get(a[1], "apy_count_of")))
+        # A NON-STRING ARGUMENT IS A RUNTIME ERROR AND NOT AN INTERPRETER
+        # ONE. `"abc".count(5)` let Python's TypeError escape this binding
+        # and take the whole interpreter down with a traceback, where a
+        # compiled program raises it and a handler catches it.
+        try:
+            return h._int(_v.count(h._get(a[1], "apy_count_of")))
+        except TypeError as exc:
+            return h._fail_like(exc)
     seq = h._get(a[0], "apy_count_of")
     item = h._get(a[1], "apy_count_of")
     # SUBSTRING counting for a str, element counting for a sequence -- the
@@ -6667,7 +7938,7 @@ def _apy_dict_get_or(h, a):
 #: is exact -- `_apy_foo` implements `apy_foo` -- and a hand-written list of
 #: two hundred entries is a second place for the same fact to live. The one
 #: it drifts from is the runtime, and `tests/asmpython/unit/test_objects_host`
-#: is the ratchet that catches that: every symbol `link/objects.py` exports
+#: is the ratchet that catches that: every symbol `objects/csource.py` exports
 #: must be reachable here.
 #:
 #: The arithmetic and comparison operators are added separately: they share
@@ -6803,6 +8074,19 @@ def _make_str_method(symbol: str, method: str, argc: int):
                 "AttributeError",
                 f"'{h.kind_name(receiver)}' object has no attribute '{_m}'")
         args = [h._get(a[i + 1], _sym) for i in range(_n)]
+        # A GENERATOR OR CURSOR ARGUMENT IS DRAINED FIRST. `join` is the one
+        # that takes an iterable, and once generator expressions became real
+        # generators `sep.join(f(x) for x in xs)` started arriving here as a
+        # `Gen` -- which Python's own `join` refuses, reporting `can only join
+        # an iterable` about something that plainly was one. The C fixed
+        # exactly this by reaching `apy_iterable` first; this is the same fix
+        # on the other path.
+        for at, arg in enumerate(args):
+            if isinstance(arg, (Gen, Iterator)):
+                drained = _seq_items(h, arg, _sym)
+                if drained is None:
+                    return 0
+                args[at] = drained
         try:
             return h._value(getattr(receiver, _m)(*args))
         except (TypeError, ValueError) as exc:
@@ -6989,9 +8273,57 @@ _TABLE.update({
     "apy_delattr": _apy_delattr,
     "apy_iter_until": _apy_iter_until,
     "apy_call_kw": _apy_call_kw,
+    "apy_unary_dunder_of": _apy_unary_dunder_of,
+    "apy_method1_of": _apy_method1_of,
     "apy_type_new": _apy_type_new,
     "apy_type_set": _apy_type_set,
     "apy_instance_new": _apy_instance_new,
+    "apy_exc_class_slot": _apy_exc_class_slot,
+    "apy_exc_class_named_of": _apy_exc_class_named_of,
+    "apy_gen_step_of": _apy_gen_step_of,
+    "apy_every_of": _apy_every_of,
+    "apy_big_text": _apy_big_text,
+    "apy_text_of": _apy_text_of,
+    "apy_exc_text_of": _apy_exc_text_of,
+    "apy_seq_text_of": _apy_seq_text_of,
+    "apy_dict_text_of": _apy_dict_text_of,
+    "apy_set_text_of": _apy_set_text_of,
+    "apy_bytes_repr": _apy_bytes_repr,
+    "apy_exc_shown_of": _apy_exc_shown_of,
+    "apy_special_form_class": _apy_special_form_class,
+    "apy_text_result_of": _apy_text_result_of,
+    "apy_traceback_of": _apy_traceback_of,
+    "apy_kind_prototype": _apy_kind_prototype,
+    "apy_no_attribute": _apy_no_attribute,
+    "apy_kind_attr": _apy_kind_attr,
+    "apy_kind_attr_of": _apy_kind_attr_of,
+    "apy_kind_method_of": _apy_kind_method_of,
+    "apy_object_default": _apy_object_default,
+    "apy_descr_get_of": _apy_descr_get_of,
+    "apy_kind_class": _apy_kind_class,
+    "apy_member_descriptor": _apy_member_descriptor,
+    "apy_group_select_of": _apy_group_select_of,
+    "apy_str_count_in_of": _apy_str_count_in_of,
+    "apy_arg_must_be_str_of": _apy_arg_must_be_str_of,
+    "apy_inst_held_of": _apy_inst_held_of,
+    "apy_base_text_of": _apy_base_text_of,
+    "apy_big_base_text_of": _apy_big_base_text_of,
+    "apy_splitlines_impl_of": _apy_splitlines_impl_of,
+    "apy_extreme_of": _apy_extreme_of,
+    "apy_extreme_by_of": _apy_extreme_by_of,
+    "apy_binary_dunder_of": _apy_binary_dunder_of,
+    "apy_is_data_descriptor_of": _apy_is_data_descriptor_of,
+    "apy_descr_set_of": _apy_descr_set_of,
+    "apy_slot_allows_of": _apy_slot_allows_of,
+    "apy_gen_stop": _apy_gen_stop,
+    "apy_exc_construct_of": _apy_exc_construct_of,
+    "apy_live_agens_slot": _apy_live_agens_slot,
+    "apy_tasks_slot": _apy_tasks_slot,
+    "apy_affix_of": _apy_affix_of,
+    "apy_str_slice_of": _apy_str_slice_of,
+    "apy_split_ws_of": _apy_split_ws_of,
+    "apy_split_sep_of": _apy_split_sep_of,
+    "apy_str_split_impl_of": _apy_str_split_impl_of,
     "apy_type_object": _apy_type_object,
     "apy_enter": _apy_enter,
     "apy_exit": _apy_exit,
@@ -7063,7 +8395,7 @@ def _apy_str_bytes(h, a):
     behaviour of `pathlib` would be measured against nothing.
 
     AN INT IS AN ADDRESS AND IS PASSED THROUGH, matching `apy_str_bytes` in
-    `link/objects.py`: C's rule for a pointer parameter admits a null pointer
+    `objects/csource.py`: C's rule for a pointer parameter admits a null pointer
     constant, and `CreateDirectoryA(path, 0)` relies on it.
 
     A `bytearray` IS REGISTERED FOR WRITE-BACK, and that is the one part of
@@ -7269,8 +8601,13 @@ def _apy_extend(h, a):
     if not isinstance(seq, (list, tuple)):
         return h._fail("AttributeError",
                        f"'{h.kind_name(seq)}' object has no attribute 'extend'")
+    # A GENERATOR IS ONE TOO, and `_seq_items` below already drains it -- only
+    # this gate did not know, so `xs.extend(g())` reported that a generator is
+    # not iterable while the compiled program extended happily. The C reaches
+    # `apy_iterable` first, which drains it; this is where the interpreter
+    # does the same thing.
     if not isinstance(other, (list, tuple, set, frozenset, str, bytes, dict,
-                              Iterator, range)):
+                              Iterator, Gen, range))             and not isinstance(other, _VIEW_TYPES):
         return h._fail("TypeError",
                        f"'{h.kind_name(other)}' object is not iterable")
     items = _seq_items(h, other, "apy_extend")
@@ -7647,7 +8984,7 @@ class Gen:
     Its locals live here rather than in registers, because a register does not
     survive the return a `yield` compiles to. `state` is 0 before the first
     step, k while suspended at yield k, and -1 once the body has finished.
-    See `apy_gen_new` in link/objects.py for the whole shape.
+    See `apy_gen_new` in objects/csource.py for the whole shape.
     """
 
     __slots__ = ("step", "slots", "state", "sent", "running", "cache",
@@ -7858,7 +9195,7 @@ def _gen_step(h, g, sent):
 # because `asmpython run` and a compiled binary must answer the same program
 # the same way -- and the ordering `gather` produces is observable.
 
-#: Which built-in coroutine a `Gen` is. Mirrors the enum in link/objects.py.
+#: Which built-in coroutine a `Gen` is. Mirrors the enum in objects/csource.py.
 _CORO_SLEEP = 1
 _CORO_GATHER = 2
 _CORO_ANEXT = 3
@@ -7935,7 +9272,7 @@ PROP_PROPERTY, PROP_CLASSMETHOD, PROP_STATICMETHOD = 0, 1, 2
 
 
 class Descr:
-    """A runtime descriptor. Mirrors `v.p` in link/objects.py."""
+    """A runtime descriptor. Mirrors `v.p` in objects/csource.py."""
 
     __slots__ = ("get", "set", "del_", "kind")
 
@@ -8944,7 +10281,11 @@ def _drain_cursor(h, it):
 def _apy_iter(h, a):
     v = h._get(a[0], "apy_iter")
     if isinstance(v, Iterator):
-        return h._new(v)          # `iter(it)` is `it`
+        # `iter(it)` IS `it`, and the handle has to be the same one: a fresh
+        # `h._new` wraps the same cursor in a new value, so the two compare
+        # unequal under `is` while walking identically. The compiled path
+        # returns its argument and answered True where this answered False.
+        return a[0]
     if isinstance(v, Gen):
         # `iter(g)` IS `g`, so a half-consumed generator keeps its position.
         return a[0]
@@ -8978,6 +10319,11 @@ def _apy_iter(h, a):
         if not drained:
             return 0
         return _apy_iter(h, [drained])
+    # A VIEW WALKS WHAT IT IS A VIEW OF, which `apy_getiter` and
+    # `apy_iterable` both already do -- `iter(d.items())` refused a thing
+    # `list(d.items())` accepts, on this path and on the compiled one.
+    if isinstance(v, _VIEW_TYPES):
+        return h._new(Iterator(list(v)))
     if not isinstance(v, (list, tuple, set, frozenset, dict, str, bytes, range)):
         return h._fail("TypeError",
                        f"'{h.kind_name(v)}' object is not iterable")
@@ -9338,6 +10684,52 @@ def _apy_set_update(h, a):
 _TABLE["apy_set_update"] = _apy_set_update
 
 
+
+# ── the error path's state, as accessors ───────────────────────────────────
+#
+# THESE FOUR ARE NEW SYMBOLS, added to the C so that the storage behind them
+# could move into the IR runtime -- see `runtime/errstate.py`. The C used to
+# read `apy_pos_here`, `apy_err_pos` and `apy_handling` directly, which the
+# machine subset cannot do; routing those reads through functions is what let
+# the variables cross.
+#
+# THEY LAND HERE FOR THE REASON `test_every_exported_symbol_has_a_host_binding`
+# gives: a compiled program can call these and `asmpython run` must be able to
+# as well, or the interpreter stops being the thing that adjudicates between
+# the backends. The port added them to the C and this is the other half of
+# that edit; the test caught it the same run.
+
+
+def _apy_pos_now(h, a):
+    """Where execution is. -1 if nothing has recorded a position."""
+    return h.pos_here
+
+
+def _apy_pos_latch(h, a):
+    """Remember the current position as where the failure happened.
+
+    ONE OPERATION, as in the C and in the ported version: `apy_fail` and
+    `apy_fail2` both did this pair together, and a getter plus a setter would
+    let a caller do half of it.
+    """
+    h.pos_err = h.pos_here
+    return h.pos_err
+
+
+def _apy_pos_latched(h, a):
+    """Where the failure was raised. -1 if none has been."""
+    return h.pos_err
+
+
+def _apy_handling_now(h, a):
+    """The exception whose `except` block is running, or None."""
+    return h._value(h.handling)
+
+# DEFINED ABOVE THE SWEEP BELOW, and that is not a style choice:
+# `_TABLE.update` reads `globals()` once, so a binding written after it
+# is never registered. Appending these four to the end of the file left
+# `apy_handling_now` unbound and the ratchet said so.
+
 # EVERY `_apy_x` REGISTERED AS `apy_x`, swept at the end of the module so the
 # definitions below the explicit blocks are seen too -- a sweep in the middle
 # silently missed them, and a missing binding is a symbol the compiled program
@@ -9348,7 +10740,7 @@ _TABLE["apy_set_update"] = _apy_set_update
 # parameterised implementation with no `_apy_add` to find.
 #
 # `tests/asmpython/unit/test_objects_host` is the ratchet: every symbol
-# `link/objects.py` exports must be reachable here.
+# `objects/csource.py` exports must be reachable here.
 _TABLE.update({name[1:]: fn for name, fn in list(globals().items())
                if name.startswith("_apy_") and callable(fn)
                and name[1:] not in _TABLE})

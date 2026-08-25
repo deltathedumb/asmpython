@@ -49,36 +49,73 @@ def apy_c_lower(c: i64) -> i64:
     return 1
 
 
-# ── the four that are not written yet ──────────────────────────────────────
+# ── the other four ─────────────────────────────────────────────────────────
 #
-# Each one goes here, in this file, in the same shape as `apy_c_lower` above.
-# When one is written, add its name to the `ascii.py` entry in `REPLACES` in
-# `link/objects_ir.py` -- that is the switch that makes a compiled program use
-# the ported version instead of the C, and until a name is listed there the
-# code is compiled and unused.
-#
-# `apy_c_upper(c: i64) -> i64`
-#     1 if `c` is an ASCII upper-case letter. 65 is `A` and 90 is `Z`.
-#
-# `apy_c_digit(c: i64) -> i64`
-#     1 if `c` is an ASCII decimal digit. 48 is `0` and 57 is `9`.
-#
-# `apy_c_alpha(c: i64) -> i64`
-#     1 if `c` is an ASCII letter of either case. The C writes this as
-#     `apy_c_lower(c) || apy_c_upper(c)`, and calling the other two from here
-#     is fine -- a runtime module may call anything else in the runtime.
-#
-# `apy_c_space(c: i64) -> i64`
-#     1 if `c` is one of the six ASCII whitespace bytes, which are:
-#         32  space
-#          9  tab             (`\t`)
-#         10  newline         (`\n`)
-#         13  carriage return (`\r`)
-#         12  form feed       (`\f`)
-#         11  vertical tab    (`\v`)
-#     Python's `str.isspace` says True for more than these six, and that is
-#     the Unicode table's business rather than this file's -- `apy_c_space` is
-#     asked only about bytes.
+# WRITTEN FROM THE SPECIFICATIONS THAT USED TO SIT HERE. The block this
+# replaces described each one in prose and said "when one is written, add its
+# name to the `ascii.py` entry in `REPLACES`" -- which is done, so the C's
+# five are all displaced and this file is complete.
+
+
+def apy_c_upper(c: i64) -> i64:
+    """1 if `c` is an ASCII upper-case letter, 0 otherwise. 65..90 is A..Z."""
+    b: i64 = c & 255
+    if b < 65:
+        return 0
+    if b > 90:
+        return 0
+    return 1
+
+
+def apy_c_digit(c: i64) -> i64:
+    """1 if `c` is an ASCII decimal digit, 0 otherwise. 48..57 is 0..9."""
+    b: i64 = c & 255
+    if b < 48:
+        return 0
+    if b > 57:
+        return 0
+    return 1
+
+
+def apy_c_alpha(c: i64) -> i64:
+    """1 if `c` is an ASCII letter of either case.
+
+    CALLS THE OTHER TWO, as the C does. A runtime module may call anything
+    else in the runtime -- that is what makes these one implementation rather
+    than three copies of the same two comparisons, and it is why changing
+    what counts as a letter is one edit.
+    """
+    if apy_c_lower(c):
+        return 1
+    return apy_c_upper(c)
+
+
+def apy_c_space(c: i64) -> i64:
+    """1 if `c` is one of the six ASCII whitespace bytes.
+
+    THE SIX, and no more: space, tab, newline, carriage return, form feed and
+    vertical tab. `str.isspace` says True for a good many characters beyond
+    them, and every one of those is above 127 -- so it is the Unicode table's
+    business rather than this file's. Answering True here for anything else
+    would make a byte-level predicate quietly disagree with the table that is
+    supposed to own the question.
+
+    A CHAIN RATHER THAN A RANGE, because the six are not contiguous: 9 to 13
+    are, and 32 is not. Written as two tests, the gap between 13 and 32 --
+    which holds fourteen control characters that are NOT whitespace -- is the
+    thing a range would swallow.
+    """
+    b: i64 = c & 255
+    if b == 32:
+        return 1
+    if b < 9:
+        return 0
+    if b > 13:
+        return 0
+    return 1
+
+
+# ── what is allowed in this file ───────────────────────────────────────────
 #
 # HOW TO CHECK ONE. `tests/asmpython/integration/test_ported_int.py` is the
 # pattern: the ported code is compiled into a real program and its answers are

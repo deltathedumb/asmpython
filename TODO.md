@@ -336,7 +336,7 @@ Two paths, and a function's annotations decide which it takes:
 * **Dynamic** — the module's top-level statements, and any function with an
   unannotated or `object`-annotated parameter, or no return annotation. Every
   value is a runtime object carrying its own type; every operation is a call
-  into `link/objects.py`. This is the path ordinary Python takes.
+  into `objects/csource.py`. This is the path ordinary Python takes.
 
 One representation per value for its whole life, with exactly one boundary
 (`_dyn_call`). That is deliberate: the suite's `TAXONOMY.md` names
@@ -415,6 +415,84 @@ mode invents the bugs it is meant to find.
 **Compare against CPython, not against the case.** Nearly every serious finding
 came from running a wider program than the case and diffing the whole output.
 The case tells you one line is wrong; CPython tells you which rule you broke.
+
+## A generator expression inside an `except*` handler
+
+Found while porting the exception-group machinery, and NOT caused by it: the
+pure C runtime fails the same way, so this predates the port entirely.
+
+    try:
+        raise ExceptionGroup("g", [ValueError("a")])
+    except* ValueError as eg:
+        print(list(x for x in [1, 2]))
+
+answers `error: <a pointer>` on all three execution paths. Every neighbouring
+shape works, which is what makes the repro worth keeping:
+
+| shape                                          | works |
+| ---------------------------------------------- | ----- |
+| the same generator at module level             | yes   |
+| the same generator inside a plain `except`     | yes   |
+| a LIST COMPREHENSION inside `except*`          | yes   |
+| a generator inside `except*`                   | NO    |
+
+So it is not generators, and not `except*` -- it is the two together. A
+generator expression lowers to a real generator FUNCTION, and an `except*`
+handler body is lowered by `_dyn_try`'s dispatch rather than as an ordinary
+suite; the guess is that the hoisted function does not get its cells there.
+Not chased down, because it is a frontend lowering question and was found
+during unrelated work.
+
+THE `error: <pointer>` IS ITS OWN BUG and probably the easier one: an uncaught
+exception reaching the top level prints the VALUE where a message should be.
+`trap: ExceptionGroup: g` is what the same escape prints from a shorter
+program, so two different reporting paths disagree about how to render one.
+
+## `OSError` keeps arguments CPython throws away
+
+`str()` of the OSError family is right now -- `[Errno 2] No such file`, and
+`: 'f.txt'` when a filename came too -- on all three paths. What is still
+wrong is what `.args` HOLDS, which is a constructor question and not a
+rendering one:
+
+| written                             | CPython `args`        | ours                       |
+|-------------------------------------|-----------------------|----------------------------|
+| `OSError(2, "m")`                   | `(2, 'm')`            | same                       |
+| `OSError(2, "m", "f.txt")`          | `(2, 'm')`            | `(2, 'm', 'f.txt')`        |
+| `OSError(2, "m", "a", "b")`         | `(2, 'm')`            | `(2, 'm', 'a', 'b')`       |
+
+CPython MOVES the third argument to `.filename` and drops it from `args`, and
+on Windows takes a fourth as `.winerror` -- which is why `repr` of the
+three-argument form shows two. Fixing it means giving the exception those
+attributes, not changing how it prints; `str()` already reads the third
+argument straight from `argv` and gets the right answer either way.
+
+`OSError(2, "m", "a", "b")` also has a Windows-only `str`: CPython says
+`[WinError b] m: 'a'`, taking the message from the FOURTH argument. That form
+is not implemented and falls through to the tuple. It is listed for
+completeness rather than as something worth doing.
+
+## `slice.indices` refuses a bound CPython clamps
+
+`slice(2 ** 100).indices(5)` is `(0, 5, 1)` in CPython and an OverflowError
+here. Same for a big LENGTH: `slice(1).indices(2 ** 100)` answers `(0, 1, 1)`
+there and raises here. Pre-existing -- the C and the IR agree with each other,
+and `apy_index_arg` is what refuses.
+
+THE FIX IS CHEAPER THAN IT LOOKS, and the reason is worth writing down: a big
+is by definition outside `[-2**63, 2**63)`, and the length it is being clamped
+against fits an int64. So a big bound is ALWAYS past one end or the other, and
+its SIGN alone decides which -- no big arithmetic is needed, only
+`apy_big_neg`. `start` clamps to `0` or `n`, `stop` likewise, and the answer
+falls out.
+
+WHAT MAKES IT MORE THAN A ONE-LINE CHANGE is that `apy_index_arg` has nine
+call sites and most of them are right to refuse: `[1, 2][2 ** 100]` really is
+an IndexError and `'ab'.ljust(2 ** 100)` really is an OverflowError, because
+there is no list and no string that large. Only `indices` clamps rather than
+indexes. So the clamping belongs in `apy_slice_indices`, asking about the big
+BEFORE it calls `apy_index_arg` -- not in `apy_index_arg` itself, which would
+silently turn eight correct errors into wrong answers.
 
 ## What is left
 
@@ -879,9 +957,9 @@ every time something lands, which is how it should be.
   the walkable types by hand. A new kind has to be added to every one of them,
   and the ones that were missed each surfaced as a plain "not iterable".
 * **the Unicode character classes** — DONE, and embedded ALWAYS. The table is
-  2948 runs generated by `link/_gen_unicode.py` from the reference
+  2948 runs generated by `objects/c/_gen_unicode.py` from the reference
   implementation's own answers, spliced into the C at a marker so
-  `link/objects.py` stays readable. Roughly 60KB of source and a binary search
+  `objects/csource.py` stays readable. Roughly 60KB of source and a binary search
   per character.
 
   The predicates now walk CODE POINTS rather than bytes, which is the half

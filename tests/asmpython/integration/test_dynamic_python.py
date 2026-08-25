@@ -2,7 +2,7 @@
 
 `test_endtoend.py` does this for the statically typed subset. This does it for
 the DYNAMIC path -- the one a Python script actually takes, where every value
-is a runtime object and every operation a call into `link/objects.py`.
+is a runtime object and every operation a call into `objects/csource.py`.
 
 Each program is checked against CPython through:
 
@@ -2995,6 +2995,44 @@ PROGRAMS = {
         # imaginary part is the INT zero, which `type()` can tell apart.
         print((7).conjugate(), (7).real, (7).imag)
         print((2.5).real, (2.5).imag, type((7).imag).__name__)
+    """,
+    "ascii_escapes_what_repr_keeps": """
+        # `ascii(x)` IS `repr(x)` WITH NOTHING ABOVE 0x7F LEFT IN IT. The two
+        # agree for every ASCII value, which is why `!a` could be folded into
+        # `!r` for a long time without anything noticing.
+        #
+        # THE PERMISSIVE UTF-8 STEP, not the validating one: `ascii` names
+        # whatever byte is there rather than refusing it, because dropping a
+        # bad byte or emitting it raw are both worse than `ÿ`.
+        for s in ("abc", "café", "中文", "😀",
+                  " ", "it's", "tab	here"):
+            print(ascii(s))
+        print(ascii([1, "café"]), ascii({"é": "ü"}))
+        print(ascii(5), ascii(None), ascii(b"ab"))
+        # AND THE THREE PLACES A CONVERSION IS SPELLED, which reach it by
+        # three different routes: an f-string is lowered by the frontend,
+        # `str.format` parses its own replacement fields, and `%a` goes
+        # through the percent formatter.
+        print(f"{'café'!a}", "{!a}".format("café"), "%r" % "café")
+        print(f"{'é'!a:>10}|{None!a}")
+    """,
+    "oserror_shows_its_errno": """
+        # `str()` OF THE OSError FAMILY IS NOT ITS ARGUMENTS. CPython puts
+        # `[Errno n] message` on the two-argument form and appends the quoted
+        # filename on the three -- and the whole family arrives under its own
+        # name, so this is a walk up the hierarchy and not a test for
+        # `OSError` itself. `repr` is unaffected and still shows the call.
+        #
+        # THE FILENAME IS QUOTED AND THE MESSAGE IS NOT, which reads as an
+        # inconsistency and is deliberate: the message is prose, and a path
+        # with a trailing space is invisible unrendered.
+        for e in (OSError(2, "No such file"),
+                  OSError(2, "No such file", "f.txt"),
+                  PermissionError(13, "Permission denied"),
+                  OSError("plain"),
+                  OSError()):
+            print(str(e))
+        print(str(ValueError(1, "not an oserror")))
     """,
     "self_referential_repr": """
         # A CONTAINER THAT HOLDS ITSELF is an ordinary thing to build, and

@@ -265,29 +265,62 @@ Each produces a diagnostic with a code. **The compiler never raises on Python
 it does not support** — a result or a diagnostic, never a traceback. That is
 enforced by a test that feeds 42 unsupported constructs at the whole pipeline.
 
-## Where static typing shows
+## An operand keeps its own type
 
-Every expression has ONE type. Python's `and`, `or` and `x if c else y`
-return whichever operand they picked, and those operands may have different
-types; here the expression's type is their unification, so the value is
-converted:
+Python's `and`, `or` and `x if c else y` do not compute a value — they YIELD
+ONE OF THEIR OPERANDS. So the result has the type of whichever one was picked,
+and on the static path, where every expression has one type, that can only be
+right when the operands agree. Where they do not, it is refused:
 
 ```python
-0 and 2.5           # Python: 0        here: 0.0
-1 if c else 2.5     # Python: 1        here: 1.0
-True or 2           # Python: True     here: 1
+print(n and x)          # error[E0065]: `and` yields one of its operands
 ```
 
-The values are equal — `0 == 0.0` and `True == 1` — and only the type, and so
-the printed form, differs. That is what "every expression has one static type"
-means, and the alternative is carrying a tag at runtime.
+Converted, the operands agree and there is one answer:
 
-**On the dynamic path all three print what CPython prints**, because there the
-value does carry a tag and `and` really does yield an operand. So the same
-source can print `0` at module level and `0.0` inside a fully annotated
-function — which is a genuine wart, and the honest description of it is that
-the static path is a subset with its own rules rather than an optimisation of
-the dynamic one.
+```python
+print(float(n) and x)   # 3.0
+```
+
+`n` is an `int` and `x` a `float` throughout this document. Both lines are
+STATIC-PATH code: at module level everything is dynamic, every value carries
+its own type, and `n and x` is simply Python. The rule here is the static
+path's and nowhere else's.
+
+**This used to widen instead**, and the entry here used to defend it: `a and
+f` answered `0.0` where CPython says `0`, on the grounds that the values are
+equal and the alternative is a runtime tag. That was a false choice. The
+alternative is a diagnostic, which costs nothing at run time — and the old
+behaviour meant the same source printed `0` at module level and `0.0` inside
+an annotated function, which is the static path having its own semantics
+rather than being an optimisation of the dynamic one.
+
+Nothing caught it because the conformance corpus is scripts, and a script's
+top level is dynamic: the divergence lived only in the half the corpus never
+measures.
+
+### In a condition the operands may still differ
+
+Only the TRUTH of a test is observed, and `0` and `0.0` answer that
+identically — so nothing is refused where the value cannot be seen:
+
+```python
+if n and x:             # fine: only truthiness is read
+    print(1)
+while n and x:          # fine
+    n = 0
+if not (n or x):        # fine
+    print(2)
+```
+
+Assign it, and the value is observed again:
+
+```python
+picked = n and x        # error[E0065]: the value is used
+```
+
+The position travels down through `and`, `or`, `not` and a conditional's
+arms, because truthiness is preserved through all four.
 
 ## Floats print exactly as CPython prints them
 
@@ -380,7 +413,9 @@ The full set the frontend can emit:
 | `E0061` | an exception constructor given the wrong number of arguments |
 | `E0062` | an unknown exception type in an `except` clause |
 | `E0064` | an async comprehension |
+| `E0065` | `and`/`or`/`if-else` yielding operands of different types, where the value is used |
 | `E0066` | `global` naming nothing at module scope |
+| `E0070` | `rodata()` given anything but a non-empty bytes literal |
 | `E0067` | `nonlocal` |
 | `E0068` | an unexpected keyword argument |
 | `E0069` | two values for one argument |
@@ -428,6 +463,7 @@ The full set the frontend can emit:
 | `E0126` | a native call with the wrong number of arguments for its `argtypes` |
 | `E0127` | a `ctypes` library used as a value rather than called through |
 | `E0128` | a `ctypes` name this frontend does not have |
+| `E0129` | an import naming a compiled extension module, which has no source to compile |
 
 Each applies wherever the construct appears, including inside an augmented
 assignment -- `x **= n` reports `E0043` exactly as `x = x ** n` does.

@@ -322,6 +322,31 @@ def test_the_documented_toolchains_are_the_shipped_ones() -> None:
     assert set(table) == set(link_registry.available()) - {"my-linker"}
 
 
+def test_the_version_is_one_number() -> None:
+    """`VERSION`, the build and `asmpython.__version__` say the same thing.
+
+    THREE PLACES HELD IT AND TWO WERE WRONG -- `pyproject.toml` and
+    `__init__.py` both said `0.1.0` against a `VERSION` reading
+    3.14.0-preview, so an installed build reported a version this project had
+    not used since before the rewrite. `pyproject` reads `VERSION` directly
+    now; this is what keeps the remaining literal honest.
+    """
+    import asmpython
+    declared = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    assert asmpython.__version__ == declared, (
+        f"asmpython.__version__ is {asmpython.__version__!r}, "
+        f"VERSION says {declared!r}")
+
+
+def test_the_build_reads_the_version_file_rather_than_repeating_it() -> None:
+    """A second literal in `pyproject.toml` is a third thing to forget."""
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'version = { file = "VERSION" }' in text, (
+        "pyproject no longer derives the version from VERSION")
+    assert not re.search(r'^version = "', text, re.M), (
+        "pyproject has a literal version again")
+
+
 def test_the_readme_layout_lists_the_real_packages() -> None:
     """The layout block is a map. A package it omits is a package nobody finds."""
     text = _doc("README.md").read_text(encoding="utf-8")
@@ -511,3 +536,55 @@ def test_every_documented_diagnostic_is_produced(line: int, code: str,
     assert code in reported, (
         f"LANGUAGE.md:{line} promises {code}; got "
         f"{sorted(reported) or 'no diagnostic at all'}")
+
+
+#: What the Python frontend's docstring once said it could NOT do: "No
+#: objects, no dynamic typing, no exceptions, no closures." Each is a program
+#: now, because that sentence outlived the dynamic path by a long way.
+NOT_A_SUBSET = {
+    "objects": "class P:\n"
+               "    def __init__(self, n): self.n = n\n"
+               "p = P(3)\n"
+               "print(p.n)\n",
+    "dynamic typing": "def f(x):\n"
+                      "    return x * 2\n"
+                      "print(f(3), f('a'), f(1.5))\n",
+    "exceptions": "try:\n"
+                  "    raise ValueError('v')\n"
+                  "except ValueError as e:\n"
+                  "    print(type(e).__name__, e)\n",
+    "closures": "def outer(a):\n"
+                "    def inner(b):\n"
+                "        return a + b\n"
+                "    return inner\n"
+                "print(outer(1)(2))\n",
+    "generators": "def g():\n"
+                  "    yield 1\n"
+                  "    yield 2\n"
+                  "print(list(g()))\n",
+}
+
+
+@harness.cases("what,source", sorted(NOT_A_SUBSET.items()))
+def test_the_frontend_is_not_a_subset(what: str, source: str,
+                                      tmp_path: Path) -> None:
+    """asmpython compiles Python, and a claim otherwise must not survive.
+
+    THE ROT THIS EXISTS TO CATCH is a claim about COVERAGE that nothing
+    checks. `frontends/python/__init__.py` opened with "Python frontend: a
+    statically-annotated subset" and listed these five as absent, and it stayed
+    that way while the conformance suite went to 1668/1668 -- so a reader
+    asking what asmpython accepts found a sentence four years out of date and
+    nothing anywhere disagreed with it.
+
+    Behavioural rather than textual on purpose: asserting the docstring's
+    WORDING would be satisfied by editing the words. What has to stay true is
+    that each of these compiles.
+    """
+    source_path = tmp_path / "prog.py"
+    source_path.write_text(source, encoding="utf-8")
+    sink = DiagnosticSink()
+    result = compile_source(Options(source=source_path), sink)
+    assert result.ok, (
+        f"{what} does not compile, so the frontend really is a subset: "
+        + "; ".join(f"{d.code}: {d.message}" for d in sink.diagnostics))

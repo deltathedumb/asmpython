@@ -7,7 +7,7 @@ so something has to. That something is three functions:
 
     plat_write(fd, buf, n)      plat_exit(code)      plat_heap(n)
 
-`link/platform.py` holds the contracts. THIS FILE IS THE CLAIM THAT THE NUMBER
+`objects/floor.py` holds the contracts. THIS FILE IS THE CLAIM THAT THE NUMBER
 IS REALLY THREE, and the only way to make that claim is to write a program that
 uses nothing else and run it everywhere.
 
@@ -208,16 +208,16 @@ class TestTheFloorStaysThree:
     """The deliverable is a NUMBER, so something has to hold it to it."""
 
     def test_there_are_exactly_three(self):
-        from asmpython.link.platform import FLOOR
+        from asmpython.objects.floor import FLOOR
         assert set(FLOOR) == {"plat_write", "plat_exit", "plat_heap"}, FLOOR
 
     def test_every_backend_that_claims_the_floor_has_all_of_it(self):
         """A backend implementing two of three is worse than one implementing
         none: the program compiles and fails at load, or at the first call,
         naming a symbol the user never wrote."""
-        from asmpython.link.platform import FLOOR
+        from asmpython.objects.floor import FLOOR
         from asmpython.backends.jvm.runtime import HOST_NAMES as JVM_NAMES
-        from asmpython.link.runtime import HOST_NAMES as C_NAMES
+        from asmpython.objects.support import HOST_NAMES as C_NAMES
         assert set(FLOOR) <= set(JVM_NAMES), set(FLOOR) - set(JVM_NAMES)
         assert set(FLOOR) <= set(C_NAMES), set(FLOOR) - set(C_NAMES)
 

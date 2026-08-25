@@ -75,22 +75,49 @@ WRITTEN_OUT = [
 ]
 
 
-def _probes() -> list[str]:
+def _min_python(text: str) -> tuple[int, ...]:
+    """The `# min-python:` a case declares, as a version tuple.
+
+    Read here rather than imported from `conformance/harness.py`: that module
+    parses a case whole and raises on anything malformed, which is a second
+    suite's job and not this one's.
+    """
+    for line in text.splitlines():
+        if not line.startswith("#"):
+            break
+        if line.startswith("# min-python:"):
+            return tuple(int(p) for p in line.split(":", 1)[1].strip().split("."))
+    return ()
+
+
+def _probes() -> tuple[list[str], list[str]]:
     """Every string literal the cases hand to `compile`, read off their
-    trees -- so this cannot drift from what is measured."""
-    out = []
+    trees -- so this cannot drift from what is measured.
+
+    GATED THE WAY `conformance/harness.py` GATES, and for a sharper reason
+    than it has. A case written in 3.14 syntax cannot be `ast.parse`d by an
+    older host at all, so reading its probes is a SyntaxError that takes the
+    whole suite's collection with it -- and even parsed, its probes would
+    compare a bundled `compile` that implements 3.14 against a host `compile`
+    that does not, and report the host's age as this compiler's bug.
+    """
+    out, gated = [], []
     for name in CASES:
-        tree = ast.parse((_ROOT / "conformance" / "cases"
-                          / (name + ".py")).read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
+        text = (_ROOT / "conformance" / "cases"
+                / (name + ".py")).read_text(encoding="utf-8")
+        need = _min_python(text)
+        if need and sys.version_info[:len(need)] < need:
+            gated.append(name)
+            continue
+        for node in ast.walk(ast.parse(text)):
             if isinstance(node, (ast.Tuple, ast.List)) and node.elts and all(
                     isinstance(e, ast.Constant) and isinstance(e.value, str)
                     for e in node.elts):
                 out.extend(e.value for e in node.elts)
-    return out + WRITTEN_OUT
+    return out + WRITTEN_OUT, gated
 
 
-PROBES = _probes()
+PROBES, GATED = _probes()
 
 
 def _ask(fn, src: str) -> str:
@@ -118,6 +145,17 @@ class TestAgreesWithCPython:
     def test_there_are_probes(self):
         """A sweep over an empty list passes and proves nothing."""
         assert len(PROBES) > 70, len(PROBES)
+
+    @harness.skip_if(sys.version_info < (3, 14),
+                     reason="cases above this CPython are gated, by design")
+    def test_nothing_is_gated_on_a_current_interpreter(self):
+        """The gate is a concession to an OLD host, never a way to lose a case.
+
+        On the interpreter this compiler targets, every case must be measured
+        -- so the reduced run an older host gets cannot quietly become the one
+        anybody relies on.
+        """
+        assert GATED == [], f"gated on {sys.version_info[:2]}: {GATED}"
 
     def test_answers_a_code_object(self):
         """`type(compile(...)).__name__` is `'code'`, which a case prints."""

@@ -4,10 +4,20 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "asmpython"
-version = "0.1.0"
 description = "A retargetable compiler: language-independent IR, pluggable frontends and backends"
-requires-python = ">=3.11"
+# 3.14 AND NOT LOWER, because the Python frontend parses a user's program with
+# the HOST's `ast` -- so on 3.12 this compiler rejects `except A, B:` and every
+# other thing 3.14 added, with a syntax error against a valid program. It is
+# the version this compiler targets; it has to be the version it runs on.
+requires-python = ">=3.14"
 dependencies = []
+# ONE NUMBER, in `VERSION` at the root. It was three -- here, `VERSION`, and
+# `asmpython.__version__` -- and two of them were `0.1.0` against a project
+# calling itself 3.14.0-preview.
+dynamic = ["version"]
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
 
 [project.scripts]
 asmpython = "asmpython.driver.cli:main"

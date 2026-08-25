@@ -19,7 +19,7 @@ it: `Path("C:/x").is_absolute()` would still answer False while the class
 looked native, which is the plausible-wrong-answer this file exists to avoid.
 It is one thing to add, not four, and it is declared here until then.
 
-THE CONCRETE HALF GOES THROUGH `link/hostsvc.py`, which is the contract every
+THE CONCRETE HALF GOES THROUGH `objects/hostsvc.py`, which is the contract every
 backend implements: `host_file_open`, `host_file_read`, `host_file_kind` and
 six more. Nothing is imported and nothing is declared -- those names are part
 of the frontend/backend contract exactly as `plat_write` is, so they are
@@ -280,7 +280,7 @@ class PureWindowsPath(PurePosixPath):
 #
 # NOTHING HERE NAMES A PLATFORM. It did: the flags were MSVC's numbers, the
 # file calls were MSVC's spellings, and the metadata call was kernel32's. All
-# of that is now `link/hostsvc.py`'s problem, which is what makes this half of
+# of that is now `objects/hostsvc.py`'s problem, which is what makes this half of
 # the module portable rather than Windows-and-C-only.
 #
 # BINARY IS NOT A FLAG ANY MORE either. `host_file_open` is always binary by
@@ -297,7 +297,7 @@ class PureWindowsPath(PurePosixPath):
 #: no linker and no `_open`, and because the names themselves are platform
 #: spellings: `_open` is MSVC's, `open` is POSIX's, `java.nio` is neither.
 #:
-#: `link/hostsvc.py` names the same operations once and lets each backend
+#: `objects/hostsvc.py` names the same operations once and lets each backend
 #: satisfy them however it can. Nothing is imported and nothing is declared:
 #: the names below are part of the contract every backend implements, exactly
 #: as `plat_write` is, so they are reachable without an import.

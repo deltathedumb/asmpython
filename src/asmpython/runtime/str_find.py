@@ -215,3 +215,200 @@ def apy_str_rfind3(s: ptr, sub: ptr, start: ptr, end: ptr) -> ptr:
         return apy_str_seek(s, sub, apy_str_bound(start),
                             apy_str_bound(end), True)
     return apy_str_rfind3_slow(s, sub, start, end)
+
+
+# -- the three the search and the split both stand on ----------------------
+
+
+def apy_find_at(s: ptr, sub: ptr, lo: i64, hi: i64) -> i64:
+    """The first `sub` inside `s[lo:hi]`, as an absolute byte index, or -1.
+
+    AN EMPTY NEEDLE MATCHES AT `lo` -- but only when `lo` is inside the
+    window, which is the whole reason this takes `hi` rather than assuming
+    the end of the string.
+
+    BYTES, AND THAT IS RIGHT: the callers hand it byte bounds and read a byte
+    answer, and the conversion to character positions happens above them.
+    Doing it here would convert twice.
+
+    THE INNER LOOP ENDS BY MOVING `j` TO `m`, because the subset has no
+    `break` -- which reads oddly and is the only way to leave a loop early
+    without a second flag.
+    """
+    m: i64 = load(i64, offset(sub, apy_str_len_offset()))
+    if m == 0:
+        if lo <= hi:
+            return lo
+        return -1
+    sp: ptr = ptr(load(u64, offset(s, apy_str_ptr_offset())))
+    np: ptr = ptr(load(u64, offset(sub, apy_str_ptr_offset())))
+    i: i64 = lo
+    while i + m <= hi:
+        j: i64 = 0
+        same: i64 = 1
+        while j < m:
+            if load(u8, offset(sp, i + j)) != load(u8, offset(np, j)):
+                same = 0
+                j = m
+            else:
+                j = j + 1
+        if same:
+            return i
+        i = i + 1
+    return -1
+
+
+def apy_rfind_at(s: ptr, sub: ptr, lo: i64, hi: i64) -> i64:
+    """The LAST `sub` inside `s[lo:hi]`, or -1.
+
+    AN EMPTY NEEDLE MATCHES AT `hi` here, which is the mirror of the rule
+    above and is what makes `"abc".rfind("")` answer 3.
+    """
+    m: i64 = load(i64, offset(sub, apy_str_len_offset()))
+    if m == 0:
+        if lo <= hi:
+            return hi
+        return -1
+    sp: ptr = ptr(load(u64, offset(s, apy_str_ptr_offset())))
+    np: ptr = ptr(load(u64, offset(sub, apy_str_ptr_offset())))
+    i: i64 = hi - m
+    while i >= lo:
+        j: i64 = 0
+        same: i64 = 1
+        while j < m:
+            if load(u8, offset(sp, i + j)) != load(u8, offset(np, j)):
+                same = 0
+                j = m
+            else:
+                j = j + 1
+        if same:
+            return i
+        i = i - 1
+    return -1
+
+
+def apy_str_slice_of(s: ptr, lo: i64, hi: i64) -> ptr:
+    """`s[lo:hi]` by BYTE bounds, as a string of its own.
+
+    A REVERSED WINDOW IS EMPTY rather than an error, which is what every
+    caller wants: a search that found nothing hands in bounds that crossed,
+    and the answer is the empty string.
+
+    COPIED, NOT POINTED AT: the piece outlives the call, and a slice sharing
+    the original's bytes could not carry its own terminator.
+    """
+    if hi < lo:
+        hi = lo
+    p: ptr = ptr(load(u64, offset(s, apy_str_ptr_offset())))
+    return apy_str_copy_bytes(offset(p, lo), hi - lo)
+
+
+def apy_arg_must_be_str_of(meth: ptr, argno: i64, v: ptr) -> ptr:
+    """`s.count(5)` -- the argument had to be a string and was not.
+
+    `None` IS NAMED AS `None` AND NOT AS `NoneType`, which is what CPython
+    prints here: the message is about the VALUE passed, and None is the value
+    a program wrote.
+
+    THE POSITION IS PART OF THE MESSAGE only when there is more than one
+    argument to confuse -- a one-argument method names no number, which is
+    why there are two shapes rather than one with a zero in it.
+    """
+    k: ptr = apy_kind_name_of(v)
+    if i64(load(i32, offset(v, 0))) == apy_none_kind():
+        k = rodata(b"None\0")
+    if argno:
+        buf: ptr = apy_fmt_scratch()
+        at: i64 = apy_cstr_into(buf, 0, 200, meth)
+        at = apy_cstr_into(buf, at, 200, rodata(b"() argument \0"))
+        at = apy_cstr_into(buf, at, 200, apy_decimal_of(argno, 0))
+        at = apy_cstr_into(buf, at, 200, rodata(b" must be str, not \0"))
+        at = apy_cstr_into(buf, at, 200, k)
+        store(u8, u8(0), offset(buf, at))
+        return apy_raise_at(rodata(b"TypeError\0"), buf)
+    return apy_raise_fmt(
+        rodata(b"TypeError\0"),
+        rodata(b"%s() argument must be str, not %s\0"), meth, k)
+
+
+def apy_str_other_of(meth: ptr, argno: i64, v: ptr) -> i64:
+    """Is `v` a string this method may work on?
+
+    BYTES TOO, for the reason every string operation here admits them: the
+    two share a layout, and the operation is the same one.
+    """
+    k: i64 = i64(load(i32, offset(v, 0)))
+    if k == apy_str_kind() or k == apy_bytes_kind():
+        return 1
+    apy_arg_must_be_str_of(meth, argno, v)
+    return 0
+
+
+def apy_str_count_in_of(s: ptr, sub: ptr, start: ptr, end: ptr) -> ptr:
+    """`s.count(sub)`, with optional bounds. NON-OVERLAPPING.
+
+    `"aaa".count("aa")` IS 1 AND NOT 2, which is what the `i += m` says: a
+    match consumes what it matched, so the second `aa` starting one byte in
+    is never looked for.
+
+    AN EMPTY NEEDLE MATCHES BETWEEN EVERY PAIR and at both ends, which is
+    `hi - lo + 1` positions -- and zero when the window is empty.
+
+    BYTES, AND THAT IS RIGHT HERE: a non-empty needle can only match at a
+    character boundary, because UTF-8 is prefix-free at those boundaries. The
+    empty needle counts POSITIONS, which is a byte answer for a byte window,
+    and the C answers the same.
+    """
+    if not apy_str_other_of(rodata(b"count\0"), 1, sub):
+        return ptr(0)
+    n: i64 = load(i64, offset(s, apy_str_len_offset()))
+    bounds: ptr = apy_affix_bounds()
+    store(i64, 0, bounds)
+    store(i64, n, offset(bounds, 8))
+    if start:
+        if not apy_slice_arg_of(start, bounds):
+            return ptr(0)
+    if end:
+        if not apy_slice_arg_of(end, offset(bounds, 8)):
+            return ptr(0)
+    apy_clamp_range_of(n, bounds, offset(bounds, 8))
+    lo: i64 = load(i64, bounds)
+    hi: i64 = load(i64, offset(bounds, 8))
+    m: i64 = load(i64, offset(sub, apy_str_len_offset()))
+    if m == 0:
+        if hi >= lo:
+            return apy_from_int(hi - lo + 1)
+        return apy_from_int(0)
+    sp: ptr = ptr(load(u64, offset(s, apy_str_ptr_offset())))
+    np: ptr = ptr(load(u64, offset(sub, apy_str_ptr_offset())))
+    hits: i64 = 0
+    i: i64 = lo
+    while i + m <= hi:
+        j: i64 = 0
+        same: i64 = 1
+        while j < m:
+            if load(u8, offset(sp, i + j)) != load(u8, offset(np, j)):
+                same = 0
+                j = m
+            else:
+                j = j + 1
+        if same:
+            hits = hits + 1
+            i = i + m
+        else:
+            i = i + 1
+    return apy_from_int(hits)
+
+
+def apy_str_count2(s: ptr, sub: ptr, start: ptr) -> ptr:
+    """`s.count(sub, start)`."""
+    if not apy_str_self_of(rodata(b"count\0"), s):
+        return ptr(0)
+    return apy_str_count_in_of(s, sub, start, ptr(0))
+
+
+def apy_str_count3(s: ptr, sub: ptr, start: ptr, end: ptr) -> ptr:
+    """`s.count(sub, start, end)`."""
+    if not apy_str_self_of(rodata(b"count\0"), s):
+        return ptr(0)
+    return apy_str_count_in_of(s, sub, start, end)

@@ -14,6 +14,7 @@ asmpython build prog.py --emit-ir         # stop at the IR and read it
 asmpython run prog.py                     # execute in the reference interpreter
 asmpython check prog.py                   # analyse and verify, produce nothing
 asmpython ops | types | passes | backends | frontends | targets | toolchains
+asmpython libraries                       # where installed packages resolve from
 ```
 
 ## Layout
@@ -24,20 +25,30 @@ src/asmpython/
   ir/            types, opcodes, module, cfg, builder, verifier, printer,
                  parser, interpreter
   passes/        pass manager with invariant checking, and transforms
-  frontend(s)/   source -> IR         (python: an annotated subset)
-  backend(s)/    IR -> artifacts      (c; x86-64; arm64; jvm)
+  frontend(s)/   source -> IR         (python: the language, not a subset)
+  backend(s)/    IR -> artifacts      (c; x86-64; arm64; jvm -- and six
+                 more registered but unfinished: see `asmpython backends`)
   target(s)/     the platforms        (x86_64-*, aarch64-*, c, jvm)
   link/          artifacts -> program (cc; jar; baremetal; none)
-  runtime/       the object runtime, in asmpython's own machine subset --
+  objects/       what a Python value IS at run time: the object runtime as C,
+                 the part of it rewritten in IR, and the floor beneath both
+  runtime/       that IR part's source, in asmpython's own machine subset --
                  compiled into every program that needs it, not imported
   plugins/       third-party registrations: manifest, resolution, install
   driver/        options, pipeline, command line
 ```
 
-`legacy/asmpython/` is the pre-rewrite compiler, kept for its code generation
-and not maintained. It answers to the same import name, and two packages
-cannot share one — so the rewrite owns `asmpython` and the old tree needs
-`PYTHONPATH=legacy`. See [legacy/README.md](legacy/README.md).
+Each backend also declares an **alib** — `<arch>.alib`, the low-level library
+for the machine it emits: MMIO, ports, barriers, system registers. It hangs
+off the backend rather than living in a registry of its own, because an alib
+describes instructions something can produce, and the code generator is that
+something. `asmpython alibs` lists them and says how much of each is real.
+
+`archived/legacy/asmpython/` is the pre-rewrite compiler, kept for its code
+generation and not maintained. It answers to the same import name, and two
+packages cannot share one — so the rewrite owns `asmpython` and the old tree
+needs `PYTHONPATH=archived/legacy`. See
+[archived/legacy/README.md](archived/legacy/README.md).
 
 Four registries — frontends, backends, targets, toolchains — and the
 built-ins register through exactly the same call a third party makes. An
@@ -71,7 +82,7 @@ the network on its own.
 A plugin may also patch the compiler directly (`CompilerPatch`) for what the
 registries do not cover — with two sealed targets that can never be patched
 and a guarded set needing an explicit, reported `force=True`. See
-[docs/BACKENDS.md](docs/BACKENDS.md).
+[archived/docs/BACKENDS.md](archived/docs/BACKENDS.md).
 
 ### Replacing and refreshing
 
@@ -138,23 +149,59 @@ executed — and all six must agree. The AArch64 one runs under
 `qemu-system-aarch64`, which needs no ARM hardware because the target is bare
 metal: the image boots directly with `-M virt -kernel`, no guest OS involved.
 
+## Installed packages
+
+`import requests` resolves against the host Python installation's
+`site-packages` — a **library point**, which is a search root that came from
+an interpreter rather than from the command line. `asmpython libraries` prints
+the ones in force and which interpreter they came from; `--host-python PATH`
+asks a different installation, and `--no-site-packages` searches none.
+
+Library points are searched **last**: after the bundled standard library, after
+the source's own directory, and after every `--import-path`. So a package
+installed years ago cannot decide what a name in this program means, and
+nothing that resolved before library points existed resolves differently now.
+
+A pip package is ordinary Python source, so it is **spliced exactly as the
+bundled standard library is** — mangled, ordered so a dependency precedes its
+importer, merged into the one module the frontend knows. There is no import
+system at run time and no module objects. The consequence worth stating: the
+whole transitive closure has to compile, and a construct one of those files
+uses that this compiler does not accept is a gap worth closing rather than a
+reason to drop back to C.
+
+A **compiled extension module** — `.pyd`, `.so` — is not source and is refused
+with `E0129` naming the file and the distribution it came from, rather than
+`E0083` about a file that is plainly sitting right there. It is a native binary
+built against CPython's C API, so using one needs that API implemented against
+this object runtime; loading it is the smaller half, and `dynlib` in
+`objects/hostsvc.py` is that half.
+
 ## Extending it
 
 | you want | read | register with |
 | --- | --- | --- |
-| a language | [docs/FRONTENDS.md](docs/FRONTENDS.md) | `asmpython.frontend.register` |
-| a code generator | [docs/BACKENDS.md](docs/BACKENDS.md) | `asmpython.backend.register` |
-| a platform | [docs/TARGETS.md](docs/TARGETS.md) | `asmpython.target.register` |
-| a way to link | [docs/LINKERS.md](docs/LINKERS.md) | `asmpython.link.register` |
+| a language | [archived/docs/FRONTENDS.md](archived/docs/FRONTENDS.md) | `asmpython.frontend.register` |
+| a code generator | [archived/docs/BACKENDS.md](archived/docs/BACKENDS.md) | `asmpython.backend.register` |
+| a platform | [archived/docs/TARGETS.md](archived/docs/TARGETS.md) | `asmpython.target.register` |
+| a way to link | [archived/docs/LINKERS.md](archived/docs/LINKERS.md) | `asmpython.link.register` |
 
-[docs/LANGUAGE.md](docs/LANGUAGE.md) describes the Python subset — what it
-accepts, and the four places Python and the machine disagree.
+[archived/docs/LANGUAGE.md](archived/docs/LANGUAGE.md) describes what the
+Python frontend accepts — which is Python, on two paths — and the four places
+Python and the machine disagree.
 
 ## Running the tests
 
 ```
 python -m tests.harness
 ```
+
+**CPython 3.14 or newer**, and not because the suite is fussy: the Python
+frontend parses a user's program with the HOST's `ast`, so an older
+interpreter rejects `except A, B:` and the rest of 3.14 as syntax errors
+against valid programs. The suite compares every program with the CPython
+running it, so below 3.14 it is the ORACLE that is wrong, and it says so
+several hundred times.
 
 The C and x86-64 stages need a C compiler on PATH, and the AArch64 stage needs
 `aarch64-none-elf-gcc` and `qemu-system-aarch64`; without them those tests

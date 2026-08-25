@@ -19,6 +19,7 @@ import abc
 from dataclasses import dataclass
 
 from ..ir import Module
+from .alib import Alib
 # Re-exported so a backend author needs one import. The TYPE belongs to the
 # backend interface -- every `emit` receives one -- but the INSTANCES do not
 # live here: they are registered in `asmpython.targets`, so adding a platform never
@@ -76,6 +77,24 @@ class Backend(abc.ABC):
     options: tuple[Option, ...] = ()
     #: False for a work in progress; the driver warns.
     ready: bool = True
+    #: WHAT KIND OF ARTIFACT THIS PRODUCES, and therefore whether text is
+    #: allowed out of it. Two answers and the rule is different for each:
+    #:
+    #:   "language"  Emits SOURCE IN ANOTHER LANGUAGE -- C, LLVM IR. Text is
+    #:               the artifact; something downstream compiles it. There is
+    #:               nothing to encode and no object format to write.
+    #:   "binary"    Emits MACHINE CODE OR BYTECODE -- an ELF/COFF/Mach-O
+    #:               object, a class file, a wasm module, a .pyc. The output
+    #:               is bytes that a loader takes directly.
+    #:
+    #: A BINARY BACKEND MAY NOT EMIT ASSEMBLY. That is the whole reason this
+    #: field exists rather than being obvious from the name. Assembly text is
+    #: neither: it is a binary backend that stopped one stage early and handed
+    #: the last one to `as`, which reads as working -- the file exists, the
+    #: toolchain links it -- while the backend has in fact never encoded an
+    #: instruction. Saying "binary" here is a claim that `emit` produces the
+    #: bytes itself, and `test_backend_kinds.py` checks the claim.
+    kind: str = "binary"
     #: Name of the target used when the user names none. A NAME, not a
     #: Target: holding an instance here would import the built-in targets
     #: to define the backend interface, putting platforms back inside the
@@ -92,7 +111,7 @@ class Backend(abc.ABC):
     #:
     #: Part of the object runtime is now written in asmpython's own machine
     #: subset and compiled into every program that needs it
-    #: (`link/objects_ir.py`), which is how a backend stops having to define
+    #: (`objects/ir.py`), which is how a backend stops having to define
     #: 229 functions. THIS IS THE OPT-OUT, and it is not an afterthought: the
     #: point of that work is to REMOVE an obligation, not to replace it with a
     #: different one. A backend with its own implementation of a function --
@@ -105,7 +124,7 @@ class Backend(abc.ABC):
     #: leaves the C runtime exactly as it was before any of it was ported.
     object_runtime: frozenset[str] = frozenset()
     #: HOST SERVICE GROUPS THIS BACKEND PROVIDES -- "file", "net", "time",
-    #: "random", "env", "text". See `link/hostsvc.py` for the operations in
+    #: "random", "env", "text". See `objects/hostsvc.py` for the operations in
     #: each and for why they are optional rather than part of the floor.
     #:
     #: EMPTY IS A COMPLETE BACKEND. That is the whole reason this is declared
@@ -116,6 +135,19 @@ class Backend(abc.ABC):
     #: capability -- not at link time as an undefined symbol, and not at run
     #: time as a wrong answer.
     host_services: frozenset[str] = frozenset()
+    #: THIS BACKEND'S ARCHITECTURE LIBRARY, or None where the machine offers
+    #: nothing a portable language cannot reach.
+    #:
+    #: ON THE BACKEND RATHER THAN IN A REGISTRY OF ITS OWN. It was a fifth
+    #: registry beside frontends/backends/targets/toolchains, and that was one
+    #: registry too many: an alib describes what a code generator can emit, so
+    #: the code generator is the thing that has one. Keeping it separate meant
+    #: an architecture could declare `rdtsc` with no backend able to produce
+    #: it, and nothing in the type system minded.
+    #:
+    #: It reaches a program through `modules` -- see `alib_modules` -- so the
+    #: frontend needs no second mechanism to import from.
+    alib: "Alib | None" = None
     #: MODULES THIS BACKEND MAKES IMPORTABLE, as {name: {member: spec}} in the
     #: shape `frontends/python/modules.py` documents.
     #:
@@ -174,7 +206,7 @@ class Backend(abc.ABC):
         backend owes it, and a backend that has not implemented it fails in
         ways this could only describe worse.
         """
-        from ..link import hostsvc
+        from ..objects import hostsvc
 
         wanted: dict[str, str] = {}
         for fn in module.functions:
@@ -189,7 +221,7 @@ class Backend(abc.ABC):
             f"{g!r} (for {wanted[g]})" for g in sorted(wanted))
         raise BackendUnsupported(
             f"this program needs host services the {self.name} backend does "
-            f"not provide: {listed}. See link/hostsvc.py for what each group "
+            f"not provide: {listed}. See objects/hostsvc.py for what each group "
             f"is, and `Backend.host_services` for how a backend declares one.")
 
     @abc.abstractmethod
@@ -228,7 +260,13 @@ def available() -> dict[str, Backend]:
 
 
 def load_builtin() -> None:
-    from ..backends import arm64, c, jvm, x86_64  # noqa: F401
+    # THE STUBS ARE IMPORTED TOO. Each declares `ready = False` and an alib,
+    # and refuses to emit -- so `asmpython backends` shows the whole matrix
+    # with the unfinished half marked, rather than showing four and leaving
+    # the rest to be discovered as "unknown backend".
+    from ..backends import (                                   # noqa: F401
+        apir, arm32, arm64, c, jvm, llvm, pybc, wasm, x86_32, x86_64,
+    )
 
 
 class BackendUnsupported(Exception):

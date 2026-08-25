@@ -62,7 +62,7 @@ class code:
 
     def co_positions(self):
         """One position per statement, as the rest of this runtime records
-        them -- see `apy_pos_add` in link/objects.py for why per statement."""
+        them -- see `apy_pos_add` in objects/csource.py for why per statement."""
         out = []
         for node in self.tree.walk():
             line = getattr(node, "lineno", 0)

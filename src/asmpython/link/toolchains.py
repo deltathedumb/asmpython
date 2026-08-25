@@ -71,7 +71,13 @@ class CcToolchain(Toolchain):
         # elsewhere. Float remainder compiles to an `fmod` call, so a program
         # using `%` on floats fails to link without this -- and only that
         # program, which makes it look like a frontend bug.
-        system_libs = ["-lm"] if request.target.object_format == "elf" else []
+        # `-ldl` for the same reason: `dlopen` moved into libc in glibc 2.34,
+        # and was libdl before that -- so the flag is needed on older systems
+        # and is a harmless empty stub on newer ones, which is why it is
+        # unconditional rather than probed. Windows needs neither, because
+        # both `fmod` and `LoadLibraryA` are in what the CRT links already.
+        system_libs = (["-lm", "-ldl"]
+                       if request.target.object_format == "elf" else [])
         argv = [cc, *inputs, "-o", str(output), *request.extra_inputs,
                 *system_libs]
         run(request, argv, what="linking")

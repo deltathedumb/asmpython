@@ -9,6 +9,8 @@
     asmpython run prog.py                    execute in the reference interpreter
     asmpython check prog.py                  analyse and verify, produce nothing
     asmpython ops / types / targets / backends / frontends / toolchains / passes
+    asmpython alibs                    the per-architecture low-level libraries
+    asmpython port                     how far the object runtime has moved to IR
 
 Every stage can be stopped at and dumped, and `--emit-ir` writes text that
 `asmpython run` accepts. That round trip is what makes a backend debuggable: you can
@@ -68,6 +70,8 @@ def _options(args) -> Options:
         object_runtime=getattr(args, "object_runtime", "ir"),
         import_paths=tuple(Path(p) for p in
                            (getattr(args, "import_path", None) or ())),
+        site_packages=getattr(args, "site_packages", True),
+        host_python=getattr(args, "host_python", None),
     )
 
 
@@ -151,7 +155,7 @@ def cmd_run(args) -> int:
     # other. Two ways to set one and both are honoured:
     #
     #   plat_exit(n)   ends the process, and a compiled binary really does
-    #   return n       from the entry, which `link/runtime.py` turns into
+    #   return n       from the entry, which `objects/support.py` turns into
     #                  `int main(void) { return (int)ir_main(); }`
     #
     # The second used to be dropped here, so `def main() -> int: return 7`
@@ -243,6 +247,58 @@ def cmd_backends(args) -> int:
     return 0
 
 
+def cmd_libraries(args) -> int:
+    """Which installed packages a build would resolve against, and from where.
+
+    THE POINT OF PRINTING IT. A library point is a directory the user never
+    typed, holding whatever pip last put there. "Why did `import yaml` work on
+    my machine and not in CI" has one honest answer and this is where it is.
+    """
+    from ..frontends.python import hostlib
+    host = hostlib.discover(getattr(args, "host_python", None))
+    if host.unavailable:
+        print(f"  no library point: {host.unavailable}")
+        return 1
+    print(f"  interpreter  {host.executable or '(this one)'}")
+    print(f"  version      Python {host.version}")
+    if host.prefix:
+        print(f"  prefix       {host.prefix}")
+    print()
+    if not host.points:
+        print("  no site-packages directory exists for that interpreter")
+        return 0
+    print("  searched after the bundled standard library, the source's own "
+          "directory")
+    print("  and every --import-path, in this order:")
+    print()
+    width = max(len(p.kind) for p in host.points)
+    for point in host.points:
+        count = _distribution_count(point.path)
+        print(f"  {point.kind:<{width}}  {point.path}"
+              + (f"   ({count} installed)" if count is not None else ""))
+    print()
+    print("  compiled extension modules are found and REFUSED with E0129: "
+          "they are")
+    print("  native binaries built against CPython, and there is no source "
+          "to splice.")
+    return 0
+
+
+def _distribution_count(point) -> int | None:
+    """How many distributions live on one point, or None if unreadable.
+
+    Counted from `.dist-info` directories rather than by importing anything:
+    the point may belong to another interpreter entirely, and reading its
+    metadata with THIS one's machinery is exactly the mistake `hostlib`
+    refuses to make elsewhere.
+    """
+    try:
+        return sum(1 for entry in point.iterdir()
+                   if entry.name.endswith((".dist-info", ".egg-info")))
+    except OSError:
+        return None
+
+
 def cmd_targets(args) -> int:
     targets = target_registry.available()
     aliases: dict[str, list[str]] = {}
@@ -266,6 +322,87 @@ def cmd_toolchains(args) -> int:
     width = _column(items)
     for name, tc in items:
         print(f"  {name:<{width}} {tc.description}")
+    return 0
+
+
+def cmd_port(args) -> int:
+    """How far the object runtime has moved to IR, and what is next.
+
+    THE READY LIST IS THE POINT. Anything on it can be ported without deciding
+    anything new: every function it calls is already in IR, and every libc
+    function it calls is one the machine subset can write out. Everything else
+    is reported as what stands in the way, so the next piece of work is a
+    blocker rather than a guess.
+
+    See `objects/ir.py` for why this asks about CLOSURE rather than about
+    `static` helpers, and why a call to libc counts as a callee.
+    """
+    from ..objects.ir import survey
+
+    s = survey()
+    # THE TOTAL IS EVERY EXPORTED FUNCTION, which this used to get wrong: it
+    # added the fully-replaced count to the untouched one and called that the
+    # total, so the split functions were in neither and the runtime looked
+    # smaller than it is.
+    total = s["replaced"] + s["untouched"]
+    print(f"object runtime: {s['replaced']} of {total} exported functions "
+          f"in IR, {s['split']} of those split -- {s['untouched']} still C")
+    print()
+    if s["ready"]:
+        print("ready to port -- closed over what IR already defines:")
+        for name in s["ready"]:
+            print(f"  {name}")
+    else:
+        print("nothing is ready: every remaining function needs something "
+              "that is not in IR yet")
+    if s["wont"]:
+        print()
+        print("ruled out, and not proposed again:")
+        for name, why in sorted(s["wont"].items()):
+            print(f"  {name}")
+            print(f"      {why}")
+    if s["near"]:
+        print()
+        print("one or two away -- what each is waiting on:")
+        width = max(len(n) for n, _ in s["near"])
+        for name, needs in s["near"]:
+            print(f"  {name:<{width}}  {', '.join(needs)}")
+    print()
+    print("what stands in the way, by how many functions wait on it:")
+    for name, count in s["blockers"]:
+        why = s["reasons"].get(name)
+        print(f"  {count:4d}  {name}" + (f"   {why}" if why else ""))
+    return 0
+
+
+def cmd_alibs(args) -> int:
+    """The architecture libraries, and how much of each is real.
+
+    THE UNIMPLEMENTED COUNT IS PRINTED, not hidden. Every intrinsic is a stub
+    today, and a listing that showed only the names would read as a catalogue
+    of working features -- which is exactly the impression a declared-but-not-
+    lowered surface must not give.
+    """
+    backend_registry.load_builtin()
+    items = [(name, be) for name, be in sorted(backend_registry.available().items())
+             if be.alib is not None]
+    width = max((len(be.alib.module_name) for _, be in items), default=0)
+    total = done = 0
+    for name, be in items:
+        a = be.alib
+        ins = a.all_intrinsics()
+        total += len(ins)
+        done += sum(1 for i in ins if i.implemented)
+        mark = "" if be.ready else "  (backend unfinished)"
+        caps = ", ".join(a.capabilities) or "nothing yet declared"
+        print(f"  {a.module_name:<{width}}  {len(ins):3d} intrinsics  "
+              f"{caps}{mark}")
+    print()
+    print(f"  {total} intrinsics across {len(items)} backends; "
+          f"{done} lowered.")
+    if done < total:
+        print(f"  {total - done} are DECLARED ONLY -- the surface exists, the "
+              f"code generation does not.")
     return 0
 
 
@@ -548,6 +685,17 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--import-path", action="append", metavar="DIR",
                        help="where to find the program's own modules; the "
                             "source's own directory is always searched")
+        # THE HOST INSTALLATION'S PACKAGES. Searched LAST, after the bundled
+        # standard library, the source's directory and every --import-path,
+        # so nothing that resolved before this flag existed resolves
+        # differently because of it. See frontends/python/hostlib.py.
+        p.add_argument("--no-site-packages", dest="site_packages",
+                       action="store_false", default=True,
+                       help="do not search the host Python installation's "
+                            "site-packages (see `asmpython libraries`)")
+        p.add_argument("--host-python", metavar="PATH",
+                       help="the interpreter whose site-packages to search; "
+                            "default is the one running the compiler")
         p.add_argument("source")
         p.add_argument("--frontend")
         p.add_argument("--max-errors", type=int, default=100)
@@ -562,7 +710,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="verify after every pass; names the pass that broke it")
         p.add_argument("--time-passes", action="store_true")
         # WHERE THE OBJECT RUNTIME COMES FROM. Part of it is written in
-        # asmpython's own machine subset and compiled in (`link/objects_ir.py`);
+        # asmpython's own machine subset and compiled in (`objects/ir.py`);
         # `c` uses the hand-written C for all of it, as every build did before
         # any of it was ported. Both are supported: the reason to write it in
         # IR is that a backend should not HAVE to define 229 functions, which
@@ -615,11 +763,22 @@ def build_parser() -> argparse.ArgumentParser:
         ("targets", cmd_targets, "list target platforms"),
         ("backends", cmd_backends, "list backends"),
         ("toolchains", cmd_toolchains, "list ways of producing a program"),
+        ("alibs", cmd_alibs, "list the architecture libraries"),
+        ("port", cmd_port, "how far the object runtime has moved to IR"),
         ("frontends", cmd_frontends, "list frontends"),
         ("passes", cmd_passes, "list optimisation passes"),
     ):
         p = sub.add_parser(name, help=doc)
         p.set_defaults(fn=fn)
+
+    # Not in the loop above: this is the one noun whose answer depends on
+    # WHICH interpreter is asked, so it takes the same flag `build` does.
+    lib = sub.add_parser("libraries",
+                         help="where installed packages are resolved from")
+    lib.add_argument("--host-python", metavar="PATH",
+                     help="the interpreter to ask; default is the one "
+                          "running the compiler")
+    lib.set_defaults(fn=cmd_libraries)
 
     pl = sub.add_parser("plugin", help="install and inspect plugins")
     pls = pl.add_subparsers(dest="plugin_command", required=True)

@@ -61,7 +61,7 @@ class LinkRequest:
     workdir: Path
     #: Extra objects, archives or `-l` names supplied by the caller.
     extra_inputs: tuple[str, ...] = ()
-    #: Runtime source the frontend needs linked in (see `asmpython.link.runtime`).
+    #: Runtime source the frontend needs linked in (see `asmpython.objects.support`).
     runtime_sources: tuple[Path, ...] = ()
     keep_intermediates: bool = False
     verbose: bool = False

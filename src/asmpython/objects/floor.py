@@ -74,10 +74,10 @@ FLOOR: dict[str, tuple[tuple[str, ...], str]] = {
 NAMES = tuple(FLOOR)
 
 #: The C implementation. `@STATIC@` and `@PTR@` are substituted exactly as
-#: `link/runtime.py` substitutes them -- the C backend inlines everything
+#: `objects/support.py` substitutes them -- the C backend inlines everything
 #: `static` and passes pointers as `uintptr_t`, and a second convention here
 #: would be a second thing to keep in step.
-C_SOURCE = r"""/* THE PLATFORM FLOOR. See link/platform.py for the contracts. */
+C_SOURCE = r"""/* THE PLATFORM FLOOR. See objects/floor.py for the contracts. */
 
 @STATIC@int64_t plat_write(int64_t fd, @PTR@ buf, int64_t n)
 {
@@ -113,7 +113,7 @@ C_SOURCE = r"""/* THE PLATFORM FLOOR. See link/platform.py for the contracts. */
 def c_source(*, static: bool = False, ptr: str = "void *") -> str:
     """`C_SOURCE` with its substitutions made.
 
-    The same two knobs `link.runtime.host_functions` takes, for the same two
+    The same two knobs `objects.support.host_functions` takes, for the same two
     consumers: a linked translation unit, and the C backend's self-contained
     output.
     """

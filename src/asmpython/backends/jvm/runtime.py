@@ -8,7 +8,7 @@ Two kinds, and they are here for the same reason:
                 emits calls to and something has to define
 
 For a machine backend the second kind is C, compiled once and linked in
-(`asmpython.link.runtime`). There is nothing to link here -- a class file is
+(`asmpython.objects.support`). There is nothing to link here -- a class file is
 the whole program -- so they are written as bytecode, and this module is where
 that happens rather than in the middle of the code generator.
 
@@ -21,7 +21,7 @@ WHAT THESE MUST AGREE WITH. `put_float` is not `System.out.print(double)`:
 Python's float repr is the shortest decimal that reads back as the same double,
 switching to exponent form at a fixed exponent, and Java's is a different rule
 with a different switch point. `$repr` is a transcription of `py_repr_double`
-in `asmpython.link.runtime`, because a program's output must not depend on
+in `asmpython.objects.support`, because a program's output must not depend on
 which backend compiled it.
 """
 from __future__ import annotations
@@ -29,9 +29,9 @@ from __future__ import annotations
 from .classfile import ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC, ClassBuilder, \
     ITEM_DOUBLE, ITEM_INTEGER, ITEM_LONG, MethodBuilder
 # The floor's NAMES only. What each does is written in bytecode below, and the
-# contracts are in `link/platform.py` -- one list, so a fourth function cannot
+# contracts are in `objects/floor.py` -- one list, so a fourth function cannot
 # be satisfied here without being declared there.
-from ...link.platform import FLOOR as _FLOOR
+from ...objects.floor import FLOOR as _FLOOR
 
 #: Where the IR's memory lives, and its descriptor.
 MEM = "$mem"
@@ -342,7 +342,7 @@ def _put_none(rt: Runtime, m: MethodBuilder) -> None:
 
 
 # ── the platform floor ──────────────────────────────────────────────────────
-# THREE FUNCTIONS, and `link/platform.py` holds the contracts. Everything above
+# THREE FUNCTIONS, and `objects/floor.py` holds the contracts. Everything above
 # this line in this file is a PYTHON operation a backend should not have to
 # know -- `put_bool` knows how Python spells a true value -- and everything
 # below it knows nothing about any language. Stage 6 of docs/INERT-RUNTIME.md
@@ -624,7 +624,7 @@ def _format(m: MethodBuilder, precision_slot: int, suffix: str, *,
 def _repr(rt: Runtime, m: MethodBuilder) -> None:
     """Python's `repr` of a double: the shortest decimal that reads back equal.
 
-    A transcription of `py_repr_double` in `asmpython.link.runtime`, and it has
+    A transcription of `py_repr_double` in `asmpython.objects.support`, and it has
     to stay one. `Double.toString` is also shortest-round-trip but formats to
     Java's rule -- `1.0E16` where Python writes `1e+16`, and plain notation out
     to 1e7 where Python goes to 1e16 -- so using it would make a program's
@@ -835,7 +835,7 @@ def _repr(rt: Runtime, m: MethodBuilder) -> None:
 # rounded, so a program doing `x ** 3` would print a different last digit here
 # than under `asmpython run` or the C backend.
 #
-# A transcription of `POW_INT_C` in `asmpython.link.runtime`, down to the
+# A transcription of `POW_INT_C` in `asmpython.objects.support`, down to the
 # guards -- every one of them is there because something returned a nan
 # without it, and the comments there say which case.
 #

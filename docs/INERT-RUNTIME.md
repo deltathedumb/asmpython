@@ -17,9 +17,19 @@ So the JVM backend compiles annotated Python and refuses the language. Done is:
 ## Where this stands
 
 **Stages 1 to 4 are done and measured. Stage 5 is under way: the string
-cell and its length, code-point and search families are ported, and the
-allocator upgrade that stage 5 named as its own prerequisite is done. Stage 6
-is not started.**
+cell and its length, code-point and search families are ported, the allocator
+upgrade that stage 5 named as its own prerequisite is done, and the SEQUENCE
+CELL has followed it. Stage 6 is not started.**
+
+**Stage 5b was not in the plan and was found by walking into it.**
+`apy_seq_push` was written, worked, and was refused: it answers `None`,
+`apy_none()` was a C function, and the ported runtime may reach for the
+platform floor and its own `_slow` halves and nothing else. The singleton
+cells -- `None`, `True`, `False`, `Ellipsis`, `NotImplemented` -- are the
+first SHARED STATE rather than shared code here, and they move as one piece or
+every `is` spanning the two halves answers False. **They are ported now**, the
+C's two direct uses of `&apy_none_cell` go through `apy_none()`, and append is
+back. Every kind that answers None was waiting on that and no longer is.
 
 | | | |
 | --- | --- | --- |
@@ -27,7 +37,9 @@ is not started.**
 | 2 | the platform floor | **3 functions**, down from 5, and none language-aware |
 | 3 | the integer cell | construction, and arithmetic as a split |
 | 4 | the allocator | every object in a program, from one arena in the subset |
-| 5 | kind by kind | **under way** -- `str`'s cell, length, codes and search; and the allocator upgrade below |
+| 5 | kind by kind | **under way** -- `str`'s cell, length, codes and search; the sequence cell; and the allocator upgrade below |
+| 5b | the singleton cells | **done** -- one None, owned by IR; the C's own two uses redirected through the accessor. `apy_stop` joined them as a sixth |
+| 5c | indirect calls | **done** -- `funcaddr`/`callptr` in the subset; every backend already implemented the opcodes |
 | 5a | the buffer allocator | size classes and free lists, which `list` and `dict` need before anything else |
 | 6 | delete the C | not started; and see the note on `objects_host.py` below |
 
@@ -37,11 +49,20 @@ it could NOT do, which twice turned out to be the more useful half.
 **The headline number has moved for the subset and not yet for the language.**
 A backend compiling the statically typed subset owes three functions instead of
 five, and none of the three knows what a Python value is. A backend compiling
-DYNAMIC Python still owes 418 exported symbols minus the 24 now written in IR
+DYNAMIC Python still owes 423 exported symbols minus the 53 now written in IR
 -- the mechanism to move the rest exists, is measured, and is the whole of
-stage 5. **394 remain**, and that number is the honest size of what is left:
-most of them are polymorphic over eighteen kinds, and `func_addr`/`call_ptr`
-and stage 6 sit behind them.
+stage 5. **370 remain**, of which 38 are fully replaced and 15 keep a C
+`_slow` half. That number is the honest size of what is left, and it is now
+moving in batches rather than one kind at a time: the walls are down, so what
+governs the rate is how many functions depend only on what is already ported.
+
+**WHAT UNBLOCKED THE BATCHES.** Three things had to land before any of this
+was cheap -- the buffer allocator (5a), the singleton cells (5b) and
+`funcaddr`/`callptr` in the subset. With those in place, a survey of the
+remaining C found 86 functions with no `static` helper in their way and
+fourteen lines or fewer, which is the seam the last three batches came out
+of: the ASCII predicates, the closure cell, the sentinel and identity, the
+kind predicates, and `object`'s own defaults.
 
 **What the C runtime is now: still supported, no longer required.** That
 distinction is the point of the whole exercise. `--object-runtime c` uses the
@@ -54,13 +75,13 @@ set grows -- and it grows every stage from here.
 
 | | lines | language | consumed by |
 | --- | --- | --- | --- |
-| `link/objects.py` | 15,560 | C (as one string, `OBJECTS_C`) | the C backend, and the machine backends via a C toolchain |
-| `link/unicode_table.py` | 909 | C, generated | spliced into the above at `/* @UNICODE_TABLE@ */` |
+| `objects/c/` | 16,284 | C, in nineteen parts concatenated in source order | the C backend, and the machine backends via a C toolchain |
+| `objects/c/unicode_table.py` | 909 | C, generated | spliced into the above at `/* @UNICODE_TABLE@ */` |
 | `ir/objects_host.py` | 8,583 | Python | the IR interpreter |
 | a JVM equivalent | 0 | — | nothing; `BackendUnsupported` |
 
 **The runtime is written twice and needed a third time.** That is not an
-accident of history, it is what the current design requires: `link/objects.py`
+accident of history, it is what the current design requires: `objects/csource.py`
 `signatures()` reads every `APY_API` symbol out of the C and types it as
 `ptr`/`i64`/`f64`, so the IR calls the runtime as OPAQUE EXTERNAL SYMBOLS. An
 opaque symbol is something each backend must go and find.
@@ -318,7 +339,7 @@ than asserted by this document.
     plat_exit(code)                    does not return
     plat_heap(n) -> ptr                n more bytes, or null
 
-`link/platform.py` holds the contracts and the C implementation; the JVM's is
+`objects/floor.py` holds the contracts and the C implementation; the JVM's is
 bytecode in `backends/jvm/runtime.py` over the `byte[]` it already had; the IR
 interpreter's is in `Interpreter._host`. **One list, three implementations** --
 a fourth function cannot be satisfied by a backend without being declared in
@@ -474,7 +495,7 @@ refuses. Worth knowing before reading a JVM failure as a regression.
 
 `apy_add` is polymorphic over eighteen kinds, so porting it whole means porting
 all of them -- the all-or-nothing this document exists to avoid. So the C body
-is RENAMED and the name is left to the IR (`link/objects.split_c`):
+is RENAMED and the name is left to the IR (`objects/csource.split_c`):
 
     APY_API apy_value apy_add(apy_value, apy_value);            <- IR
     APY_API apy_value apy_add_slow(apy_value a, apy_value b){   <- the C
@@ -587,8 +608,13 @@ kinds that are tag-dispatched.
 
 So the order that follows from what the code can actually do:
 
-    str  ->  the allocator upgrade  ->  list, dict  ->  func_addr/call_ptr
-         ->  classes, exceptions, generators
+    str  ->  the allocator upgrade  ->  the sequence cell  ->  the singleton
+         cells  ->  func_addr/call_ptr  ->  [ALL DONE]
+         ->  the rest of list, dict  ->  classes, exceptions, generators
+
+The singleton step was not in the original order and was found by walking into
+it -- see `runtime/list_cell.py`, which records the refusal that produced it.
+Everything left of `func_addr/call_ptr` is now done.
 
 ## Traps this work will hit
 
@@ -664,7 +690,7 @@ the same arrangement every stage has had, and the reason both are tested.
 
 This document is one half of an argument. It shrinks what a backend owes by
 writing the runtime in the subset -- 24 of 418 symbols so far, 394 to go. The
-other half is `link/hostsvc.py`, which NAMES what a backend owes so that it
+other half is `objects/hostsvc.py`, which NAMES what a backend owes so that it
 stops growing.
 
 **The two meet at a number.** When stage 6 lands, a backend owes the platform
@@ -693,7 +719,7 @@ not as a wrong answer at run time.
 Python value is. Every signature is machine words and pointers to bytes, and
 `tests/asmpython/integration/test_hostsvc.py` asserts it, because the moment
 one takes a `str` every backend implementing it owes the LANGUAGE rather than
-the machine -- which is the argument `link/platform.py` makes for why the
+the machine -- which is the argument `objects/floor.py` makes for why the
 floor is three functions and not the five it used to be.
 
 **Not an opcode, and the floor is the precedent.** `plat_write` is an ordinary

@@ -40,7 +40,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .base import LinkError, LinkRequest, Toolchain, find_tool, run
-from .runtime import POW_INT_C
+from ..objects.support import POW_INT_C
 from .registry import register
 
 #: Where `-M virt` puts RAM, and where the PL011 UART is mapped. Both are
@@ -123,7 +123,7 @@ void put_int(i64 v) {
    CPython, the IR interpreter, the C backend and the x86-64 backend. Fourteen
    of the twenty differential seeds failed on exactly that.
 
-   The hosted runtime gets the same answer cheaply (`link/runtime.py`,
+   The hosted runtime gets the same answer cheaply (`objects/support.py`,
    `py_repr_double`): print to N significant digits with snprintf, parse back
    with strtod, stop at the first N that round-trips. There is no libc here, so
    neither half of that trick exists, and writing an approximate one is how a

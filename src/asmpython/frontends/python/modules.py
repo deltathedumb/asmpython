@@ -147,7 +147,7 @@ _ASYNCIO = {
     "gather": ("callv", "apy_asyncio_gather"),
     # A TASK IS A COROUTINE THE LOOP OWNS, and that is the whole difference
     # from `await`: it runs in the gaps, whenever whatever is being driven
-    # suspends. See the task layer in link/objects.py.
+    # suspends. See the task layer in objects/csource.py.
     "create_task": ("call", "apy_asyncio_create_task", 1),
     # THE PARAMETER NAMES, because `wait_for(c, timeout=1)` is how every
     # program writes it -- the keyword is not optional in practice even
@@ -229,6 +229,16 @@ def use_backend(backend_id: str, modules: dict, type_lookup=None) -> None:
     _BACKEND_ID = backend_id
     _BACKEND_MODULES = dict(modules or {})
     _BACKEND_TYPE = type_lookup
+
+
+def backend_modules() -> dict:
+    """Every module the selected backend offers, by name.
+
+    For the lowerer, which has to DECLARE an intrinsic as an external before
+    any body that calls one is lowered -- and a member is only discovered
+    while lowering, which is too late.
+    """
+    return dict(_BACKEND_MODULES)
 
 
 def resolve(name: str):

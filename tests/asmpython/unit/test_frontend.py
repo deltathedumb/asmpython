@@ -819,49 +819,61 @@ class TestSpans:
             "all instructions share one span -- spans are not being recorded"
 
 
-class TestStaticTypingIsVisible:
-    """Where a single static type per expression changes the answer.
+class TestAnOperandKeepsItsOwnType:
+    """`and`, `or` and `x if c else y` YIELD AN OPERAND, so its type survives.
 
-    Python's `and`, `or` and `x if c else y` return whichever operand they
-    picked, and the operands may differ in type. Here the expression has one
-    type -- their unification -- so the chosen operand is converted to it.
+    THIS CLASS USED TO ASSERT THE OPPOSITE. It locked in `print(a and f)`
+    answering `0.0` where CPython says `0`, with a docstring calling it "not a
+    bug: the alternative is a runtime tag on every value, which is the thing
+    this compiler exists not to do."
 
-    The values stay equal; the printed form does not. These lock the
-    behaviour in and record why it is not a bug: the alternative is a runtime
-    tag on every value, which is the thing this compiler exists not to do.
-    Documented in docs/LANGUAGE.md.
+    That was a false choice. The alternative is not a runtime tag -- it is
+    REFUSING the expression, which costs nothing at run time and is what the
+    rest of this frontend does with every other ambiguity. The old behaviour
+    meant the same source printed `0` at module level and `0.0` inside an
+    annotated function, which is the static path having its own semantics
+    rather than being an optimisation of the dynamic one.
+
+    Nothing caught it because the conformance corpus is scripts, and a
+    script's top level is dynamic -- so the divergence lived only in the half
+    the corpus never measures.
+
+    WHERE THE VALUE IS NOT OBSERVED, nothing is refused: see
+    `TestConditionsDoNotHaveToAgree`.
     """
 
-    def test_and_unifies_to_float(self, tmp_path):
-        lines, _ = run_text("""
+    def _refused(self, src: str, tmp_path) -> list[str]:
+        result, sink = compile_text(src, tmp_path)
+        assert not result.ok, "expected a diagnostic, got a compiled module"
+        return codes(sink)
+
+    def test_and_over_two_types_is_refused(self, tmp_path):
+        assert "E0065" in self._refused("""
             def main() -> int:
                 a: int = 0
                 f: float = 2.5
                 print(a and f)
                 return 0
         """, tmp_path)
-        assert lines == ["0.0"], "CPython prints 0; the value is equal"
 
-    def test_conditional_unifies_to_float(self, tmp_path):
-        lines, _ = run_text("""
-            def main() -> int:
-                c: int = 1
-                print(1 if c > 0 else 2.5)
-                return 0
-        """, tmp_path)
-        assert lines == ["1.0"], "CPython prints 1; the value is equal"
-
-    def test_or_unifies_bool_to_int(self, tmp_path):
-        lines, _ = run_text("""
+    def test_or_over_two_types_is_refused(self, tmp_path):
+        assert "E0065" in self._refused("""
             def main() -> int:
                 b: bool = True
                 print(b or 2)
                 return 0
         """, tmp_path)
-        assert lines == ["1"], "CPython prints True; the value is equal"
+
+    def test_a_conditional_over_two_types_is_refused(self, tmp_path):
+        assert "E0065" in self._refused("""
+            def main() -> int:
+                c: int = 1
+                print(1 if c > 0 else 2.5)
+                return 0
+        """, tmp_path)
 
     def test_same_typed_operands_are_untouched(self, tmp_path):
-        """The unification only shows when the operands actually differ."""
+        """The refusal only fires when the operands actually differ."""
         lines, _ = run_text("""
             def main() -> int:
                 a: int = 0
@@ -872,3 +884,64 @@ class TestStaticTypingIsVisible:
                 return 0
         """, tmp_path)
         assert lines == ["0", "7", "2"]
+
+    def test_the_answer_is_now_cpythons(self, tmp_path):
+        """CONVERTED EXPLICITLY, the operands agree and the value is right.
+
+        This is what the diagnostic's `help` tells a reader to write, so it
+        has to actually work.
+        """
+        lines, _ = run_text("""
+            def main() -> int:
+                a: int = 0
+                f: float = 2.5
+                print(float(a) and f)
+                return 0
+        """, tmp_path)
+        assert lines == ["0.0"], "both operands are floats, so 0.0 is right"
+
+
+class TestConditionsDoNotHaveToAgree:
+    """Only the TRUTH of a test is observed, so its operands may differ.
+
+    THE HALF THAT MAKES THE REFUSAL AFFORDABLE. `if a and b:` over an int and
+    a float asks whether the result is truthy, and `0` and `0.0` answer that
+    identically -- so refusing here would reject working programs to prevent a
+    difference nobody can see. The position travels down through `and`, `or`,
+    `not` and a conditional's arms, because truthiness is preserved through
+    all four.
+    """
+
+    def test_a_mixed_test_compiles_and_agrees_with_cpython(self, tmp_path):
+        lines, _ = run_text("""
+            def f(a: int, b: float, c: int) -> int:
+                total: int = 0
+                if a and b:
+                    total = total + 1
+                if (a and b) or c:
+                    total = total + 2
+                if not (a or b):
+                    total = total + 4
+                return total
+
+            def main() -> int:
+                print(f(1, 2.5, 3))
+                print(f(0, 0.0, 7))
+                return 0
+        """, tmp_path)
+        # Checked against CPython by running the same `f` as a script.
+        assert lines == ["3", "6"]
+
+    def test_a_while_test_may_mix_types(self, tmp_path):
+        lines, _ = run_text("""
+            def main() -> int:
+                a: int = 3
+                b: float = 1.5
+                n: int = 0
+                while a and b:
+                    a = a - 1
+                    n = n + 1
+                print(n)
+                return 0
+        """, tmp_path)
+        assert lines == ["3"]

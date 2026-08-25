@@ -180,7 +180,7 @@ class TestTheDeclarationsAreNotCode:
         """The claim this whole feature is measured against."""
         sys.path.insert(0, str(SRC))
         try:
-            from asmpython.link.platform import FLOOR
+            from asmpython.objects.floor import FLOOR
             assert set(FLOOR) == {"plat_write", "plat_exit", "plat_heap"}, FLOOR
         finally:
             del sys.path[0]

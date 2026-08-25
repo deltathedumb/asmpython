@@ -179,7 +179,7 @@ class TestRun:
         """The frontend's own rule, honoured on the path that defines it.
 
         `E0009`'s note says the entry's return value BECOMES the process exit
-        code, and `link/runtime.py` makes that true for every compiled
+        code, and `objects/support.py` makes that true for every compiled
         backend: `int main(void) { return (int)ir_main(); }`. This path used
         to report 0 regardless, so `return 7` exited 7 when compiled and 0
         when interpreted -- the oracle every backend is measured against

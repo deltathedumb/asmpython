@@ -1,6 +1,6 @@
 # The host services, for the IR interpreter.
 #
-# `link/hostsvc.py` names the operations and says why they exist; this answers
+# `objects/hostsvc.py` names the operations and says why they exist; this answers
 # them. The interpreter is a backend like any other in this respect -- it
 # declares what it can do and a program needing more is refused -- and it can
 # do a great deal, because it is running inside CPython and CPython has a
@@ -30,7 +30,7 @@ NOT_MINE = object()
 #: wired to these names rather than a second copy of it here.
 GROUPS = frozenset({"file", "time", "random", "env"})
 
-#: `link/hostsvc.py`'s error table, which is NOT errno -- see there for why.
+#: `objects/hostsvc.py`'s error table, which is NOT errno -- see there for why.
 _ERR, _ENOENT, _EACCES, _EEXIST = -1, -2, -3, -4
 _ENOTDIR, _ENOTEMPTY, _EAGAIN, _EPIPE, _EINVAL = -5, -6, -7, -8, -9
 

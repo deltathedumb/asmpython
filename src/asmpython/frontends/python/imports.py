@@ -43,6 +43,10 @@ In order, first hit wins:
    the real one, and `import queue` keeps meaning what it meant
 2. the directory of the file being compiled
 3. each `--import-path` directory, in the order given
+4. each LIBRARY POINT -- the host Python installation's `site-packages`, so
+   `import requests` reaches what pip installed. Last for the same reason the
+   standard library is first: a package installed years ago must not decide
+   what a name in this program means. See `hostlib.py`.
 
 A package is a directory with `__init__.py`; `a.b.c` is `a/b/c.py` or
 `a/b/c/__init__.py`. Relative imports resolve against the importing module's
@@ -51,6 +55,8 @@ own package, which is why every module carries one.
 from __future__ import annotations
 
 from pathlib import Path
+
+from . import hostlib
 
 #: The prefix a spliced user name gets. DISTINCT FROM THE BUNDLED ONE, and not
 #: for tidiness: `bundled.splice` refuses a tree that already contains its own
@@ -78,7 +84,8 @@ class Finder:
     two compilations in one process cannot see each other's files.
     """
 
-    def __init__(self, roots: tuple[Path, ...] = ()) -> None:
+    def __init__(self, roots: tuple[Path, ...] = (),
+                 host: "hostlib.HostLibrary | None" = None) -> None:
         #: Deduplicated, order preserved: a directory named twice searches
         #: once, and the first spelling decides where it sits.
         seen: dict[Path, None] = {}
@@ -88,6 +95,11 @@ class Finder:
             except OSError:
                 continue
         self.roots: tuple[Path, ...] = tuple(seen)
+        #: The interpreter whose `site-packages` are among `roots`, kept so a
+        #: name that resolves to a COMPILED extension can be reported as one.
+        #: Empty when no library point is in force, and every lookup on an
+        #: empty one answers None.
+        self.host: hostlib.HostLibrary = host or hostlib.HostLibrary()
         self._read: dict[str, str] = {}
 
     # ── resolution ──────────────────────────────────────────────────────────
@@ -169,6 +181,15 @@ class Finder:
     def has(self, name: str) -> bool:
         return self.find(name) is not None
 
+    def native(self, name: str) -> "hostlib.NativeModule | None":
+        """`name` as a COMPILED extension module on a library point, or None.
+
+        Asked only once `find` has answered None, and only to say something
+        better than "no module named" about a file that is plainly there.
+        Nothing loads it; see `hostlib.py` for why there is nothing to splice.
+        """
+        return hostlib.native_module(name, self.host)
+
 
 #: The finder in force for the compilation running now.
 #:
@@ -184,9 +205,16 @@ class Finder:
 _CURRENT = Finder()
 
 
-def use(roots) -> None:
+def use(roots, host: "hostlib.HostLibrary | None" = None) -> None:
+    """Publish the search path for the compilation about to run.
+
+    `host` is the interpreter whose library points are already IN `roots` --
+    passed separately rather than derived, because the driver decides whether
+    to consult one at all, and a finder that discovered its own would consult
+    it even when `--no-site-packages` said not to.
+    """
     global _CURRENT
-    _CURRENT = Finder(tuple(roots))
+    _CURRENT = Finder(tuple(roots), host)
 
 
 def current() -> Finder:

@@ -12,14 +12,14 @@
 # version is wrong, nothing works rather than something obscure fails.
 #
 # THIS FILE IS NOT IMPORTED BY ANYTHING. It is read as SOURCE and compiled into
-# every program that needs the object runtime; see `link/objects_ir.py`. Under
+# every program that needs the object runtime; see `objects/ir.py`. Under
 # CPython it is not even valid -- `i64` is not a name Python has -- and that is
 # the honest signal that it is not host code.
 
 # ── the layout, which is C's ────────────────────────────────────────────────
 #
 # `struct apy_obj { int kind; union { int64_t i; double f; ... } v; }`, as
-# `link/objects.py` declares it. These numbers are NOT guessed: a test compiles
+# `objects/csource.py` declares it. These numbers are NOT guessed: a test compiles
 # that C and asserts `sizeof` and each `offsetof` against them, because a cell
 # this file builds is read by 15,000 lines of C that were not told anything had
 # changed. See `tests/asmpython/integration/test_ported_int.py`.
@@ -42,7 +42,7 @@ def apy_payload_offset() -> i64:
     return 8
 
 
-#: `APY_INT_K`, the third entry of the kind enum in `link/objects.py`.
+#: `APY_INT_K`, the third entry of the kind enum in `objects/csource.py`.
 def apy_int_kind() -> i64:
     return 2
 

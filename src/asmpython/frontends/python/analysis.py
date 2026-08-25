@@ -27,8 +27,8 @@ from .modules import importable, member, resolve
 from ...diagnostics import (DiagnosticSink, SourceFile, Span, error,
                             warning)
 from ...ir import types as T
-from ...link.platform import FLOOR as _FLOOR
-from ...link import hostsvc as _hostsvc
+from ...objects.floor import FLOOR as _FLOOR
+from ...objects import hostsvc as _hostsvc
 
 #: `object.<dunder>` -- the DEFAULT implementations, and the runtime call each
 #: one is. A class that overrides a dunder reaches its default this way, which
@@ -168,16 +168,34 @@ PTR = MACHINE["ptr"]
 #: because -5..256 are shared cells, and a cache has to outlive every call that
 #: touches it.
 MEMORY_INTRINSICS = {"alloca": 1, "load": 2, "store": 3, "offset": 2,
-                     "sizeof": 1, "reserve": 2}
+                     "sizeof": 1, "reserve": 2,
+                     # INDIRECT CALLS, deferred three times by
+                     # docs/INERT-RUNTIME.md and the last thing standing
+                     # between the ported runtime and classes, generators and
+                     # every dunder lookup -- all of which dispatch through a
+                     # function pointer rather than a kind tag.
+                     "funcaddr": 1,
+                     # CONSTANT BYTES, which the subset had no way to express
+                     # at all: `b"..."` is `E0040: unsupported expression`, so
+                     # every runtime function that builds a string from a
+                     # literal was unportable -- the type name in a repr, the
+                     # name of an exception, every message. The IR could
+                     # always hold one (`global __str0 = "..." readonly`);
+                     # what was missing was a spelling.
+                     "rodata": 1,
+                     # VARIADIC, which `-1` means here: at least a type and an
+                     # address, then however many arguments the callee takes.
+                     "callptr": -1}
 
 #: What each yields when its arity was wrong, so one mistake makes one
 #: diagnostic instead of a cascade about the expression it sits in.
 _INTRINSIC_RESULT = {"alloca": PTR, "load": None, "store": NONE,
-                     "offset": PTR, "sizeof": INT, "reserve": PTR}
+                     "offset": PTR, "sizeof": INT, "reserve": PTR,
+                     "funcaddr": PTR, "callptr": None, "rodata": PTR}
 
 #: THE PLATFORM FLOOR, callable from the static path. Three functions -- emit
 #: bytes, stop, get memory -- and everything else a runtime needs is code that
-#: has not been written in this subset yet. See `link/platform.py` for the
+#: has not been written in this subset yet. See `objects/floor.py` for the
 #: contracts and `docs/INERT-RUNTIME.md` for why the number is three.
 #:
 #: Ordinary calls, not intrinsics: each lowers to `Op.CALL` of an external
@@ -186,7 +204,7 @@ _INTRINSIC_RESULT = {"alloca": PTR, "load": None, "store": NONE,
 #: CLOSED by design -- a fourth would be a change to the contract every backend
 #: implements, and it should read like one rather than appear as an import.
 #:
-#: READ OUT OF `link/platform.py`, which is where the contracts are written and
+#: READ OUT OF `objects/floor.py`, which is where the contracts are written and
 #: where the C implementation sits. A hand-kept second copy of a signature list
 #: drifted three times in one afternoon when `_OBJECT_RUNTIME` was one; the
 #: fix there was to parse the definitions, and the fix here is to have one list.
@@ -199,7 +217,7 @@ PLATFORM = {name: (tuple(BY_NAME[a] for a in args),
 
 #: THE HOST SERVICES, callable from the static path exactly as the floor is.
 #:
-#: Everything in `link/hostsvc.py` EXCEPT its `core` group, which is the floor
+#: Everything in `objects/hostsvc.py` EXCEPT its `core` group, which is the floor
 #: and is already above -- one name declared twice would be two IR imports of
 #: the same symbol, and the second would win silently.
 #:
@@ -224,7 +242,7 @@ def _object_runtime() -> dict:
     path is subset code, and its fallthrough for a str is not, yet. Without a
     way to call across that line, a port would have to be all-or-nothing.
 
-    THE SIGNATURES ARE READ OUT OF THE C by `link/objects.signatures()`, the
+    THE SIGNATURES ARE READ OUT OF THE C by `objects/csource.signatures()`, the
     same parse the frontend's own declarations come from, so this cannot
     disagree with what a program links against. `apy_value` is `ptr` there,
     which is why a runtime function written here takes and returns `ptr`.
@@ -233,8 +251,8 @@ def _object_runtime() -> dict:
     writes `store(i64, ...)` can already do anything, and the `apy_` prefix is
     not something anyone arrives at by accident.
     """
-    from ...link.objects import signatures
-    from ...link.objects_ir import SPLIT
+    from ...objects.csource import signatures
+    from ...objects.ir import SPLIT
     out = {}
     for name, (args, ret) in signatures().items():
         sig = (tuple(BY_NAME[a] for a in args),
@@ -348,7 +366,7 @@ _BUILTIN_KEYWORDS = {
 
 #: Builtin exception names. Calling one CONSTRUCTS an exception value, and
 #: naming one in an `except` clause matches against the hierarchy in
-#: `link/objects.py`. Kept in the frontend as a plain set because the frontend
+#: `objects/csource.py`. Kept in the frontend as a plain set because the frontend
 #: only has to recognise the name -- the runtime owns what it means.
 #: Builtins that may be used as a VALUE, not only called. Each becomes a
 #: one-argument function that calls it -- `sorted(xs, key=len)` needs `len` to
@@ -1915,7 +1933,7 @@ class Analyzer:
         # A LIBRARY HAS NO ENTRY and is not supposed to. The object runtime's
         # ported pieces are definitions and nothing else -- they are called by
         # a program, not run -- so "nothing to run" is the correct shape rather
-        # than the mistake it usually is. See `link/objects_ir.py`.
+        # than the mistake it usually is. See `objects/ir.py`.
         if self.library:
             if body:
                 self.sink.report(
@@ -2457,7 +2475,7 @@ class Analyzer:
                                            value=node.value)
                 return False
             case ast.If():
-                self._expr(node.test)
+                self._expr(node.test, True)
                 before = set(self.assigned)
                 then_falls = self._block(node.body)
                 then_assigned = set(self.assigned)
@@ -2500,7 +2518,7 @@ class Analyzer:
                 self._error("E0088", "`match` needs a dynamic function; this "
                                      "one is statically typed", node)
             case ast.While():
-                self._expr(node.test)
+                self._expr(node.test, True)
                 # The body may run zero times, so nothing it assigns is
                 # definitely assigned afterwards.
                 before = set(self.assigned)
@@ -2639,10 +2657,7 @@ class Analyzer:
                     # and `main` still has to be able to name what it bound.
                     self._remember_namespace(alias)
                     if resolve(alias.name) is None:
-                        self._error("E0083",
-                                    f"no module named {alias.name!r} is "
-                                    f"available; there is no import path",
-                                    node, importable())
+                        self._no_module(alias.name, node)
                         continue
                     # `import a.b` BINDS `a`, as Python does: the head is a
                     # package holding the module, so `c.math.sqrt` reads two
@@ -2654,10 +2669,7 @@ class Analyzer:
                     self.assigned.add(bound)
             case ast.ImportFrom() if self.dynamic:
                 if node.module is None or resolve(node.module) is None:
-                    self._error("E0083",
-                                f"no module named {node.module!r} is "
-                                f"available; there is no import path",
-                                node, importable())
+                    self._no_module(node.module or "", node)
                 else:
                     for alias in node.names:
                         if member(node.module, alias.name) is None:
@@ -2720,7 +2732,7 @@ class Analyzer:
         info = self.classes[self.class_of_node[id(node)]]
         # A USER EXCEPTION CLASS IS BOTH THINGS AT ONCE. Its NAME goes into
         # the runtime's exception hierarchy -- see `apy_exc_register` in
-        # link/objects.py -- which is what makes `except ValueError:` catch it
+        # objects/csource.py -- which is what makes `except ValueError:` catch it
         # through the same walk that makes `except LookupError:` catch a
         # KeyError. Its BODY builds an ordinary class, because
         #
@@ -3050,15 +3062,34 @@ class Analyzer:
         return sym.type
 
     # ── expressions ─────────────────────────────────────────────────────────
-    def _expr(self, node) -> SemType:
-        ty = self._expr_inner(node)
+    def _expr(self, node, as_condition: bool = False) -> SemType:
+        """The type of `node`.
+
+        `as_condition` says only its TRUTH is observed -- it is the test of an
+        `if`, a `while`, a conditional expression, or the operand of `not`.
+        That matters for `and`, `or` and `a if c else b`, which YIELD AN
+        OPERAND in Python: what they answer has the type of whichever one they
+        picked, so a static path that gives every expression one type can only
+        be right when the operands agree. In a condition it does not have to
+        be -- `0` and `0.0` are both false -- so the strictness applies where
+        the value can actually be seen and nowhere else.
+
+        DEFAULTS TO FALSE, which is the strict reading. A call site that
+        forgets to say "condition" gets a diagnostic on a program that would
+        have worked; one that defaulted the other way would let a wrong value
+        through, which is the failure worth preventing.
+        """
+        ty = self._expr_inner(node, as_condition)
         info = self.current
         if info is not None:
             info.expr_types[id(node)] = ty
         return ty
 
-    def _expr_inner(self, node) -> SemType:
+    def _expr_inner(self, node, as_condition: bool = False) -> SemType:
         if getattr(self, "dynamic", False):
+            # The dynamic path already answers an operand: every value
+            # carries its own type, so there is nothing to unify and
+            # nothing to refuse.
             return self._dyn_expr(node)
         match node:
             case ast.Constant(value=bool()):
@@ -3072,15 +3103,20 @@ class Analyzer:
             case ast.Name(id=name):
                 return self._lookup(name, node)
             case ast.UnaryOp(op=ast.Not()):
-                self._expr(node.operand)
+                self._expr(node.operand, True)
                 return BOOL
             case ast.UnaryOp():
                 return self._expr(node.operand)
             case ast.BinOp():
                 return self._binop(node)
             case ast.BoolOp():
-                types = [self._expr(v) for v in node.values]
-                return self._unify_all(types, node)
+                # THE OPERANDS INHERIT THE POSITION. `if (a and b) or c:`
+                # observes only truth all the way down, so nothing inside it
+                # needs to agree about type either.
+                types = [self._expr(v, as_condition) for v in node.values]
+                return self._yielded(
+                    types, node, as_condition,
+                    "`and`" if isinstance(node.op, ast.And) else "`or`")
             case ast.Compare():
                 left_node, left = node.left, self._expr(node.left)
                 for op, c in zip(node.ops, node.comparators):
@@ -3091,9 +3127,11 @@ class Analyzer:
             case ast.Call():
                 return self._call(node)
             case ast.IfExp():
-                self._expr(node.test)
-                return self._unify_all(
-                    [self._expr(node.body), self._expr(node.orelse)], node)
+                self._expr(node.test, True)
+                return self._yielded(
+                    [self._expr(node.body, as_condition),
+                     self._expr(node.orelse, as_condition)],
+                    node, as_condition, "a conditional expression")
         self._error("E0040",
                     f"unsupported expression: {type(node).__name__}", node)
         return ERROR
@@ -3902,7 +3940,28 @@ class Analyzer:
             for a in node.args:
                 self._expr(a)
             return want
+        # A LITERAL ARGUMENT TAKES THE CAST'S WIDTH, which is the whole point
+        # of writing the cast: `u64(0x8000000000000000)` means that bit
+        # pattern, and typing the literal on its own made it an i64 first --
+        # so the value wrapped to INT64_MIN before the cast ever saw it, and
+        # the range check that exists for exactly this never ran.
+        #
+        # A FLOAT TARGET STILL CHECKS AGAINST i64, because the subset has no
+        # float literal: `f64(n)` converts FROM an integer, so `n` has to be
+        # one that exists. `f64(9223372036854775808)` looked like a way to
+        # write 2**63 and silently wrote INT64_MIN instead -- which made
+        # `apy_trunc_of`'s guard true for every value, and `(1.5).is_integer()`
+        # answer True.
         got = self._expr(node.args[0])
+        # AFTER `_expr`, WHICH WRITES THE TYPE IT COMPUTED. Retyping before it
+        # is overwritten by it, and the literal goes back to the default
+        # width -- which is the whole thing this is here to prevent.
+        if int_literal(node.args[0]) is not None:
+            if want.is_machine_int:
+                self._fit_literal(node.args[0], want)
+                got = want
+            elif want.name in ("f32", "f64"):
+                self._fit_literal(node.args[0], MACHINE["i64"])
         if got.is_error:
             return want
         if want.is_ptr:
@@ -3937,6 +3996,33 @@ class Analyzer:
             return ERROR
         return want
 
+    def _fit_literal(self, node, want: SemType) -> None:
+        """Report an integer literal that does not fit `want`. Nothing else.
+
+        SEPARATE FROM `_retype` because a cast does not change the argument's
+        TYPE -- `u64(x)` converts a value of whatever width `x` already has --
+        but a LITERAL has no width of its own until something gives it one,
+        and the cast is the only thing here that ever will.
+        """
+        value = int_literal(node)
+        if value is None or not want.is_machine_int:
+            return
+        bits = T.ALL[want.name].bits
+        lo, hi = ((-(1 << (bits - 1)), (1 << (bits - 1)) - 1)
+                  if want.name[0] == "i" else (0, (1 << bits) - 1))
+        if lo <= value <= hi:
+            # AND IT TAKES THE WIDTH, which is the half that matters: checking
+            # the range and then leaving the literal an i64 lets the value
+            # wrap on its way to the cast, which is the bug this exists to
+            # stop rather than merely to report.
+            self._retype(node, want)
+            return
+        self.sink.report(
+            error("E0012", f"{value} does not fit in {want}")
+            .at(self._span(node), f"{want} holds {lo} to {hi}")
+            .help("build it from parts that do fit -- 2**63 is "
+                  "`f64(4611686018427387904) * f64(2)`"))
+
     def _memory_intrinsic(self, name: str, node: ast.Call) -> SemType:
         """`alloca`, `load`, `store`, `offset`, `sizeof`.
 
@@ -3948,6 +4034,17 @@ class Analyzer:
         you infer from the variable it lands in.
         """
         want = MEMORY_INTRINSICS[name]
+        if want < 0:
+            # VARIADIC. `callptr` is the only one, and its floor is the type
+            # and the address; everything after is the callee's business.
+            if len(node.args) < 2:
+                self._error("E0054", f"{name}() takes a type, an address and "
+                                     f"then the arguments, got "
+                                     f"{len(node.args)}", node)
+                for a in node.args:
+                    self._expr(a)
+                return ERROR
+            return self._callptr(node)
         if len(node.args) != want:
             self._error("E0054", f"{name}() takes exactly {want} argument(s), "
                                  f"got {len(node.args)}", node)
@@ -3958,6 +4055,10 @@ class Analyzer:
         if name == "sizeof":
             self._type_arg(node.args[0], name)
             return INT
+        if name == "funcaddr":
+            return self._funcaddr(node)
+        if name == "rodata":
+            return self._rodata(node)
         if name == "reserve":
             return self._reserve(node)
         if name == "alloca":
@@ -4005,18 +4106,18 @@ class Analyzer:
         """A call into the `apy_*` object runtime. See `_object_runtime`."""
         return self._declared_call(name, OBJECT_RUNTIME[name], node,
                                    "it is part of the object runtime -- see "
-                                   "link/objects.py for what it does")
+                                   "objects/csource.py for what it does")
 
     def _platform_call(self, name: str, node: ast.Call) -> SemType:
         """`plat_write`, `plat_exit`, `plat_heap` -- the whole platform floor.
 
         Checked exactly as a call to a declared function is, because that is
-        what it is: the signature comes from `link/platform.py` instead of from
+        what it is: the signature comes from `objects/floor.py` instead of from
         a `def` in this module, and nothing else about it is special.
         """
         return self._declared_call(
             name, PLATFORM[name], node,
-            "it is the platform floor -- see link/platform.py for what each "
+            "it is the platform floor -- see objects/floor.py for what each "
             "argument means")
 
     def _hostsvc_call(self, name: str, node: ast.Call) -> SemType:
@@ -4031,7 +4132,7 @@ class Analyzer:
         """
         return self._declared_call(
             name, HOSTSVC[name], node,
-            "it is a host service -- see link/hostsvc.py for what each "
+            "it is a host service -- see objects/hostsvc.py for what each "
             "argument means and which backends provide it")
 
     def _declared_call(self, name: str, signature, node: ast.Call,
@@ -4052,6 +4153,110 @@ class Analyzer:
             self._check_assignable(got, want, arg,
                                    what=f"argument to {name}()", value=arg)
         return ret
+
+    # ── the machine subset: indirect calls ──────────────────────────────
+    #
+    # DEFERRED THREE TIMES BY docs/INERT-RUNTIME.md, and honestly each time:
+    # laying out an object does not need them, dispatching on one does. `str`,
+    # `list` and `dict` are tag-dispatched and needed none of this; classes,
+    # generators, exceptions and every dunder lookup are function pointers all
+    # the way down, and none of them can leave C until the subset can spell one.
+    #
+    # TWO NAMES RATHER THAN A BARE FUNCTION VALUE. `f: ptr = helper` would
+    # read well and it is exactly the mistake this subset exists to refuse: a
+    # forgotten `()` would silently become an address instead of a call, which
+    # type-checks as `ptr` and produces a plausible wrong number. `funcaddr`
+    # makes taking the address something you asked for, and leaves a bare
+    # `helper` the error it already was.
+
+    def _funcaddr(self, node: ast.Call) -> SemType:
+        """`funcaddr(f)` -- the address of a function defined in this module.
+
+        A NAME, NOT AN EXPRESSION. `Op.FUNC_ADDR` carries its target in
+        `Instr.sym`, a symbol fixed at compile time, so there is nothing for a
+        computed argument to lower to. Refusing it here says so; accepting it
+        would mean inventing a meaning the IR has no room for.
+        """
+        arg = node.args[0]
+        if not isinstance(arg, ast.Name):
+            self._error("E0055", "funcaddr() takes the NAME of a function",
+                        arg)
+            self._expr(arg)
+            return PTR
+        info = self.functions.get(arg.id)
+        if info is None:
+            self._error("E0031", f"undefined function {arg.id!r}", arg)
+            return PTR
+        return PTR
+
+    def _callptr(self, node: ast.Call) -> SemType:
+        """`callptr(T, addr, *args)` -- call through a function pointer.
+
+        THE TYPE COMES FIRST, as it does for `load` and `store` and for the
+        same reason: what the call ANSWERS is the first thing on the line
+        rather than something inferred from where it lands. There is no
+        signature to check against -- an address is not a declaration -- so
+        the type argument is the whole of what the compiler knows, and it is
+        the caller's promise rather than a fact anything verified.
+        """
+        ty = self._type_arg(node.args[0], "callptr")
+        self._want_ptr(node.args[1], "callptr", "address")
+        for arg in node.args[2:]:
+            got = self._expr(arg)
+            if got.is_error:
+                continue
+            # NO FLOATS THROUGH HERE, and it is a real limit rather than an
+            # oversight: the C backend lowers CALL_PTR by casting the address
+            # to a signature of `int64_t` parameters, so a double would arrive
+            # in the wrong register file and read as an integer. Refused
+            # rather than mis-passed -- a wrong number out of a correct call
+            # is the failure this subset is built to make impossible.
+            if got is FLOAT or (got.is_machine and got.is_machine_float):
+                self._bad_argument(
+                    arg, "callptr", "argument", got,
+                    "an integer or a pointer",
+                    "an indirect call passes every argument as a machine "
+                    "word; pass a float through memory instead")
+        return ty
+
+    def _rodata(self, node: ast.Call) -> SemType:
+        """`rodata(b"...")` -- the address of those bytes, read-only.
+
+        THE SIBLING `reserve` NEEDED. That one gives named storage that is
+        ZEROED, which serves a cache or a free list and cannot serve a
+        constant: there is nowhere to run an initialiser, so bytes that have
+        to be there before any code runs could not get there at all.
+
+        BYTES AND NOT `str`, because what this answers is an address and a
+        length in BYTES, and a `str` would raise the question of an encoding
+        the subset has no opinion about. `b"..."` is unambiguous, and it is
+        what the callers want: `apy_from_bytes(rodata(b"StopIteration"), 13)`.
+
+        NO TERMINATOR IS ADDED. The C reads many of its literals as C strings
+        and this does not know which -- so a caller that needs one writes it:
+        `rodata(b"StopIteration\\x00")`. Appending one silently would make
+        `len` wrong for every caller that did not.
+
+        DEDUPLICATED BY CONTENT at lowering, so naming the same bytes twice
+        costs one global -- which matters because a runtime says
+        `"TypeError"` in a great many places.
+        """
+        value = node.args[0]
+        if not (isinstance(value, ast.Constant)
+                and isinstance(value.value, bytes)):
+            self.sink.report(
+                error("E0070", "rodata() needs a bytes literal")
+                .at(self._span(value))
+                .note("it becomes the initialiser of a read-only global, so "
+                      "it has to be known at compile time")
+                .help('e.g. rodata(b"StopIteration")'))
+            return PTR
+        if not value.value:
+            self.sink.report(
+                error("E0070", "rodata() needs at least one byte")
+                .at(self._span(value))
+                .note("a zero-length global has no address to hand back"))
+        return PTR
 
     def _reserve(self, node: ast.Call) -> SemType:
         """`reserve("name", bytes)` -> the address of named static storage.
@@ -4160,9 +4365,7 @@ class Analyzer:
         as Python does, and the rest of the chain is read at the use site.
         """
         if resolve(alias.name) is None and not self._is_package_root(alias.name):
-            self._error("E0083",
-                        f"no module named {alias.name!r} is available; "
-                        f"there is no import path", node, importable())
+            self._no_module(alias.name, node)
             return
         self._remember_namespace(alias)
         self._bind_namespace(alias.asname or alias.name.split(".")[0], node)
@@ -4918,6 +5121,61 @@ class Analyzer:
         return False
 
     # ── type rules ──────────────────────────────────────────────────────────
+    def _yielded(self, types: list[SemType], at, as_condition: bool,
+                 what: str) -> SemType:
+        """The type of an expression that YIELDS ONE OF ITS OPERANDS.
+
+        `and`, `or` and `a if c else b` do not compute a value -- they pick
+        one. So the result's type is whichever operand was chosen, and a
+        static path that gives every expression a single type can only be
+        right when they agree.
+
+        IT DID NOT REFUSE, IT WIDENED. `_unify_all` answers `float` for an
+        `int` and a `float`, which is correct for arithmetic (`a + b` really
+        does widen, as Python's numeric tower says) and wrong here: for
+        `a: int = 0` and `b: float`, CPython prints `0` and this printed
+        `0.0`. The dynamic path printed `0` all along, so the same source
+        answered differently depending on whether its function was annotated
+        -- which `archived/docs/LANGUAGE.md` described as "the static path is
+        a subset with its own rules rather than an optimisation of the dynamic
+        one". It is a defect, and this is the fix.
+
+        NOTHING CAUGHT IT because every conformance case is a script, and a
+        script's top level is dynamic. The divergence lives only inside a
+        fully annotated function, which is the half the corpus never measures.
+
+        IN A CONDITION THE VALUE IS NOT OBSERVED, so nothing has to agree:
+        `if a and b:` asks whether the result is truthy and `0` and `0.0`
+        answer that identically. Refusing there would reject working programs
+        to prevent a difference nobody can see.
+        """
+        real = [ty for ty in types if not ty.is_error]
+        if not real:
+            return ERROR
+        # DEFER WHERE `_unify_all` ALREADY REFUSES, which is every case
+        # involving a machine width: it reports E0016, whose note says "a
+        # machine width unifies only with itself" and whose help names the
+        # conversion. This rule exists to close the gap where unification was
+        # PERMISSIVE -- `int` widening to `float` -- so overriding a sharper
+        # diagnostic with a blunter one would be a loss. A condition defers
+        # for the other reason: its value is never observed.
+        if as_condition or any(ty.is_machine for ty in real):
+            return self._unify_all(types, at)
+        if any(ty != real[0] for ty in real):
+            self.sink.report(
+                error("E0065",
+                      f"{what} yields one of its operands, and these do not "
+                      f"have the same type: "
+                      + ", ".join(sorted({str(ty) for ty in real})))
+                .at(self._span(at))
+                .note("Python answers whichever operand it picked, so the "
+                      "result has that operand's type -- there is no single "
+                      "type for this expression to have")
+                .help("convert the operands to one type, or test it as a "
+                      "condition, where the value is not observed"))
+            return ERROR
+        return real[0]
+
     def _unify_all(self, types: list[SemType], at) -> SemType:
         real = [t for t in types if not t.is_error]
         if not real:
@@ -4992,6 +5250,35 @@ class Analyzer:
 
     def _span_of_def(self, info: FunctionInfo) -> Span:
         return self._span(info.node)
+
+    def _no_module(self, name: str, node) -> None:
+        """`name` did not resolve to source. Say WHY, when the answer is known.
+
+        A COMPILED EXTENSION MODULE is the one case where the file exists, is
+        unambiguously the module that was asked for, and still cannot be used.
+        `E0083` would say "there is no import path" about a `.pyd` sitting in
+        the directory the path just searched, which is true only in the sense
+        that no path could ever have helped -- so that case gets a code of its
+        own and names the file.
+        """
+        from . import imports as _imports
+        native = _imports.current().native(name)
+        if native is None:
+            self._error("E0083",
+                        f"no module named {name!r} is available; "
+                        f"there is no import path", node, importable())
+            return
+        report = (error("E0129",
+                        f"{name!r} is a compiled extension module, which "
+                        f"cannot be compiled from source")
+                  .at(self._span(node))
+                  .note(f"found: {native}")
+                  .note("it is a native binary built against CPython's C "
+                        "API, so there is no Python source to splice and no "
+                        "interpreter here for it to call back into")
+                  .help("use a pure-Python package instead, or call the "
+                        "underlying library directly with ctypes"))
+        self.sink.report(report)
 
     def _error(self, code: str, message: str, node, choices=None) -> None:
         """One diagnostic. `choices` lists what WOULD have worked, which for

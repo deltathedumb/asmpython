@@ -13,7 +13,7 @@ opposite ends: port the runtime so the obligation shrinks, and name the
 obligation so it stops growing.
 
 THE FLOOR IS THE MANDATORY GROUP OF THIS TABLE, not a separate thing.
-`link/platform.py` holds the contracts and the C for `plat_write`,
+`objects/floor.py` holds the contracts and the C for `plat_write`,
 `plat_exit` and `plat_heap`, and the whole of stage 2 was an argument for why
 that number is three. Nothing here changes it -- `core` below IS that set,
 read from there so there is one list. What this file adds is everything a real
@@ -65,7 +65,7 @@ better question than answering it eleven times.
 """
 from __future__ import annotations
 
-from .platform import FLOOR as _FLOOR
+from .floor import FLOOR as _FLOOR
 
 #: THE ERROR CODES, and they are NOT `errno`.
 #:
@@ -145,7 +145,7 @@ SEEK: dict[str, int] = {
 GROUPS: dict[str, dict[str, tuple[tuple[str, ...], str]]] = {
     # ── the floor: emit bytes, stop, get memory ─────────────────────────
     #
-    # THE ONE MANDATORY GROUP, and it is `link/platform.py`'s list rather than
+    # THE ONE MANDATORY GROUP, and it is `objects/floor.py`'s list rather than
     # a copy of it -- a hand-kept second copy of a signature list drifted
     # three times in one afternoon the last time this project kept two.
     # docs/INERT-RUNTIME.md stage 2 is the argument for why it is these three
@@ -215,6 +215,43 @@ GROUPS: dict[str, dict[str, tuple[tuple[str, ...], str]]] = {
         "host_net_write":   (("i64", "ptr", "i64"), "i64"),
         "host_net_close":   (("i64",), "i64"),
     },
+    # ── a dynamic library ───────────────────────────────────────────────
+    #
+    # WHY THIS EXISTS WHEN `ctypes` ALREADY WORKS, and the answer is the same
+    # one this file's header gives for `file`. `frontends/python/cffi.py`
+    # resolves a native symbol at COMPILE time -- a promise to the linker --
+    # which is exactly right and is why `CDLL("m")` needs nothing here. But a
+    # promise to the linker requires the library and the symbol to be
+    # LITERALS, because there has to be a name to hand the linker, and
+    # `E0112` refuses every program that computes one. A plugin directory
+    # read at startup is not a program that can be written that way.
+    #
+    # SO THIS IS THE OTHER HALF, not a replacement. A backend that has both
+    # keeps the link-time path for a literal -- it is faster, it needs no
+    # group, and a missing symbol is caught while building -- and reaches
+    # here only when the name is not known until the program runs.
+    #
+    # AN ADDRESS, AND THE IR ALREADY KNOWS WHAT TO DO WITH ONE. `Op.CALL_PTR`
+    # calls through a value with a declared signature, so nothing new is
+    # needed in the instruction set to call what `host_dl_sym` answers. That
+    # is why this group is three operations and not four: "call it" is not a
+    # host service, it is an instruction that already exists.
+    #
+    # A HANDLE IS OPAQUE and belongs to whoever answered it. The C backend
+    # widens `HMODULE`/`void *`; a backend with a table of its own may answer
+    # an index. A caller may only hand it back.
+    #
+    # ZERO IS "NO SUCH SYMBOL", not an error, and it is distinguishable from
+    # one because every error in this table is NEGATIVE. A symbol's address is
+    # never zero, so a caller tests for it directly rather than needing a
+    # second call to ask whether the last one failed -- which is what
+    # `dlerror` is, and it is thread-local global state this layer will not
+    # have.
+    "dynlib": {
+        "host_dl_open":  (("ptr", "i64"), "i64"),
+        "host_dl_sym":   (("i64", "ptr", "i64"), "i64"),
+        "host_dl_close": (("i64",), "i64"),
+    },
     # ── the character database ──────────────────────────────────────────
     #
     # NOT I/O, AND THAT IS THE POINT OF PUTTING IT HERE. A host operation is
@@ -237,7 +274,8 @@ GROUPS: dict[str, dict[str, tuple[tuple[str, ...], str]]] = {
 MANDATORY = ("core",)
 
 #: The groups a backend may or may not offer.
-OPTIONAL = tuple(g for g in ("file", "time", "random", "env", "net", "text"))
+OPTIONAL = tuple(g for g in ("file", "time", "random", "env", "net",
+                             "dynlib", "text"))
 
 #: Every operation, flattened, for the places that want one dictionary.
 ALL: dict[str, tuple[tuple[str, ...], str]] = {
@@ -262,7 +300,7 @@ def signature(name: str):
 
 
 #: THE C IMPLEMENTATION, per group. `@STATIC@` and `@PTR@` are substituted
-#: exactly as `link/platform.py` substitutes them, because a second convention
+#: exactly as `objects/floor.py` substitutes them, because a second convention
 #: would be a second thing to keep in step.
 #:
 #: PER GROUP, and that is not tidiness. A bare-metal C target declares no
@@ -594,6 +632,103 @@ static char **apy_host_argv = 0;
     len = (int64_t)strlen(s);
     for (k = 0; k < len && k < cap; k++) ((char *)out)[k] = s[k];
     return len;
+}
+"""
+
+C_SOURCE["dynlib"] = r"""/* --- host services: dynlib ---------------------------------------------- */
+
+/* NO HEADER FOR EITHER PLATFORM, and for the reason the `file` group gives at
+   length: `<dlfcn.h>` and `<windows.h>` both declare a great deal besides the
+   three functions wanted here, and every name they declare is one a `ctypes`
+   program may declare for itself -- two prototypes for one symbol do not
+   compile. `<windows.h>` in particular would put `CreateDirectoryA` in scope,
+   which `bundled/pathlib.py` reaches through `ctypes` precisely because no
+   header this runtime includes declares it.
+
+   So the prototypes are written out. On Windows they are spelled with the
+   types the ABI actually uses rather than the `WINAPI` typedefs: `HMODULE` is
+   a pointer, `FARPROC` is a function pointer, and `LPCSTR` is `const char *`.
+   Declaring them as plain pointers is ABI-identical and needs no header. */
+#ifdef _WIN32
+__declspec(dllimport) void *__stdcall LoadLibraryA(const char *);
+__declspec(dllimport) int __stdcall FreeLibrary(void *);
+/* GetProcAddress answers a function pointer. It is declared returning
+   `void *` here and converted through `uintptr_t` at the one call site --
+   which is the conversion C says is implementation-defined and every
+   platform with a `dlsym` defines, because the whole point of the call is to
+   get an address a caller will call. */
+__declspec(dllimport) void *__stdcall GetProcAddress(void *, const char *);
+#define APY_DL_OPEN(p)     LoadLibraryA(p)
+#define APY_DL_SYM(h, s)   GetProcAddress((h), (s))
+#define APY_DL_CLOSE(h)    (FreeLibrary(h) ? 0 : -1)
+#else
+void *dlopen(const char *, int);
+void *dlsym(void *, const char *);
+int dlclose(void *);
+/* RTLD_NOW | RTLD_LOCAL, written as the numbers they are on Linux and macOS.
+   Resolving eagerly means a missing symbol is a failed OPEN rather than a
+   crash at the first call, which is the difference between an error a program
+   can report and one it cannot. */
+#define APY_DL_OPEN(p)     dlopen((p), 0x00002 | 0x00004)
+#define APY_DL_SYM(h, s)   dlsym((h), (s))
+#define APY_DL_CLOSE(h)    (dlclose(h) ? -1 : 0)
+#endif
+
+/* A NAME ARRIVES AS A POINTER AND A LENGTH, as every path in this file does,
+   and every platform call below wants it NUL-terminated. The copy is also
+   where an embedded NUL is caught rather than silently truncated at. */
+#define APY_DL_NAME_MAX 4096
+static int apy_dl_name(@PTR@ p, int64_t n, char *out)
+{
+    int64_t i;
+    if (n < 0 || n >= APY_DL_NAME_MAX) return 0;
+    for (i = 0; i < n; i++) {
+        char c = ((const char *)p)[i];
+        if (c == 0) return 0;
+        out[i] = c;
+    }
+    out[n] = 0;
+    return 1;
+}
+
+/* THE NAME IS PASSED THROUGH UNDECORATED. `CDLL("m")` becomes `-lm` on the
+   link-time path because a LINKER wants that spelling; a loader does not, and
+   wants `libm.so.6` or `user32.dll` exactly as the program wrote it. The two
+   paths therefore disagree about what a library is called, which is a
+   property of the two mechanisms rather than a wart -- and the reason the
+   decoration is stripped in `cffi.link_flag` and not here. */
+@STATIC@int64_t host_dl_open(@PTR@ name, int64_t n)
+{
+    char buf[APY_DL_NAME_MAX];
+    void *h;
+    if (!apy_dl_name(name, n, buf)) return -9;
+    h = APY_DL_OPEN(buf);
+    /* NO `dlerror` AND NO `GetLastError`. Both are thread-local global state
+       read by a SECOND call, which is the shape this layer refuses -- see the
+       header. A library that will not load is `HOST_ENOENT`, which is what it
+       almost always is. */
+    if (!h) return -2;
+    return (int64_t)(intptr_t)h;
+}
+
+@STATIC@int64_t host_dl_sym(int64_t handle, @PTR@ name, int64_t n)
+{
+    char buf[APY_DL_NAME_MAX];
+    void *addr;
+    if (handle <= 0) return -9;
+    if (!apy_dl_name(name, n, buf)) return -9;
+    addr = APY_DL_SYM((void *)(intptr_t)handle, buf);
+    /* ZERO IS "NO SUCH SYMBOL" AND IS NOT AN ERROR. A symbol's address is
+       never zero, and every error in this table is negative, so the two are
+       distinguishable without a second call. */
+    if (!addr) return 0;
+    return (int64_t)(intptr_t)addr;
+}
+
+@STATIC@int64_t host_dl_close(int64_t handle)
+{
+    if (handle <= 0) return -9;
+    return APY_DL_CLOSE((void *)(intptr_t)handle) ? -1 : 0;
 }
 """
 

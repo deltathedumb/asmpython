@@ -145,26 +145,29 @@ class TestToolchainRegistry:
 class TestRuntime:
     def test_the_entry_symbol_is_shared_not_repeated(self):
         from asmpython.backend.base import ENTRY_SYMBOL
-        from asmpython.link.runtime import RUNTIME_C, write_runtime
+        from asmpython.objects.support import RUNTIME_C, write_runtime
         assert "@ENTRY@" in RUNTIME_C, "the template uses a literal token"
 
     def test_written_runtime_calls_the_backend_entry_symbol(self, tmp_path):
         from asmpython.backend.base import ENTRY_SYMBOL
-        text = link_registry.write_runtime(tmp_path).read_text()
+        from asmpython.objects.support import write_runtime
+        text = write_runtime(tmp_path).read_text()
         assert f"int64_t {ENTRY_SYMBOL}(void)" in text
         assert f"return (int){ENTRY_SYMBOL}()" in text
 
     def test_c_format_specifiers_survive_substitution(self, tmp_path):
         """`%lld` and `%f` are C, not Python. %-formatting the template raised
         "unsupported format character 'l'" on the first real link."""
-        text = link_registry.write_runtime(tmp_path).read_text()
+        from asmpython.objects.support import write_runtime
+        text = write_runtime(tmp_path).read_text()
         assert "%lld" in text and "%f" in text
 
     def test_a_module_that_never_prints_needs_no_runtime(self, tmp_path):
         path = tmp_path / "quiet.py"
         path.write_text("def main() -> int:\n    return 3\n", encoding="utf-8")
         result = compile_source(Options(source=path), DiagnosticSink())
-        assert not link_registry.needs_runtime(result.module)
+        from asmpython.objects.support import needs_runtime
+        assert not needs_runtime(result.module)
 
 
 @harness.skip_if(not HAS_CC, reason="no C compiler available")

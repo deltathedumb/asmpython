@@ -152,7 +152,7 @@ class Interpreter:
             result = self.objects.call(name, args)
             if result is not NOT_MINE:
                 return result
-        # THE PLATFORM FLOOR (`link/platform.py`). The three functions a
+        # THE PLATFORM FLOOR (`objects/floor.py`). The three functions a
         # backend must supply that are not IR, implemented here so the IR
         # interpreter runs the same runtime a backend runs -- which is the
         # whole point of docs/INERT-RUNTIME.md and what the corpus checks by
@@ -215,7 +215,7 @@ class Interpreter:
             return math.fmod(float(args[0]), float(args[1]))
         if name == "print_float":
             # Python's repr, which is what the runtime the compiled paths link
-            # against now prints too (`link/runtime.py`'s `py_repr_double`).
+            # against now prints too (`objects/support.py`'s `py_repr_double`).
             # This used to be C's `%f` -- `32.000000` for `32.0` -- and the
             # comment here recorded that divergence as deliberate. It was, and
             # it also meant every float a compiled program printed disagreed
@@ -229,7 +229,7 @@ class Interpreter:
             end = self.mem.buf.index(0, addr)
             self._emit(bytes(self.mem.buf[addr:end]).decode("utf-8", "replace"))
             return None
-        # THE HOST SERVICES (`link/hostsvc.py`), which are the contract every
+        # THE HOST SERVICES (`objects/hostsvc.py`), which are the contract every
         # backend implements -- so the interpreter implements them too, and
         # is a backend like any other in that respect. Before the ctypes
         # bindings below, because these are the arrangement those exist to
@@ -325,7 +325,7 @@ class Interpreter:
             # THE HOST OBJECT RUNTIME OWNS EVERY `apy_*` NAME IT CLAIMS, even
             # when the module also DEFINES one -- which it now can, because
             # part of the runtime is compiled from `runtime/*.py` and spliced
-            # in (`link/objects_ir.py`).
+            # in (`objects/ir.py`).
             #
             # The two cannot be mixed, and this is the reason rather than a
             # preference: `objects_host.py` represents an `apy_value` as a

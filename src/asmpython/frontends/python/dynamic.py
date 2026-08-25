@@ -3,7 +3,7 @@
 A SEPARATE set of methods from the statically typed ones in `lower.py`, not a
 flag threaded through them. The two share their control-flow shape and nothing
 else: here every value is one opaque pointer and every operation is a call into
-`link/objects.py`, where the value carries its own kind.
+`objects/csource.py`, where the value carries its own kind.
 
 Keeping them apart is the point. A single `_expr` that returned an `i64` in one
 mode and a pointer in another is precisely the shape that makes a value's
@@ -194,7 +194,7 @@ _MULTI_BUILTINS = frozenset({"round", "int", "sum", "min", "max", "zip",
 #: thunk declares `*rest` and hands the tuple straight over -- which is what
 #: makes `print` and `dict` usable as values at all.
 #: `property`, `classmethod`, `staticmethod` -> the constant `apy_descr_new`
-#: takes. Mirrors the enum in link/objects.py; a value here that the runtime
+#: takes. Mirrors the enum in objects/csource.py; a value here that the runtime
 #: does not know would make every read through the descriptor answer wrongly
 #: rather than fail, so the two are written to be read side by side.
 #: Methods that answer a str even when the receiver is BYTES -- they convert
@@ -216,12 +216,12 @@ def _hostsvc_names():
     and has always been: `plat_write` from dynamic code would need the same
     boxing, and nothing asks for it. Widening that is a separate decision.
     """
-    from ...link import hostsvc as _hs
+    from ...objects import hostsvc as _hs
     return [n for n in _hs.ALL if _hs.GROUP_OF[n] not in _hs.MANDATORY]
 
 
 #: Every host service, for recognising one at a dynamic call site. Read from
-#: `link/hostsvc.py` rather than listed here, because a hand-kept second copy
+#: `objects/hostsvc.py` rather than listed here, because a hand-kept second copy
 #: of a name list is the thing that has drifted in this project three times.
 _HOSTSVC_NAMES = frozenset(_hostsvc_names())
 
@@ -731,11 +731,18 @@ class DynamicLowering:
                 piece = self._dyn_str_literal(part.value)
             else:
                 value = self._dyn_expr(part.value)
-                # `!r` is repr, `!a` is ascii (repr here -- there is no
-                # non-ASCII escaping yet), anything else and the default are
-                # str. The conversion is a character code in the AST, and it
-                # runs BEFORE the spec: `f"{x!r:>10}"` pads the repr.
-                if part.conversion in (ord("r"), ord("a")):
+                # `!r` is repr, `!a` is ascii, anything else and the default
+                # are str. The conversion is a character code in the AST, and
+                # it runs BEFORE the spec: `f"{x!r:>10}"` pads the repr.
+                #
+                # `!a` WENT TO `apy_repr` UNTIL THE ESCAPING EXISTED, which
+                # made `f"{'café'!a}"` answer `'café'` where CPython says
+                # `'caf\\xe9'` -- the two agree for every ASCII value, so
+                # nothing noticed until a test wrote a non-ASCII one.
+                if part.conversion == ord("a"):
+                    value = self.b.call(T.PTR, "apy_ascii", [value])
+                    self._dyn_check()
+                elif part.conversion == ord("r"):
                     value = self.b.call(T.PTR, "apy_repr", [value])
                     self._dyn_check()
                 elif part.conversion == ord("s"):
@@ -1785,7 +1792,7 @@ class DynamicLowering:
         meaning an address, which is every shape a path or a buffer arrives
         in.
         """
-        from ...link import hostsvc as _hostsvc
+        from ...objects import hostsvc as _hostsvc
 
         params, _ = _hostsvc.ALL[name]
         args = []
@@ -2768,7 +2775,7 @@ class DynamicLowering:
                     f"dynamic lowering reached {type(node).__name__}; "
                     f"analysis should have rejected it")
 
-    def _dyn_exception(self, node: ast.Call | ast.Name) -> int:
+    def _dyn_exception(self, node: ast.expr) -> int:
         """`ValueError('x')`, or a bare `ValueError`.
 
         A bare name is the same as calling it with no argument, which is what
@@ -2783,6 +2790,12 @@ class DynamicLowering:
             if (node.id not in _EXC_NAMES and node.id not in self.exc_classes):
                 return self._dyn_expr(node)
             name, args = node.id, []
+        elif not isinstance(node, ast.Call):
+            # ANYTHING ELSE IS JUST AN EXPRESSION. `raise 5` is legal to
+            # write and is a TypeError at run time, which `apy_raise` words
+            # -- but reaching for `node.func` on a Constant crashed the
+            # COMPILER, which is a worse answer than any diagnostic.
+            return self._dyn_expr(node)
         else:
             # `raise make_error()` RAISES WHAT THE CALL ANSWERS. Only a call
             # whose callee is an exception NAME means "build one of these" --
@@ -3787,6 +3800,16 @@ class DynamicLowering:
             # the whole of what it does.
             return self.b.call(T.PTR, "apy_typing_form",
                                [self._dyn_str_literal(payload[0])])
+        if kind == "intrinsic":
+            # AN INSTRUCTION, NOT A FUNCTION. `("intrinsic", symbol, params,
+            # ret)` names something a backend splices inline -- `outb` is two
+            # moves and an `out`, not a call to anything. It differs from
+            # `call` in taking MACHINE words rather than boxed values, so the
+            # wrapper below unboxes each argument to the width the
+            # instruction reads and boxes the answer back, which is the same
+            # conversion a `ctypes` call already gets.
+            return self._dyn_intrinsic_value(attr, payload[0], payload[1],
+                                             payload[2])
         if kind == "callv":
             # VARIADIC: one parameter that collects every argument into a
             # tuple, which is how `asyncio.gather(a, b, c)` reaches a runtime
@@ -3834,6 +3857,36 @@ class DynamicLowering:
                                      [self.b.const(T.F64, value)])])
         return func
 
+    def _dyn_intrinsic_value(self, name: str, symbol: str, params, ret) -> int:
+        """An intrinsic as a CALLABLE VALUE, via a wrapper that converts.
+
+        A WRAPPER AND NOT A CALL SITE, deliberately. An imported member is
+        bound as a value -- `from x86_64.alib import outb` stores `outb` like
+        any other name -- so by the time a call is lowered there is no name
+        left to recognise, only a callable. Giving the intrinsic a wrapper
+        makes `outb(0x3F8, 65)` and `map(outb, ports)` the same object reached
+        two ways, which is what every other module member already is.
+
+        The instruction is still emitted INLINE -- inside the wrapper, where
+        the backend splices it. What the wrapper costs is one call, not a
+        call to something that does not exist.
+        """
+        wrapper = self._native_thunks.get(symbol)
+        if wrapper is None:
+            wrapper = f"pyn_{symbol}"
+            self._native_thunks[symbol] = wrapper
+            self._pending_natives.append(
+                (symbol, wrapper, len(params), (params, ret)))
+        code = self.b.reg(T.PTR)
+        self.b.emit(Instruction(Op.FUNC_ADDR, T.PTR, dst=code, sym=wrapper))
+        func = self.b.call(T.PTR, "apy_func_new",
+                           [code, self.b.const(T.I64, len(params)),
+                            self._dyn_str_literal(name),
+                            self.b.const(T.I64, 0),
+                            self.b.const(T.I64, 0),
+                            self.b.const(T.I64, 0)])
+        return func
+
     def _dyn_emit_natives(self) -> None:
         """Emit the body of every native wrapper this module asked for.
 
@@ -3843,7 +3896,11 @@ class DynamicLowering:
         """
         i = 0
         while i < len(self._pending_natives):
-            symbol, wrapper, arity = self._pending_natives[i]
+            pending = self._pending_natives[i]
+            symbol, wrapper, arity = pending[0], pending[1], pending[2]
+            # A fourth element means an INTRINSIC: machine types either side
+            # rather than boxed values all the way through.
+            signature = pending[3] if len(pending) > 3 else None
             i += 1
             fn = Function(wrapper, T.PTR, linkage=Linkage.INTERNAL)
             # The ENV first, as every callable takes -- see `apy_func_new`.
@@ -3856,10 +3913,56 @@ class DynamicLowering:
             saved_b, saved_info = self.b, self.info
             self.b = Builder(fn)
             self.b.switch_to(self.b.new_block("entry"))
-            out = self.b.call(T.PTR, symbol, args)
+            if signature is None:
+                out = self.b.call(T.PTR, symbol, args)
+            else:
+                out = self._dyn_intrinsic_body(symbol, args, *signature)
             self.b.ret(out)
             self.module.functions.append(fn)
             self.b, self.info = saved_b, saved_info
+
+    def _dyn_intrinsic_body(self, symbol: str, args, params, ret) -> int:
+        """Unbox, execute the instruction, box the answer.
+
+        THE SAME SHAPE `_dyn_ctypes_call` USES, and simpler: an intrinsic
+        takes integers and addresses only. There are no float widths to
+        choose between and no variadic tail, because an instruction has a
+        fixed operand list -- that is what makes it an instruction.
+
+        A `ptr` ARGUMENT IS AN ADDRESS, not a string's bytes. `mmio32_write`
+        takes the place to store to, and the value a program computed for it
+        is an integer; running it through `apy_str_bytes` would demand a
+        buffer where the program correctly passed a number.
+        """
+        machine = []
+        for value, want in zip(args, params):
+            raw = self.b.call(T.I64, "apy_as_int", [value])
+            self._dyn_check()
+            machine.append(self._intrinsic_width(raw, T.I64,
+                                                 TO_IR[sem_type(want)]))
+        result = self.b.call(TO_IR[sem_type(ret)], symbol, machine)
+        wide = self._intrinsic_width(result, TO_IR[sem_type(ret)], T.I64)
+        return self.b.call(T.PTR, "apy_from_int", [wide])
+
+    def _intrinsic_width(self, value: int, src: T.Type, dst: T.Type) -> int:
+        """One value at the width the instruction reads.
+
+        `_cffi_width` ALMOST DOES THIS, and the difference is `ptr`. There a
+        pointer argument is a string's buffer, so the conversion never starts
+        from an integer; here it always does -- `mmio32_write(0x90000, v)`
+        names an ADDRESS, and the address is a number the program computed.
+        An integer and a pointer are the same width, so the change is a
+        bitcast; routing it through the width rules instead picks `trunc`,
+        which the verifier rejects because a pointer has no width to truncate
+        to.
+        """
+        if src == dst:
+            return value
+        if dst == T.PTR or src == T.PTR:
+            out = self.b.reg(dst)
+            self.b.emit(Instruction(Op.BITCAST, dst, dst=out, args=[value]))
+            return out
+        return self._cffi_width(value, src, dst)
 
     def _dyn_generator(self, info, fn) -> None:
         """A generator, as a CONSTRUCTOR and a STEP function.
@@ -5490,14 +5593,18 @@ class DynamicLowering:
         def bound(expr, default, later):
             if expr is None:
                 return self._holder(self.b.const(T.I64, default)), 0
-            value = self.b.call(T.I64, "apy_index", [self._dyn_expr(expr)])
+            # THROUGH `apy_slice_bound`, NOT `apy_index`: a bound of
+            # `2 ** 100` clamps where an INDEX of it refuses, and the
+            # two cannot be told apart inside the converter.
+            value = self.b.call(T.I64, "apy_slice_bound",
+                                [self._dyn_expr(expr)])
             # AN i64, not a handle -- `_spill_across_await` stores through the
             # generator's object slots, which hold handles. Kept raw.
             return self._spill_raw(value, later), 1
 
         start, has_start = bound(sl.lower, 0, parts[1:])
         stop, has_stop = bound(sl.upper, 0, parts[2:])
-        step = (self._holder(self.b.call(T.I64, "apy_index",
+        step = (self._holder(self.b.call(T.I64, "apy_slice_bound",
                                          [self._dyn_expr(sl.step)]))
                 if sl.step is not None
                 else self._holder(self.b.const(T.I64, 1)))
@@ -5540,6 +5647,14 @@ class DynamicLowering:
         elts = list(target.elts)
         star = next((i for i, e in enumerate(elts)
                      if isinstance(e, ast.Starred)), None)
+        # THROUGH `apy_iterable` FIRST, because the unpack below READS BY
+        # INDEX -- and a generator has no indices. `a, b = g()` is ordinary
+        # Python and reported that a generator is not subscriptable, which is
+        # true of the lowering and not of the language. Anything already a
+        # container comes back unchanged, so this costs nothing for the
+        # `a, b = xs` that every program writes.
+        value = self.b.call(T.PTR, "apy_iterable", [value])
+        self._dyn_check()
         slot = self.b.alloca(8)
         self.b.store(T.PTR, value, slot)
         # A `*rest` turns the exact count into a FLOOR: `a, *b = xs` wants at

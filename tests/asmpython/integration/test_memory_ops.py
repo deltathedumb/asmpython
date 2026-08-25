@@ -160,7 +160,7 @@ def build_and_run(text: str, backend: str, tmp_path) -> int:
         p.write_bytes(data)
         inputs.append(str(p))
     if backend != "c":
-        from asmpython.link import write_runtime
+        from asmpython.objects import write_runtime
         inputs.append(str(write_runtime(tmp_path)))
     exe = tmp_path / "out.exe"
     built = subprocess.run([HAS_CC, *inputs, "-o", str(exe)],

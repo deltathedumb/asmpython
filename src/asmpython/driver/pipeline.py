@@ -34,7 +34,7 @@ from ..diagnostics import DiagnosticSink, Severity, SourceFile, error
 from ..ir import Module, print_module, verify
 from ..backend.base import BackendUnsupported
 from ..ir.verifier import VerifyError
-from ..link import objects_ir
+from ..objects import ir as objects_ir, support as objects_support
 from ..passes import PassManager
 
 #: Passes run when the user asks for optimisation but names none.
@@ -84,6 +84,13 @@ class Options:
     #: Extra directories to resolve the program's own imports against. The
     #: source's own directory is always searched and is not listed here.
     import_paths: tuple[Path, ...] = ()
+    #: Whether to search the host Python installation's `site-packages` --
+    #: LAST, after everything above. `--no-site-packages` turns it off. See
+    #: `frontends/python/hostlib.py` for what a library point is.
+    site_packages: bool = True
+    #: Whose `site-packages`. None means the interpreter running the compiler,
+    #: which is the one whose `pip` the user just ran in the common case.
+    host_python: str | None = None
 
     @property
     def effective_passes(self) -> tuple[str, ...]:
@@ -163,8 +170,23 @@ def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
     # so `import helpers` beside `prog.py` works with no flag at all, then
     # whatever `--import-path` added. Republished every compilation, so two in
     # one process cannot see each other's paths.
-    from ..frontends.python import imports as py_imports
-    py_imports.use((opts.source.parent,) + tuple(opts.import_paths))
+    from ..frontends.python import hostlib, imports as py_imports
+    # THE HOST INSTALLATION'S PACKAGES GO LAST, so a name that resolved before
+    # library points existed still resolves to what it resolved to then.
+    host = (hostlib.discover(opts.host_python) if opts.site_packages
+            else hostlib.HostLibrary())
+    if host.unavailable and opts.host_python:
+        # ONLY WHEN THE USER NAMED ONE. A failure to introspect the running
+        # interpreter means site-packages are simply not available and the
+        # program may well not need them; a failure to run the interpreter the
+        # user typed is about the flag they typed, and is worth saying.
+        sink.report(
+            error("E9108", f"--host-python: {host.unavailable}")
+            .help("give the path of a Python interpreter, or pass "
+                  "--no-site-packages to search none"))
+        return Result()
+    py_imports.use((opts.source.parent,) + tuple(opts.import_paths)
+                   + host.roots, host)
 
     fe = (frontend_registry.get(opts.frontend) if opts.frontend
           else frontend_registry.for_path(opts.source))
@@ -339,11 +361,12 @@ def _link_stage(opts: Options, result: Result, be, target: Target,
         opts = replace(opts, link_inputs=opts.link_inputs + named)
 
     runtime_sources: tuple[Path, ...] = ()
-    if not be.self_contained and link_registry.needs_runtime(module):
+    if not be.self_contained and objects_support.needs_runtime(module):
         # THE MODULE DECIDES which `apy_*` the C still defines: whatever this
         # program supplies in IR, the C stands aside for. See
-        # `link/objects_ir.omitted_by`.
-        runtime_sources = (link_registry.write_runtime(workdir, module=module),)
+        # `objects.ir.omitted_by`.
+        runtime_sources = (
+            objects_support.write_runtime(workdir, module=module),)
 
     request = link_registry.LinkRequest(
         artifacts=result.artifacts, target=target, output=output,

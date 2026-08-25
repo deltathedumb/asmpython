@@ -550,3 +550,224 @@ class TestTheNamesAreNotReserved:
                 return 0
         """, tmp_path)
         assert lines == ["9"]
+
+
+class TestIndirectCalls:
+    """`funcaddr` and `callptr` -- deferred three times, and the last thing
+    standing between the ported runtime and every kind that dispatches.
+
+    WHY THESE TWO AND NOT A BARE FUNCTION VALUE. `f: ptr = helper` reads
+    better and is exactly the mistake this subset exists to refuse: a
+    forgotten `()` becomes an address rather than a call, type-checks as
+    `ptr`, and produces a plausible wrong number. Naming the operation keeps a
+    bare `helper` the error it already was, which `test_a_bare_name_is_still_
+    undefined` holds to.
+
+    THE OPCODES WERE ALREADY THERE. Every backend and the interpreter
+    implement `FUNC_ADDR` and `CALL_PTR`; nothing had ever emitted `CALL_PTR`,
+    which is why the C backend's unmangled `&{sym}` survived until now.
+    """
+
+    def test_an_address_can_be_taken_and_called(self, tmp_path):
+        out, _ = run_text("""
+            def add_one(x: i64) -> i64:
+                return x + 1
+
+            def main() -> int:
+                f: ptr = funcaddr(add_one)
+                print(int(callptr(i64, f, 41)))
+                return 0
+        """, tmp_path)
+        assert out == ["42"]
+
+    def test_the_pointer_can_travel_through_a_parameter(self, tmp_path):
+        """THE POINT OF THE WHOLE FEATURE. A dunder lookup finds a function it
+        was not compiled knowing, so the address has to survive being passed
+        around rather than only being taken and used in one expression."""
+        out, _ = run_text("""
+            def double(x: i64) -> i64:
+                return x * 2
+
+            def apply(fn: ptr, v: i64) -> i64:
+                return callptr(i64, fn, v)
+
+            def main() -> int:
+                print(int(apply(funcaddr(double), 21)))
+                return 0
+        """, tmp_path)
+        assert out == ["42"]
+
+    def test_calls_nest(self, tmp_path):
+        out, _ = run_text("""
+            def add_one(x: i64) -> i64:
+                return x + 1
+
+            def double(x: i64) -> i64:
+                return x * 2
+
+            def main() -> int:
+                a: ptr = funcaddr(add_one)
+                b: ptr = funcaddr(double)
+                print(int(callptr(i64, a, callptr(i64, b, 10))))
+                return 0
+        """, tmp_path)
+        assert out == ["21"]
+
+    def test_a_bare_name_is_still_undefined(self, tmp_path):
+        """The refusal that makes the intrinsic worth having."""
+        assert "E0031" in refused("""
+            def helper(x: i64) -> i64:
+                return x
+
+            def main() -> int:
+                f: ptr = helper
+                return 0
+        """, tmp_path)
+
+    def test_funcaddr_needs_a_name(self, tmp_path):
+        """`Op.FUNC_ADDR` carries its target in `sym`, fixed at compile time,
+        so there is nothing a computed argument could lower to."""
+        assert "E0055" in refused("""
+            def main() -> int:
+                f: ptr = funcaddr(1 + 1)
+                return 0
+        """, tmp_path)
+
+    def test_funcaddr_of_an_unknown_function_is_refused(self, tmp_path):
+        assert "E0031" in refused("""
+            def main() -> int:
+                f: ptr = funcaddr(nowhere)
+                return 0
+        """, tmp_path)
+
+    def test_a_float_argument_is_refused(self, tmp_path):
+        """A REAL LIMIT, NOT AN OVERSIGHT. The C backend lowers `CALL_PTR` by
+        casting the address to a signature of `int64_t` parameters, so a
+        double would arrive in the wrong register file and read as an integer
+        -- a wrong number out of a correct-looking call, which is the failure
+        this subset is built to make impossible."""
+        codes_ = refused("""
+            def takes(x: f64) -> i64:
+                return 1
+
+            def main() -> int:
+                f: ptr = funcaddr(takes)
+                return int(callptr(i64, f, 1.5))
+        """, tmp_path)
+        assert any(c.startswith("E00") for c in codes_), codes_
+
+    def test_callptr_needs_a_type_and_an_address(self, tmp_path):
+        assert "E0054" in refused("""
+            def main() -> int:
+                return int(callptr(i64))
+        """, tmp_path)
+
+
+class TestConstantBytes:
+    """`rodata(b"...")` -- the sibling `reserve` needed.
+
+    THE GAP IT CLOSES. `reserve` gives named storage that is ZEROED, which
+    serves a cache or a free list and cannot serve a constant: there is
+    nowhere to run an initialiser, so bytes that must be there before any code
+    runs could not get there at all. `b"x"` on its own was
+    `E0040: unsupported expression: Constant`.
+
+    WHAT THAT BLOCKED was larger than it sounds -- every runtime function that
+    builds a string from a literal. The name of an exception, the type in a
+    repr, every message: all of them reach `apy_lit("...")` in the C, and none
+    could be ported while the subset had no way to say those bytes.
+
+    The IR could always hold one (`global __str0 = "..." readonly`); what was
+    missing was a spelling.
+    """
+
+    def test_the_bytes_are_readable(self, tmp_path):
+        out, _ = run_text("""
+            def name() -> ptr:
+                return rodata(b"Stop")
+
+            def main() -> int:
+                p: ptr = name()
+                print(int(load(u8, p)))
+                print(int(load(u8, offset(p, 3))))
+                return 0
+        """, tmp_path)
+        assert out == ["83", "112"], "S and p"
+
+    def test_the_same_bytes_are_one_global(self, tmp_path):
+        """DEDUPLICATED BY CONTENT, which matters because a runtime says
+        `"TypeError"` in a great many places -- keying on a counter instead
+        would put forty copies of it in every program."""
+        out, _ = run_text("""
+            def a() -> ptr:
+                return rodata(b"TypeError")
+
+            def b() -> ptr:
+                return rodata(b"TypeError")
+
+            def main() -> int:
+                print(int(u64(a()) == u64(b())))
+                return 0
+        """, tmp_path)
+        assert out == ["1"]
+
+    def test_different_bytes_are_different_globals(self, tmp_path):
+        out, _ = run_text("""
+            def a() -> ptr:
+                return rodata(b"TypeError")
+
+            def b() -> ptr:
+                return rodata(b"ValueError")
+
+            def main() -> int:
+                print(int(u64(a()) == u64(b())))
+                return 0
+        """, tmp_path)
+        assert out == ["0"]
+
+    def test_no_terminator_is_added(self, tmp_path):
+        """A CALLER THAT NEEDS ONE WRITES IT. The C reads many of its literals
+        as C strings and this does not know which, so appending a NUL silently
+        would make `len` wrong for every caller that did not want one."""
+        out, _ = run_text("""
+            def two() -> ptr:
+                return rodata(b"ab")
+
+            def main() -> int:
+                p: ptr = two()
+                print(int(load(u8, p)))
+                print(int(load(u8, offset(p, 1))))
+                return 0
+        """, tmp_path)
+        assert out == ["97", "98"]
+
+    def test_a_str_literal_is_refused(self, tmp_path):
+        """BYTES AND NOT `str`, because this answers an address and a length
+        in bytes, and a `str` raises an encoding question the subset has no
+        opinion about."""
+        assert "E0070" in refused("""
+            def f() -> ptr:
+                return rodata("text")
+
+            def main() -> int:
+                return 0
+        """, tmp_path)
+
+    def test_a_computed_value_is_refused(self, tmp_path):
+        assert "E0070" in refused("""
+            def f(n: i64) -> ptr:
+                return rodata(n)
+
+            def main() -> int:
+                return 0
+        """, tmp_path)
+
+    def test_empty_bytes_are_refused(self, tmp_path):
+        """A zero-length global has no address to hand back."""
+        assert "E0070" in refused("""
+            def f() -> ptr:
+                return rodata(b"")
+
+            def main() -> int:
+                return 0
+        """, tmp_path)

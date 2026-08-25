@@ -52,7 +52,7 @@ def _runtime_c(entry: str, module=None) -> str:
 
     THE MODULE IS NOT OPTIONAL IN PRACTICE. Part of the object runtime is
     written in asmpython's own subset and compiled into the program
-    (`link/objects_ir.py`), and the C stands aside for exactly the definitions
+    (`objects/ir.py`), and the C stands aside for exactly the definitions
     a given module supplies. A runtime built without being told what the
     program has is the C's `apy_from_int` next to the IR's:
 
@@ -61,7 +61,7 @@ def _runtime_c(entry: str, module=None) -> str:
     The pipeline passes it; a test assembling its own link has to as well,
     which is the same trap this file's header already warns about one level up.
     """
-    from asmpython.link.runtime import runtime_c
+    from asmpython.objects.support import runtime_c
     return runtime_c(entry=entry, module=module)
 
 PROGRAMS = {

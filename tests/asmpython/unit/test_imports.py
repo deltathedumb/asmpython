@@ -41,8 +41,8 @@ class TestRelativeImports:
          "asmpython.frontends.python.modules"),
         ("diagnostics", 3, "asmpython.frontends.python",
          "asmpython.diagnostics"),
-        ("link.platform", 3, "asmpython.frontends.python",
-         "asmpython.link.platform"),
+        ("objects.floor", 3, "asmpython.frontends.python",
+         "asmpython.objects.floor"),
         # LEVEL 2 GOES UP EXACTLY ONE. From `asmpython.frontends.python`
         # that is `asmpython.frontends`, not `asmpython` -- the expected
         # value here was written as the latter and the resolver was right.

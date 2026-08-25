@@ -23,7 +23,7 @@
 # ── the layout, which is C's ────────────────────────────────────────────────
 #
 # `struct { const char *p; int64_t n; int mut; } s;` -- the str/bytes arm of
-# the union in `link/objects.py`. As with `int_cell.py` these numbers are NOT
+# the union in `objects/csource.py`. As with `int_cell.py` these numbers are NOT
 # read off by eye: `tests/asmpython/integration/test_ported_int.py` compiles
 # the real C and asserts each one with `offsetof`, and asserts the two kind
 # constants with the enum's own values.
@@ -156,3 +156,146 @@ def apy_from_cstr(p: ptr) -> ptr:
     while load(u8, offset(p, n)) != 0:
         n = n + 1
     return apy_from_bytes(p, n)
+
+
+# ── the two wrappers that CANNOT move, and why ─────────────────────────────
+#
+# `apy_str_copy` and `apy_bytes_copy` were written, declared, and taken back
+# out. They look like the easiest ports left -- each is one call to
+# `apy_str_copy_bytes`, which is already IR -- and the C explains in its own
+# words why they are not:
+#
+#     The parameter is an `apy_value` and not a `const char *` because that is
+#     what an IR `ptr` compiles to: a ported definition emits
+#     `uintptr_t apy_str_copy_bytes(uintptr_t, int64_t)`, and a C prototype
+#     spelling the first argument as a pointer is a CONFLICTING TYPE where gcc
+#     sees both.
+#
+# THE SPLIT IS ALREADY THE ANSWER. `apy_str_copy_bytes` exists because the
+# half that ALLOCATES could take an `apy_value` and move; `apy_str_copy` keeps
+# `const char *` so that the twenty-four call sites in the C -- every slice,
+# join, case transform and repr -- did not each need a cast. Porting the
+# wrapper would undo the arrangement that made porting the body possible.
+#
+# HOW IT SURFACED, which is the part worth keeping: not as a wrong answer but
+# as `apy_str_copy used but never defined` at link time, because the C omitted
+# the body it was told was ported while gcc refused the mismatched prototype.
+# A signature that disagrees across the boundary fails loudly, which is the
+# one thing this whole arrangement gets for free.
+
+
+# -- bytes.hex() and bytes.fromhex(), which the arena made sayable ----------
+#
+# NEITHER NEEDED LIBC. The C reaches `malloc` for a working buffer and
+# `fputs`/`exit` for the out-of-memory abort beside it; the arena answers null
+# and the caller propagates, which is the convention every ported function
+# here already follows -- so the abort path simply does not exist.
+
+
+def apy_hex_digit(d: i64) -> i64:
+    """One lowercase hex digit, as a byte."""
+    if d < 10:
+        return 48 + d
+    return 87 + d
+
+
+def apy_bytes_hex(b: ptr, sep: ptr) -> ptr:
+    """`b.hex()` and `b.hex(sep)`.
+
+    A ONE-CHARACTER SEPARATOR AND NOTHING ELSE, which is what the C accepts:
+    anything longer is ignored rather than refused, and the default is no
+    separator at all.
+
+    THE BUFFER IS SIZED FOR THE WORST CASE -- three bytes per input byte,
+    which is two digits and a separator -- and the terminator makes it
+    `n * 3 + 2`. Over-allocating a few bytes in a bump arena costs a few
+    bytes.
+    """
+    if i64(load(i32, offset(b, 0))) != apy_bytes_kind():
+        return apy_raise_fmt(
+            rodata(b"AttributeError\0"),
+            rodata(b"'%s' object has no attribute 'hex'%s\0"),
+            apy_kind_name_of(b), rodata(b"\0"))
+    s: i64 = 0
+    if i64(load(i32, offset(sep, 0))) == apy_str_kind():
+        if load(i64, offset(sep, apy_str_len_offset())) == 1:
+            s = i64(load(u8, ptr(load(u64, offset(
+                sep, apy_str_ptr_offset())))))
+    n: i64 = load(i64, offset(b, apy_str_len_offset()))
+    buf: ptr = apy_alloc_bytes(n * 3 + 2)
+    if not buf:
+        return buf
+    src: ptr = ptr(load(u64, offset(b, apy_str_ptr_offset())))
+    out: i64 = 0
+    i: i64 = 0
+    while i < n:
+        c: i64 = i64(load(u8, offset(src, i)))
+        if s:
+            if i:
+                store(u8, u8(s), offset(buf, out))
+                out = out + 1
+        store(u8, u8(apy_hex_digit(c >> 4)), offset(buf, out))
+        store(u8, u8(apy_hex_digit(c & 15)), offset(buf, out + 1))
+        out = out + 2
+        i = i + 1
+    store(u8, u8(0), offset(buf, out))
+    return apy_from_bytes(buf, out)
+
+
+def apy_hex_value(c: i64) -> i64:
+    """A hex digit's value, or -1 if it is not one."""
+    if c >= 48 and c <= 57:
+        return c - 48
+    if c >= 97 and c <= 102:
+        return c - 97 + 10
+    if c >= 65 and c <= 70:
+        return c - 65 + 10
+    return -1
+
+
+def apy_bytes_fromhex(self: ptr, text: ptr) -> ptr:
+    """`bytes.fromhex(text)`.
+
+    WHITESPACE BETWEEN PAIRS IS SKIPPED, which is Python\'s rule and is what
+    lets a hex dump be pasted in. Whitespace INSIDE a pair is not special --
+    it is skipped too, so `"a b"` is a single odd digit and refused.
+
+    AN ODD NUMBER OF DIGITS IS AN ERROR, caught after the walk: a trailing
+    high nibble with nothing to pair it with is exactly that.
+    """
+    if i64(load(i32, offset(text, 0))) != apy_str_kind():
+        return apy_raise_at(
+            rodata(b"TypeError\0"),
+            rodata(b"fromhex() argument must be str\0"))
+    n: i64 = load(i64, offset(text, apy_str_len_offset()))
+    buf: ptr = apy_alloc_bytes(n // 2 + 2)
+    if not buf:
+        return buf
+    src: ptr = ptr(load(u64, offset(text, apy_str_ptr_offset())))
+    out: i64 = 0
+    hi: i64 = -1
+    i: i64 = 0
+    while i < n:
+        c: i64 = i64(load(u8, offset(src, i)))
+        if c == 32 or c == 9 or c == 10:
+            i = i + 1
+        else:
+            d: i64 = apy_hex_value(c)
+            if d < 0:
+                return apy_raise_at(
+                    rodata(b"ValueError\0"),
+                    rodata(b"non-hexadecimal number found in "
+                           b"fromhex() arg\0"))
+            if hi < 0:
+                hi = d
+            else:
+                store(u8, u8((hi << 4) | d), offset(buf, out))
+                out = out + 1
+                hi = -1
+            i = i + 1
+    if hi >= 0:
+        return apy_raise_at(
+            rodata(b"ValueError\0"),
+            rodata(b"non-hexadecimal number found in fromhex() arg\0"))
+    store(u8, u8(0), offset(buf, out))
+    return apy_bytes_literal(buf, out)

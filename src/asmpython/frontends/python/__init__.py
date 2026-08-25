@@ -1,18 +1,40 @@
-"""Python frontend: a statically-annotated subset.
+"""Python frontend: it compiles Python.
 
     analysis.py   resolve names, assign a type to every expression, report
     lower.py      typed AST -> IR
 
 Lowering runs only if analysis reported nothing, so it contains no validation.
 
-THE SUBSET: annotated int/float/bool parameters and locals, arithmetic and
-comparison, if/while/for-over-range, calls, and print. No objects, no dynamic
-typing, no exceptions, no closures.
+NOT A SUBSET, and this docstring used to say it was. It read "THE SUBSET:
+annotated int/float/bool parameters and locals... No objects, no dynamic
+typing, no exceptions, no closures", which described this frontend before the
+dynamic path existed and stayed there while the conformance suite went to
+1668/1668 -- objects, closures, generators, coroutines, metaclasses,
+`except*`, t-strings and `compile()` included. A reader checking what
+asmpython accepts found a sentence saying "almost nothing", four years of work
+out of date.
 
-That boundary is honest rather than arbitrary. Everything missing needs a
-runtime and an object model, which is a separate body of work; the point of
-this frontend is to prove the IR is usable by a real language and to be the
-worked example a second frontend is written against.
+TWO PATHS, AND THE CHOICE IS AN OPTIMISATION RATHER THAN A LIMIT:
+
+  * STATIC -- a function whose every parameter and return is annotated keeps
+    machine representations: an `int` is a 64-bit register, a `float` an xmm
+    register, and nothing is allocated.
+  * DYNAMIC -- module-level code and any function with an unannotated
+    parameter. Every value is a runtime object carrying its own type. This is
+    the path ordinary Python takes, and it is the one the conformance suite
+    measures.
+
+A dynamic function calling a static one unwraps each argument to the type it
+declared and wraps the result back. That boundary is the only place the two
+meet, which is what stops a value's representation depending on the slot it
+was stored in.
+
+WHERE THE TWO STILL DISAGREE is written down rather than left to be found:
+`and`, `or` and `a if c else b` YIELD AN OPERAND in Python, so `x and y` over
+an `int` and a `float` answers whichever one it picked -- and the static path
+gives every expression one type, so it widens to `float` and prints `0.0`
+where CPython and the dynamic path print `0`. See `_unify_all` in
+`analysis.py`. That is a defect and not a documented feature of a subset.
 """
 from __future__ import annotations
 

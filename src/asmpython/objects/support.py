@@ -26,7 +26,7 @@ from pathlib import Path
 # MODULES because they are separate ideas -- `put_bool` knows how Python spells
 # a true value and `plat_write` knows nothing at all -- and stage 6 of
 # docs/INERT-RUNTIME.md deletes the first group and keeps the second.
-from .platform import NAMES as _FLOOR_NAMES, c_source as _floor_c
+from .floor import NAMES as _FLOOR_NAMES, c_source as _floor_c
 
 #: The host functions `frontends/python` emits calls to, as C source.
 #:
@@ -311,7 +311,7 @@ def host_functions(*, static: bool = False,
 #: The IR's `main` is NOT C's `main`: it returns i64 and C requires int, and on
 #: Windows the real entry point is further wrapped again. The backend renames
 #: it and this calls it, so the rename lives in one place.
-RUNTIME_C = """/* asmpython runtime for the Python frontend. Generated -- edit link/runtime.py. */
+RUNTIME_C = """/* asmpython runtime for the Python frontend. Generated -- edit objects/support.py. */
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -350,8 +350,8 @@ def runtime_c(*, entry: str = ENTRY_SYMBOL, module=None) -> str:
     The object runtime comes AFTER the host functions: it calls
     `py_repr_double` and `py_pow_int`, and C wants a definition in scope.
     """
-    from .objects import objects_c
-    from .objects_ir import omitted_by, split_by
+    from .csource import objects_c
+    from .ir import omitted_by, split_by
     return (RUNTIME_C.replace("@HOST@", host_functions())
             .replace("@OBJECTS@", objects_c(omit=omitted_by(module),
                                             split=split_by(module)))
@@ -375,7 +375,7 @@ def needs_runtime(module) -> bool:
     unused object is how a "no dependencies" claim quietly stops being true.
     """
     from ..ir.opcodes import Op
-    from .objects import OBJECT_NAMES
+    from .csource import OBJECT_NAMES
     provided = set(HOST_NAMES) | set(OBJECT_NAMES)
     return any(ins.sym in provided
                for f in module.functions for b in f.blocks
