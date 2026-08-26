@@ -3372,7 +3372,12 @@ def _apy_str_translate(h, a):
 # not the float -3.0, and a float there would print and compare differently.
 
 def _math_real(h, v, fn):
-    if isinstance(v, bool) or not isinstance(v, (int, float)):
+    # A BOOL IS A REAL NUMBER, because a bool is an int. `math.floor(True)` is
+    # `1` in CPython and `math.sqrt(True)` is `1.0`; every math function takes
+    # one. Rejecting them here made the interpreter refuse the whole module
+    # for an argument both compiled paths accepted -- a three-way split on
+    # `math.floor(True)`, which answered `1`, `True` and a TypeError.
+    if not isinstance(v, (int, float)):
         h._fail("TypeError", f"must be real number, not {h.kind_name(v)}")
         return None
     return v
@@ -3382,7 +3387,9 @@ def _math1(name, fn, want_int=False):
     def run(h, a):
         v = h._get(a[0], name)
         if want_int:
-            if isinstance(v, bool) or not isinstance(v, int):
+            # A BOOL IS AN INT HERE TOO -- `math.isqrt(True)` is 1. See
+            # `_math_real`.
+            if not isinstance(v, int):
                 if not isinstance(v, float):
                     return h._fail("TypeError",
                                    f"'{h.kind_name(v)}' object cannot be "
@@ -3401,8 +3408,9 @@ def _math2(name, fn, want_int=False):
         x = h._get(a[0], name)
         y = h._get(a[1], name)
         if want_int:
+            # A BOOL IS AN INT -- `math.gcd(True, 6)` is 1. See `_math_real`.
             for v in (x, y):
-                if isinstance(v, bool) or not isinstance(v, int):
+                if not isinstance(v, int):
                     return h._fail("TypeError",
                                    "'float' object cannot be interpreted as "
                                    "an integer")

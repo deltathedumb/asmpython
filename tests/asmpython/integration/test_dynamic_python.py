@@ -2996,6 +2996,24 @@ PROGRAMS = {
         print((7).conjugate(), (7).real, (7).imag)
         print((2.5).real, (2.5).imag, type((7).imag).__name__)
     """,
+    "floor_and_ceil_cross_into_big": """
+        # A DOUBLE OF MAGNITUDE 2**63 OR MORE IS ALREADY A WHOLE NUMBER, and
+        # flooring it has to produce an integer that big -- which means
+        # building a big out of the mantissa and the exponent. Nothing is
+        # rounded here and nothing may be lost: the value has no fractional
+        # part left, so the answer is exact or it is wrong.
+        import math
+        for v in (0.0, 1.5, -1.5, 2.5, -2.5, 1e17, 1e18, 1e19, -1e19,
+                  2.0 ** 62, 2.0 ** 63, -(2.0 ** 63), 2.0 ** 64,
+                  2.0 ** 100, -(2.0 ** 100), 1e30):
+            print(math.floor(v), math.ceil(v), math.trunc(v))
+        print(2 ** 100 == math.floor(float(2 ** 100)))
+        print(math.floor(1e19) // 2, math.ceil(-(2.0 ** 100)) % 7)
+        # AN INTEGER IS ANSWERED UNCHANGED, and a BOOL becomes an int:
+        # `math.floor(True)` is `1` and not `True`.
+        print(math.floor(5), math.ceil(2 ** 100), math.trunc(-7))
+        print(repr(math.floor(True)), repr(math.ceil(False)))
+    """,
     "deletion_reports_what_it_could_not_find": """
         # FOUR SHAPES THAT LOOK ALIKE AND ARE NOT. A dict deletes by KEY and
         # names the key; a list deletes by INDEX and names a range; a slice

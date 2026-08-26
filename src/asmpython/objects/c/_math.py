@@ -47,6 +47,10 @@ static apy_value apy_whole(double d) {
 }
 
 APY_API apy_value apy_math_floor(apy_value v) {
+    /* A BOOL BECOMES AN INT: `math.floor(True)` is `1` in CPython and
+       not `True`. These answer an integer, and a bool is one only by
+       inheritance -- handing the argument straight back printed it. */
+    if (O(v)->kind == APY_BOOL_K) return apy_from_int(O(v)->v.i);
     if (apy_is_int_like(v) || apy_is_big(v)) return v;
     {
         double x = apy_math_arg(v, "floor");
@@ -56,6 +60,10 @@ APY_API apy_value apy_math_floor(apy_value v) {
 }
 
 APY_API apy_value apy_math_ceil(apy_value v) {
+    /* A BOOL BECOMES AN INT: `math.floor(True)` is `1` in CPython and
+       not `True`. These answer an integer, and a bool is one only by
+       inheritance -- handing the argument straight back printed it. */
+    if (O(v)->kind == APY_BOOL_K) return apy_from_int(O(v)->v.i);
     if (apy_is_int_like(v) || apy_is_big(v)) return v;
     {
         double x = apy_math_arg(v, "ceil");
@@ -65,6 +73,10 @@ APY_API apy_value apy_math_ceil(apy_value v) {
 }
 
 APY_API apy_value apy_math_trunc(apy_value v) {
+    /* A BOOL BECOMES AN INT: `math.floor(True)` is `1` in CPython and
+       not `True`. These answer an integer, and a bool is one only by
+       inheritance -- handing the argument straight back printed it. */
+    if (O(v)->kind == APY_BOOL_K) return apy_from_int(O(v)->v.i);
     if (apy_is_int_like(v) || apy_is_big(v)) return v;
     {
         double x = apy_math_arg(v, "trunc");

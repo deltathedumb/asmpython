@@ -43,7 +43,10 @@ UNBOUND = set()
 #: the binding would be owed. That is why this is a ratchet in both directions:
 #: a name here that HAS a binding must be taken out of it.
 _HELPERS_THE_HOST_OWNS_WHOLE = {
+    "apy_big_alloc_of",
     "apy_big_cmp_of",
+    "apy_big_done_of",
+    "apy_big_of_i64_of",
     "apy_big_popcount",
     "apy_char_class_of",
     "apy_class_builtin_kind",
@@ -62,6 +65,8 @@ _HELPERS_THE_HOST_OWNS_WHOLE = {
     "apy_is_special_form",
     "apy_mag_bits_of",
     "apy_mag_cmp_of",
+    "apy_mag_shl_of",
+    "apy_mag_trim_of",
     "apy_math_arg_of",
     "apy_names_object",
     "apy_num_f_of",

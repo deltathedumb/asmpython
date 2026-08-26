@@ -112,6 +112,12 @@ REPLACES: dict[str, tuple[str, ...]] = {
     # A PER-CHARACTER SUBSTITUTION whose output length is not a function of
     # its input length -- a replacement may be a whole string or a deletion.
     "str_translate.py": ("apy_str_translate",),
+    # MAKING a big, where every other big function in IR could only READ one
+    # -- which is what kept the whole float-to-integer boundary in C. See the
+    # file's own header.
+    "bigmake.py": ("apy_big_alloc_of", "apy_mag_trim_of", "apy_big_done_of",
+                   "apy_big_of_i64_of", "apy_mag_shl_of",
+                   "apy_math_floor", "apy_math_ceil", "apy_math_trunc"),
     "int_cell.py": ("apy_from_int", "apy_as_int"),
     # THE THREE STRING CONSTRUCTORS THAT BORROW THEIR BYTES. The ones that OWN
     # them -- `apy_str_take`, `apy_str_copy` -- were `static` when this was

@@ -124,20 +124,27 @@ static int apy_index_arg(apy_value v, int64_t *out, int form) {
     return (int)apy_index_arg_of(v, (apy_value)(uintptr_t)out, (int64_t)form);
 }
 
-static apy_obj *apy_big_alloc(int64_t n) {
+APY_API apy_value apy_big_alloc_of(int64_t n) {
     apy_obj *o = apy_alloc(APY_BIG_K);
     if (n < 1) n = 1;
     o->v.big.limb = (apy_limb *)calloc((size_t)n, sizeof(apy_limb));
     if (!o->v.big.limb) { fputs("asmpython: out of memory\n", stderr); exit(1); }
     o->v.big.n = n;
     o->v.big.neg = 0;
-    return o;
+    return (apy_value)o;
+}
+/* THE NAME ITS CALLERS USE, kept as a delegate: the body is IR's now, and
+   the exported half above stands in when nothing is ported. `apy_obj *`
+   crosses as a plain word -- see `apy_mag_cmp_of`. */
+static apy_obj *apy_big_alloc(int64_t n) {
+    return (apy_obj *)(uintptr_t)apy_big_alloc_of(n);
 }
 
 /* Drop leading zero limbs, then DEMOTE if the value fits an int64 -- the
    invariant at the top of this section, enforced in the one place every
    result passes through. A zero-limb magnitude is the integer 0. */
-static apy_value apy_big_done(apy_obj *o) {
+APY_API apy_value apy_big_done_of(apy_value ov) {
+    apy_obj *o = (apy_obj *)(uintptr_t)ov;
     int64_t n = o->v.big.n;
     while (n > 0 && o->v.big.limb[n - 1] == 0) n--;
     o->v.big.n = n;
@@ -157,17 +164,25 @@ static apy_value apy_big_done(apy_obj *o) {
     }
     return V(o);
 }
+/* THE NAME ITS CALLERS USE, kept as a delegate. */
+static apy_value apy_big_done(apy_obj *o) {
+    return apy_big_done_of((apy_value)o);
+}
 
 /* An int64 as a magnitude plus a sign, for feeding a mixed operation into the
    big path. Never normalised -- it is an operand, not a result. */
-static apy_obj *apy_big_of_i64(int64_t v) {
+APY_API apy_value apy_big_of_i64_of(int64_t v) {
     apy_obj *o = apy_big_alloc(2);
     uint64_t m = apy_abs64(v);
     o->v.big.limb[0] = (apy_limb)(m & 0xffffffffu);
     o->v.big.limb[1] = (apy_limb)(m >> 32);
     o->v.big.neg = v < 0;
     if (o->v.big.limb[1] == 0) o->v.big.n = o->v.big.limb[0] ? 1 : 0;
-    return o;
+    return (apy_value)o;
+}
+/* THE NAME ITS CALLERS USE, kept as a delegate. */
+static apy_obj *apy_big_of_i64(int64_t v) {
+    return (apy_obj *)(uintptr_t)apy_big_of_i64_of(v);
 }
 
 /* Either integer kind as a big object. A bool arrives here too -- `True` is
@@ -257,15 +272,21 @@ static apy_obj *apy_mag_mul(const apy_obj *a, const apy_obj *b) {
    spins forever on a top limb of zero. The shifts allocate a limb they may
    not need, so they are the two that must trim before returning -- found by
    `10 ** 30 / 7` hanging, where the shifted divisor had a zero on top. */
-static apy_obj *apy_mag_trim(apy_obj *o) {
+APY_API apy_value apy_mag_trim_of(apy_value ov) {
+    apy_obj *o = (apy_obj *)(uintptr_t)ov;
     while (o->v.big.n > 0 && o->v.big.limb[o->v.big.n - 1] == 0) o->v.big.n--;
-    return o;
+    return (apy_value)o;
+}
+/* THE NAME ITS CALLERS USE, kept as a delegate. */
+static apy_obj *apy_mag_trim(apy_obj *o) {
+    return (apy_obj *)(uintptr_t)apy_mag_trim_of((apy_value)o);
 }
 
-static apy_obj *apy_mag_shl(const apy_obj *a, int64_t bits) {
+APY_API apy_value apy_mag_shl_of(apy_value av, int64_t bits) {
+    const apy_obj *a = (const apy_obj *)(uintptr_t)av;
     int64_t words = bits / APY_LIMB_BITS, off = bits % APY_LIMB_BITS, i;
     apy_obj *r;
-    if (a->v.big.n == 0) return apy_big_alloc(0);
+    if (a->v.big.n == 0) return (apy_value)apy_big_alloc(0);
     r = apy_big_alloc(a->v.big.n + words + 1);
     for (i = 0; i < a->v.big.n; i++) {
         uint64_t t = (uint64_t)a->v.big.limb[i] << off;
@@ -275,7 +296,11 @@ static apy_obj *apy_mag_shl(const apy_obj *a, int64_t bits) {
            Skipping it is correct as well as safe: there is nothing to carry. */
         if (off) r->v.big.limb[i + words + 1] |= (apy_limb)(t >> APY_LIMB_BITS);
     }
-    return apy_mag_trim(r);
+    return (apy_value)apy_mag_trim(r);
+}
+/* THE NAME ITS CALLERS USE, kept as a delegate. */
+static apy_obj *apy_mag_shl(const apy_obj *a, int64_t bits) {
+    return (apy_obj *)(uintptr_t)apy_mag_shl_of((apy_value)a, bits);
 }
 
 /* A LOGICAL right shift of the magnitude. `lost` reports whether any 1 bit
