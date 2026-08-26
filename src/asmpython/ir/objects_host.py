@@ -72,6 +72,27 @@ def _wrap64(v: int) -> int:
     return v - (1 << 64) if v >= (1 << 63) else v
 
 
+#: The exceptions a CORRECT host method can raise, and which are therefore the
+#: PROGRAM's answer rather than a bug in this file.
+#:
+#: DELIBERATELY NOT `Exception`. An `AttributeError` or a `NameError` raised
+#: while dispatching to a host method is a typo in a spec table here -- a
+#: method name that does not exist -- and catching it would file the
+#: interpreter's own bug under the program's, which is exactly the failure this
+#: module's header warns about. Narrow enough to keep that distinction.
+#:
+#: `ArithmeticError` IS WHAT THE LIST WAS MISSING, and it covers OverflowError.
+#: `'a'.center(2 ** 100)` raised one straight out of the bridge and KILLED THE
+#: INTERPRETER, where CPython and both compiled paths raise a catchable
+#: OverflowError. A sweep of 9,339 generated expressions produced 631 lines and
+#: 8,708 blanks because of it, and every blank read as a divergence.
+#:
+#: `LookupError` covers IndexError and KeyError, which a host method reaches
+#: the same way -- `[].pop()` and `{}.popitem()` are the program's errors.
+_HOST_RAISES = (TypeError, ValueError, ArithmeticError, LookupError,
+                MemoryError, RecursionError)
+
+
 class Exc:
     """An exception VALUE -- what `except ValueError as e` binds.
 
@@ -1014,10 +1035,32 @@ class ObjectHost:
 
     # ── dispatch ────────────────────────────────────────────────────────────
     def call(self, name: str, args: list):
+        """Dispatch one runtime symbol to its host binding.
+
+        THE BACKSTOP FOR A HOST METHOD THAT RAISES lives here, at the one
+        place every binding is reached, rather than in each of the two hundred
+        bindings. Most of them wrap their own call and convert the failure;
+        the ones that forget used to take the WHOLE INTERPRETER down with a
+        Python traceback, where CPython and both compiled paths raise an
+        ordinary catchable exception.
+
+        THAT IS NOT A SMALL FAILURE. A sweep of 9,339 generated expressions
+        stopped at case 631 -- `'abc'.index(5)`, whose binding calls
+        `v.index(item)` with no guard at all -- so 93% of the run produced no
+        output and read as divergence. Two separate bindings did it, which is
+        what says the fix belongs here and not in either of them.
+
+        `_HOST_RAISES` AND NOT `Exception`, for the reason given where it is
+        defined: an AttributeError here is this file's own bug, and burying it
+        as the program's error is the failure mode that would cost most.
+        """
         fn = _TABLE.get(name)
         if fn is None:
             return NOT_MINE
-        return fn(self, args)
+        try:
+            return fn(self, args)
+        except _HOST_RAISES as exc:
+            return self._fail_like(exc)
 
 
 # Imported late so this module can be read without chasing the interpreter's
@@ -2724,7 +2767,7 @@ def _apy_list_sort(h, a):
             return _user(h, lambda: (
                 seq.sort(key=lambda v: h._invoke(key, [v]), reverse=rev)
                 or h._none))
-    except (TypeError, ValueError) as exc:
+    except _HOST_RAISES as exc:
         return h._fail_like(exc)
     return h._none
 
@@ -2781,7 +2824,7 @@ def _apy_format(h, a):
         return h._new(format(h._text(v, False), spec))
     try:
         return h._new(format(v, spec))
-    except (TypeError, ValueError) as exc:
+    except _HOST_RAISES as exc:
         return h._fail_like(exc)
 
 
@@ -6708,7 +6751,7 @@ def _apy_min(h, a):
         return 0
     try:
         return h._value(min(items))
-    except (TypeError, ValueError) as exc:
+    except _HOST_RAISES as exc:
         return h._fail_like(exc)
 
 
@@ -6718,7 +6761,7 @@ def _apy_max(h, a):
         return 0
     try:
         return h._value(max(items))
-    except (TypeError, ValueError) as exc:
+    except _HOST_RAISES as exc:
         return h._fail_like(exc)
 
 
@@ -6768,7 +6811,7 @@ def _apy_extreme_n(h, a):
         return h._fail("TypeError", "min expected at least 1 argument")
     try:
         return h._value((max if int(a[2]) else min)(args))
-    except (TypeError, ValueError) as exc:
+    except _HOST_RAISES as exc:
         return h._fail_like(exc)
 
 
@@ -6786,7 +6829,7 @@ def _apy_extreme_or(h, a):
             return h._value(pick(items))
         return _user(h, lambda: h._value(
             pick(items, key=lambda v: h._invoke(key, [v]))))
-    except (TypeError, ValueError) as exc:
+    except _HOST_RAISES as exc:
         return h._fail_like(exc)
 
 
@@ -7202,7 +7245,7 @@ def _apy_slice_indices(h, a):
                        f"'indices'")
     try:
         return h._new(sl.indices(int(h._get(a[1], "apy_slice_indices"))))
-    except (TypeError, ValueError) as exc:
+    except _HOST_RAISES as exc:
         return h._fail_like(exc)
 
 
@@ -8116,7 +8159,7 @@ def _make_str_method(symbol: str, method: str, argc: int):
                 args[at] = drained
         try:
             return h._value(getattr(receiver, _m)(*args))
-        except (TypeError, ValueError) as exc:
+        except _HOST_RAISES as exc:
             return h._fail_like(exc)
     return binding
 
@@ -8867,7 +8910,7 @@ def _extreme_by(h, a, which, name):
         if keyfn is None:
             return h._value(which(items))
         return h._value(which(items, key=lambda v: _call_key(h, keyfn, v)))
-    except (TypeError, ValueError) as exc:
+    except _HOST_RAISES as exc:
         return h._fail_like(exc)
 
 

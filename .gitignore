@@ -54,7 +54,19 @@ _build/
 !asmpython/_runtime/threading_shims.asm
 
 # ── Downloaded dependencies (NASM / GCC / embeddable Python) ─────────────────
-/tools/
+/tools/*
+# ...EXCEPT THE SOURCE THAT LIVES BESIDE THEM. `/tools/` is ignored because it
+# is where the vendored toolchain is unpacked, and the developer tools were
+# written into the same directory -- so they were never in version control.
+# TODO.md documented three of them and said "RUN IT" about tools this
+# checkout does not have. The generated Unicode table was committed while
+# `gen_unicode_ir.py`, which writes it, was not.
+#
+# THE CONTENTS ARE IGNORED AND NOT THE DIRECTORY, which is the difference
+# that makes the negation work at all: git does not descend into an excluded
+# DIRECTORY, so `!/tools/*.py` under `/tools/` matched nothing. `/tools/*`
+# still excludes `tools/python/` and `tools/gcc/` whole.
+!/tools/*.py
 /local/
 
 # ── Misc logs ───────────────────────────────────────────────────────────────

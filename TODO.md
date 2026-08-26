@@ -536,6 +536,43 @@ something that is not an int, a str or None says
 `character mapping must be in range(0x110000)` here and
 `character mapping must return integer, None or str` in CPython.
 
+## The score is saturated and the runtime is not conformant
+
+**772 divergent of 9,339** generated expressions, measured by
+`tools/objects_diff.py` against CPython on all four paths. The conformance
+suite is at 1668/1668 and sees none of them, because a construct the suite
+does not write is a construct the suite cannot find.
+
+RUN IT BEFORE BELIEVING THE SCORE. `py -3.14 tools/objects_diff.py`.
+
+The 772 are not 772 bugs -- they are a handful of shapes, each hit by many
+generated cases, which is exactly what a sweep is for:
+
+| shape | paths wrong | note |
+|---|---|---|
+| `s[None:None:None]` is a TypeError | all three | 687 cases, SIX distinct shapes. Python accepts an explicit `None` bound and means "not given"; `apy_sl_field` gets this right for `slice` objects and the string subscript path does not. |
+| `' '.split()`, `' x'.split()` | compiled only | whitespace is ASCII-only in `apy_str_split`. The interpreter is right. NOW FIXABLE: the Unicode table reached IR this session. |
+| `'İ'.lower()` | compiled only | a one-to-many case mapping -- CPython gives two code points. |
+| `'café'.count('')` | compiled only | counting the empty substring. |
+| `(2**63).to_bytes(16, 'little', signed=True)` | both compiled | **emits the object's ADDRESS.** The handle is read as an integer, which is the exact failure `apy_index_arg`'s comment warns about. The interpreter is right. |
+
+AND TWO THAT ARE NOT BUGS: `hash(None)` and `hash(b'a')` differ everywhere,
+including from CPython to CPython. They are impl tier and the sweep should
+stop generating them.
+
+WHAT THE SWEEP ALSO FOUND, and fixed: a host method raising an exception the
+bridge did not catch KILLED THE INTERPRETER. `'a'.center(2 ** 100)` raised an
+OverflowError and `'abc'.index(5)` a TypeError, straight out through
+`ObjectHost.call`, where CPython and both compiled paths raise something
+catchable. The first sweep stopped at case 631 of 9,339 and reported 93% of
+the run as divergent. Guarded at the bridge now, and `_HOST_RAISES` says why
+it is not simply `Exception`.
+
+AND A WARNING THIS FILE ALREADY GAVE, earned again: a run of this against a
+tree being edited underneath it reported 8,713 divergences, because it caught
+`pipeline.py` between a reference to `opts.native_libraries` and the field
+being saved. **Measure a tree that builds, and measure it alone.**
+
 ## What is left
 
 29 counted cases at the 1639 measurement, of which TEN were reachable and
@@ -1091,7 +1128,7 @@ using it.
 | `conformance/harness.py --shim embedded --merge 32` | the embedded interpreter inside a produced binary -- what actually ships. Expensive; merge mode is what makes it affordable at all. |
 | `conformance/harness.py --merge N` | N cases compiled into ONE program. Sees what a case-per-process run cannot -- state the runtime keeps for the length of one program -- and pays one `gcc` per batch instead of one per case. |
 | `conformance/try.py` | one case or one snippet, want vs got, with the compiler's own stderr. |
-| `tools/objects_diff.py` | the object runtime against CPython, ~137k generated cases. No compiler involved, so a failure is the runtime's and can be nothing else. |
+| `tools/objects_diff.py` | the object runtime against CPython over generated cases, on ALL FOUR paths at once -- so a divergence says WHO disagrees: `ir != c` is an unfaithful port, `compiled != interp` is drift, `all != cpython` is a conformance gap. **772/9,339 as of this measurement.** |
 | `tools/dynamic_diff.py` | random dynamic Python, compiled and diffed against CPython. Covers the LOWERING, which `objects_diff` cannot. |
 | `tools/crash_scan.py` | which cases make the compiler crash rather than refuse. |
 | `tests/.../test_suspension_positions.py` | 44 shapes an `await` or a `yield` can sit in, asked only whether the IR verifier accepts them. Two seconds, no backend, safe to run beside a measurement. |
