@@ -464,6 +464,8 @@ The full set the frontend can emit:
 | `E0127` | a `ctypes` library used as a value rather than called through |
 | `E0128` | a `ctypes` name this frontend does not have |
 | `E0129` | an import naming a compiled extension module, which has no source to compile |
+| `E0130` | `from <native library> import ...`; a declared library is imported whole |
+| `E0131` | a declared native library named after a module this compiler already has |
 
 Each applies wherever the construct appears, including inside an augmented
 assignment -- `x **= n` reports `E0043` exactly as `x = x ** n` does.

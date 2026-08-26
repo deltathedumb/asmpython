@@ -177,6 +177,45 @@ built against CPython's C API, so using one needs that API implemented against
 this object runtime; loading it is the smaller half, and `dynlib` in
 `objects/hostsvc.py` is that half.
 
+## Native libraries
+
+A shared library with a C ABI is declared, then imported:
+
+```json
+[{"module": "user32", "library": "user32.dll", "target_os": "windows",
+  "functions": [{"name": "GetSystemMetrics", "args": ["c_int"],
+                 "ret": "c_int"}]}]
+```
+
+```
+import user32
+print(user32.GetSystemMetrics(0))     # 1920
+```
+
+```sh
+asmpython build app.py --native-library libs.json
+```
+
+A declared function **is a `ctypes` function whose `argtypes` are already
+known**, so the declaration fills in exactly the state `CDLL(...)` plus an
+`argtypes` and a `restype` assignment would have left behind, and every path
+after that — argument checking, conversion, the single `Op.CALL`, the link —
+is the same tested code. That is why this is a declaration format and not a
+second way to call a native function.
+
+A signature is required and never guessed, for the reason `ctypes` gives: there
+is nothing to read a foreign symbol's argument kinds out of, and a wrong one
+truncates rather than failing. `"args": []` declares a function that takes
+none; omitting `args` is refused. `symbol` renames, so the program may import
+`metric` and the linker still sees `GetSystemMetrics`. Two libraries may share
+one `module` name scoped by `target_os`, and the one matching the target wins —
+an unscoped declaration is the fallback, never the winner.
+
+A declaration cannot shadow a module the compiler already has (`E0131`), and a
+library is imported whole rather than from (`E0130`). This is a C ABI only: no
+C++ mangling, vtables or exceptions — export an `extern "C"` wrapper — and it
+is not a CPython extension module, which is `E0129` above.
+
 ## Extending it
 
 | you want | read | register with |

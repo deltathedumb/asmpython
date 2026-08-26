@@ -21,7 +21,7 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass, field
 
-from . import cffi, modules
+from . import cffi, modules, nativelib
 from .modules import importable, member, resolve
 
 from ...diagnostics import (DiagnosticSink, SourceFile, Span, error,
@@ -1328,6 +1328,11 @@ class Analyzer:
         self.ctypes_sigs: dict = {}
         #: Every library named, so the driver can hand them to the linker.
         self.ctypes_libraries: list = []
+        #: Which platform a DECLARED native library is being chosen for, so a
+        #: cross-platform program declaring `user32.dll` and `libX11.so.6`
+        #: under one module name gets the one that applies. None means every
+        #: unscoped declaration applies and no scoped one does.
+        self.native_os: str | None = nativelib.target_os()
         #: Statement ids that WERE a ctypes declaration. Lowering skips them:
         #: `libm = ctypes.CDLL("m")` describes the build rather than doing
         #: anything, and lowering it as ordinary code looks for a run-time
@@ -2645,6 +2650,13 @@ class Analyzer:
             case ast.Import() if self._ctypes_import(node):
                 pass
             case ast.ImportFrom() if self._ctypes_import(node):
+                pass
+            # A DECLARED NATIVE LIBRARY, imported inside a function body. The
+            # module-level ones were taken by `_collect_ctypes` and are
+            # excluded from the entry, so they never arrive here twice.
+            case ast.Import() if self._nativelib_import(node):
+                pass
+            case ast.ImportFrom() if self._nativelib_import(node):
                 pass
             case ast.Import() if not self.dynamic:
                 for alias in node.names:
@@ -4738,7 +4750,11 @@ class Analyzer:
         """
         for stmt in tree.body:
             if isinstance(stmt, (ast.Import, ast.ImportFrom)):
-                self._ctypes_import(stmt)
+                # A DECLARED NATIVE LIBRARY IS ASKED ABOUT SECOND, so `import
+                # ctypes` keeps meaning `ctypes` even if someone declares a
+                # library under that name -- and `_nativelib_import` refuses
+                # any module name that already resolves anyway.
+                self._ctypes_import(stmt) or self._nativelib_import(stmt)
             elif isinstance(stmt, ast.Assign):
                 self._ctypes_assign(stmt)
 
@@ -4775,6 +4791,68 @@ class Analyzer:
             self.ctypes_stmts.add(id(node))
             return True
         return False
+
+    def _nativelib_import(self, node) -> bool:
+        """`import user32`, where a declaration said what `user32` is.
+
+        True if this statement named a DECLARED NATIVE LIBRARY, in which case
+        it is handled here and the ordinary import rules never see it.
+
+        WHAT IT BINDS, AND WHY THERE IS NOTHING ELSE TO IT. A declared
+        function is a ctypes function whose `argtypes` are already known, so
+        this fills in exactly the state those three statements would have
+        left behind -- the library for the linker, and one signature per
+        function -- and every path afterwards is the ctypes path. See
+        `nativelib.py` for why that is the whole design and not a shortcut.
+
+        A DECLARATION CANNOT SHADOW A MODULE THAT ALREADY RESOLVES. `resolve`
+        is asked FIRST, so pointing `import math` at a DLL leaves `math`
+        meaning what it meant. Refused rather than silently ignored, because
+        a declaration that does nothing is a build someone will debug.
+        """
+        registry = nativelib.current()
+        if not registry or not isinstance(node, (ast.Import, ast.ImportFrom)):
+            return False
+        if isinstance(node, ast.ImportFrom):
+            # `from user32 import GetSystemMetrics` would bind the function as
+            # a bare name, and a native call is recognised by the shape
+            # `lib.f(...)` -- there is no value to bind. Reported rather than
+            # left to fail later as an undefined name.
+            if node.level or node.module is None:
+                return False
+            if registry.get(node.module, self.native_os) is None:
+                return False
+            self._error("E0130",
+                        f"a native library is imported whole; write "
+                        f"`import {node.module}` and call "
+                        f"`{node.module}.{node.names[0].name}(...)`", node)
+            self.ctypes_stmts.add(id(node))
+            return True
+        claimed = False
+        for alias in node.names:
+            library = registry.get(alias.name, self.native_os)
+            if library is None:
+                continue
+            if resolve(alias.name) is not None:
+                self._error("E0131",
+                            f"{alias.name!r} is declared as a native library "
+                            f"and is already a module this compiler has",
+                            node)
+                claimed = True
+                continue
+            local = alias.asname or alias.name
+            self.ctypes_libs[local] = library.library
+            if library.library not in self.ctypes_libraries:
+                self.ctypes_libraries.append(library.library)
+            for fn in library.functions:
+                self.ctypes_sigs[(local, fn.name)] = {
+                    "params": list(fn.params), "ret": fn.ret,
+                    "symbol": fn.c_symbol,
+                }
+            claimed = True
+        if claimed:
+            self.ctypes_stmts.add(id(node))
+        return claimed
 
     def _ctypes_assign(self, node) -> bool:
         """The three statements a ctypes declaration is made of.
@@ -4899,7 +4977,11 @@ class Analyzer:
         wide = [cffi.TYPES[p] for p in params]
         if self.current is not None:
             self.current.ctypes_calls[id(node)] = {
-                "symbol": symbol,
+                # THE DECLARED C SYMBOL WINS, when a declaration gave one.
+                # `nativelib` allows a function to be imported under a name
+                # that is not the symbol's; a program writing `ctypes` gives
+                # no such mapping, and there the two are the same string.
+                "symbol": signature.get("symbol", symbol),
                 "params": wide,
                 "ret": cffi.TYPES[ret],
                 "library": self.ctypes_libs.get(local, ""),
@@ -4940,7 +5022,11 @@ class Analyzer:
             self._expr(arg)
         if self.current is not None:
             self.current.ctypes_calls[id(node)] = {
-                "symbol": symbol,
+                # THE DECLARED C SYMBOL WINS, when a declaration gave one.
+                # `nativelib` allows a function to be imported under a name
+                # that is not the symbol's; a program writing `ctypes` gives
+                # no such mapping, and there the two are the same string.
+                "symbol": signature.get("symbol", symbol),
                 "params": [cffi.TYPES[p] for p in params],
                 "ret": cffi.TYPES[ret],
                 "library": self.ctypes_libs.get(local, ""),

@@ -72,6 +72,8 @@ def _options(args) -> Options:
                            (getattr(args, "import_path", None) or ())),
         site_packages=getattr(args, "site_packages", True),
         host_python=getattr(args, "host_python", None),
+        native_libraries=tuple(Path(p) for p in
+                               (getattr(args, "native_library", None) or ())),
     )
 
 
@@ -696,6 +698,13 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--host-python", metavar="PATH",
                        help="the interpreter whose site-packages to search; "
                             "default is the one running the compiler")
+        # A SHARED LIBRARY THE PROGRAM MAY `import`. Declared rather than
+        # discovered: a foreign symbol's argument kinds cannot be read out of
+        # the library, and guessing them is how a native call corrupts a
+        # stack. See frontends/python/nativelib.py.
+        p.add_argument("--native-library", action="append", metavar="FILE",
+                       help="JSON declaring shared libraries this program may "
+                            "import, and the signatures it calls in them")
         p.add_argument("source")
         p.add_argument("--frontend")
         p.add_argument("--max-errors", type=int, default=100)

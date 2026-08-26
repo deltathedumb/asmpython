@@ -91,6 +91,9 @@ class Options:
     #: Whose `site-packages`. None means the interpreter running the compiler,
     #: which is the one whose `pip` the user just ran in the common case.
     host_python: str | None = None
+    #: Declaration files naming shared libraries the program may `import`.
+    #: See `frontends/python/nativelib.py`.
+    native_libraries: tuple[Path, ...] = ()
 
     @property
     def effective_passes(self) -> tuple[str, ...]:
@@ -119,6 +122,37 @@ class Result:
     @property
     def ok(self) -> bool:
         return self.module is not None
+
+
+def _target_os(opts: "Options", be) -> str | None:
+    """The platform this build is for, before the emit stage resolves it.
+
+    THE SAME EXPRESSION the emit stage uses, and deliberately so: a scoped
+    native-library declaration picks a library by it, and two places deciding
+    what "the target" was is how a program type-checks against `user32.dll`
+    and links against `libX11.so.6`. None when nothing can say yet, which
+    leaves only unscoped declarations applying.
+    """
+    chosen = None
+    if opts.target is not None:
+        chosen = opts.target.os
+    elif be is not None:
+        try:
+            chosen = target_registry.get(be.default_target).os
+        except Exception:
+            chosen = None
+    # `any` MEANS THE HOST, and this is the C backend's whole case. Its target
+    # is `any/any` because it emits SOURCE -- but the toolchain then compiles
+    # that source for the machine it is running on, so the program really is
+    # a host program and `user32.dll` really is the library it wants. Left as
+    # `any`, a declaration scoped to a platform could never apply to the
+    # default backend, which is every ordinary build.
+    if chosen in (None, "any"):
+        try:
+            return target_registry.host().os
+        except Exception:
+            return None
+    return chosen
 
 
 def _publish_backend_modules(be) -> None:
@@ -187,6 +221,22 @@ def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
         return Result()
     py_imports.use((opts.source.parent,) + tuple(opts.import_paths)
                    + host.roots, host)
+    # DECLARED NATIVE LIBRARIES. Published beside the search path and for the
+    # same reason: the frontend is handed a source and a sink, so anything the
+    # driver knows and it needs arrives through a module global. Scoped
+    # declarations need the target, which is resolved here exactly as the emit
+    # stage resolves it -- two places deciding what "the target" was is how
+    # a program links against the other platform's library.
+    from ..frontends.python import nativelib as py_nativelib
+    declared = py_nativelib.Registry()
+    for path in opts.native_libraries:
+        try:
+            for library in py_nativelib.read(path).all():
+                declared.add(library)
+        except py_nativelib.DeclarationError as exc:
+            sink.report(error("E9109", f"--native-library: {exc}"))
+            return Result()
+    py_nativelib.use(declared, _target_os(opts, selected))
 
     fe = (frontend_registry.get(opts.frontend) if opts.frontend
           else frontend_registry.for_path(opts.source))
