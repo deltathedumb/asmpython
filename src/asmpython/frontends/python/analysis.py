@@ -5342,17 +5342,29 @@ class Analyzer:
 
         A COMPILED EXTENSION MODULE is the one case where the file exists, is
         unambiguously the module that was asked for, and still cannot be used.
-        `E0083` would say "there is no import path" about a `.pyd` sitting in
-        the directory the path just searched, which is true only in the sense
-        that no path could ever have helped -- so that case gets a code of its
-        own and names the file.
+        `E0083` would list the directory it was sitting in among the ones it
+        searched, which reads as "not found" about a file that is plainly
+        there -- so that case gets a code of its own and names the file.
         """
         from . import imports as _imports
-        native = _imports.current().native(name)
+        finder = _imports.current()
+        native = finder.native(name)
         if native is None:
-            self._error("E0083",
-                        f"no module named {name!r} is available; "
-                        f"there is no import path", node, importable())
+            report = (error("E0083",
+                            f"no module named {name!r} is available")
+                      .at(self._span(node)))
+            # WHERE IT LOOKED, rather than a claim that it did not. The text
+            # was "there is no import path" unconditionally, and the file
+            # being compiled always contributes its own directory as a root
+            # -- so the clause was false on every single invocation, about
+            # the one place a reader would go and check.
+            if finder.roots:
+                report = report.note(
+                    "searched: " + ", ".join(str(r) for r in finder.roots))
+            else:
+                report = report.note("there is no import path")
+            self.sink.report(report.help("available: "
+                                         + ", ".join(importable())))
             return
         report = (error("E0129",
                         f"{name!r} is a compiled extension module, which "

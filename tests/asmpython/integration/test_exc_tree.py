@@ -120,19 +120,65 @@ class TestTheTreeIsTheCs:
         assert not orphans, f"parents nothing declares: {orphans}"
 
 
+def _truth() -> set[str]:
+    """Which modules this build ACTUALLY has, derived rather than written.
+
+    `bundled.available()` globs the directory and `BUILTIN_MODULES` is the
+    table the frontend resolves a bare name against, so between them they are
+    the whole answer -- and neither can be edited without this moving too.
+    """
+    sys.path.insert(0, SRC)
+    try:
+        from asmpython.frontends.python import bundled, modules
+        return set(bundled.available()) | set(modules.BUILTIN_MODULES)
+    finally:
+        del sys.path[0]
+
+
 class TestTheModuleListIsTheCs:
-    """The bundled module names exist twice too, and for the same reason.
+    """The bundled module names exist three times, and must be the truth.
 
     A NAME IN ONE COPY AND NOT THE OTHER IS NOT A CRASH, which is what makes
     this worth a test: `__import__("math")` would report `No module named
     'math'` from one arrangement and an ImportError from the other, and both
     look like plausible answers.
+
+    COMPARED AGAINST WHAT THE BUILD HAS, not against each other. Copy-to-copy
+    was the whole of this test until now, and three copies agreeing on a
+    wrong list is exactly what that let happen. The list CLAIMED ten modules
+    this build cannot import -- `os`, `datetime`, `decimal`, `fractions`,
+    `statistics`, `tomllib`, `contextvars`, `numbers`, `zoneinfo`,
+    `annotationlib` -- and DENIED eight it can, so `__import__("re")`
+    answered `No module named 're'` inside a binary carrying 1,249 lines of
+    bundled `re.py`. Three copies of one wrong answer are still one wrong
+    answer, and a test comparing only the copies stays green through all of
+    it.
     """
 
-    def test_the_two_copies_agree(self):
-        c, ir = _c_modules(), _packed("apy_known_modules")
-        assert c == ir, (
-            "the C's `known[]` and the packed blob in runtime/errstate.py "
-            "disagree.\n"
-            f"  only in the C:  {[n for n in c if n not in ir]}\n"
-            f"  only in the IR: {[n for n in ir if n not in c]}")
+    def test_the_c_is_what_the_build_has(self):
+        c, truth = set(_c_modules()), _truth()
+        assert c == truth, (
+            "the C's `known[]` is not what this build bundles.\n"
+            f"  claims but does not have: {sorted(c - truth)}\n"
+            f"  has but denies:           {sorted(truth - c)}")
+
+    def test_the_ir_is_what_the_build_has(self):
+        ir, truth = set(_packed("apy_known_modules")), _truth()
+        assert ir == truth, (
+            "the packed blob in runtime/errstate.py is not what this build "
+            "bundles.\n"
+            f"  claims but does not have: {sorted(ir - truth)}\n"
+            f"  has but denies:           {sorted(truth - ir)}")
+
+    def test_the_host_is_what_the_build_has(self):
+        sys.path.insert(0, SRC)
+        try:
+            from asmpython.ir.objects_host import _KNOWN_MODULES
+        finally:
+            del sys.path[0]
+        host, truth = set(_KNOWN_MODULES), _truth()
+        assert host == truth, (
+            "`_KNOWN_MODULES` in ir/objects_host.py is not what this build "
+            "bundles.\n"
+            f"  claims but does not have: {sorted(host - truth)}\n"
+            f"  has but denies:           {sorted(truth - host)}")

@@ -3225,11 +3225,11 @@ def _apy_typevar(h, a):
 #: imported DYNAMICALLY either -- there is no import machinery in a produced
 #: binary -- but the error says which of the two reasons it is.
 _KNOWN_MODULES = frozenset({
-    "math", "sys", "typing", "asyncio", "inspect", "__future__", "functools",
-    "itertools", "contextlib", "warnings", "statistics", "abc", "enum",
-    "collections", "collections.abc", "fractions", "decimal", "tomllib",
-    "pathlib", "dataclasses", "contextvars", "numbers", "copy", "types", "os",
-    "datetime", "zoneinfo", "annotationlib",
+    "__future__", "_pyast", "_pycompile", "_pylex", "_pyparse", "_pyrun",
+    "_pyvalidate", "abc", "asyncio", "collections", "collections.abc",
+    "contextlib", "copy", "dataclasses", "enum", "functools", "inspect",
+    "itertools", "keyword", "math", "pathlib", "re", "sys", "types",
+    "typing", "warnings",
 })
 
 

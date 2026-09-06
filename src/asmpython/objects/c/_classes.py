@@ -393,12 +393,11 @@ APY_API apy_value apy_type_alias(apy_value name, apy_value value,
    ImportError saying the import cannot be performed dynamically. */
 APY_API apy_value apy_import(apy_value name) {
     static const char *known[] = {
-        "math", "sys", "typing", "asyncio", "inspect", "__future__",
-        "functools", "itertools", "contextlib", "warnings", "statistics",
-        "abc", "enum", "collections", "collections.abc", "fractions",
-        "decimal", "tomllib", "pathlib", "dataclasses", "contextvars",
-        "numbers", "copy", "types", "os", "datetime", "zoneinfo",
-        "annotationlib", 0};
+        "__future__", "_pyast", "_pycompile", "_pylex", "_pyparse",
+        "_pyrun", "_pyvalidate", "abc", "asyncio", "collections",
+        "collections.abc", "contextlib", "copy", "dataclasses", "enum",
+        "functools", "inspect", "itertools", "keyword", "math",
+        "pathlib", "re", "sys", "types", "typing", "warnings", 0};
     const char *want = O(name)->kind == APY_STR_K ? APY_CSTR(name) : "";
     int i;
     for (i = 0; known[i]; i++)

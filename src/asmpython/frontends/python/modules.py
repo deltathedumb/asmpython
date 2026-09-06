@@ -284,11 +284,29 @@ def resolve(name: str):
 
 
 def importable() -> list:
-    """Every name `import` can reach, for a diagnostic to suggest."""
+    """Every name `import` can reach, for a diagnostic to suggest.
+
+    THE BUNDLED LIBRARY IS IN IT, which it was not. This list is what `E0083`
+    prints after "available:", and it was built from `BUILTIN_MODULES` and the
+    backend's modules alone -- so a program told `statistics` is unavailable
+    was shown a list of nine names that omitted `re`, `functools`,
+    `collections`, `enum`, `dataclasses`, `pathlib` and fourteen others that
+    demonstrably work. A suggestion list missing two thirds of the answer is
+    worse than none: it reads as the whole surface.
+
+    THE PRIVATE ONES ARE NOT SUGGESTED. `_pylex` and the rest of the runtime
+    compiler are bundled and really are importable, but they are this
+    compiler's own furniture rather than anything a program should be told to
+    reach for -- and CPython has no module by those names at all.
+    """
+    from .bundled import available
+
     out = list(BUILTIN_MODULES)
+    out += [name for name in available()
+            if not name.startswith("_") or name.startswith("__")]
     out += [f"{_BACKEND_ID}.{name}" for name in _BACKEND_MODULES]
     out += [name for name in _BACKEND_MODULES if name not in BUILTIN_MODULES]
-    return sorted(out)
+    return sorted(set(out))
 
 
 def member(module: str, name: str):
