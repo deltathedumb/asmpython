@@ -1,19 +1,12 @@
 """`llvm` -- LLVM IR, as text.
 
 NOT WRITTEN YET. This module exists so that 'llvm' is a REGISTERED backend
-that refuses, rather than a name `asmpython backends` has never heard of --
-and so that `llvm.alib` has an owner. A backend is the thing that can emit an
-architecture's instructions, so it is the thing that declares them; see
-`backend/alib.py`.
+that refuses, rather than a name `asmpython backends` has never heard of.
 
 A LANGUAGE BACKEND, so text is the artifact and no encoder is needed --
 the same bargain the C backend takes. It is the cheapest of the six by
 a wide margin and reaches every platform LLVM does, which makes it the
 sensible one to write first.
-
-LLVM ALREADY NAMES EVERY ALIB INTRINSIC (`llvm.ctpop.i64`,
-`llvm.readcyclecounter`, `fence`, `volatile`), so `llvm.alib` is the
-one that can be lowered without inventing anything.
 
 `ready = False`, so the driver warns before it ever reaches `emit`, and `emit`
 refuses with the work that is missing rather than with a traceback.
@@ -22,7 +15,6 @@ from __future__ import annotations
 
 from ...backend.base import Backend, BackendUnsupported, Target, register
 from ...ir import Module
-from .alib import ALIB
 
 
 class LlvmBackend(Backend):
@@ -35,7 +27,6 @@ class LlvmBackend(Backend):
     #: this backend can emit for it -- a target naming a platform nothing can
     #: compile for is the failure `x86_64-macos` already demonstrated.
     default_target = "c"
-    alib = ALIB
 
     def emit(self, module: Module, target: Target) -> dict[str, bytes]:
         raise BackendUnsupported(

@@ -1,10 +1,7 @@
 """`wasm` -- WebAssembly, as a binary module.
 
 NOT WRITTEN YET. This module exists so that 'wasm' is a REGISTERED backend
-that refuses, rather than a name `asmpython backends` has never heard of --
-and so that `wasm.alib` has an owner. A backend is the thing that can emit an
-architecture's instructions, so it is the thing that declares them; see
-`backend/alib.py`.
+that refuses, rather than a name `asmpython backends` has never heard of.
 
 A BINARY BACKEND, NOT A `.wat` ONE. The text format would be text, which
 `Backend.kind` forbids for anything that is not another language -- and
@@ -22,7 +19,6 @@ from __future__ import annotations
 
 from ...backend.base import Backend, BackendUnsupported, Target, register
 from ...ir import Module
-from .alib import ALIB
 
 
 class WasmBackend(Backend):
@@ -35,7 +31,6 @@ class WasmBackend(Backend):
     #: this backend can emit for it -- a target naming a platform nothing can
     #: compile for is the failure `x86_64-macos` already demonstrated.
     default_target = "c"
-    alib = ALIB
 
     def emit(self, module: Module, target: Target) -> dict[str, bytes]:
         raise BackendUnsupported(

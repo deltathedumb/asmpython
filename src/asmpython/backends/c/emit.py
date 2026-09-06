@@ -101,7 +101,6 @@ from ...objects.support import (  # noqa: E402
     HOST_NAMES as _HOST_NAMES, host_functions as _host_functions,
 )
 from ...objects import hostsvc as _hostsvc  # noqa: E402
-from .alib import ALIB
 
 #: WHAT THIS BACKEND CAN DO FOR A PROGRAM, beyond the floor. It emits C and
 #: links against a hosted libc, so it has a filesystem, a clock, entropy, an
@@ -160,8 +159,6 @@ _PROVIDED = (set(_HOST_NAMES) | set(_OBJECT_NAMES) | {"putchar"}
 
 class CBackend(Backend):
     name = "c"
-    #: This backend's architecture library; see `backend/alib.py`.
-    alib = ALIB
     description = "portable C99 source; one local per register, no allocation"
     #: SOURCE IN ANOTHER LANGUAGE, so text is the artifact rather than a
     #: stage short of one. A C compiler does the encoding.

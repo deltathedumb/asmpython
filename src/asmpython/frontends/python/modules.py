@@ -231,6 +231,25 @@ def use_backend(backend_id: str, modules: dict, type_lookup=None) -> None:
     _BACKEND_TYPE = type_lookup
 
 
+#: A backend module member that is an INSTRUCTION rather than a function:
+#:
+#:     ("intrinsic", symbol, (argument IR types...), result IR type)
+#:
+#: WHY A KIND OF ITS OWN rather than reusing `("call", symbol, arity)`. A
+#: `call` member reaches a runtime function that takes `apy_value`s -- boxed
+#: Python objects. An intrinsic is an INSTRUCTION, and an instruction takes a
+#: machine word. The types are carried here so the frontend can unbox each
+#: argument to the width the instruction reads, which is the same conversion
+#: a `ctypes` call already gets and the reason this needs no new lowering.
+#:
+#: DECLARED HERE BECAUSE THE TABLE IS HERE. It lived in `backend/alib.py`
+#: until the architecture libraries were removed, which left the kind with no
+#: producer and its only definition in a deleted file. A backend that offers
+#: an instruction still needs a way to say so, and the shape of a member is
+#: this module's business rather than any one backend's.
+INTRINSIC_KIND = "intrinsic"
+
+
 def backend_modules() -> dict:
     """Every module the selected backend offers, by name.
 

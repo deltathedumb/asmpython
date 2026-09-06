@@ -38,12 +38,6 @@ src/asmpython/
   driver/        options, pipeline, command line
 ```
 
-Each backend also declares an **alib** — `<arch>.alib`, the low-level library
-for the machine it emits: MMIO, ports, barriers, system registers. It hangs
-off the backend rather than living in a registry of its own, because an alib
-describes instructions something can produce, and the code generator is that
-something. `asmpython alibs` lists them and says how much of each is real.
-
 `archived/legacy/asmpython/` is the pre-rewrite compiler, kept for its code
 generation and not maintained. It answers to the same import name, and two
 packages cannot share one — so the rewrite owns `asmpython` and the old tree

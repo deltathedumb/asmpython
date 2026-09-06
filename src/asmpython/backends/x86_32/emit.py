@@ -1,10 +1,7 @@
 """`x86-32` -- 32-bit x86, as a real object file.
 
 NOT WRITTEN YET. This module exists so that 'x86-32' is a REGISTERED backend
-that refuses, rather than a name `asmpython backends` has never heard of --
-and so that `x86_32.alib` has an owner. A backend is the thing that can emit an
-architecture's instructions, so it is the thing that declares them; see
-`backend/alib.py`.
+that refuses, rather than a name `asmpython backends` has never heard of.
 
 PLANNED TO SHARE THE x86-64 ENCODER rather than have one of its own. The
 instruction encoding is the same problem in a narrower default operand
@@ -19,7 +16,6 @@ from __future__ import annotations
 
 from ...backend.base import Backend, BackendUnsupported, Target, register
 from ...ir import Module
-from .alib import ALIB
 
 
 class X86_32Backend(Backend):
@@ -32,7 +28,6 @@ class X86_32Backend(Backend):
     #: this backend can emit for it -- a target naming a platform nothing can
     #: compile for is the failure `x86_64-macos` already demonstrated.
     default_target = "c"
-    alib = ALIB
 
     def emit(self, module: Module, target: Target) -> dict[str, bytes]:
         raise BackendUnsupported(

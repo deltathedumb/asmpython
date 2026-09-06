@@ -71,7 +71,6 @@ from .classpath import ClassFileError, ClassPath, parse_parameters
 from .interop import Interop
 from .runtime import (BRK, BRK_DESC, HEAP_BYTES, MEM, MEM_DESC, SP, SP_DESC,
                       STACK_BYTES, Runtime, objects_init)
-from .alib import ALIB
 
 #: Address 0 stays unused so that a null pointer dereference is an index into
 #: nothing rather than a read of the first global.
@@ -191,8 +190,6 @@ class JvmBackend(Backend):
     """IR to a JVM class file."""
 
     name = "jvm"
-    #: This backend's architecture library; see `backend/alib.py`.
-    alib = ALIB
     description = "JVM class files, packaged as a runnable jar"
     #: Real class files, written byte by byte by `classfile.py`. The only
     #: backend here that has always been what it claims.

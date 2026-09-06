@@ -19,7 +19,6 @@ import abc
 from dataclasses import dataclass
 
 from ..ir import Module
-from .alib import Alib
 # Re-exported so a backend author needs one import. The TYPE belongs to the
 # backend interface -- every `emit` receives one -- but the INSTANCES do not
 # live here: they are registered in `asmpython.targets`, so adding a platform never
@@ -135,19 +134,6 @@ class Backend(abc.ABC):
     #: capability -- not at link time as an undefined symbol, and not at run
     #: time as a wrong answer.
     host_services: frozenset[str] = frozenset()
-    #: THIS BACKEND'S ARCHITECTURE LIBRARY, or None where the machine offers
-    #: nothing a portable language cannot reach.
-    #:
-    #: ON THE BACKEND RATHER THAN IN A REGISTRY OF ITS OWN. It was a fifth
-    #: registry beside frontends/backends/targets/toolchains, and that was one
-    #: registry too many: an alib describes what a code generator can emit, so
-    #: the code generator is the thing that has one. Keeping it separate meant
-    #: an architecture could declare `rdtsc` with no backend able to produce
-    #: it, and nothing in the type system minded.
-    #:
-    #: It reaches a program through `modules` -- see `alib_modules` -- so the
-    #: frontend needs no second mechanism to import from.
-    alib: "Alib | None" = None
     #: MODULES THIS BACKEND MAKES IMPORTABLE, as {name: {member: spec}} in the
     #: shape `frontends/python/modules.py` documents.
     #:
@@ -260,10 +246,10 @@ def available() -> dict[str, Backend]:
 
 
 def load_builtin() -> None:
-    # THE STUBS ARE IMPORTED TOO. Each declares `ready = False` and an alib,
-    # and refuses to emit -- so `asmpython backends` shows the whole matrix
-    # with the unfinished half marked, rather than showing four and leaving
-    # the rest to be discovered as "unknown backend".
+    # THE STUBS ARE IMPORTED TOO. Each declares `ready = False` and refuses to
+    # emit -- so `asmpython backends` shows the whole matrix with the
+    # unfinished half marked, rather than showing four and leaving the rest to
+    # be discovered as "unknown backend".
     from ..backends import (                                   # noqa: F401
         apir, arm32, arm64, c, jvm, llvm, pybc, wasm, x86_32, x86_64,
     )

@@ -57,7 +57,6 @@ from ...backend.regalloc import (
 from ...ir import Function, Module, types as T
 from ...ir.module import Global, Instruction, Linkage, Register
 from ...ir.opcodes import Op
-from .alib import ALIB
 
 
 class UnsupportedOperation(BackendUnsupported):
@@ -364,8 +363,6 @@ def _emit_parallel_moves(e: _Emitter, moves: list[tuple[str, str]]) -> None:
 
 class Arm64Backend(Backend):
     name = "arm64"
-    #: This backend's architecture library; see `backend/alib.py`.
-    alib = ALIB
     description = "AArch64 assembly (AAPCS64), shared allocator"
     default_target = "aarch64-none"
 

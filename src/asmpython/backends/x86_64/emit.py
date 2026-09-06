@@ -47,9 +47,6 @@ from ...backend.regalloc import (
 from ...ir import Function, Module, types as T
 from ...ir.module import Global, Instruction, Linkage, Register
 from ...ir.opcodes import Op
-from ...backend.alib import alib_modules, intrinsic_named
-from .alib import ALIB
-from . import alib_emit
 
 @dataclass(frozen=True, slots=True)
 class ABI:
@@ -559,16 +556,6 @@ class _Emitter:
 
 class X86_64Backend(Backend):
     name = "x86-64"
-    #: This backend's architecture library; see `backend/alib.py`.
-    alib = ALIB
-    #: AND THE SAME LIBRARY AS AN IMPORTABLE MODULE. An alib reaches a program
-    #: through `Backend.modules` -- `from x86_64.alib import outb` is an
-    #: ordinary import of an ordinary module, resolved by the table every
-    #: backend already offers things through. There is no second mechanism and
-    #: no new syntax; what the module holds is instructions rather than
-    #: functions, and `alib_emit.py` splices each one where its call would
-    #: have gone.
-    modules = alib_modules(ALIB)
     description = "x86-64 assembly; ABI and dialect chosen by target"
     # The machine this is running on, not a platform fixed at
     # authoring time: `asmpython build --backend x86-64` on Windows used to
@@ -1105,25 +1092,7 @@ class X86_64Backend(Backend):
                 adjust = self._place_arguments(e, ins, abi,
                                                skip_first=op is Op.CALL_PTR)
                 if op is Op.CALL:
-                    # AN INTRINSIC IS SPLICED, NOT CALLED. The arguments are
-                    # already where the ABI puts them, which is exactly what
-                    # a sequence in `alib_emit` expects -- so the instruction
-                    # goes here, in place of the call that would have been.
-                    #
-                    # REFUSED BY NAME if this backend declares the intrinsic
-                    # and does not lower it: emitting the call instead would
-                    # leave an undefined `__alib_` symbol at link time, which
-                    # says nothing about which instruction was missing.
-                    wanted = intrinsic_named(ins.sym)
-                    if wanted:
-                        if not alib_emit.is_lowered(wanted):
-                            raise UnsupportedOperation(
-                                f"x86_64.alib declares {wanted!r} but this "
-                                f"backend does not emit it yet")
-                        for line in alib_emit.lines(wanted):
-                            e.emit(line)
-                    else:
-                        e.emit(f"call {self.symbol(ins.sym, dialect)}")
+                    e.emit(f"call {self.symbol(ins.sym, dialect)}")
                 else:
                     # The callee address is an ordinary value. Loaded into r11
                     # -- reserved, so the allocator never put an argument

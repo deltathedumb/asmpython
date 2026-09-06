@@ -151,11 +151,11 @@ class TestBinaryBackendsEmitBytes:
 class TestAnUnfinishedBackendRefuses:
     """A registered name that cannot emit must SAY so, not crash.
 
-    The six stubs exist so `asmpython backends` shows the whole matrix and so
-    each architecture's alib has an owner. The price of that is a name a user
-    can select, so the refusal is part of the contract: it names the backend
-    and what is missing, and it arrives as a diagnostic rather than a
-    traceback.
+    The six stubs exist so `asmpython backends` shows the whole matrix rather
+    than four names, with the unfinished half marked. The price of that is a
+    name a user can select, so the refusal is part of the contract: it names
+    the backend and what is missing, and it arrives as a diagnostic rather
+    than a traceback.
     """
 
     UNFINISHED = sorted(b for b in BACKENDS
@@ -164,8 +164,8 @@ class TestAnUnfinishedBackendRefuses:
     def test_there_are_stubs_and_they_are_marked(self):
         assert self.UNFINISHED, "no unfinished backends; update this file"
         for name in self.UNFINISHED:
-            assert backend_registry.get(name).alib is not None, (
-                f"{name} is a stub with no alib, which is its only job so far")
+            assert not backend_registry.get(name).ready, (
+                f"{name} is in UNFINISHED but declares itself ready")
 
     @harness.cases("backend", UNFINISHED)
     def test_it_refuses_with_a_reason(self, backend):

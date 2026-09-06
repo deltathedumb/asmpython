@@ -3861,9 +3861,9 @@ class DynamicLowering:
         """An intrinsic as a CALLABLE VALUE, via a wrapper that converts.
 
         A WRAPPER AND NOT A CALL SITE, deliberately. An imported member is
-        bound as a value -- `from x86_64.alib import outb` stores `outb` like
-        any other name -- so by the time a call is lowered there is no name
-        left to recognise, only a callable. Giving the intrinsic a wrapper
+        bound as a value -- `from <backend>.<mod> import outb` stores `outb`
+        like any other name -- so by the time a call is lowered there is no
+        name left to recognise, only a callable. Giving the intrinsic a wrapper
         makes `outb(0x3F8, 65)` and `map(outb, ports)` the same object reached
         two ways, which is what every other module member already is.
 

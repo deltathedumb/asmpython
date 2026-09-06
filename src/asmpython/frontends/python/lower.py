@@ -1237,8 +1237,7 @@ class Lowerer(DynamicLowering):
         all, and a member is only discovered while lowering a body, which is
         after declarations have to exist.
         """
-        from .modules import backend_modules
-        from ...backend.alib import INTRINSIC_KIND
+        from .modules import INTRINSIC_KIND, backend_modules
 
         out: dict = {}
         for table in backend_modules().values():
@@ -1252,10 +1251,10 @@ class Lowerer(DynamicLowering):
             # it would have walked a whole classpath on every compile to find
             # intrinsics that cannot be there.
             #
-            # AN ALIB TABLE IS ALWAYS A PLAIN DICT, because intrinsics are
-            # DECLARED -- `backends/<name>/alib.py` is written out -- rather
-            # than discovered from something on disk. So skipping what cannot
-            # be enumerated skips nothing this is looking for.
+            # AN INTRINSIC TABLE IS ALWAYS A PLAIN DICT, because intrinsics
+            # are DECLARED -- a backend writes its members out -- rather than
+            # discovered from something on disk. So skipping what cannot be
+            # enumerated skips nothing this is looking for.
             if not isinstance(table, dict):
                 continue
             for spec in table.values():

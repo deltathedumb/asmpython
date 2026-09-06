@@ -49,7 +49,6 @@ from __future__ import annotations
 
 from ...backend.base import Backend, BackendUnsupported, Target, register
 from ...ir import Module
-from .alib import ALIB
 
 
 class ApirBackend(Backend):
@@ -63,7 +62,6 @@ class ApirBackend(Backend):
     #: and that is a property of the second compilation rather than of this
     #: one. `c` stands in until that is designed.
     default_target = "c"
-    alib = ALIB
 
     def emit(self, module: Module, target: Target) -> dict[str, bytes]:
         raise BackendUnsupported(

@@ -734,10 +734,11 @@ class TestTheSwitchIsCoherent:
         # WHAT THE RUNTIME CALLS, not what it declares. An intrinsic is
         # declared as an external in every module lowered -- see
         # `lower._intrinsic_externals`, which says why it cannot wait until a
-        # body mentions one -- so `__alib_rdtsc` appears in the runtime's
-        # declarations and is called by nothing in it. Counting declarations
-        # made this fail the day x86-64 lowered its alib, over symbols the
-        # runtime does not reach for in any sense the test means.
+        # body mentions one -- so an intrinsic's symbol appears in the
+        # runtime's declarations and is called by nothing in it. Counting
+        # declarations made this fail the day a backend first lowered one,
+        # over symbols the runtime does not reach for in any sense the test
+        # means.
         #
         # A CALL IS THE THING THE TEST IS ABOUT: "the allocator asks the floor
         # and nothing else" is a statement about what it REACHES, and an
@@ -1002,10 +1003,11 @@ class TestTheArena:
         # WHAT THE RUNTIME CALLS, not what it declares. An intrinsic is
         # declared as an external in every module lowered -- see
         # `lower._intrinsic_externals`, which says why it cannot wait until a
-        # body mentions one -- so `__alib_rdtsc` appears in the runtime's
-        # declarations and is called by nothing in it. Counting declarations
-        # made this fail the day x86-64 lowered its alib, over symbols the
-        # runtime does not reach for in any sense the test means.
+        # body mentions one -- so an intrinsic's symbol appears in the
+        # runtime's declarations and is called by nothing in it. Counting
+        # declarations made this fail the day a backend first lowered one,
+        # over symbols the runtime does not reach for in any sense the test
+        # means.
         #
         # A CALL IS THE THING THE TEST IS ABOUT: "the allocator asks the floor
         # and nothing else" is a statement about what it REACHES, and an

@@ -9,7 +9,6 @@
     asmpython run prog.py                    execute in the reference interpreter
     asmpython check prog.py                  analyse and verify, produce nothing
     asmpython ops / types / targets / backends / frontends / toolchains / passes
-    asmpython alibs                    the per-architecture low-level libraries
     asmpython port                     how far the object runtime has moved to IR
 
 Every stage can be stopped at and dumped, and `--emit-ir` writes text that
@@ -377,37 +376,6 @@ def cmd_port(args) -> int:
     return 0
 
 
-def cmd_alibs(args) -> int:
-    """The architecture libraries, and how much of each is real.
-
-    THE UNIMPLEMENTED COUNT IS PRINTED, not hidden. Every intrinsic is a stub
-    today, and a listing that showed only the names would read as a catalogue
-    of working features -- which is exactly the impression a declared-but-not-
-    lowered surface must not give.
-    """
-    backend_registry.load_builtin()
-    items = [(name, be) for name, be in sorted(backend_registry.available().items())
-             if be.alib is not None]
-    width = max((len(be.alib.module_name) for _, be in items), default=0)
-    total = done = 0
-    for name, be in items:
-        a = be.alib
-        ins = a.all_intrinsics()
-        total += len(ins)
-        done += sum(1 for i in ins if i.implemented)
-        mark = "" if be.ready else "  (backend unfinished)"
-        caps = ", ".join(a.capabilities) or "nothing yet declared"
-        print(f"  {a.module_name:<{width}}  {len(ins):3d} intrinsics  "
-              f"{caps}{mark}")
-    print()
-    print(f"  {total} intrinsics across {len(items)} backends; "
-          f"{done} lowered.")
-    if done < total:
-        print(f"  {total - done} are DECLARED ONLY -- the surface exists, the "
-              f"code generation does not.")
-    return 0
-
-
 def cmd_frontends(args) -> int:
     frontend_registry.load_builtin()
     items = sorted(frontend_registry.available().items())
@@ -772,7 +740,6 @@ def build_parser() -> argparse.ArgumentParser:
         ("targets", cmd_targets, "list target platforms"),
         ("backends", cmd_backends, "list backends"),
         ("toolchains", cmd_toolchains, "list ways of producing a program"),
-        ("alibs", cmd_alibs, "list the architecture libraries"),
         ("port", cmd_port, "how far the object runtime has moved to IR"),
         ("frontends", cmd_frontends, "list frontends"),
         ("passes", cmd_passes, "list optimisation passes"),
