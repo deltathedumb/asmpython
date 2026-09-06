@@ -110,19 +110,13 @@ KNOWN_REFUSED: dict[str, str] = {
         "spliced successfully. `bundled.py` has the right diagnostic for "
         "this already -- E0084, 'module X has no member Y'.",
     "guarded_optional_import":
-        "E0083. An import below module top level is never spliced, so the "
-        "`try: import helpers` a program writes to make a dependency optional "
-        "cannot be written at all.",
-    "import_inside_a_function":
-        "E0083. `imports.splice` iterates `tree.body` only, so a function-"
-        "local import is left for the analyser to deny.",
-    "import_inside_an_if":
-        "E0083, and the same cause -- only a statement at module top level is "
-        "seen.",
-    "import_mixed_with_a_builtin_module":
-        "E0083. `import helpers, math` requires every name in one statement "
-        "to resolve to a spliceable file; `helpers` IS spliced into the "
-        "prelude and the statement survives anyway, then errors.",
+        "E0083, and only for the half that is genuinely absent. The `try: "
+        "import helpers` arm works now; `import definitely_not_here` inside a "
+        "`try` is still refused at COMPILE time, where CPython raises "
+        "ImportError at run time and the handler catches it. An import "
+        "resolved while compiling cannot be caught by a `try` around it, "
+        "which is the splice rather than anything about where the statement "
+        "is written.",
     "namespace_package":
         "E0083. A directory without `__init__.py` is not importable, though "
         "its submodules resolve -- accidentally PEP-420-shaped for children "

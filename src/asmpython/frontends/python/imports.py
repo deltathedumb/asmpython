@@ -400,8 +400,13 @@ def splice(tree, source, sink=None):
         packages[name] = own
         order.append(name)
 
+    # THE WHOLE TREE, not `tree.body`. An import written inside a function, an
+    # `if` or a `try` names a module that must still be found and spliced --
+    # discovery and removal have to agree about which statements count, and
+    # when only this loop was top-level-only the nested ones were never even
+    # looked for.
     anchor = None
-    for stmt in tree.body:
+    for stmt in ast.walk(tree):
         for name in wanted(stmt, package):
             anchor = anchor or stmt
             visit(name)
@@ -502,17 +507,61 @@ def splice(tree, source, sink=None):
                 node.col_offset = col
                 node.end_col_offset = col + 1
 
-    names, imported, kept = {}, {}, []
-    for stmt in tree.body:
-        found = wanted(stmt, package)
-        if id(stmt) in refused_ids:
-            continue
-        if isinstance(stmt, ast.Import) and len(found) == len(stmt.names):
+    names, imported = {}, {}
+
+    class _Drop(ast.NodeTransformer):
+        """Remove the imports that were spliced, WHEREVER they are written.
+
+        A TRANSFORMER AND NOT A LOOP OVER `tree.body`, which is what this was.
+        Only a statement at module top level was ever considered, so
+
+            def go(): import helpers
+            if True:  import helpers
+            try:      import helpers
+            except ImportError: ...
+
+        were each left for the analyser to deny with `E0083` about a file
+        sitting beside the source -- and the third is how a program makes a
+        dependency optional, so that could not be written at all.
+
+        AND AN ALIAS AT A TIME, which is the other half. `import helpers,
+        math` required EVERY name in one statement to resolve to a spliceable
+        file; `helpers` was spliced into the prelude and the statement
+        survived intact anyway, so the program was told `helpers` did not
+        exist while its definitions sat above. Each alias is now decided on
+        its own and the statement keeps only what it still needs.
+
+        A SPLICED MODULE'S DEFINITIONS ARE MODULE-LEVEL however deep the
+        import was written, so a function-local import binds a name the whole
+        program can see rather than a local one. That is the splice, not this
+        pass -- and it is visible only to a program that imports the same
+        module twice under two spellings.
+        """
+
+        def visit_Import(self, stmt):
+            if id(stmt) in refused_ids:
+                return None
+            found = set(wanted(stmt, package))
+            left = []
             for alias in stmt.names:
-                imported[alias.asname or alias.name] = \
-                    finder.absolute(alias.name, 0, package)
-            continue
-        if isinstance(stmt, ast.ImportFrom) and found:
+                try:
+                    absolute = finder.absolute(alias.name, 0, package)
+                except ImportError_:
+                    left.append(alias)
+                    continue
+                if absolute in found:
+                    imported[alias.asname or alias.name] = absolute
+                else:
+                    left.append(alias)
+            if not left:
+                return None
+            return ast.copy_location(ast.Import(names=left), stmt)
+
+        def visit_ImportFrom(self, stmt):
+            if id(stmt) in refused_ids:
+                return None
+            if not wanted(stmt, package):
+                return stmt
             target = finder.absolute(stmt.module or "", stmt.level, package)
             left = []
             for alias in stmt.names:
@@ -529,18 +578,42 @@ def splice(tree, source, sink=None):
                     # SURVIVES -- it may be a bundled name, or a real mistake
                     # the analyser reports with a span of its own.
                     left.append(alias)
-            if left:
-                kept.append(ast.copy_location(
-                    ast.ImportFrom(module=stmt.module, names=left,
-                                   level=stmt.level), stmt))
-            continue
-        kept.append(stmt)
+            if not left:
+                return None
+            return ast.copy_location(
+                ast.ImportFrom(module=stmt.module, names=left,
+                               level=stmt.level), stmt)
 
-    tree.body = kept
+    tree = _Drop().visit(tree)
+    _keep_bodies_legal(tree)
     rewritten = bundled._Rewrite(imported, members, names,
                                  prefix=MANGLE).visit(tree)
     rewritten.body = prelude + rewritten.body
     return ast.fix_missing_locations(rewritten)
+
+
+
+def _keep_bodies_legal(tree) -> None:
+    """`pass` wherever removing an import emptied a block.
+
+    `def go(): import helpers` is a whole function body, and `try: import x`
+    a whole `try` block. Dropping the statement leaves `body=[]`, which is not
+    a tree Python can compile -- it reaches the analyser as an IndexError with
+    no span, which reads as a compiler crash rather than as anything about the
+    program.
+    """
+    import ast
+
+    for node in ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            if isinstance(block, list) and not block:
+                filler = ast.Pass()
+                filler.lineno = getattr(node, "lineno", 1)
+                filler.end_lineno = filler.lineno
+                filler.col_offset = getattr(node, "col_offset", 0)
+                filler.end_col_offset = filler.col_offset + 1
+                block.append(filler)
 
 
 def _defines(parsed) -> set:
