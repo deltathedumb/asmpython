@@ -64,11 +64,42 @@ class TestRelativeImports:
         """
         assert Finder().absolute("x", 1, "a.b") == "a.b.x"
         assert Finder().absolute("x", 2, "a.b") == "a.x"
-        assert Finder().absolute("x", 3, "a.b") == "x"
 
     def test_climbing_past_the_root_is_refused(self):
+        """AND LEVEL 3 OUT OF `a.b` IS PAST IT, which this asserted was `x`.
+
+        The guard was `level - 1 > len(parts)`, one level looser than
+        CPython's `level > len(parts)`, so the last legal climb was allowed
+        to go one further and returned a bare top-level name. In a tree of
+        any depth that name usually exists, so `from ... import x` inside
+        `a.b` resolved to a real module and nothing said otherwise.
+        """
+        with harness.raises(ImportError_):
+            Finder().absolute("x", 3, "a.b")
         with harness.raises(ImportError_):
             Finder().absolute("x", 4, "a.b")
+
+    def test_the_boundary_is_cpythons_exactly(self):
+        """`level > len(parts)` refuses, and one less is the deepest legal."""
+        for package, deepest in (("a", 1), ("a.b", 2), ("a.b.c", 3)):
+            parts = package.split(".")
+            assert Finder().absolute("x", deepest, package) == \
+                ".".join(parts[:len(parts) - (deepest - 1)] + ["x"])
+            with harness.raises(ImportError_):
+                Finder().absolute("x", deepest + 1, package)
+
+    def test_the_two_refusals_are_cpythons_own_sentences(self):
+        """WHICH refusal it is says what the file's situation was, so the
+        text is CPython's rather than a third wording of our own."""
+        from asmpython.frontends.python.imports import BEYOND_TOP, NO_PARENT
+
+        with harness.raises(ImportError_) as no_package:
+            Finder().absolute("x", 1, "")
+        assert no_package.value.reason == NO_PARENT
+
+        with harness.raises(ImportError_) as too_far:
+            Finder().absolute("x", 3, "a.b")
+        assert too_far.value.reason == BEYOND_TOP
 
 
 class TestFindingTheFile:

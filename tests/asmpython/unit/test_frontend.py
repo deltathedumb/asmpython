@@ -123,11 +123,25 @@ class TestTheDocumentedDiagnostics:
     """
 
     def codes_in_source(self) -> set[str]:
+        """THE WHOLE FRONTEND PACKAGE, not `analysis.py` alone.
+
+        It read one file, and the docstring above says "every code the
+        frontend emits" -- which was true only by coincidence. `E0084` is
+        emitted from `bundled.py` and is documented, and the check passed
+        because `analysis.py` happens to emit it too; `E0000`, the syntax
+        error every user of a mistyped program sees, is emitted from
+        `__init__.py` and was invisible to this in BOTH directions. A new
+        code emitted from `imports.py` would have been undocumented with
+        every test green, which is the exact rot this class exists to stop.
+        """
         import re
         from pathlib import Path
         import asmpython.frontends.python.analysis as analysis
-        text = Path(analysis.__file__).read_text(encoding="utf-8")
-        return set(re.findall(r'"(E\d{4})"', text))
+        found: set[str] = set()
+        for path in sorted(Path(analysis.__file__).parent.glob("*.py")):
+            found |= set(re.findall(r'"(E\d{4})"',
+                                    path.read_text(encoding="utf-8")))
+        return found
 
     def language_doc(self):
         """Where `LANGUAGE.md` actually is.

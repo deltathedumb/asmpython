@@ -57,6 +57,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from . import hostlib
+from ...diagnostics import error
 
 #: The prefix a spliced user name gets. DISTINCT FROM THE BUNDLED ONE, and not
 #: for tidiness: `bundled.splice` refuses a tree that already contains its own
@@ -69,12 +70,29 @@ MANGLE = "_asmpy_module_"
 
 
 class ImportError_(Exception):
-    """A module named in an import that no search path holds."""
+    """A module named in an import that no search path holds.
 
-    def __init__(self, name: str, tried: list[Path]) -> None:
-        super().__init__(name)
+    `reason` IS CPYTHON'S OWN SENTENCE where CPython has one. A relative
+    import that climbs past its package is not "not found" -- the spelling is
+    invalid and no search path could have helped -- and CPython says exactly
+    which of the two it is. Carrying the text here is what lets a diagnostic
+    quote it rather than invent a third wording.
+    """
+
+    def __init__(self, name: str, tried: list[Path],
+                 reason: str = "") -> None:
+        super().__init__(reason or name)
         self.name = name
         self.tried = tried
+        self.reason = reason
+
+
+#: The two sentences CPython raises for a relative import it cannot resolve,
+#: verbatim from `importlib._bootstrap`. `_sanity_check` raises the first and
+#: `_resolve_name` the second, and which one arrives says whether the file had
+#: no package at all or had one and the climb went past it.
+NO_PARENT = "attempted relative import with no known parent package"
+BEYOND_TOP = "attempted relative import beyond top-level package"
 
 
 class Finder:
@@ -111,12 +129,30 @@ class Finder:
         NOT two. A relative import's first dot means "this package", so level
         N goes up N-1 packages from it, and the arithmetic being one off is
         how `from . import x` would silently reach a sibling of the package.
+
+        THE GUARD WAS OFF BY ONE AT THE OTHER END, which is the failure this
+        docstring described and the code then had. CPython's `_resolve_name`
+        raises when `len(package.rsplit('.', level - 1)) < level`, and that
+        length is `min(level, len(parts))` -- so the rule is simply
+        `level > len(parts)`. The guard here was `level - 1 > len(parts)`,
+        one level too permissive, so `from ... import x` inside `a.b`
+        returned a bare `x` and reached a TOP-LEVEL module where CPython
+        refuses outright. Measured: `from .. import outside` inside `pk/`
+        silently spliced the program's own `outside.py`.
+
+        AND AN EMPTY PACKAGE IS A DIFFERENT ERROR, checked first because
+        CPython checks it first: `_sanity_check` runs before `_resolve_name`,
+        so a file with no package at all gets `NO_PARENT` rather than the
+        beyond-top-level sentence it would otherwise fall into.
         """
         if level == 0:
             return name
-        parts = package.split(".") if package else []
-        if level - 1 > len(parts):
-            raise ImportError_(("." * level) + (name or ""), [])
+        spelled = ("." * level) + (name or "")
+        if not package:
+            raise ImportError_(spelled, [], NO_PARENT)
+        parts = package.split(".")
+        if level > len(parts):
+            raise ImportError_(spelled, [], BEYOND_TOP)
         base = parts[:len(parts) - (level - 1)]
         return ".".join(base + ([name] if name else []))
 
@@ -241,23 +277,69 @@ def current() -> Finder:
 # merged tree, which `bundled.splice` then resolves exactly as it resolves the
 # program's own. The other order leaves it unspliced.
 
-def splice(tree, source_path):
+def splice(tree, source, sink=None):
     """Merge the program's own imported modules into `tree`, and return it.
 
     Unchanged when the program imports none of them, so a single-file program
     pays nothing and looks exactly as it did.
+
+    `sink` IS HOW A REFUSED RELATIVE IMPORT GETS SAID OUT LOUD. Resolution
+    happens here and nowhere else, so this is the only pass that can tell
+    `from .. import x` that climbed past its package from a module that is
+    simply absent -- see `_relative_refused`. Optional only so that the unit
+    tests can drive the splice without building one.
     """
     import ast
-    from . import bundled
 
+    from . import bundled
+    from .analysis import span_of
+
+    source_path = getattr(source, "path", source)
     finder = current()
     if not finder.roots:
         return tree
     package = finder.package_of(source_path)
     order, packages, members = [], {}, {}
     seen = set()
+    #: One report per import statement, not per candidate name. `wanted` tries
+    #: every reading of a `from a import b` and is called again for the
+    #: prelude, so an unguarded report arrives three or four times for one
+    #: line.
+    said: set = set()
+    #: Statements already reported by `_relative_refused`. Kept so the
+    #: statement is DROPPED rather than left for the analyser to deny by
+    #: name -- two diagnostics for one mistake, and the second one wrong.
+    refused_ids: set = set()
 
-    def wanted(stmt, in_package):
+    def _relative_refused(stmt, in_module, reason: str, spelled: str) -> None:
+        """A relative import whose level cannot resolve, reported once.
+
+        POINTED AT THE ANCHOR, which is the import statement in the file being
+        compiled. The offending statement is usually in ANOTHER file, and its
+        line number indexes into that file rather than this one -- the same
+        reason the splice remaps every position it emits. Which file it really
+        came from goes in a note, because that is where the reader has to go.
+        """
+        if sink is None:
+            return
+        key = (in_module, spelled, getattr(stmt, "lineno", 0))
+        if key in said:
+            return
+        said.add(key)
+        node = anchor if in_module else stmt
+        report = (error("E0132", f"{spelled!r} cannot be resolved: {reason}")
+                  .at(span_of(source, node or stmt)))
+        if in_module:
+            found = finder.find(in_module)
+            report = report.note(
+                f"written in {in_module!r}"
+                + (f" ({found})" if found else "")
+                + f", line {getattr(stmt, 'lineno', '?')}")
+        sink.report(report.note(
+            "this is the sentence CPython raises for it, and the level "
+            "arithmetic here is CPython's"))
+
+    def wanted(stmt, in_package, in_module=""):
         """The absolute names an import statement could mean, resolvable ones
         only.
 
@@ -280,7 +362,16 @@ def splice(tree, source_path):
                 continue
             try:
                 absolute = finder.absolute(name, level, in_package)
-            except ImportError_:
+            except ImportError_ as refused:
+                # A LEVEL THAT CANNOT RESOLVE IS NOT "NOT FOUND". Swallowing
+                # it left the statement in the merged tree for the analyser to
+                # deny by name -- and for `from .. import x` the name it
+                # denied was the EMPTY STRING, so the program was told "no
+                # module named ''" about a line that says what it means.
+                if refused.reason:
+                    _relative_refused(stmt, in_module, refused.reason,
+                                      ("." * level) + (name or ""))
+                    refused_ids.add(id(stmt))
                 continue
             # THE STANDARD LIBRARY WINS THE NAME. A program's own `queue.py`
             # must not displace the bundled one, or `import queue` quietly
@@ -304,7 +395,7 @@ def splice(tree, source_path):
         found = finder.find(name)
         own = finder.package_of(found)
         for stmt in ast.parse(finder.read(name), filename=str(found)).body:
-            for child in wanted(stmt, own):
+            for child in wanted(stmt, own, name):
                 visit(child)
         packages[name] = own
         order.append(name)
@@ -322,7 +413,9 @@ def splice(tree, source_path):
         parsed = ast.parse(finder.read(module), filename=module)
         borrowed, brought, body = {}, {}, []
         for stmt in parsed.body:
-            names = wanted(stmt, packages[module])
+            names = wanted(stmt, packages[module], module)
+            if id(stmt) in refused_ids:
+                continue
             if isinstance(stmt, ast.ImportFrom) and names:
                 # The statement is DROPPED, because the module it names is
                 # spliced instead -- so every name it bound has to point at
@@ -402,6 +495,8 @@ def splice(tree, source_path):
     names, imported, kept = {}, {}, []
     for stmt in tree.body:
         found = wanted(stmt, package)
+        if id(stmt) in refused_ids:
+            continue
         if isinstance(stmt, ast.Import) and len(found) == len(stmt.names):
             for alias in stmt.names:
                 imported[alias.asname or alias.name] = \

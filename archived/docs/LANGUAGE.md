@@ -361,6 +361,7 @@ The full set the frontend can emit:
 
 | code | what it means |
 | --- | --- |
+| `E0000` | the source is not valid Python; CPython's own `SyntaxError` text |
 | `E0003` | nothing to run: only definitions, and no `main` to call |
 | `E0004` | a duplicate parameter name |
 | `E0005` | `*args`, `**kwargs`, or keyword-only/positional-only parameters |
@@ -466,6 +467,7 @@ The full set the frontend can emit:
 | `E0129` | an import naming a compiled extension module, which has no source to compile |
 | `E0130` | `from <native library> import ...`; a declared library is imported whole |
 | `E0131` | a declared native library named after a module this compiler already has |
+| `E0132` | a relative `import` whose level climbs past its package, or that has no package at all |
 
 Each applies wherever the construct appears, including inside an augmented
 assignment -- `x **= n` reports `E0043` exactly as `x = x ** n` does.

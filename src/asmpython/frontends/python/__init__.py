@@ -193,7 +193,7 @@ class PythonFrontend(Frontend):
         # A spliced user module may `import functools`, and after the first
         # pass that statement is an ordinary one in the merged tree for the
         # second to resolve. The other order leaves it unspliced.
-        tree = user_splice(tree, source.path)
+        tree = user_splice(tree, source, sink)
         tree = splice(tree, source, sink)
         # PEP 3151: `IOError` and `EnvironmentError` ARE `OSError` -- the same
         # object in CPython, not subclasses of it. Rewriting the name here is

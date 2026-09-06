@@ -134,10 +134,12 @@ KNOWN_REFUSED: dict[str, str] = {
         "its submodules resolve -- accidentally PEP-420-shaped for children "
         "and absent for the package itself.",
     "relative_import_climbing_past_the_root":
-        "E0083 at compile time, where CPython raises ImportError the program "
-        "catches. `Finder.absolute`'s guard is `level - 1 > len(parts)` where "
-        "CPython's valid range is `1..len(parts)`, so the climb is accepted, "
-        "resolves to the top-level `outside`, and only fails later by name.",
+        "E0132 at COMPILE time, where CPython raises the same sentence at RUN "
+        "time and the program catches it. The level arithmetic and the text "
+        "are now CPython's exactly -- what is left is that an import is "
+        "resolved while compiling, so a refusal cannot be caught by a `try` "
+        "around the import. That is the splice, and it closes when a module "
+        "gets a run-time existence.",
     "star_import":
         "E0083 and E0052. `from X import *` is never handled, so nothing it "
         "would have bound exists.",
