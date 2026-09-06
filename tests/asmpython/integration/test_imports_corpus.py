@@ -65,10 +65,6 @@ KNOWN_DIVERGENT: dict[str, str] = {
         "bundled, where CPython puts the script's directory at sys.path[0]. "
         "Prints the bundled `keyword.iskeyword('for')` answer instead of the "
         "file sitting beside main.py.",
-    "a_package_beats_a_module_of_the_same_name":
-        "`Finder.find` tries `<name>.py` BEFORE `<name>/__init__.py`, which "
-        "is the inverse of CPython's FileFinder -- a directory with an "
-        "__init__ is a package first and always wins. Prints 'module'.",
     "imported_main_guard_does_not_run":
         "every spliced module shares the program's `__name__`, which is the "
         "constant '__main__' for the whole merged module -- so an imported "
@@ -105,10 +101,11 @@ KNOWN_DIVERGENT: dict[str, str] = {
 #: only shrinks.
 KNOWN_REFUSED: dict[str, str] = {
     "from_import_of_an_absent_member":
-        "E0083. `from helpers import absent` leaves the alias in place and "
-        "the analyser then denies the module itself, about a file that was "
-        "spliced successfully. `bundled.py` has the right diagnostic for "
-        "this already -- E0084, 'module X has no member Y'.",
+        "E0084, which is now the RIGHT sentence -- `module 'helpers' has no "
+        "member 'absent'`, naming the file and listing what it does provide, "
+        "rather than E0083 denying a module that was spliced successfully. "
+        "What is left is that it arrives while compiling, where CPython "
+        "raises ImportError at run time and this program catches it.",
     "guarded_optional_import":
         "E0083, and only for the half that is genuinely absent. The `try: "
         "import helpers` arm works now; `import definitely_not_here` inside a "

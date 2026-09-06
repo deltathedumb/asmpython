@@ -157,10 +157,23 @@ class Finder:
         return ".".join(base + ([name] if name else []))
 
     def find(self, name: str) -> Path | None:
-        """The file holding `name`, or None. A package is its `__init__.py`."""
+        """The file holding `name`, or None. A package is its `__init__.py`.
+
+        A PACKAGE BEATS A MODULE OF THE SAME NAME, and this order is CPython's
+        rather than a preference. `FileFinder._fill_cache` records the
+        directories on a path entry separately from the files, and
+        `find_spec` checks the directory-with-`__init__` FIRST -- so with both
+        `p.py` and `p/__init__.py` on one path entry, `import p` is the
+        package, every time.
+
+        THE ORDER HERE WAS THE INVERSE, and it failed silently: the module
+        won, the package was never looked at, and a program laid out that way
+        printed the wrong one of two files that both exist. Measured against
+        CPython 3.14.7, which answers `package`.
+        """
         rel = name.replace(".", "/")
         for root in self.roots:
-            for candidate in (root / f"{rel}.py", root / rel / "__init__.py"):
+            for candidate in (root / rel / "__init__.py", root / f"{rel}.py"):
                 if candidate.is_file():
                     return candidate
         return None
@@ -573,6 +586,22 @@ def splice(tree, source, sink=None):
                 elif alias.name in members.get(target, ()):
                     names[alias.asname or alias.name] = \
                         bundled._mangled(target, alias.name, MANGLE)
+                elif target in members and sink is not None:
+                    # THE MODULE IS HERE AND THIS MEMBER IS NOT, which is a
+                    # different sentence from "no module named 'helpers'" --
+                    # and that is what a surviving alias used to produce,
+                    # about a file that had just been spliced successfully.
+                    # `bundled.py` reached the same conclusion for the
+                    # standard library and wrote the diagnostic; this is the
+                    # same mistake against a program's own module, so it is
+                    # the same code.
+                    found_at = finder.find(target)
+                    bundled._no_member(
+                        sink, source, stmt, target, alias.name, members,
+                        note=(f"{target!r} is this program's own module"
+                              + (f", {found_at}" if found_at else "")
+                              + " -- it was found and spliced, and defines no"
+                                " such name"))
                 else:
                     # NOT SOMETHING THE MODULE DEFINES, so the import of it
                     # SURVIVES -- it may be a bundled name, or a real mistake

@@ -83,7 +83,8 @@ class _Reserved(Exception):
     """A program used the prefix `splice` reserves for itself."""
 
 
-def _no_member(sink, source, node, module: str, name: str, members) -> None:
+def _no_member(sink, source, node, module: str, name: str, members,
+               note: str = "") -> None:
     """`warnings.deprecated` when `warnings` is bundled and has no such name.
 
     THIS PASS IS THE ONLY ONE THAT CAN SAY IT. A bundled module is spliced and
@@ -110,9 +111,15 @@ def _no_member(sink, source, node, module: str, name: str, members) -> None:
     the diagnostic.
     """
     public = sorted(one for one in members[module] if not one.startswith("_"))
+    # THE NOTE SAYS WHICH KIND OF MODULE IT IS. The mistake is the same for a
+    # bundled module and for one of the program's own files, so the code and
+    # the message are -- but "it covers part of CPython's module, see
+    # docs/STDLIB.md" is false about a file the user wrote, and sends them to
+    # read the standard library's coverage table about their own typo.
     report = (error("E0084", f"module {module!r} has no member {name!r}")
               .at(span_of(source, node))
-              .note(f"{module!r} is bundled: it is Python spliced into this "
+              .note(note or
+                    f"{module!r} is bundled: it is Python spliced into this "
                     f"program rather than an import, and it covers part of "
                     f"CPython's module. See docs/STDLIB.md"))
     if public:
