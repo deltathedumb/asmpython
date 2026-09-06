@@ -164,6 +164,8 @@ class Lowerer(DynamicLowering):
         self.late_arity = getattr(analyzer, "late_arity", set())
         #: Statements that were ctypes declarations. See `dynamic.py`.
         self.ctypes_stmts = getattr(analyzer, "ctypes_stmts", set())
+        self.splice_dunder_stmts = getattr(
+            analyzer, "splice_dunder_stmts", set())
         source_name = source.path.stem if source.path else "module"
         #: The IR symbol per Python function name. The entry point is called
         #: `main` in the IR -- backends rename that to `ENTRY_SYMBOL` and the C

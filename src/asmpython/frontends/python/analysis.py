@@ -1338,6 +1338,12 @@ class Analyzer:
         #: anything, and lowering it as ordinary code looks for a run-time
         #: `ctypes` that was never going to exist.
         self.ctypes_stmts: set = set()
+        #: A splice's `__name__` restoration on a STATICALLY typed `def`.
+        #: Same shape and same reason as `ctypes_stmts`: the statement
+        #: describes the compile rather than doing anything, and lowering
+        #: it looks for a function object that was never going to exist.
+        #: See `_is_splice_dunder`.
+        self.splice_dunder_stmts: set = set()
         #: Python class name -> the backend's table for the type it declares.
         #: `class MyBlock(block.Block)` is not a class in the runtime-object
         #: sense at all: it is a TYPE the backend generates, its instances are
@@ -2356,6 +2362,22 @@ class Analyzer:
                 self._expr(target.value)
                 self._expr(target.slice)
                 self._expr(node.value)
+            case ast.Assign(targets=[ast.Attribute()]) \
+                    if self._is_splice_dunder(node):
+                # DROPPED. A splice restores `__name__` on every definition it
+                # renamed, and a STATICALLY typed function has nothing to
+                # restore it on -- it is a machine-word signature with no
+                # object and no module storage, so the read of its global
+                # trapped at run time with `NameError` naming the mangled
+                # symbol. `from sm import f` where `sm.py` is
+                # `def f() -> int: return 1` -- the language's own annotated
+                # style, across the file boundary R1 is about.
+                #
+                # HERE AND NOT IN THE SPLICE, because this is the only place
+                # that knows which path a `def` takes. Recorded rather than
+                # merely skipped: lowering walks the same tree and would
+                # otherwise emit the read this pass just declined to check.
+                self.splice_dunder_stmts.add(id(node))
             case ast.Assign(targets=[ast.Attribute() as target]) if self.dynamic:
                 # `x.attr = v`. Nothing static to check -- whether `x` has that
                 # attribute, and whether it accepts one, are both runtime
@@ -5336,6 +5358,27 @@ class Analyzer:
 
     def _span_of_def(self, info: FunctionInfo) -> Span:
         return self._span(info.node)
+
+    def _is_splice_dunder(self, node) -> bool:
+        """A splice's `__name__` restoration on a function with no object.
+
+        TRUE ONLY FOR THE COMPILER'S OWN STATEMENT, which is why the splices
+        mark it rather than this matching on the shape: a program is perfectly
+        entitled to write `f.__name__ = 'g'`, and that must go on meaning what
+        it says.
+
+        And true only when the target IS static. A dynamic `def` and every
+        `class` get a real object, and the restoration is what makes
+        `g.__name__` answer `g` instead of `_asmpy_module_m_g` -- dropping it
+        for those would trade a trap for a wrong answer.
+        """
+        if not getattr(node, "splice_dunder", False):
+            return False
+        target = node.targets[0].value
+        if not isinstance(target, ast.Name):
+            return False
+        found = self.functions.get(target.id)
+        return found is not None and not found.dynamic
 
     def _no_module(self, name: str, node) -> None:
         """`name` did not resolve to source. Say WHY, when the answer is known.

@@ -2487,6 +2487,12 @@ class DynamicLowering:
         self.b.span = self._span(node)
         self._dyn_record_position(node)
         match node:
+            case _ if id(node) in self.splice_dunder_stmts:
+                # A SPLICE'S `__name__` RESTORATION ON A STATIC `def`.
+                # The analyser decided this one has no object to restore
+                # it on; emitting it reads a global that is never stored
+                # and traps. See `analysis._is_splice_dunder`.
+                return
             case _ if id(node) in self.ctypes_stmts:
                 # A CTYPES DECLARATION DESCRIBES THE BUILD. `libm =
                 # ctypes.CDLL("m")` names a library for the linker and

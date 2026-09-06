@@ -473,11 +473,21 @@ def splice(tree, source, sink=None):
                                  ast.ClassDef)) and stmt.name.startswith(MANGLE):
                 real = stmt.name[len(bundled._mangled(module, "", MANGLE)):]
                 for dunder in ("__name__", "__qualname__"):
-                    prelude.append(ast.Assign(
+                    fixup = ast.Assign(
                         targets=[ast.Attribute(
                             value=ast.Name(id=stmt.name, ctx=ast.Load()),
                             attr=dunder, ctx=ast.Store())],
-                        value=ast.Constant(value=real)))
+                        value=ast.Constant(value=real))
+                    # MARKED FOR THE ANALYSER, which is the only thing that
+                    # knows whether this `def` will take the STATIC path. A
+                    # static function is machine words and has no object to
+                    # carry a `__name__`, so this assignment reads a global
+                    # that is never stored and traps -- see
+                    # `_is_splice_dunder`. The splice cannot decide it here:
+                    # the rule is thirty lines of annotation analysis and a
+                    # second copy of it would drift.
+                    fixup.splice_dunder = True
+                    prelude.append(fixup)
 
     # EVERY SPLICED NODE POINTS AT THE IMPORT. The positions it arrives with
     # are lines in another file, which do not exist in the one being compiled

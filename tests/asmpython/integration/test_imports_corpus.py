@@ -85,12 +85,6 @@ KNOWN_DIVERGENT: dict[str, str] = {
         "`bundled._mangled` is `prefix + module.replace('.', '_') + '_' + "
         "name`, so `a.b` and `a_b` mint the same symbol and the second "
         "definition wins both. Prints 'a_b' twice.",
-    "an_annotated_function_from_another_module":
-        "the splice appends `<mangled>.__name__ = '<real>'` for every spliced "
-        "def, and a fully annotated function lowers on the STATIC path which "
-        "never stores its global slot -- so the attribute assignment loads an "
-        "unbound global. Traps with NameError on the language's own annotated "
-        "style, which is what R1's users would write.",
     "dotted_import_binds_the_head":
         "`import a.b.c` keys the rewrite map on the dotted string, while the "
         "rewriter matches only a bare `ast.Name` -- so `lib.sub.deep.where()` "
