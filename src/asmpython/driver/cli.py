@@ -69,6 +69,7 @@ def _options(args) -> Options:
         object_runtime=getattr(args, "object_runtime", "ir"),
         import_paths=tuple(Path(p) for p in
                            (getattr(args, "import_path", None) or ())),
+        safe_path=getattr(args, "safe_path", False),
         site_packages=getattr(args, "site_packages", True),
         host_python=getattr(args, "host_python", None),
         native_libraries=tuple(Path(p) for p in
@@ -654,7 +655,14 @@ def build_parser() -> argparse.ArgumentParser:
     def source_args(p):
         p.add_argument("--import-path", action="append", metavar="DIR",
                        help="where to find the program's own modules; the "
-                            "source's own directory is always searched")
+                            "source's own directory is searched too "
+                            "unless -P")
+        # CPYTHON'S OWN FLAG, spelled the same. `-P` is what a program
+        # uses when a file beside it is named after a module it imports
+        # and it wants the real one.
+        p.add_argument("-P", "--safe-path", action="store_true",
+                       help="do not search the source's own directory, "
+                            "as CPython's -P does")
         # THE HOST INSTALLATION'S PACKAGES. Searched LAST, after the bundled
         # standard library, the source's directory and every --import-path,
         # so nothing that resolved before this flag existed resolves

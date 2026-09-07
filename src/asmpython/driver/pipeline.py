@@ -82,8 +82,15 @@ class Options:
     #: choice at the granularity of one function.
     object_runtime: str = "ir"
     #: Extra directories to resolve the program's own imports against. The
-    #: source's own directory is always searched and is not listed here.
+    #: source's own directory is searched too unless `safe_path` says not
+    #: to, and is not listed here.
     import_paths: tuple[Path, ...] = ()
+    #: Leave the SOURCE'S OWN DIRECTORY off the search path -- CPython's
+    #: `-P` / `PYTHONSAFEPATH`, and implied by its `-I`. A program whose
+    #: directory holds a file named after a standard module otherwise
+    #: imports that file, which is what CPython does and what this flag
+    #: exists to switch off.
+    safe_path: bool = False
     #: Whether to search the host Python installation's `site-packages` --
     #: LAST, after everything above. `--no-site-packages` turns it off. See
     #: `frontends/python/hostlib.py` for what a library point is.
@@ -219,8 +226,11 @@ def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
             .help("give the path of a Python interpreter, or pass "
                   "--no-site-packages to search none"))
         return Result()
-    py_imports.use((opts.source.parent,) + tuple(opts.import_paths)
-                   + host.roots, host)
+    # THE SOURCE'S DIRECTORY IS `sys.path[0]`, and comes first for the same
+    # reason CPython puts it there -- unless `--safe-path` removes it, as
+    # `-P` does.
+    own = () if opts.safe_path else (opts.source.parent,)
+    py_imports.use(own + tuple(opts.import_paths) + host.roots, host)
     # DECLARED NATIVE LIBRARIES. Published beside the search path and for the
     # same reason: the frontend is handed a source and a sink, so anything the
     # driver knows and it needs arrives through a module global. Scoped

@@ -59,12 +59,6 @@ HAS_CC = shutil.which("gcc") or shutil.which("cc")
 #: counts as a divergence: the program ran and did not print what CPython
 #: prints.
 KNOWN_DIVERGENT: dict[str, str] = {
-    "a_local_file_shadows_the_bundled_library":
-        "the bundled library wins a name ahead of the source's own directory "
-        "-- `imports.py:288` skips a local file outright when the name is "
-        "bundled, where CPython puts the script's directory at sys.path[0]. "
-        "Prints the bundled `keyword.iskeyword('for')` answer instead of the "
-        "file sitting beside main.py.",
     "imported_main_guard_does_not_run":
         "every spliced module shares the program's `__name__`, which is the "
         "constant '__main__' for the whole merged module -- so an imported "

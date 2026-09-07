@@ -56,9 +56,22 @@ def _cpython(path: Path) -> subprocess.CompletedProcess:
 
 
 def _asmpython(path: Path) -> subprocess.CompletedProcess:
+    """THE SUBJECT, isolated the same way the oracle is.
+
+    `-P` IS THE ANSWER TO THE PARAGRAPH ABOVE, on this side. The oracle
+    passes CPython's `-I`, which implies `-P` and so leaves the script's own
+    directory off `sys.path`; without the matching flag here, `tests/stdlib/
+    re.py` importing `re` finds ITSELF, and the two sides are answering
+    different questions.
+
+    It did not need one until the compiler started resolving a name the way
+    CPython does. The bundled library used to win every name outright, which
+    made this immune by accident -- and made a `keyword.py` beside any real
+    program silently lose to the bundled module.
+    """
     env = {**os.environ, "PYTHONPATH": str(SRC)}
     return subprocess.run(
-        [sys.executable, "-m", "asmpython", "run", str(path)],
+        [sys.executable, "-m", "asmpython", "run", "-P", str(path)],
         capture_output=True, text=True, env=env, cwd=str(ROOT))
 
 

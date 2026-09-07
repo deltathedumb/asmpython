@@ -118,6 +118,18 @@ class Finder:
         #: Empty when no library point is in force, and every lookup on an
         #: empty one answers None.
         self.host: hostlib.HostLibrary = host or hostlib.HostLibrary()
+        #: Which of `roots` are LIBRARY POINTS -- `site-packages` and its
+        #: kind -- resolved the same way `roots` was so the two can be
+        #: compared. Kept because the bundled standard library sits BETWEEN
+        #: the two groups in CPython's order and nothing else could say where
+        #: the line falls; see `find_before_stdlib`.
+        library: set = set()
+        for point in self.host.roots:
+            try:
+                library.add(Path(point).resolve())
+            except OSError:
+                continue
+        self.library_roots: frozenset = frozenset(library)
         self._read: dict[str, str] = {}
 
     # ── resolution ──────────────────────────────────────────────────────────
@@ -173,6 +185,36 @@ class Finder:
         """
         rel = name.replace(".", "/")
         for root in self.roots:
+            for candidate in (root / rel / "__init__.py", root / f"{rel}.py"):
+                if candidate.is_file():
+                    return candidate
+        return None
+
+    def find_before_stdlib(self, name: str) -> Path | None:
+        """`name` on a root that OUTRANKS the standard library, or None.
+
+        THE STANDARD LIBRARY IS NOT FIRST AND IT IS NOT LAST. CPython's
+        `sys.path` is the script's own directory, then `PYTHONPATH`, then the
+        standard library, then `site-packages` -- so a file beside the program
+        DOES displace a stdlib module of the same name, and a package
+        installed years ago does NOT.
+
+        This module's header used to describe the bundled library as position
+        1 and argue for it: "so a program's `queue.py` does not displace the
+        real one, and `import queue` keeps meaning what it meant". CPython
+        does the opposite, and measured it showed: a `keyword.py` beside the
+        program printed the bundled answer under asmpython and the file's own
+        answer under CPython 3.14.7, silently.
+
+        The rule that protection was written for is real and is kept where
+        CPython keeps it -- ahead of `site-packages`, which is the case where
+        an installed package must not decide what a name in this program
+        means.
+        """
+        rel = name.replace(".", "/")
+        for root in self.roots:
+            if root in self.library_roots:
+                continue
             for candidate in (root / rel / "__init__.py", root / f"{rel}.py"):
                 if candidate.is_file():
                     return candidate
@@ -386,10 +428,17 @@ def splice(tree, source, sink=None):
                                       ("." * level) + (name or ""))
                     refused_ids.add(id(stmt))
                 continue
-            # THE STANDARD LIBRARY WINS THE NAME. A program's own `queue.py`
-            # must not displace the bundled one, or `import queue` quietly
-            # stops meaning what it meant.
-            if absolute not in bundled.available() and finder.has(absolute):
+            # THE STANDARD LIBRARY SITS WHERE CPYTHON PUTS IT: after the
+            # program's own directory and `--import-path`, and before
+            # `site-packages`. It used to win every name outright, which is
+            # not a preference this compiler gets to have -- a `keyword.py`
+            # beside the program printed the bundled answer here and the
+            # file's own answer under CPython, with nothing said.
+            if finder.find_before_stdlib(absolute) is not None:
+                out.append(absolute)
+            elif absolute in bundled.available():
+                pass
+            elif finder.has(absolute):
                 out.append(absolute)
         return out
 
