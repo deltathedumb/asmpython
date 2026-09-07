@@ -578,6 +578,18 @@ def splice(tree, source, sink=None):
             target = finder.absolute(stmt.module or "", stmt.level, package)
             left = []
             for alias in stmt.names:
+                if alias.name == "*":
+                    # `from helpers import *`. CPython binds `__all__` when the
+                    # module defines one and every name not starting with `_`
+                    # otherwise -- and the splice already knows the members, so
+                    # this is the same rewrite every named import gets, applied
+                    # to each of them. It was not handled at all: the statement
+                    # survived, and every name it should have bound was
+                    # `E0083` plus an unknown-function error at the use site.
+                    for member in sorted(_exported(finder, target, members)):
+                        names[member] = bundled._mangled(target, member,
+                                                         MANGLE)
+                    continue
                 child = finder.absolute(
                     ((stmt.module + ".") if stmt.module else "") + alias.name,
                     stmt.level, package)
@@ -620,6 +632,44 @@ def splice(tree, source, sink=None):
     rewritten.body = prelude + rewritten.body
     return ast.fix_missing_locations(rewritten)
 
+
+
+def _exported(finder, module: str, members) -> set:
+    """What `from <module> import *` binds, by CPython's rule.
+
+    `__all__` WHEN THE MODULE DEFINES ONE, and every name not starting with an
+    underscore otherwise. Read from the module's own source rather than from
+    the merged tree, because by the time this is asked the definitions have
+    been renamed and `__all__` is a list of the names the module CALLS them,
+    not the names they were spliced under.
+
+    A NON-LITERAL `__all__` FALLS BACK to the underscore rule. `__all__ =
+    [n for n in dir() if ...]` is a value only a running module has, and
+    guessing at it would bind a set no rule predicts; the underscore rule is
+    at least the one the module would have had if it had not written one.
+    """
+    import ast
+
+    known = set(members.get(module, ()))
+    try:
+        parsed = ast.parse(finder.read(module), filename=module)
+    except (ImportError_, OSError, SyntaxError):
+        return {n for n in known if not n.startswith("_")}
+    for stmt in parsed.body:
+        targets = (stmt.targets if isinstance(stmt, ast.Assign)
+                   else [stmt.target] if isinstance(stmt, ast.AnnAssign)
+                   else [])
+        for target in targets:
+            if not (isinstance(target, ast.Name) and target.id == "__all__"):
+                continue
+            value = stmt.value
+            if isinstance(value, (ast.List, ast.Tuple)):
+                named = {e.value for e in value.elts
+                         if isinstance(e, ast.Constant)
+                         and isinstance(e.value, str)}
+                if len(named) == len(value.elts):
+                    return named & known
+    return {n for n in known if not n.startswith("_")}
 
 
 def _keep_bodies_legal(tree) -> None:

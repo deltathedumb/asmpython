@@ -125,9 +125,6 @@ KNOWN_REFUSED: dict[str, str] = {
         "resolved while compiling, so a refusal cannot be caught by a `try` "
         "around the import. That is the splice, and it closes when a module "
         "gets a run-time existence.",
-    "star_import":
-        "E0083 and E0052. `from X import *` is never handled, so nothing it "
-        "would have bound exists.",
 }
 
 
@@ -285,6 +282,7 @@ PROGRAMS: dict[str, dict[str, str]] = {
         "helpers.py": """
             A = 1
             B = 2
+            _HIDDEN = 3
 
             def f():
                 return "f"
@@ -292,6 +290,26 @@ PROGRAMS: dict[str, dict[str, str]] = {
         "main.py": """
             from helpers import *
             print(A, B, f())
+            try:
+                print(_HIDDEN)
+            except NameError:
+                print("underscore names are not bound")
+        """,
+    },
+
+    "star_import_honours_dunder_all": {
+        "helpers.py": """
+            A = 1
+            B = 2
+            __all__ = ["A"]
+        """,
+        "main.py": """
+            from helpers import *
+            print(A)
+            try:
+                print(B)
+            except NameError:
+                print("B is not in __all__")
         """,
     },
 
