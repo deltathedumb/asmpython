@@ -17,18 +17,24 @@ ones in force.
 
 ## Where it sits in the search order, and why it is LAST
 
-`imports.py` searches, first hit wins:
+`imports.py` searches CPython's `sys.path` in CPython's order, first hit wins:
 
-1. the bundled standard library
-2. the directory of the file being compiled
-3. each `--import-path`, in the order given
+1. the directory of the file being compiled -- `sys.path[0]`
+2. each `--import-path`, in the order given -- `PYTHONPATH`
+3. the bundled standard library
 4. **each library point, in the order the interpreter reports them**
 
 Last, and this is the whole of the safety argument. A pip package named
 `typing` or `enum34` must not displace the bundled module of that name, and a
 program's own `helpers.py` must not lose to something installed years ago.
-Putting library points at the end makes both impossible rather than unlikely:
-nothing that resolved before this change resolves differently after it.
+Putting library points at the end makes both impossible rather than unlikely.
+
+THE STANDARD LIBRARY MOVED AND THIS DID NOT. It used to be position 1 and win
+every name; it is position 3 now, because CPython puts a script's own
+directory ahead of it and a `keyword.py` beside the program was losing to the
+bundled module silently. Nothing about the argument for library points being
+LAST changed with it -- the two questions are independent, and only one of
+them had CPython disagreeing.
 
 ## What "resolving" means here, and it is the same splice as everything else
 

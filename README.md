@@ -151,10 +151,15 @@ an interpreter rather than from the command line. `asmpython libraries` prints
 the ones in force and which interpreter they came from; `--host-python PATH`
 asks a different installation, and `--no-site-packages` searches none.
 
-Library points are searched **last**: after the bundled standard library, after
-the source's own directory, and after every `--import-path`. So a package
-installed years ago cannot decide what a name in this program means, and
-nothing that resolved before library points existed resolves differently now.
+Library points are searched **last**: after the source's own directory, after
+every `--import-path`, and after the bundled standard library. So a package
+installed years ago cannot decide what a name in this program means.
+
+The order as a whole is CPython's `sys.path`: the source's own directory, then
+`--import-path`, then the standard library, then library points. A file beside
+the program therefore *does* displace a standard module of the same name, as
+it does under CPython -- and `-P` / `--safe-path` leaves that directory out,
+exactly as CPython's `-P` does.
 
 A pip package is ordinary Python source, so it is **spliced exactly as the
 bundled standard library is** — mangled, ordered so a dependency precedes its

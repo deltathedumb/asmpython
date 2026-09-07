@@ -37,20 +37,29 @@ only shape the rest of the frontend knows".
 
 ## Where it looks
 
-In order, first hit wins:
+CPYTHON'S `sys.path`, IN CPYTHON'S ORDER. First hit wins:
 
-1. the bundled standard library -- so a program's `queue.py` does not displace
-   the real one, and `import queue` keeps meaning what it meant
-2. the directory of the file being compiled
-3. each `--import-path` directory, in the order given
+1. the directory of the file being compiled -- `sys.path[0]`, and `-P` /
+   `--safe-path` leaves it out exactly as CPython's does
+2. each `--import-path` directory, in the order given -- `PYTHONPATH`
+3. the bundled standard library
 4. each LIBRARY POINT -- the host Python installation's `site-packages`, so
-   `import requests` reaches what pip installed. Last for the same reason the
-   standard library is first: a package installed years ago must not decide
-   what a name in this program means. See `hostlib.py`.
+   `import requests` reaches what pip installed
 
-A package is a directory with `__init__.py`; `a.b.c` is `a/b/c.py` or
-`a/b/c/__init__.py`. Relative imports resolve against the importing module's
-own package, which is why every module carries one.
+THE STANDARD LIBRARY IS NEITHER FIRST NOR LAST, and both halves of that are
+load-bearing. A file beside the program DOES displace a stdlib module of the
+same name, which is what CPython does and what this got wrong: a `keyword.py`
+sitting beside `main.py` lost to the bundled module, silently, because this
+list used to read "1. the bundled standard library" and the code agreed with
+it. And a package installed years ago does NOT displace one, which is the
+protection that rule was reaching for -- kept, at position 4, where CPython
+keeps it. `Finder.find_before_stdlib` is the line between the two groups.
+
+A package is a directory with `__init__.py`, and it BEATS a module of the same
+name -- `p/__init__.py` before `p.py`, as `FileFinder` checks directories
+first. `a.b.c` is `a/b/c.py` or `a/b/c/__init__.py`. Relative imports resolve
+against the importing module's own package, which is why every module carries
+one, and the level arithmetic is `_resolve_name`'s exactly.
 """
 from __future__ import annotations
 
