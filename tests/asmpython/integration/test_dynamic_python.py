@@ -174,6 +174,34 @@ PROGRAMS = {
         show("big too big", lambda: (2 ** 70).to_bytes(4, "little"))
         show("bad length", lambda: (1).to_bytes(-1, "big"))
     """,
+    # A BOUND THAT IS WRITTEN AND A BOUND THAT IS GIVEN ARE TWO FACTS. The
+    # frontend knew only the first: `has_start` was a compile-time constant
+    # saying whether the source spelled a bound, and a bound that was spelled
+    # but evaluated to None went down the integer path -- so every container
+    # answered a TypeError about NoneType for `xs[None:None]`, which is
+    # CPython's way of spelling the whole thing. `apy_slice_given` is the
+    # second fact and it can only be a run-time one.
+    "slice_none_bounds": """
+        s = "abcdef"
+        xs = [1, 2, 3, 4]
+        t = (1, 2, 3)
+        b = b"abcd"
+        n = None
+        print(s[None:None], s[None:3], s[1:None], s[::None])
+        print(s[None:None:None], s[n:n:-1], s[None::2])
+        print(xs[None:None], t[None:None], b[None:None])
+        print(bytearray(b"abc")[None:None], range(10)[None:None:2])
+        print(xs[n:n:n], s[n:3], s[1:n], s[::n])
+        def show(label, fn):
+            try:
+                print(label, repr(fn()))
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+        show("step zero  ", lambda: s[::0])
+        show("str bound  ", lambda: s["a":])
+        show("float bound", lambda: s[1.5:])
+        show("list bound ", lambda: xs[[]:])
+    """,
     "traceback_positions": """
         try:
             (1).missing

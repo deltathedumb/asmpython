@@ -35,9 +35,58 @@ APY_API int64_t apy_index(apy_value v);
    was asked for -- which is why the frontend picks the converter rather than
    the converter guessing. */
 APY_API int64_t apy_slice_bound(apy_value v) {
+    /* AN EXPLICIT `None` IS NOT A BOUND, and the caller pairs this with
+       `apy_slice_given`, which reports that it was not given at all. Zero
+       is answered rather than refused because refusing is what
+       `xs[None:None]` used to do. */
+    if (O(v)->kind == APY_NONE_K)
+        return 0;
     if (apy_is_big(v))
         return O(v)->v.big.neg ? -((int64_t)1 << 62) : ((int64_t)1 << 62);
-    return apy_index(v);
+    if (apy_is_int_like(v))
+        return O(v)->v.i;
+    if (O(v)->kind == APY_INST_K) {
+        apy_value got = apy_unary_dunder(v, "__index__");
+        if (apy_error_occurred()) return 0;
+        if (got) {
+            /* A BIG FROM `__index__` CLAMPS TOO. The bound rule is about the
+               POSITION, not about where the number came from. */
+            if (apy_is_big(got))
+                return O(got)->v.big.neg ? -((int64_t)1 << 62)
+                                         : ((int64_t)1 << 62);
+            if (apy_is_int_like(got)) return O(got)->v.i;
+        }
+    }
+    /* NOT `apy_index`'s MESSAGE. CPython words a bad slice bound differently
+       from a bad index, and now that None is accepted the difference
+       matters: its wording NAMES None as one of the things a bound may be. */
+    apy_fail("TypeError",
+             "slice indices must be integers or None or have an "
+             "__index__ method");
+    return 0;
+}
+
+/* Whether this bound was GIVEN, in the sense a slice means.
+
+   `xs[None:None]` IS `xs[:]`. Python reads an explicitly written `None`
+   bound exactly as it reads an omitted one -- which is also why
+   `slice(None, None, None)` is the object a bare `[:]` builds, and why
+   `xs[None::2]` steps from the start rather than raising.
+
+   THE FRONTEND KNOWS WHICH BOUNDS WERE WRITTEN and cannot know which of them
+   EVALUATE to None: `xs[a:b]` is a pair of expressions. So it settles the
+   first half at compile time and this settles the second at run time. */
+APY_API int64_t apy_slice_given(apy_value v) {
+    return O(v)->kind == APY_NONE_K ? 0 : 1;
+}
+
+/* A slice's step, where `None` means ONE rather than nothing.
+
+   Separate from the bound because the default differs and because a step of
+   zero is an error: `xs[::None]` is `xs[::1]`, and answering 0 for the None
+   would turn it into one. */
+APY_API int64_t apy_slice_step(apy_value v) {
+    return O(v)->kind == APY_NONE_K ? 1 : apy_slice_bound(v);
 }
 
 APY_API int64_t apy_index(apy_value v) {

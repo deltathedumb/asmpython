@@ -6070,26 +6070,34 @@ class DynamicLowering:
 
         def bound(expr, default, later):
             if expr is None:
-                return self._holder(self.b.const(T.I64, default)), 0
+                return (self._holder(self.b.const(T.I64, default)),
+                        self._holder(self.b.const(T.I64, 0)))
+            # WHETHER IT WAS WRITTEN IS NOT WHETHER IT IS A BOUND. `xs[a:b]`
+            # is two expressions and either may evaluate to None, which
+            # Python reads as no bound at all -- `xs[None:None]` is `xs[:]`.
+            # So "written" is settled here and "given" is settled at run time
+            # by `apy_slice_given`; both have to be true.
+            value_of = self._dyn_expr(expr)
+            given = self.b.call(T.I64, "apy_slice_given", [value_of])
             # THROUGH `apy_slice_bound`, NOT `apy_index`: a bound of
             # `2 ** 100` clamps where an INDEX of it refuses, and the
             # two cannot be told apart inside the converter.
-            value = self.b.call(T.I64, "apy_slice_bound",
-                                [self._dyn_expr(expr)])
+            value = self.b.call(T.I64, "apy_slice_bound", [value_of])
             # AN i64, not a handle -- `_spill_across_await` stores through the
             # generator's object slots, which hold handles. Kept raw.
-            return self._spill_raw(value, later), 1
+            return self._spill_raw(value, later), self._spill_raw(given, later)
 
         start, has_start = bound(sl.lower, 0, parts[1:])
         stop, has_stop = bound(sl.upper, 0, parts[2:])
-        step = (self._holder(self.b.call(T.I64, "apy_slice_bound",
+        # `apy_slice_step` AND NOT `apy_slice_bound`, because the default
+        # differs: `xs[::None]` is `xs[::1]`, and a step of zero is an error.
+        step = (self._holder(self.b.call(T.I64, "apy_slice_step",
                                          [self._dyn_expr(sl.step)]))
                 if sl.step is not None
                 else self._holder(self.b.const(T.I64, 1)))
         out = self.b.call(T.PTR, "apy_slice",
                           [held(), start(), stop(), step(),
-                           self.b.const(T.I64, has_start),
-                           self.b.const(T.I64, has_stop)])
+                           has_start(), has_stop()])
         self._dyn_check()
         return out
 

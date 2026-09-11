@@ -641,11 +641,74 @@ def apy_slice_bound(v: ptr) -> i64:
     `1 << 62` AND NOT `INT64_MAX`, so that arithmetic on the result -- adding
     a length, negating it -- cannot overflow on the way to being clamped.
     """
+    k: i64 = i64(load(i32, offset(v, 0)))
+    if k == apy_none_kind():
+        # AN EXPLICIT `None` IS NOT A BOUND, so there is no number to give --
+        # and the caller pairs this with `apy_slice_given`, which says the
+        # bound was not given at all. Zero is returned rather than refused
+        # because refusing is what `xs[None:None]` used to do.
+        return 0
     if apy_is_big_of(v):
         if load(i32, offset(v, apy_big_neg_offset())) != 0:
             return -(i64(1) << 62)
         return i64(1) << 62
-    return apy_index(v)
+    if apy_is_int_like_of(v):
+        return apy_int_payload(v)
+    if k == apy_inst_kind():
+        got: ptr = apy_unary_dunder_of(v, rodata(b"__index__\0"))
+        if apy_error_occurred():
+            return 0
+        if got:
+            if apy_is_big_of(got):
+                # A BIG FROM `__index__` CLAMPS TOO. The bound rule is about
+                # the POSITION, not about where the number came from.
+                if load(i32, offset(got, apy_big_neg_offset())) != 0:
+                    return -(i64(1) << 62)
+                return i64(1) << 62
+            if apy_is_int_like_of(got):
+                return apy_int_payload(got)
+    # NOT `apy_index`'s MESSAGE. CPython words a bad slice bound differently
+    # from a bad index, and now that None is accepted the difference matters:
+    # its wording NAMES None as one of the things a bound may be.
+    apy_raise_at(
+        rodata(b"TypeError\0"),
+        rodata(b"slice indices must be integers or None or have an "
+               b"__index__ method\0"))
+    return 0
+
+
+def apy_slice_given(v: ptr) -> i64:
+    """Whether this bound was GIVEN, in the sense a slice means.
+
+    `xs[None:None]` IS `xs[:]`. Python treats an explicitly written `None`
+    bound exactly as it treats an omitted one -- which is why
+    `slice(None, None, None)` is the object a bare `[:]` builds, and why
+    `xs[None::2]` steps from the start rather than raising.
+
+    THE FRONTEND KNOWS WHICH BOUNDS WERE WRITTEN and cannot know which of
+    them EVALUATE to None: `xs[a:b]` is a pair of expressions. So it answers
+    the first half at compile time and this answers the second at run time,
+    and the two are multiplied together into the `has_start`/`has_stop` flags
+    `apy_slice` reads.
+    """
+    # THE KIND TEST IS WRITTEN OUT rather than behind a helper: a helper
+    # would be a fourth symbol to define in the C, in the ported runtime and
+    # in the interpreter's host table, for one comparison.
+    if i64(load(i32, offset(v, 0))) == apy_none_kind():
+        return 0
+    return 1
+
+
+def apy_slice_step(v: ptr) -> i64:
+    """A slice's step, where `None` means ONE rather than nothing.
+
+    Separate from `apy_slice_bound` because the default differs and because
+    a step of zero is an error: `xs[::None]` is `xs[::1]`, and answering 0
+    for the None would turn it into one.
+    """
+    if i64(load(i32, offset(v, 0))) == apy_none_kind():
+        return 1
+    return apy_slice_bound(v)
 
 
 def apy_iadd(a: ptr, b: ptr) -> ptr:

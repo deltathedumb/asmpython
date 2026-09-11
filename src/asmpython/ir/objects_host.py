@@ -1735,9 +1735,54 @@ def _apy_slice_bound(h, a):
     `xs[-(2 ** 100):]` is the whole list as well.
     """
     v = h._get(a[0], "apy_slice_bound")
+    if v is None:
+        # AN EXPLICIT `None` IS NOT A BOUND, and the caller pairs this with
+        # `apy_slice_given`, which reports that it was not given at all.
+        return 0
     if _is_int_like(v) and not -(1 << 63) <= int(v) < (1 << 63):
         return -_HUGE_BOUND if int(v) < 0 else _HUGE_BOUND
-    return _apy_index(h, a)
+    if _is_int_like(v):
+        return _wrap64(int(v))
+    if isinstance(v, Instance) and v.cls.find("__index__") is not None:
+        try:
+            got = v._send("__index__")
+        except _UserFailed:
+            return 0
+        if _is_int_like(got):
+            # A BIG FROM `__index__` CLAMPS TOO. The bound rule is about the
+            # POSITION, not about where the number came from.
+            if not -(1 << 63) <= int(got) < (1 << 63):
+                return -_HUGE_BOUND if int(got) < 0 else _HUGE_BOUND
+            return _wrap64(int(got))
+    # NOT `apy_index`'s MESSAGE. CPython words a bad slice bound differently
+    # from a bad index, and now that None is accepted the difference matters:
+    # its wording NAMES None as one of the things a bound may be.
+    h._fail("TypeError", "slice indices must be integers or None or have an "
+                         "__index__ method")
+    return 0
+
+
+def _apy_slice_given(h, a):
+    """Whether this bound was GIVEN, in the sense a slice means.
+
+    `xs[None:None]` IS `xs[:]`. Python reads an explicitly written `None`
+    bound exactly as it reads an omitted one, which is also why
+    `slice(None, None, None)` is what a bare `[:]` builds. The frontend knows
+    which bounds were WRITTEN and cannot know which of them evaluate to None;
+    this answers the second half.
+    """
+    return 0 if h._get(a[0], "apy_slice_given") is None else 1
+
+
+def _apy_slice_step(h, a):
+    """A slice's step, where `None` means ONE rather than nothing.
+
+    Separate from the bound because the default differs and a step of zero is
+    an error: `xs[::None]` is `xs[::1]`.
+    """
+    if h._get(a[0], "apy_slice_step") is None:
+        return 1
+    return _apy_slice_bound(h, a)
 
 
 def _apy_index(h, a):

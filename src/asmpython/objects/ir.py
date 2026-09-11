@@ -526,7 +526,12 @@ SPLITS: dict[str, tuple[str, ...]] = {
     # ORDERING TWO NUMBERS. The fast half answers everything except a big
     # against a float -- that comparison takes a double apart with `frexp`
     # and `ldexp`, and those are libm.
-    "mathints.py": ("apy_num_f_of", "apy_num_order_of"),
+    "mathints.py": ("apy_num_f_of", "apy_num_order_of",
+                    # AN EXPLICITLY WRITTEN `None` BOUND IS NO BOUND:
+                    # `xs[None:None]` is `xs[:]`. Which bounds were written
+                    # is the frontend's to know and which EVALUATE to None is
+                    # not, so the second half is asked at run time.
+                    "apy_slice_given", "apy_slice_step"),
     # READING AN ATTRIBUTE. The fast half answers an INSTANCE, which is where
     # a program spends its time; the other nine kinds are a page of field
     # names each and stay in the C.
