@@ -31,7 +31,16 @@ from .analysis import (
     _EXC_NAMES, _handler_names, _target_names, int_literal,
     sem_type, span_of,
 )
-from .methods import DICT_PARTS, method_symbol
+from .methods import (
+    DICT_PARTS, DYN_METHOD_TABLE, METHOD_PARAMS, KeywordError, fold_keywords,
+    method_symbol,
+)
+
+#: Methods whose keywords are read by a branch of their own in
+#: `_dyn_builtin_method`, because they are keyword-ONLY and travel to a
+#: different entry point than a positional would. Folding them into
+#: slots would be wrong: there are no slots to fold them into.
+_KEYWORDS_OF_THEIR_OWN = frozenset({"sort", "update"})
 from .modules import member, resolve
 
 #: Python operator -> the runtime call that implements it.
@@ -5579,10 +5588,65 @@ class DynamicLowering:
                                                node.keywords)
             return self._dyn_str_format_call(receiver, node.args,
                                              node.keywords)
-        args = self._dyn_operands(node.args)
+        # A KEYWORD DOES NOT CHANGE THE ARGUMENT COUNT, and the dispatch below
+        # is indexed by count -- so `"a,b,c".split(",", maxsplit=1)` looked
+        # like a one-argument call and the limit was DROPPED. Folded into the
+        # slot it names first; see `methods.fold_keywords`.
+        #
+        # ONLY WHERE THE BUILTIN IS THE ONLY ANSWER. On a name COLLISION the
+        # receiver chooses between a builtin and a user method at run time,
+        # and a keyword the builtin does not know may be exactly right for the
+        # user one -- `datetime.replace(tzinfo=...)` against `str.replace`'s
+        # `count` is that case, and refusing it here would break it.
+        collides = (attr in self.user_method_names or self.extends_builtin)
+        # ONLY A NAME THE BUILTIN DISPATCH KNOWS. `asyncio.wait_for(c,
+        # timeout=1)` is an attribute call with a keyword and is not a builtin
+        # method at all -- it resolves through `apy_getattr`, which handles
+        # keywords perfectly well. Folding every attribute call refused that
+        # one, which is how this guard came to be written.
+        foldable = (attr in DYN_METHOD_TABLE
+                    and attr not in _KEYWORDS_OF_THEIR_OWN)
+        args, lowered_kw, spreads = self._dyn_lower_call(node.args,
+                                                         node.keywords)
+        if foldable and not collides and (node.keywords or attr == "to_bytes"):
+            # `to_bytes` FOLDS WHETHER OR NOT A KEYWORD WAS WRITTEN: `signed`
+            # is keyword-only and the other two have defaults, so every arity
+            # pads to one three-argument entry point rather than a family.
+            try:
+                args = self._dyn_arrange(
+                    attr, args, [kw.arg for kw in node.keywords], lowered_kw,
+                    spreads, pad_to=3 if attr == "to_bytes" else 0)
+            except KeywordError as exc:
+                # A REFUSAL ONLY WHERE THE BUILTIN WOULD HAVE ANSWERED.
+                # `METHOD_PARAMS` holds the eight whose signature was read
+                # out of CPython, so a bad keyword there is a bad one. For
+                # any other name the arity decides: a call the builtin
+                # dispatch cannot serve was going elsewhere anyway, and
+                # refusing it would reject a call that works.
+                if attr in METHOD_PARAMS or method_symbol(
+                        attr, len(args)) is not None:
+                    self._dyn_keyword_error(exc)
+                    return self.b.call(T.PTR, "apy_none", [])
         sym = method_symbol(attr, len(args))
-        if sym is not None and (attr in self.user_method_names
-                                or self.extends_builtin):
+        if sym is not None and collides:
+            # THE BUILTIN HALF GETS THE FOLDED ARGUMENTS TOO, when folding is
+            # possible at all. A program that happens to define its own
+            # `replace` should not make `"aaa".replace("a", "z", count=1)`
+            # start ignoring the count -- which it did, because the collision
+            # path skipped the folding entirely.
+            builtin_args, builtin_sym = args, sym
+            if node.keywords and attr not in _KEYWORDS_OF_THEIR_OWN:
+                try:
+                    builtin_args = self._dyn_arrange(
+                        attr, args, [kw.arg for kw in node.keywords],
+                        lowered_kw, spreads,
+                        pad_to=3 if attr == "to_bytes" else 0)
+                except KeywordError:
+                    # THE KEYWORD IS THE USER METHOD'S. Refusing here would
+                    # reject `datetime.replace(tzinfo=...)`, which is the call
+                    # this whole branch exists to keep working.
+                    builtin_args = args
+                builtin_sym = method_symbol(attr, len(builtin_args)) or sym
             # THE NAME COLLIDES. `add` is a set's method and may equally be a
             # method of a class in this same program, and which one `x.add(1)`
             # means is decided by the receiver at run time -- there is no
@@ -5601,7 +5665,9 @@ class DynamicLowering:
             # plainly has. The receiver decides here too, so it gets the same
             # two-way shape; a program with no such class still pays nothing.
             return self._dyn_method_either(receiver, attr, args, sym,
-                                           node.keywords)
+                                           node.keywords,
+                                           builtin_args=builtin_args,
+                                           builtin_sym=builtin_sym)
         if sym is None:
             # Not a built-in method name: look the attribute up on the
             # receiver and call what comes back. This is the only path a user
@@ -5632,6 +5698,131 @@ class DynamicLowering:
             out = self.b.call(T.PTR, "apy_str_like", [receiver, out])
             self._dyn_check()
         return out
+
+    def _dyn_lower_call(self, positional: list, keywords: list) -> tuple:
+        """Every argument of a call, lowered ONCE, in SOURCE order.
+
+        Python evaluates the positional arguments and then the keywords as
+        written, so that is the order they are lowered in -- and arranging
+        them into slots afterwards cannot change it. An earlier shape of this
+        lowered the positionals, decided to fold, and lowered them again, so
+        `"a,b".split(sep(), maxsplit=1)` called `sep` TWICE.
+        """
+        lowered_pos = self._dyn_operands(positional)
+        named = {}
+        spreads = []
+        for kw in keywords:
+            value = self._dyn_expr(kw.value)
+            # A `**` SPREAD HAS NO NAME, and there can be more than one --
+            # `f(**a, **b)` is legal. Keyed by name they would collapse into
+            # one entry and the others would go unchecked, so they are kept
+            # in a list of their own.
+            if kw.arg is None:
+                spreads.append(value)
+            else:
+                named[kw.arg] = value
+        return lowered_pos, named, spreads
+
+    def _dyn_arrange(self, attr: str, lowered_pos: list, names: list,
+                     lowered_kw: dict, spreads: list = (),
+                     pad_to: int = 0) -> list:
+        """Already-lowered arguments in the order the runtime entry wants.
+
+        RAISES `KeywordError` rather than emitting one: whether a refusal is
+        the right answer depends on which call site is asking. On the
+        builtin-only path it is; on a name collision the user method may want
+        exactly that keyword, so there the caller catches this and leaves the
+        builtin half alone.
+        """
+        if spreads:
+            # `**mapping`. WHAT IT HOLDS IS A RUN-TIME QUESTION, so it cannot
+            # be folded into a slot here -- but it is usually EMPTY, and
+            # `f(*args, **kwargs)` forwarding through a wrapper is exactly
+            # that. So the empty case is answered, by checking at run time,
+            # and only a mapping with something in it is refused. Dropping it
+            # silently is what this whole change exists to stop.
+            for name in names:
+                if name is not None:
+                    raise KeywordError(
+                        f"{attr}() cannot mix a ** mapping with the keyword "
+                        f"{name!r} in this compiler")
+            for mapping in spreads:
+                self._dyn_refuse_nonempty_mapping(attr, mapping)
+            # FALLS THROUGH WITH NO NAMES rather than returning: the
+            # positional arguments may still need padding to the entry
+            # point's arity, which is how `(5).to_bytes(2, "little", **{})`
+            # reaches the three-argument call it belongs in.
+            names = []
+        plan = fold_keywords(attr, len(lowered_pos), names, pad_to=pad_to)
+        if plan is None:
+            return lowered_pos
+        out = []
+        for kind, value in plan:
+            if kind == "pos":
+                out.append(lowered_pos[value])
+            elif kind == "kw":
+                out.append(lowered_kw[value])
+            else:
+                out.append(self._dyn_constant(value))
+        return out
+
+    def _dyn_refuse_nonempty_mapping(self, attr: str, mapping: int) -> None:
+        """Let `f(**{})` through and refuse `f(**{'k': v})`, at run time.
+
+        THE EMPTY CASE IS THE COMMON ONE. A wrapper forwarding `*args,
+        **kwargs` to a built-in method passes an empty mapping nearly always,
+        and that call has an exact answer -- the positional one. What it
+        HOLDS, when it holds anything, is not knowable at compile time and
+        cannot be folded into a slot, so that is the case that is refused.
+        """
+        bad = self.b.new_block("kwspread")
+        fine = self.b.new_block("kwempty")
+        self.b.branch(self.b.cmp(Op.NE, T.I64,
+                                 self.b.call(T.I64, "apy_truth", [mapping]),
+                                 self.b.const(T.I64, 0)), bad, fine)
+        self.b.switch_to(bad)
+        self.b.call(T.PTR, "apy_raise",
+                    [self.b.call(
+                        T.PTR, "apy_make_exc",
+                        [self._dyn_str_literal("TypeError"),
+                         self._dyn_str_literal(
+                             f"{attr}() does not take a non-empty ** mapping "
+                             f"in this compiler; pass the arguments by "
+                             f"name")])])
+        self._dyn_check()
+        self.b.jump(fine)
+        self.b.switch_to(fine)
+
+    def _dyn_keyword_error(self, exc: KeywordError) -> None:
+        """The TypeError CPython raises for a keyword a method cannot take.
+
+        A RUN-TIME RAISE rather than a diagnostic, because that is where
+        CPython puts it and a program may be testing for exactly it -- the
+        same reasoning `dict(a, b)` above is built on. The arguments have
+        already been lowered by the time this is reached, so they still run.
+        """
+        self.b.call(T.PTR, "apy_raise",
+                    [self.b.call(
+                        T.PTR, "apy_make_exc",
+                        [self._dyn_str_literal("TypeError"),
+                         self._dyn_str_literal(str(exc))])])
+        self._dyn_check()
+
+    def _dyn_constant(self, value) -> int:
+        """A Python constant as a runtime value, for a defaulted parameter."""
+        if value is None:
+            return self.b.call(T.PTR, "apy_none", [])
+        if isinstance(value, bool):
+            return self.b.call(T.PTR, "apy_from_bool",
+                               [self.b.const(T.I64, 1 if value else 0)])
+        if isinstance(value, int):
+            return self.b.call(T.PTR, "apy_from_int",
+                               [self.b.const(T.I64, value)])
+        if isinstance(value, str):
+            return self._dyn_str_literal(value)
+        if isinstance(value, bytes):
+            return self._dyn_bytes_literal(value)
+        raise AssertionError(f"no lowering for the default {value!r}")
 
     def _dyn_builtin_method(self, receiver: int, attr: str, args: list,
                             sym: str, keywords=()) -> int:
@@ -5725,7 +5916,8 @@ class DynamicLowering:
         return any(c.builtin_base is not None for c in self.classes.values())
 
     def _dyn_method_either(self, receiver: int, attr: str, args: list,
-                           sym: str, keywords=()) -> int:
+                           sym: str, keywords=(), builtin_args=None,
+                           builtin_sym=None) -> int:
         """One call site, two answers, chosen by the receiver's kind.
 
         The result lands in ONE register written on both paths, which is what
@@ -5772,7 +5964,10 @@ class DynamicLowering:
             args=[self._dyn_builtin_method(
                 self.b.call(T.PTR, "apy_method_self",
                             [receiver, self._dyn_str_literal(attr)]),
-                attr, args, sym, keywords)]))
+                attr,
+                args if builtin_args is None else builtin_args,
+                sym if builtin_sym is None else builtin_sym,
+                keywords)]))
         self.b.jump(done)
 
         self.b.switch_to(done)

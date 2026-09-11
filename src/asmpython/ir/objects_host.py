@@ -3591,6 +3591,10 @@ def _apy_to_bytes_n(h, a):
     v = h._get(a[0], "apy_to_bytes_n")
     length = h._get(a[1], "apy_to_bytes_n")
     order = h._get(a[2], "apy_to_bytes_n")
+    # THE THIRD ARGUMENT IS `signed`, and it is always supplied: lowering pads
+    # every `to_bytes` call to three, so the keyword-only parameter reaches
+    # here as a position rather than being dropped on the way.
+    signed = h._get(a[3], "apy_to_bytes_n")
     if not _is_int_like(v):
         return h._fail("AttributeError", f"'{h.kind_name(v)}' object has no "
                                          f"attribute 'to_bytes'")
@@ -3598,7 +3602,8 @@ def _apy_to_bytes_n(h, a):
         return h._fail("TypeError", "to_bytes() length must be an integer")
     try:
         return h._new(int(v).to_bytes(
-            int(length), "little" if order == "little" else "big"))
+            int(length), "little" if order == "little" else "big",
+            signed=bool(signed)))
     except (OverflowError, ValueError) as exc:
         return h._fail_like(exc)
 

@@ -387,14 +387,75 @@ APY_API apy_value apy_bytes_fromhex(apy_value self, apy_value text) {
     }
 }
 
-/* `n.to_bytes(length, byteorder)`. Big-endian unless told otherwise, which is
-   the argument every caller passes and the reason it has no default here. */
+/* The `k`-th byte of an integer's MAGNITUDE, least significant first, and
+   zero beyond the end -- which is what asking for a wider byte means.
+
+   THE WHOLE REASON THIS EXISTS. `O(v)->v.i` is the int64 an int cell holds,
+   and a BIG integer's cell does not hold its value there: it holds a pointer
+   to the limbs. Reading it as a number put the object's ADDRESS into the
+   answer, so `(2**63).to_bytes(16, 'little')` returned a heap address
+   formatted as data. */
+static int64_t apy_int_mag_byte(apy_value v, int64_t k) {
+    if (apy_is_big(v)) {
+        int64_t which = k / (int64_t)sizeof(apy_limb);
+        if (which >= O(v)->v.big.n) return 0;
+        return (int64_t)((O(v)->v.big.limb[which]
+                          >> ((k % (int64_t)sizeof(apy_limb)) * 8)) & 0xFF);
+    }
+    if (k >= 8) return 0;
+    {   /* NEGATION WRAPS FOR THE MOST NEGATIVE int64 and that is the right
+           answer: -(-2**63) is -2**63 again, and read unsigned that is 2**63,
+           which is exactly its magnitude. */
+        int64_t m = O(v)->v.i;
+        uint64_t u = (uint64_t)(m < 0 ? -m : m);
+        return (int64_t)((u >> (k * 8)) & 0xFF);
+    }
+}
+
+/* How many bytes the magnitude needs, with no leading zeroes. */
+static int64_t apy_int_mag_len(apy_value v) {
+    int64_t top = apy_is_big(v)
+        ? O(v)->v.big.n * (int64_t)sizeof(apy_limb) : 8;
+    while (top > 0 && apy_int_mag_byte(v, top - 1) == 0) top--;
+    return top;
+}
+
+static int apy_int_is_neg(apy_value v) {
+    if (apy_is_big(v)) return O(v)->v.big.neg != 0;
+    return O(v)->v.i < 0;
+}
+
+/* Whether the value fits `n` bytes under the rule the caller asked for.
+
+   THREE RULES, NOT ONE. Unsigned needs the magnitude to fit outright. Signed
+   and positive loses the top bit to the sign, so 127 fits one byte and 128
+   does not. Signed and NEGATIVE reaches one further -- -128 fits one byte --
+   and that extra value is exactly the power of two, so it is the magnitude
+   having a single one bit at the top that makes it fit. */
+static int apy_to_bytes_fits(apy_value v, int64_t n, int64_t used,
+                             int neg, int want_signed) {
+    int64_t top, k;
+    if (used > n) return 0;
+    if (!want_signed) return 1;
+    if (used < n) return 1;
+    top = apy_int_mag_byte(v, n - 1);
+    if (top < 128) return 1;
+    if (!neg || top != 128) return 0;
+    for (k = 0; k < n - 1; k++)
+        if (apy_int_mag_byte(v, k) != 0) return 0;
+    return 1;
+}
+
+/* `n.to_bytes(length, byteorder, signed)`. Big-endian unless told otherwise,
+   which is the C's rule kept: anything that is not exactly "little" is big.
+
+   THE MAGNITUDE IS READ BYTE BY BYTE rather than shifted out of an int64, so
+   a big integer answers its value instead of its address. */
 APY_API apy_value apy_to_bytes_n(apy_value v, apy_value length,
-                                 apy_value order) {
-    int64_t n, i;
-    uint64_t m;
+                                 apy_value order, apy_value signed_) {
+    int64_t n, i, used;
     char *buf;
-    int big;
+    int big, neg, want_signed;
     if (!apy_is_int_like(v))
         return apy_fail2("AttributeError",
                          "'%s' object has no attribute 'to_bytes'%s",
@@ -402,23 +463,40 @@ APY_API apy_value apy_to_bytes_n(apy_value v, apy_value length,
     if (!apy_is_int_like(length))
         return apy_fail("TypeError", "to_bytes() length must be an integer");
     n = O(length)->v.i;
-    if (n < 0 || n > 1024)
+    if (n < 0)
+        return apy_fail("ValueError", "length argument must be non-negative");
+    if (n > 1024)
         return apy_fail("OverflowError", "int too big to convert");
     big = !(O(order)->kind == APY_STR_K
             && strcmp(APY_CSTR(order), "little") == 0);
-    if (O(v)->v.i < 0)
+    want_signed = apy_truth(signed_);
+    neg = apy_int_is_neg(v);
+    if (neg && !want_signed)
         return apy_fail("OverflowError",
                         "can't convert negative int to unsigned");
-    m = (uint64_t)O(v)->v.i;
+    used = apy_int_mag_len(v);
+    if (!apy_to_bytes_fits(v, n, used, neg, want_signed))
+        return apy_fail("OverflowError", "int too big to convert");
     buf = (char *)calloc((size_t)(n ? n : 1) + 1, 1);
     if (!buf) { fputs("asmpython: out of memory\n", stderr); exit(1); }
-    for (i = 0; i < n; i++) {
-        buf[big ? n - 1 - i : i] = (char)(m & 0xFF);
-        m >>= 8;
+    /* LITTLE-ENDIAN FIRST, ALWAYS. The two's complement below carries upward
+       from the least significant byte, which is only simple in this order. */
+    for (i = 0; i < n; i++)
+        buf[i] = (char)apy_int_mag_byte(v, i);
+    if (neg) {
+        int carry = 1;
+        for (i = 0; i < n; i++) {
+            int b = (255 - (unsigned char)buf[i]) + carry;
+            carry = b > 255;
+            buf[i] = (char)(b & 0xFF);
+        }
     }
-    if (m) {
-        free(buf);
-        return apy_fail("OverflowError", "int too big to convert");
+    if (big) {
+        int64_t a = 0, z = n - 1;
+        while (a < z) {
+            char t = buf[a]; buf[a] = buf[z]; buf[z] = t;
+            a++; z--;
+        }
     }
     {
         apy_value out = apy_str_take(buf, n);

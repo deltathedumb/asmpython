@@ -43,6 +43,129 @@ from asmpython.ir.interpreter import Interpreter
 HAS_CC = shutil.which("gcc") or shutil.which("cc")
 
 PROGRAMS = {
+    # A KEYWORD DOES NOT CHANGE THE ARGUMENT COUNT, and the built-in method
+    # dispatch is indexed by count -- so every one of these used to be
+    # DROPPED rather than refused. `split(",", maxsplit=1)` answered three
+    # pieces, `replace(count=1)` replaced all of them, and an unknown keyword
+    # was accepted in silence. Ten methods take a keyword and eight were
+    # wrong; the two that were not, `sort` and `update`, have branches of
+    # their own and are here to keep them that way.
+    "builtin_method_keywords": """
+        print("a,b,c".split(",", maxsplit=1))
+        print("a,b,c".rsplit(",", maxsplit=1))
+        print("a b c".split(maxsplit=1))
+        print("a\\nb".splitlines(keepends=True))
+        print("aaa".replace("a", "b", count=1))
+        print("a\\tb".expandtabs(tabsize=2))
+        print("a".encode(encoding="utf-8", errors="strict"))
+        print(b"a".decode(encoding="utf-8", errors="strict"))
+        xs = [3, 1, 2]
+        xs.sort(reverse=True)
+        print(xs)
+        ys = ["bb", "a"]
+        ys.sort(key=len)
+        print(ys)
+        d = {"a": 1}
+        d.update(b=2)
+        print(sorted(d.items()))
+    """,
+    # AN UNKNOWN KEYWORD IS A TypeError, not a value. Every message here is
+    # CPython 3.14's own wording, because a program may be reading it.
+    "builtin_method_keyword_errors": """
+        def show(label, fn):
+            try:
+                print(label, repr(fn()))
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+        show("unknown   ", lambda: (5).to_bytes(2, "little", nonsense=True))
+        show("duplicate ", lambda: "a,b".split(",", sep=";"))
+        try:
+            "abc".count("a", x=1)
+        except TypeError as e:
+            # CPYTHON NAMES THE OWNER: `str.count() takes no keyword
+            # arguments`. There is no static type for the receiver here --
+            # that is the whole reason the dispatch is by arity -- so the
+            # bare method name is as close as this gets, and the prefix is
+            # normalised away rather than the claim being dropped.
+            print("none taken TypeError:", str(e).replace("str.", ""))
+    """,
+    # A NAME COLLISION MUST NOT COST THE BUILTIN ITS KEYWORDS. When a program
+    # defines its own `replace` or `split`, the receiver picks between the two
+    # at run time -- and the builtin half skipped the folding entirely, so
+    # `"aaa".replace("a", "z", count=1)` replaced all three. The user method
+    # keeps its own keywords, which is why the folding cannot simply refuse
+    # what the builtin does not recognise.
+    "builtin_method_name_collision": """
+        class Thing:
+            def __init__(self, a, b):
+                self.a, self.b = a, b
+            def replace(self, a=None, b=None):
+                return Thing(a if a is not None else self.a,
+                             b if b is not None else self.b)
+            def split(self, sep=None, maxsplit=-1):
+                return ("user", sep, maxsplit)
+        t = Thing(1, 2)
+        r = t.replace(b=9)
+        print(r.a, r.b)
+        print(t.split(",", maxsplit=3))
+        print("a,b,c".split(",", maxsplit=1))
+        print("aaa".replace("a", "z", count=1))
+    """,
+    # AN EMPTY `**` MAPPING IS THE COMMON ONE, and it has an exact answer:
+    # the positional call. A wrapper forwarding `*args, **kwargs` passes one
+    # nearly always. What a NON-EMPTY mapping holds is a run-time fact the
+    # compile-time arrangement cannot use, so that is refused -- loudly, where
+    # it used to be dropped. See `test_method_keywords.py` for the refusal.
+    #
+    # A `*args` SPREAD ON THE POSITIONAL SIDE is a different and OLDER gap and
+    # is not tested here: `s.split(*args)` cannot be counted at compile time,
+    # so it falls to the generic attribute path -- which cannot produce a
+    # bound builtin method at all, and answers AttributeError. That predates
+    # this change and is unaffected by it.
+    "builtin_method_empty_spread": """
+        kw = {}
+        print("a,b,c".split(",", **kw))
+        print("aaa".replace("a", "z", **kw))
+        print((5).to_bytes(2, "little", **kw))
+    """,
+    # EACH ARGUMENT RUNS ONCE. Folding a keyword into its slot means deciding
+    # the arrangement AFTER the arguments are lowered, and a first attempt
+    # lowered the positional ones twice -- so the separator expression here
+    # printed twice and any call with a side effect ran twice.
+    "builtin_method_keyword_evaluation": """
+        def sep():
+            print("evaluated")
+            return ","
+        print("a,b,c".split(sep(), maxsplit=1))
+    """,
+    # `to_bytes` READ A BIG INTEGER'S CELL AS A NUMBER, and a big integer's
+    # cell holds a POINTER to its limbs -- so this printed a heap address
+    # formatted as data, on both compiled paths, while the interpreter was
+    # right. `signed=` was dropped on the way in, and the no-argument and
+    # one-argument forms did not exist.
+    "int_to_bytes": """
+        print((2 ** 63).to_bytes(16, "little"))
+        print((2 ** 63).to_bytes(16, "little", signed=True))
+        print((2 ** 70).to_bytes(16, "little"))
+        print((2 ** 70).to_bytes(16, "big"))
+        print((-(2 ** 70)).to_bytes(16, "little", signed=True))
+        print((-1).to_bytes(2, "little", signed=True))
+        print((-128).to_bytes(1, "big", signed=True))
+        print((127).to_bytes(1, "big", signed=True))
+        print((255).to_bytes())
+        print((255).to_bytes(2))
+        print((0).to_bytes(0, "big"))
+        def show(label, fn):
+            try:
+                print(label, repr(fn()))
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+        show("negative  ", lambda: (-1).to_bytes(2, "little"))
+        show("too big   ", lambda: (300).to_bytes(1, "little"))
+        show("signed edge", lambda: (128).to_bytes(1, "big", signed=True))
+        show("big too big", lambda: (2 ** 70).to_bytes(4, "little"))
+        show("bad length", lambda: (1).to_bytes(-1, "big"))
+    """,
     "traceback_positions": """
         try:
             (1).missing

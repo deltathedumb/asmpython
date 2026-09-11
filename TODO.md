@@ -550,11 +550,24 @@ generated cases, which is exactly what a sweep is for:
 
 | shape | paths wrong | note |
 |---|---|---|
-| `s[None:None:None]` is a TypeError | all three | 687 cases, SIX distinct shapes. Python accepts an explicit `None` bound and means "not given"; `apy_sl_field` gets this right for `slice` objects and the string subscript path does not. |
-| `' '.split()`, `' x'.split()` | compiled only | whitespace is ASCII-only in `apy_str_split`. The interpreter is right. NOW FIXABLE: the Unicode table reached IR this session. |
-| `'İ'.lower()` | compiled only | a one-to-many case mapping -- CPython gives two code points. |
-| `'café'.count('')` | compiled only | counting the empty substring. |
-| `(2**63).to_bytes(16, 'little', signed=True)` | both compiled | **emits the object's ADDRESS.** The handle is read as an integer, which is the exact failure `apy_index_arg`'s comment warns about. The interpreter is right. |
+| `s[None:None:None]` is a TypeError | all three | **STILL OPEN.** 687 cases, SIX distinct shapes. Python accepts an explicit `None` bound and means "not given"; `apy_sl_field` gets this right for `slice` objects and the string subscript path does not. The largest single shape left. |
+| `' '.split()`, `' x'.split()` | ~~compiled only~~ | **CLOSED.** Whitespace was ASCII-only in `apy_str_split`; the Unicode table reaching IR fixed it. |
+| `'İ'.lower()` | compiled only | **STILL OPEN.** A one-to-many case mapping -- CPython gives two code points and the compiled paths give one. |
+| `'café'.count('')` | compiled only | **STILL OPEN.** Counting the empty substring counts BYTES: five characters answer 6. |
+| `(2**63).to_bytes(16, 'little', signed=True)` | ~~both compiled~~ | **CLOSED.** It emitted the object's ADDRESS: a big integer's cell holds a pointer to its limbs and `to_bytes` read that field as the number. `signed=` was dropped on the way in as well, and the no-argument and one-argument forms did not exist. See `apy_int_mag_byte_of`. |
+
+AND ONE THE SWEEP COULD NOT SEE, found by pulling on that thread: **a
+keyword argument to a built-in method was DROPPED**. The dispatch is
+indexed by argument COUNT and a keyword does not change the count, so
+`"a,b,c".split(",", maxsplit=1)` took the one-argument symbol and
+answered three pieces. Eight of the ten methods that take a keyword were
+wrong that way, and an unknown keyword was ignored outright.
+
+THE SWEEP GENERATES POSITIONAL CALLS, which is why 9,339 of them found
+none of it -- a construct the generator does not write is a construct the
+sweep cannot find, which is the sentence this section opens with, one
+level further down. `tools/objects_diff.py` should learn to write a
+keyword.
 
 AND TWO THAT ARE NOT BUGS: `hash(None)` and `hash(b'a')` differ everywhere,
 including from CPython to CPython. They are impl tier and the sweep should

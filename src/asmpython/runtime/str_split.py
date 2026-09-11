@@ -418,18 +418,72 @@ def apy_str_expandtabs(s: ptr, width: ptr) -> ptr:
     return apy_from_bytes(buf, out)
 
 
-def apy_to_bytes_n(v: ptr, length: ptr, order: ptr) -> ptr:
-    """`n.to_bytes(length, order)`.
+def apy_int_mag_byte_of(v: ptr, k: i64) -> i64:
+    """The `k`-th byte of this integer's MAGNITUDE, least significant first.
 
-    ANYTHING LEFT OVER IS AN OVERFLOW, which is why the magnitude is checked
-    AFTER the bytes are written rather than by counting bits first: the loop
-    shifts the value away, and a non-zero remainder means it did not fit.
+    ZERO BEYOND THE END, because a request for a wider byte is a request for
+    the leading zeroes an integer conceptually has.
 
-    BIG-ENDIAN IS THE DEFAULT HERE because anything that is not exactly the
-    string "little" is treated as big -- the C's rule, kept.
+    THE WHOLE REASON THIS EXISTS. `apy_int_payload` is the i64 an int cell
+    holds, and a BIG integer's cell does not hold its value there -- it holds
+    a pointer to the limbs. Reading it as a number put the object's ADDRESS
+    into the answer, so `(2**63).to_bytes(16, 'little')` returned a heap
+    address formatted as data, on every path except the interpreter.
+    """
+    if apy_is_big_of(v):
+        n: i64 = load(i64, offset(v, apy_big_n_offset()))
+        which: i64 = k // apy_limb_size()
+        if which >= n:
+            return 0
+        limb: ptr = ptr(load(u64, offset(v, apy_big_limb_offset())))
+        w: u64 = u64(load(u32, offset(limb, which * apy_limb_size())))
+        return i64((w >> u64((k - which * apy_limb_size()) * 8)) & u64(255))
+    if k >= 8:
+        return 0
+    m: i64 = apy_int_payload(v)
+    if m < 0:
+        # NEGATION WRAPS FOR THE MOST NEGATIVE i64 and that is the right
+        # answer: -(-2**63) is -2**63 again in two's complement, and read as
+        # unsigned that is 2**63, which is exactly its magnitude.
+        m = -m
+    return i64((u64(m) >> u64(k * 8)) & u64(255))
 
-    A NEGATIVE INT IS REFUSED because `signed=` is not supported; two's
-    complement over an arbitrary width is a different function.
+
+def apy_int_mag_len_of(v: ptr) -> i64:
+    """How many bytes the magnitude needs, with no leading zeroes."""
+    top: i64 = 8
+    if apy_is_big_of(v):
+        top = load(i64, offset(v, apy_big_n_offset())) * apy_limb_size()
+    while top > 0:
+        if apy_int_mag_byte_of(v, top - 1) != 0:
+            return top
+        top = top - 1
+    return 0
+
+
+def apy_int_is_neg_of(v: ptr) -> i64:
+    """Whether this integer is negative. A big keeps its sign in a flag."""
+    if apy_is_big_of(v):
+        return i64(load(i32, offset(v, apy_big_neg_offset())))
+    if apy_int_payload(v) < 0:
+        return 1
+    return 0
+
+
+def apy_to_bytes_n(v: ptr, length: ptr, order: ptr, signed: ptr) -> ptr:
+    """`n.to_bytes(length, byteorder, signed)`.
+
+    THE MAGNITUDE IS READ BYTE BY BYTE rather than shifted out of an i64, so
+    a big integer answers its value instead of its address -- see
+    `apy_int_mag_byte_of`, which is the bug this shape exists for.
+
+    THE RANGE TEST IS ON THE MAGNITUDE'S LENGTH, not on what is left over
+    after shifting. The two agree for a small int and only the first is
+    available for a big, and having one rule for both is worth more than the
+    shift being marginally cheaper.
+
+    BIG-ENDIAN IS THE DEFAULT: anything that is not exactly "little" is big,
+    which is the C's rule, kept.
     """
     if not apy_is_int_like_of(v):
         return apy_raise_fmt(
@@ -442,7 +496,10 @@ def apy_to_bytes_n(v: ptr, length: ptr, order: ptr) -> ptr:
             rodata(b"TypeError\0"),
             rodata(b"to_bytes() length must be an integer\0"))
     n: i64 = apy_int_payload(length)
-    if n < 0 or n > 1024:
+    if n < 0:
+        return apy_raise_at(rodata(b"ValueError\0"),
+                            rodata(b"length argument must be non-negative\0"))
+    if n > 1024:
         return apy_raise_at(rodata(b"OverflowError\0"),
                             rodata(b"int too big to convert\0"))
     big: i64 = 1
@@ -450,11 +507,20 @@ def apy_to_bytes_n(v: ptr, length: ptr, order: ptr) -> ptr:
         if apy_cstr_eq(ptr(load(u64, offset(order, apy_str_ptr_offset()))),
                        rodata(b"little\0")):
             big = 0
-    if apy_int_payload(v) < 0:
-        return apy_raise_at(
-            rodata(b"OverflowError\0"),
-            rodata(b"can't convert negative int to unsigned\0"))
-    m: u64 = u64(apy_int_payload(v))
+    want_signed: i64 = apy_truth(signed)
+    neg: i64 = apy_int_is_neg_of(v)
+    # SPELLED AS TWO TESTS, not `neg and not want_signed`: in the machine
+    # subset an i64 and a bool are different types and cannot meet in one
+    # boolean expression.
+    if neg != 0:
+        if want_signed == 0:
+            return apy_raise_at(
+                rodata(b"OverflowError\0"),
+                rodata(b"can't convert negative int to unsigned\0"))
+    used: i64 = apy_int_mag_len_of(v)
+    if apy_to_bytes_fits_of(v, n, used, neg, want_signed) == 0:
+        return apy_raise_at(rodata(b"OverflowError\0"),
+                            rodata(b"int too big to convert\0"))
     room: i64 = n
     if room == 0:
         room = 1
@@ -465,18 +531,67 @@ def apy_to_bytes_n(v: ptr, length: ptr, order: ptr) -> ptr:
     while z <= room:
         store(u8, u8(0), offset(buf, z))
         z = z + 1
+    # LITTLE-ENDIAN FIRST, ALWAYS. The two's complement below carries from the
+    # least significant byte upward, which is only simple in this order; the
+    # bytes are reversed at the end if the caller asked for big-endian.
     i: i64 = 0
     while i < n:
-        at: i64 = i
-        if big:
-            at = n - 1 - i
-        store(u8, u8(i64(m & u64(255))), offset(buf, at))
-        m = m >> u64(8)
+        store(u8, u8(apy_int_mag_byte_of(v, i)), offset(buf, i))
         i = i + 1
-    if m != u64(0):
-        return apy_raise_at(rodata(b"OverflowError\0"),
-                            rodata(b"int too big to convert\0"))
+    if neg != 0:
+        carry: i64 = 1
+        j: i64 = 0
+        while j < n:
+            b: i64 = (255 - i64(load(u8, offset(buf, j)))) + carry
+            carry = 0
+            if b > 255:
+                b = b - 256
+                carry = 1
+            store(u8, u8(b), offset(buf, j))
+            j = j + 1
+    if big != 0:
+        a: i64 = 0
+        b2: i64 = n - 1
+        while a < b2:
+            t: i64 = i64(load(u8, offset(buf, a)))
+            store(u8, load(u8, offset(buf, b2)), offset(buf, a))
+            store(u8, u8(t), offset(buf, b2))
+            a = a + 1
+            b2 = b2 - 1
     return apy_bytes_literal(buf, n)
+
+
+def apy_to_bytes_fits_of(v: ptr, n: i64, used: i64, neg: i64,
+                         want_signed: i64) -> i64:
+    """Whether the value fits `n` bytes, under the rule the caller asked for.
+
+    THREE RULES, NOT ONE. Unsigned needs the magnitude to fit outright. Signed
+    and positive loses the top bit to the sign, so 127 fits one byte and 128
+    does not. Signed and NEGATIVE reaches one further in that direction -- -128
+    fits one byte -- and that extra value is exactly the power of two, so it is
+    the magnitude having a single one bit at the top that makes it fit.
+    """
+    if used > n:
+        return 0
+    if want_signed == 0:
+        return 1
+    if used < n:
+        return 1
+    top: i64 = apy_int_mag_byte_of(v, n - 1)
+    if top < 128:
+        return 1
+    if neg == 0:
+        return 0
+    if top != 128:
+        return 0
+    # THE ONE EXTRA VALUE. -2**(8n-1) is the only magnitude with the top bit
+    # set that fits, and it has no other bit set at all.
+    k: i64 = 0
+    while k < n - 1:
+        if apy_int_mag_byte_of(v, k) != 0:
+            return 0
+        k = k + 1
+    return 1
 
 
 def apy_str_splitlines(s: ptr) -> ptr:

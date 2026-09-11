@@ -141,7 +141,10 @@ DYN_METHOD_TABLE = {
     # separator form is bytes' alone.
     "hex":          ["apy_hex_of", "apy_bytes_hex"],
     "fromhex":      [None, "apy_bytes_fromhex"],
-    "to_bytes":     [None, None, "apy_to_bytes_n"],
+    # `to_bytes` TAKES ITS THREE PARAMETERS ALWAYS. Lowering pads the ones the
+    # call left out, because `signed` is keyword-only and the other two have
+    # defaults -- so every arity reaches one entry point rather than three.
+    "to_bytes":     [None, None, None, "apy_to_bytes_n"],
     "as_integer_ratio": ["apy_as_integer_ratio"],
     "expandtabs":   ["apy_str_expandtabs", "apy_str_expandtabs"],
     "translate":    [None, "apy_str_translate"],
@@ -202,3 +205,118 @@ def method_symbol(name: str, argc: int) -> str | None:
     if syms is None or argc >= len(syms):
         return None
     return syms[argc]
+
+
+# ── keyword arguments ───────────────────────────────────────────────────────
+#
+# WHY THIS TABLE EXISTS. `DYN_METHOD_TABLE` is indexed by ARGUMENT COUNT, and
+# a keyword argument does not change the count -- so `"a,b,c".split(",",
+# maxsplit=1)` looked like a one-argument call, dispatched to the
+# one-argument symbol, and the limit was DROPPED. Not refused: dropped. The
+# program printed `['a', 'b', 'c']` and nothing anywhere said why.
+#
+# Eight of the ten built-in methods that take a keyword were wrong that way,
+# and an unknown keyword was ignored too -- `(5).to_bytes(2, 'little',
+# nonsense=True)` answered a value where CPython raises TypeError.
+#
+# READ OUT OF CPYTHON'S OWN SIGNATURES rather than transcribed, the same way
+# the `compile()` probes were: `inspect.signature` over every name in
+# `DYN_METHOD_TABLE`, on every builtin type that has it.
+#
+# ONE TABLE PER METHOD IS SOUND ONLY WHILE THE OWNERS AGREE, and for the eight
+# here they do. `translate` is the one that does not -- `str.translate(table)`
+# takes no keyword and `bytes.translate(table, delete=b"")` takes one -- and it
+# is absent for a simpler reason: this compiler does not implement
+# `bytes.translate` at any arity, so there is no call for the entry to serve.
+# `test_method_keywords.py` asks CPython both questions again on every run.
+
+#: A parameter that has no default: leaving it out is a TypeError, not a
+#: substitution. Distinct from `None`, which is a real default for `split`.
+REQUIRED = object()
+
+#: A parameter that cannot be given by name -- CPython marks it positional
+#: only, so `"aaa".replace(old="a", ...)` is an error there and here.
+POSITIONAL_ONLY = None
+
+#: method -> its parameters IN POSITIONAL ORDER, each `(name, default)`.
+#:
+#: `sort` and `update` are absent ON PURPOSE: both already have a branch of
+#: their own in the lowering, because their keywords are keyword-ONLY and
+#: travel to a different entry point than a positional would. A method here
+#: takes its keywords by POSITION, which is the whole mechanism -- the
+#: keyword is moved into the slot it names and the ordinary arity dispatch
+#: then sees the call it should have seen all along.
+METHOD_PARAMS: dict[str, tuple[tuple[str | None, object], ...]] = {
+    "split":      (("sep", None), ("maxsplit", -1)),
+    "rsplit":     (("sep", None), ("maxsplit", -1)),
+    "splitlines": (("keepends", False),),
+    "replace":    ((POSITIONAL_ONLY, REQUIRED), (POSITIONAL_ONLY, REQUIRED),
+                   ("count", -1)),
+    "expandtabs": (("tabsize", 8),),
+    "encode":     (("encoding", "utf-8"), ("errors", "strict")),
+    "decode":     (("encoding", "utf-8"), ("errors", "strict")),
+    "to_bytes":   (("length", 1), ("byteorder", "big"), ("signed", False)),
+}
+
+
+class KeywordError(Exception):
+    """A keyword this method cannot take. Carries CPython's own wording."""
+
+
+def fold_keywords(name: str, argc: int, given: list[str],
+                  pad_to: int = 0) -> list | None:
+    """How to arrange `argc` positional and these named arguments, or None.
+
+    ANSWERS A PLAN RATHER THAN VALUES, because the caller has to LOWER each
+    argument and the order it lowers them in is the order the program must
+    evaluate them in -- which is source order, not the positional order the
+    plan describes. Returning a plan lets the caller do both.
+
+    Each entry is `("pos", i)`, `("kw", name)` or `("default", value)`.
+    `None` means there were no keywords and the call is already positional.
+
+    RAISES RATHER THAN DROPS. An unknown keyword, a duplicate, or a missing
+    required parameter is a TypeError in CPython, so it is an error here --
+    the alternative is the silent wrong answer this table was written for.
+    """
+    if not given and not pad_to:
+        return None
+    params = METHOD_PARAMS.get(name)
+    if params is None:
+        # CPython writes `str.count()`, naming the OWNER. There is no static
+        # type for the receiver here -- that is the whole reason the dispatch
+        # is by arity -- so the bare method name is as close as this can get.
+        raise KeywordError(f"{name}() takes no keyword arguments")
+    index = {p: i for i, (p, _) in enumerate(params) if p is not None}
+    slots: dict[int, tuple] = {i: ("pos", i) for i in range(argc)}
+    if argc > len(params):
+        raise KeywordError(f"{name}() takes at most {len(params)} arguments")
+    for kw in given:
+        at = index.get(kw)
+        if at is None:
+            raise KeywordError(
+                f"{name}() got an unexpected keyword argument {kw!r}")
+        if at in slots:
+            # CPYTHON'S OWN WORDING, position counted from one -- it names the
+            # slot the caller already filled, which is the useful half.
+            raise KeywordError(f"argument for {name}() given by name "
+                               f"({kw!r}) and position ({at + 1})")
+        slots[at] = ("kw", kw)
+    # FILL THE GAPS, so the arity dispatch sees a contiguous call. Every
+    # default here is a value the runtime already accepts in that position --
+    # `"a b c".split(None, 1)` is a call the runtime answers correctly today,
+    # which is why folding can lean on it rather than needing new symbols.
+    # `pad_to` FILLS THE TAIL AS WELL AS THE GAPS, for a method whose runtime
+    # entry point takes every parameter and lets the defaults be supplied here.
+    highest = max(max(slots) if slots else -1, pad_to - 1)
+    plan = []
+    for i in range(highest + 1):
+        if i in slots:
+            plan.append(slots[i])
+            continue
+        _, default = params[i]
+        if default is REQUIRED:
+            raise KeywordError(
+                f"{name}() missing required argument {params[i][0]!r}")
+        plan.append(("default", default))
+    return plan
