@@ -265,14 +265,31 @@ static apy_value apy_str_index_of(apy_value s, apy_value sub) {
    an empty needle counts the gaps: `'abc'.count('')` is 4. */
 APY_API apy_value apy_str_count_in_of(apy_value s, apy_value sub,
                                      apy_value start, apy_value end) {
-    int64_t lo = 0, hi, m, i, hits = 0;
+    int64_t lo = 0, hi, m, i, n, hits = 0;
+    /* BYTES COUNTS OCTETS AND STR COUNTS CHARACTERS. One function serves
+       both receivers, so the unit is a fact about `s` rather than about the
+       code: `"éàbcé".count("é", 1, 5)` names characters, and answering it
+       over bytes found nothing. */
+    int wide = O(s)->kind == APY_STR_K;
     if (!apy_str_other("count", 1, sub)) return 0;
-    hi = O(s)->v.s.n;
+    n = wide ? apy_str_chars(s) : O(s)->v.s.n;
+    hi = n;
     if (start && !apy_slice_arg(start, &lo)) return 0;
     if (end && !apy_slice_arg(end, &hi)) return 0;
-    apy_clamp_range(O(s)->v.s.n, &lo, &hi);
+    apy_clamp_range(n, &lo, &hi);
     m = O(sub)->v.s.n;
+    /* AN EMPTY NEEDLE COUNTS POSITIONS, and a str's positions are BETWEEN
+       CHARACTERS: `"café".count("")` is 5 and not 6. Counting byte
+       boundaries put a position inside the two bytes of the `é`, which is a
+       place Python says nothing can go. */
     if (m == 0) return apy_from_int(hi >= lo ? hi - lo + 1 : 0);
+    /* THE WINDOW CROSSES INTO BYTES HERE, once. A non-empty needle can only
+       match at a character boundary -- UTF-8 is prefix-free there -- so the
+       walk itself needs no conversion. */
+    if (wide) {
+        lo = apy_char_to_byte(s, lo);
+        hi = apy_char_to_byte(s, hi);
+    }
     for (i = lo; i + m <= hi; ) {
         if (memcmp(O(s)->v.s.p + i, O(sub)->v.s.p, (size_t)m) == 0) {
             hits++;
@@ -1031,8 +1048,16 @@ static apy_value apy_replace_impl(apy_value s, apy_value old, apy_value new_,
     cap = (n + 1) * (k + 1) + n + 1;
     buf = (char *)malloc((size_t)cap + 1);
     if (m == 0) {
+        /* AN EMPTY NEEDLE MATCHES BETWEEN CHARACTERS and not between bytes:
+           `"日".replace("", "-")` is `"-日-"`, and inserting at every byte
+           boundary put a dash inside the three bytes the character is made
+           of -- splitting it into rubbish. A bytes receiver counts octets
+           and is left alone. */
+        int wide = O(s)->kind == APY_STR_K;
         for (i = 0; i <= n; i++) {
-            if (limit < 0 || hits < limit) {
+            int starts = i == n || !wide
+                || ((unsigned char)O(s)->v.s.p[i] & 0xC0) != 0x80;
+            if (starts && (limit < 0 || hits < limit)) {
                 memcpy(buf + out, O(new_)->v.s.p, (size_t)k);
                 out += k;
                 hits++;

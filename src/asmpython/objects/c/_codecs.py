@@ -556,7 +556,12 @@ APY_API apy_value apy_str_expandtabs(apy_value s, apy_value width) {
             while (pad-- > 0 && out < cap) { buf[out++] = ' '; col++; }
         } else {
             if (out < cap) buf[out++] = c;
-            col = (c == '\n' || c == '\r') ? 0 : col + 1;
+            /* A COLUMN IS A CHARACTER AND NOT A BYTE. A continuation byte
+               is `10xxxxxx` and adds nothing; counting it made `"é\tx"`
+               reach column 2 after one character and the tab stop land one
+               place early. */
+            col = (c == '\n' || c == '\r') ? 0
+                : ((c & 0xC0) == 0x80 ? col : col + 1);
         }
     }
     buf[out] = 0;

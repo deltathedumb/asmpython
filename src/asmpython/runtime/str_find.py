@@ -354,14 +354,28 @@ def apy_str_count_in_of(s: ptr, sub: ptr, start: ptr, end: ptr) -> ptr:
     AN EMPTY NEEDLE MATCHES BETWEEN EVERY PAIR and at both ends, which is
     `hi - lo + 1` positions -- and zero when the window is empty.
 
-    BYTES, AND THAT IS RIGHT HERE: a non-empty needle can only match at a
-    character boundary, because UTF-8 is prefix-free at those boundaries. The
-    empty needle counts POSITIONS, which is a byte answer for a byte window,
-    and the C answers the same.
+    THE BOUNDS ARE THE RECEIVER'S OWN UNIT and the search is always bytes,
+    which is the same "clamp in characters, search in bytes" shape
+    `apy_str_seek` has. A non-empty needle can only match at a character
+    boundary -- UTF-8 is prefix-free there -- so the walk needs no conversion
+    of its own; the two ENDS do, because `"éàbcé".count("é", 1, 5)` names
+    characters and answering it over bytes found nothing.
+
+    AN EMPTY NEEDLE COUNTS POSITIONS, and a str's positions are BETWEEN
+    CHARACTERS: `"café".count("")` is 5 and not 6. Counting byte boundaries
+    put a position inside the two bytes of the `é`, which is a place Python
+    says nothing can go.
     """
     if not apy_str_other_of(rodata(b"count\0"), 1, sub):
         return ptr(0)
+    # BYTES COUNTS OCTETS AND STR COUNTS CHARACTERS. One function serves both
+    # receivers, so the unit is a fact about `s` rather than about the code.
+    wide: i64 = 0
+    if i64(load(i32, offset(s, 0))) == apy_str_kind():
+        wide = 1
     n: i64 = load(i64, offset(s, apy_str_len_offset()))
+    if wide:
+        n = apy_str_char_count(s)
     bounds: ptr = apy_affix_bounds()
     store(i64, 0, bounds)
     store(i64, n, offset(bounds, 8))
@@ -379,6 +393,11 @@ def apy_str_count_in_of(s: ptr, sub: ptr, start: ptr, end: ptr) -> ptr:
         if hi >= lo:
             return apy_from_int(hi - lo + 1)
         return apy_from_int(0)
+    # THE WINDOW CROSSES INTO BYTES HERE, once, and the walk below is the
+    # same one a bytes receiver takes.
+    if wide:
+        lo = apy_str_char_to_byte(s, lo)
+        hi = apy_str_char_to_byte(s, hi)
     sp: ptr = ptr(load(u64, offset(s, apy_str_ptr_offset())))
     np: ptr = ptr(load(u64, offset(sub, apy_str_ptr_offset())))
     hits: i64 = 0

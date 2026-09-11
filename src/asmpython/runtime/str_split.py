@@ -373,6 +373,12 @@ def apy_str_expandtabs(s: ptr, width: ptr) -> ptr:
     THE COLUMN RESETS ON A LINE BREAK, so each line is tabulated from its own
     start rather than from the beginning of the string.
 
+    A COLUMN IS A CHARACTER AND NOT A BYTE, which is the whole of what UTF-8
+    changes here: counting bytes made `"é\tx"` reach column 2 after one
+    character and the tab stop land one place early. A continuation byte is
+    `10xxxxxx` and adds nothing to the column; every other byte starts a
+    character and adds one.
+
     THE BUFFER IS SIZED FOR EVERY BYTE BEING A TAB, which is the worst case
     and cheap in a bump arena.
     """
@@ -411,7 +417,7 @@ def apy_str_expandtabs(s: ptr, width: ptr) -> ptr:
                 out = out + 1
             if c == 13 or c == 10:
                 col = 0
-            else:
+            elif (c & 192) != 128:
                 col = col + 1
         i = i + 1
     store(u8, u8(0), offset(buf, out))

@@ -318,6 +318,38 @@ PROGRAMS = {
         print(bytes(bb), len(bb), bb.decode())
         show("bytes del  ", lambda: b"abc".__delitem__(0))
     """,
+    # A POSITION AND A WIDTH ARE CHARACTERS, and five places counted bytes.
+    # Every one of them was invisible in ASCII and wrong the moment a string
+    # held anything else: `"café".count("")` answered 6 because it counted
+    # byte boundaries, one of which is inside the two bytes of the `é`.
+    "character_positions_and_widths": """
+        def show(label, fn):
+            try:
+                print(label, repr(fn()))
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        s = "éàbcé"
+        # AN EMPTY NEEDLE COUNTS THE PLACES BETWEEN CHARACTERS.
+        print("café".count(""), "abc".count(""), "".count(""))
+        print(b"abc".count(b""), b"".count(b""))
+        # AND THE BOUNDS NAME CHARACTERS, which is what `find` already did.
+        print(s.count("é"), s.count("é", 1, 5), s.count("é", 1), s.count("é", 0, 1))
+        print(b"a-b".count(b"-", 1, 3))
+        # AN EMPTY NEEDLE IN `replace` INSERTS BETWEEN CHARACTERS TOO.
+        print("café".replace("", "-"))
+        print("日本".replace("", "-"), "日本".replace("", "-", 2))
+        print(b"ab".replace(b"", b"-"))
+        # A TAB STOP COUNTS COLUMNS AND A COLUMN IS A CHARACTER.
+        print(repr("é\tx".expandtabs(4)), repr("ab\tx".expandtabs(4)))
+        print(repr("日\tx".expandtabs(2)))
+        # A FORMAT WIDTH IS A CHARACTER COUNT, its fill is a CHARACTER, and
+        # its precision truncates characters.
+        print("{:>7}".format(s), "{:<7}".format(s), "{:^7}".format(s))
+        print("{:*>7}".format(s), "{:é>7}".format("ab"), "{:é^7}".format("ab"))
+        print("{:.2}".format(s), format(s, ">7"), f"{s:>7}")
+        print("{:>7}".format(42), "{:08.2f}".format(-1.5))
+    """,
     "traceback_positions": """
         try:
             (1).missing

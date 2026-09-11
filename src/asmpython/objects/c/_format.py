@@ -20,7 +20,13 @@ C = r"""/* --- format specs ----------------------------------------------------
    for a program to hand `%n` to the C library. */
 
 typedef struct {
-    char fill, align, sign, type, group;
+    /* THE FILL IS A CHARACTER AND NOT A BYTE. `"{:é>7}"` is an ordinary spec
+       in Python and was refused here as invalid, because one `char` cannot
+       hold `é` and the align was looked for at byte 1, which is the middle
+       of it. */
+    const char *fill;
+    int filln;
+    char align, sign, type, group;
     /* PEP 682's `z`: a negative zero formats as a POSITIVE one. It sits
        between the sign and the `#`, and it is about the VALUE rather than
        about the padding, which is why it is a flag of its own. */
@@ -29,14 +35,27 @@ typedef struct {
 
 static int apy_spec_parse(const char *p, int64_t n, apy_spec *out) {
     int64_t i = 0;
-    out->fill = ' '; out->align = 0; out->sign = 0; out->type = 0;
+    int64_t fw;
+    out->fill = " "; out->filln = 1;
+    out->align = 0; out->sign = 0; out->type = 0;
     out->group = 0; out->alt = 0; out->zero = 0; out->width = 0;
     out->precision = 0; out->has_precision = 0; out->coerce_zero = 0;
     /* FILL is only a fill when an align follows it, which is why position 1 is
        examined before position 0: in `{:<5}` the `<` is the align and in
        `{:*<5}` the `*` is the fill. */
-    if (n >= 2 && (p[1] == '<' || p[1] == '>' || p[1] == '^' || p[1] == '=')) {
-        out->fill = p[0]; out->align = p[1]; i = 2;
+    /* HOW WIDE THE FIRST CHARACTER IS, from its lead byte alone -- which is
+       all UTF-8 needs to say where the next one starts. Written out rather
+       than borrowed: the decoder lives in a part that comes after this one. */
+    fw = 0;
+    if (n) {
+        unsigned char c0 = (unsigned char)p[0];
+        fw = c0 >= 0xF0 ? 4 : c0 >= 0xE0 ? 3 : c0 >= 0xC0 ? 2 : 1;
+        if (fw > n) fw = n;
+    }
+    if (n > fw && (p[fw] == '<' || p[fw] == '>' || p[fw] == '^'
+                   || p[fw] == '=')) {
+        out->fill = p; out->filln = (int)fw; out->align = p[fw];
+        i = fw + 1;
     } else if (n >= 1 && (p[0] == '<' || p[0] == '>' || p[0] == '^'
                           || p[0] == '=')) {
         out->align = p[0]; i = 1;
@@ -49,7 +68,7 @@ static int apy_spec_parse(const char *p, int64_t n, apy_spec *out) {
         /* A leading zero means `0=` -- padding between the sign and the
            digits -- unless an explicit align already said otherwise. */
         out->zero = 1;
-        if (!out->align) { out->align = '='; out->fill = '0'; }
+        if (!out->align) { out->align = '='; out->fill = "0"; out->filln = 1; }
         i++;
     }
     while (i < n && p[i] >= '0' && p[i] <= '9')
@@ -87,36 +106,48 @@ static int64_t apy_group_digits(char *body, int64_t n, char group) {
    `000-1.50`. */
 static apy_value apy_spec_pad(const char *body, int64_t n, const apy_spec *sp,
                          int numeric) {
-    int64_t width = sp->width, pad, left, i, out = 0, signlen = 0;
+    int64_t width = sp->width, pad, left, i, out = 0, signlen = 0, chars = 0;
     char align = sp->align;
     char *buf;
     if (!align) align = numeric ? '>' : '<';
-    if (width <= n) return apy_str_copy(body, n);
-    pad = width - n;
-    buf = (char *)malloc((size_t)width + 1);
+    /* A WIDTH IS A CHARACTER COUNT. Comparing it against the BYTE length
+       under-padded every non-ASCII body -- `"{:>7}".format("éàb")` came out
+       unpadded, because three characters in five bytes looked wide enough. A
+       continuation byte is `10xxxxxx` and every other byte starts a
+       character. */
+    for (i = 0; i < n; i++)
+        if (((unsigned char)body[i] & 0xC0) != 0x80) chars++;
+    if (width <= chars) return apy_str_copy(body, n);
+    pad = width - chars;
+    buf = (char *)malloc((size_t)(n + pad * sp->filln) + 1);
     if (!buf) { fputs("asmpython: out of memory\n", stderr); exit(1); }
     if (align == '=') {
         if (n && (body[0] == '-' || body[0] == '+' || body[0] == ' '))
             signlen = 1;
         memcpy(buf, body, (size_t)signlen);
         out = signlen;
-        for (i = 0; i < pad; i++) buf[out++] = sp->fill;
+        for (i = 0; i < pad; i++) { memcpy(buf + out, sp->fill,
+            (size_t)sp->filln); out += sp->filln; }
         memcpy(buf + out, body + signlen, (size_t)(n - signlen));
         out += n - signlen;
     } else if (align == '>') {
-        for (i = 0; i < pad; i++) buf[out++] = sp->fill;
+        for (i = 0; i < pad; i++) { memcpy(buf + out, sp->fill,
+            (size_t)sp->filln); out += sp->filln; }
         memcpy(buf + out, body, (size_t)n);
         out += n;
     } else if (align == '^') {
         left = pad / 2;
-        for (i = 0; i < left; i++) buf[out++] = sp->fill;
+        for (i = 0; i < left; i++) { memcpy(buf + out, sp->fill,
+            (size_t)sp->filln); out += sp->filln; }
         memcpy(buf + out, body, (size_t)n);
         out += n;
-        for (i = 0; i < pad - left; i++) buf[out++] = sp->fill;
+        for (i = 0; i < pad - left; i++) { memcpy(buf + out, sp->fill,
+            (size_t)sp->filln); out += sp->filln; }
     } else {
         memcpy(buf, body, (size_t)n);
         out = n;
-        for (i = 0; i < pad; i++) buf[out++] = sp->fill;
+        for (i = 0; i < pad; i++) { memcpy(buf + out, sp->fill,
+            (size_t)sp->filln); out += sp->filln; }
     }
     buf[out] = 0;
     return apy_str_take(buf, out);
@@ -171,7 +202,10 @@ APY_API apy_value apy_format(apy_value v, apy_value spec) {
         int64_t len;
         if (!s) return 0;
         len = O(s)->v.s.n;
-        if (sp.has_precision && sp.precision < len) len = sp.precision;
+        /* A PRECISION ON TEXT IS A MAXIMUM CHARACTER COUNT, so `"{:.2}"` of
+           `"éàb"` is `"éà"`. Truncating bytes cut the `à` in half. */
+        if (sp.has_precision && sp.precision < apy_str_chars(s))
+            len = apy_char_to_byte(s, sp.precision);
         return apy_spec_pad(APY_CSTR(s), len, &sp, 0);
     }
     if (sp.type == 'b' || sp.type == 'o' || sp.type == 'x' || sp.type == 'X'
