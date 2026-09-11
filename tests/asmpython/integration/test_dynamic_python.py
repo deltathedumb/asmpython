@@ -202,6 +202,64 @@ PROGRAMS = {
         show("float bound", lambda: s[1.5:])
         show("list bound ", lambda: xs[[]:])
     """,
+    # A BUILTIN HAS NO CLASS DICT TO SEARCH, so the list of what it carries
+    # is written out -- and it had eight names on it. `hasattr([1], "__eq__")`
+    # was False for the most comparable object in the language, and so was
+    # every `__add__`, `__lt__`, `__repr__` and `__delitem__` a structural
+    # test or a numeric tower reads.
+    "builtin_protocol_methods": """
+        names = ["__len__", "__iter__", "__contains__", "__getitem__",
+                 "__setitem__", "__delitem__", "__hash__", "__eq__",
+                 "__ne__", "__lt__", "__add__", "__mul__", "__reversed__",
+                 "__buffer__", "__index__", "__int__", "__float__",
+                 "__abs__", "__neg__", "__bool__", "__str__", "__repr__",
+                 "__format__"]
+        vals = [("list", [1]), ("dict", {1: 2}), ("set", {1}),
+                ("frozenset", frozenset([1])), ("tuple", (1,)),
+                ("str", "a"), ("bytes", b"a"),
+                ("bytearray", bytearray(b"a")), ("int", 1), ("float", 1.0),
+                ("range", range(3))]
+        for label, v in vals:
+            print(label, " ".join(n for n in names if hasattr(v, n)))
+
+        # AND THEY HAVE TO WORK, not merely answer `hasattr`.
+        xs = [1, 2, 3]
+        xs.__delitem__(0)
+        d = {"a": 1, "b": 2}
+        d.__delitem__("a")
+        print(xs, d)
+        print(list([1, 2].__reversed__()), list(range(3).__reversed__()))
+        print([1].__add__([2]), "a".__add__("b"), "ab".__mul__(2))
+        print((7).__floordiv__(2), (7).__mod__(2), (7).__divmod__(2))
+        print((6).__and__(3), (6).__xor__(3), (1).__lshift__(4))
+        print((5).__invert__(), (-5).__abs__(), True.__index__())
+        print((2.7).__floor__(), (2.1).__ceil__(), (2.9).__int__())
+        print((2 ** 70).__add__(1), (3 + 4j).__abs__())
+        print("%d-%s".__mod__((1, "a")), {"a": 1}.__or__({"b": 2}))
+        print(sorted({1, 2}.__xor__({2, 3})), (255).__format__("x"))
+
+        # THE SENTINEL, WHICH IS THE PART THAT IS NOT OBVIOUS.
+        # `(1).__eq__("a")` is `NotImplemented` and not False: `==` above the
+        # method turns a pair of them into False and `<` turns them into the
+        # TypeError a program sees, and `functools.total_ordering` reads the
+        # sentinel to decide whether to try the reflected operation. The
+        # numbers widen ONE WAY -- `(1).__eq__(1.0)` declines and
+        # `(1.0).__eq__(1)` answers -- which is how Python arranges for
+        # exactly one side to decide.
+        pairs = [(1, 1), (1, 1.0), (1.0, 1), (1j, 1), (1, 1j),
+                 ("a", "a"), ("a", 1), (b"a", bytearray(b"a")),
+                 (bytearray(b"a"), b"a"), ([1], (1,)), ([1], [1]),
+                 ({1}, frozenset([1])), ({}, {}), (None, None), (None, 1),
+                 (range(3), range(3))]
+        for a, b in pairs:
+            print(repr(a.__eq__(b)), repr(a.__lt__(b)))
+
+        class P:
+            pass
+        p, q = P(), P()
+        print(p.__eq__(p), p.__eq__(q), p.__ne__(p), p.__lt__(q))
+        print(type(p.__repr__()) is str, p.__format__("") == str(p))
+    """,
     "traceback_positions": """
         try:
             (1).missing

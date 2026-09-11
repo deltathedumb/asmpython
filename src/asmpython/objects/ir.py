@@ -291,6 +291,12 @@ REPLACES: dict[str, tuple[str, ...]] = {
                       "apy_object_default", "apy_object_class",
                       "apy_descr_get_of", "apy_split_of",
                       "apy_kind_method_of", "apy_kind_attr_of",
+                      # WHICH DUNDERS A VALUE HAS, as two tables of names.
+                      # They are `apy_kind_attr_of`'s and live beside it: a
+                      # builtin has no class dict to search, so the list of
+                      # what it carries has to be written somewhere, and
+                      # arity is the only thing the caller needs back.
+                      "apy_object_arity", "apy_number_arity",
                       "apy_kind_attr", "apy_kind_prototype",
                       "apy_no_attribute", "apy_mro_entries",
                       "apy_traceback_of",

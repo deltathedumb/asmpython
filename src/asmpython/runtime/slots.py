@@ -840,6 +840,147 @@ def apy_name_is(want: ptr, name: ptr) -> i64:
     return 0
 
 
+
+def apy_object_arity(want: ptr) -> i64:
+    """The arity of a dunder EVERY object has, or 0 for anything else.
+
+    WHAT `object` CARRIES, and the reason this is one table rather than a
+    test per kind: `hasattr(x, "__eq__")` is True for every value in Python,
+    a list and an int and a function alike, so the answer cannot depend on
+    what `x` is. Comparison is the part programs actually read --
+    `functools.total_ordering` asks a class which orderings it already has,
+    and `abc` asks the same question structurally.
+
+    THE ORDERINGS ARE HERE EVEN THOUGH MOST KINDS REFUSE THEM, because that
+    is what CPython does: `{}.__lt__({})` answers `NotImplemented` rather
+    than raising, and it is the operator above it that turns that into the
+    TypeError a program sees.
+    """
+    if apy_cstr_eq(want, rodata(b"__eq__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__ne__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__lt__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__le__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__gt__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__ge__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__str__\0")):
+        return 1
+    if apy_cstr_eq(want, rodata(b"__repr__\0")):
+        return 1
+    if apy_cstr_eq(want, rodata(b"__format__\0")):
+        return 2
+    return 0
+
+
+def apy_number_arity(want: ptr, is_int: i64, is_complex: i64) -> i64:
+    """The arity of a NUMBER's dunder, or 0 where that kind has none.
+
+    THREE OVERLAPPING SETS, and the overlaps are what make this one function.
+    Every number adds, multiplies, divides, negates and has a truth; only an
+    int and a float floor-divide, take a remainder and convert between the
+    two; only an int has bits. A complex has none of the last two groups --
+    `(1j).__floordiv__` is an AttributeError in Python and not a method that
+    refuses -- which is the distinction a `numbers` ABC registration reads.
+
+    THE REFLECTED HALVES ARE REAL METHODS. `(1).__radd__(2)` is 3, and a
+    class implementing a numeric tower calls them by name.
+    """
+    if apy_cstr_eq(want, rodata(b"__add__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__radd__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__sub__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__rsub__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__mul__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__rmul__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__truediv__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__rtruediv__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__pow__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__rpow__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__neg__\0")):
+        return 1
+    if apy_cstr_eq(want, rodata(b"__pos__\0")):
+        return 1
+    if apy_cstr_eq(want, rodata(b"__abs__\0")):
+        return 1
+    if apy_cstr_eq(want, rodata(b"__bool__\0")):
+        return 1
+    if is_complex:
+        if apy_cstr_eq(want, rodata(b"__complex__\0")):
+            return 1
+        return 0
+    # AN INT AND A FLOAT, BOTH: the whole-number operations and the two
+    # conversions between them. A complex has left above.
+    if apy_cstr_eq(want, rodata(b"__floordiv__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__rfloordiv__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__mod__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__rmod__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__divmod__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__rdivmod__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__int__\0")):
+        return 1
+    if apy_cstr_eq(want, rodata(b"__float__\0")):
+        return 1
+    if apy_cstr_eq(want, rodata(b"__trunc__\0")):
+        return 1
+    if apy_cstr_eq(want, rodata(b"__floor__\0")):
+        return 1
+    if apy_cstr_eq(want, rodata(b"__ceil__\0")):
+        return 1
+    # NOT `__round__`, though CPython's numbers have one: a native carries a
+    # fixed arity and no defaults, so the optional `ndigits` would either be
+    # dropped in silence or make the no-argument form an error. `round(x, n)`
+    # is the spelling that works.
+    if not is_int:
+        return 0
+    # AN INT'S OWN: the bit operations and `__index__`, which is the promise
+    # that this value may stand where a position is wanted.
+    if apy_cstr_eq(want, rodata(b"__index__\0")):
+        return 1
+    if apy_cstr_eq(want, rodata(b"__invert__\0")):
+        return 1
+    if apy_cstr_eq(want, rodata(b"__and__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__rand__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__or__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__ror__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__xor__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__rxor__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__lshift__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__rlshift__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__rshift__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__rrshift__\0")):
+        return 2
+    return 0
+
+
 def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
     """The builtin method or field `want` names on `obj`, or null.
 
@@ -871,10 +1012,22 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
         if load(i32, offset(obj, apy_s_mut_offset())):
             writable_bytes = 1
     mut: i64 = is_list or is_dict or is_set or writable_bytes
+    is_int: i64 = apy_is_int_like_of(obj)
+    is_float: i64 = apy_kind_is(obj, apy_float_kind())
+    is_complex: i64 = apy_kind_is(obj, apy_complex_kind())
+    num: i64 = is_int or is_float or is_complex
     if apy_name_is(want, rodata(b"__hash__\0")):
         if mut:
             return apy_none()
         return apy_kind_method_of(obj, 1, rodata(b"__hash__\0"), bind)
+    # `object` GIVES THESE TO EVERYTHING, which is why they are gated on no
+    # kind at all: `hasattr(x, "__eq__")` is True for every object there is,
+    # and a structural test written against `collections.abc` -- or
+    # `functools.total_ordering`, which asks which orderings a class already
+    # has -- reads them rather than calling them.
+    common: i64 = apy_object_arity(want)
+    if common != 0:
+        return apy_kind_method_of(obj, common, want, bind)
     if apy_name_is(want, rodata(b"__len__\0")) and walks:
         return apy_kind_method_of(obj, 1, rodata(b"__len__\0"), bind)
     if apy_name_is(want, rodata(b"__iter__\0")):
@@ -893,6 +1046,69 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
         if is_list or is_dict or writable_bytes:
             return apy_kind_method_of(obj, 3, rodata(b"__setitem__\0"),
                                       bind)
+    # WHATEVER `del x[k]` WOULD REACH. Exactly the three kinds that take a
+    # `__setitem__`, because a container that cannot be written cannot have
+    # a piece taken out of it either.
+    if apy_name_is(want, rodata(b"__delitem__\0")):
+        if is_list or is_dict or writable_bytes:
+            return apy_kind_method_of(obj, 2, rodata(b"__delitem__\0"),
+                                      bind)
+    # `reversed(x)` WALKS ANYTHING INDEXABLE, but only three kinds carry the
+    # method that names it: a str or a tuple is reversed through `__len__`
+    # and `__getitem__`, and CPython gives neither a `__reversed__`.
+    if apy_name_is(want, rodata(b"__reversed__\0")):
+        if is_list or is_dict or is_range:
+            return apy_kind_method_of(obj, 1, rodata(b"__reversed__\0"),
+                                      bind)
+    # CONCATENATION AND REPETITION, which a sequence has and a set, a dict
+    # and a range do not -- `range(3) * 2` is a TypeError in Python and the
+    # attribute is absent, not a method that refuses.
+    if seq or text:
+        if apy_name_is(want, rodata(b"__add__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"__mul__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"__rmul__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+    if num:
+        arity: i64 = apy_number_arity(want, is_int, is_complex)
+        if arity != 0:
+            return apy_kind_method_of(obj, arity, want, bind)
+    # A RANGE IS FALSE WHEN IT IS EMPTY and says so with `__bool__` rather
+    # than through `__len__`, which is the one place it parts company with
+    # the other walkable kinds.
+    if is_range and apy_name_is(want, rodata(b"__bool__\0")):
+        return apy_kind_method_of(obj, 1, rodata(b"__bool__\0"), bind)
+    # `%` ON TEXT IS FORMATTING, not arithmetic -- which is why it belongs to
+    # str and bytes and to no other sequence.
+    if is_str or is_bytes:
+        if apy_name_is(want, rodata(b"__mod__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+    # `d | e` MERGES TWO DICTS, and the same four spellings are a set's
+    # operations. A `collections.abc` mixin composes them by name, which is
+    # the reading that needed them to exist as values.
+    if is_dict:
+        if apy_name_is(want, rodata(b"__or__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"__ror__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+    if sset:
+        if apy_name_is(want, rodata(b"__or__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"__and__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"__sub__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"__xor__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"__ror__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"__rand__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"__rsub__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"__rxor__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
     if is_dict:
         if apy_name_is(want, rodata(b"keys\0")):
             return apy_kind_method_of(obj, 1, want, bind)

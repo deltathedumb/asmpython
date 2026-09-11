@@ -6281,6 +6281,103 @@ def _unbound_kind(h, want: str):
     return body
 
 
+#: The dunders `object` gives to every value, with their arities.
+#:
+#: WHAT MAKES `hasattr(x, "__eq__")` TRUE FOR EVERYTHING. Comparison is the
+#: part programs read rather than call: `functools.total_ordering` asks a
+#: class which orderings it already has, and `abc` asks structurally. The
+#: same table is `runtime/slots.py`'s `apy_object_arity`, written for the
+#: machine subset.
+_OBJECT_ARITY = {"__eq__": 2, "__ne__": 2, "__lt__": 2, "__le__": 2,
+                 "__gt__": 2, "__ge__": 2, "__str__": 1, "__repr__": 1,
+                 "__format__": 2}
+
+#: What every number has, what an int and a float share, and what only an
+#: int carries. See `runtime/slots.py`'s `apy_number_arity`, which is the
+#: same three sets. NOT `__round__`, though CPython's numbers have one: a
+#: native carries a fixed arity and no defaults, so its optional `ndigits`
+#: would either be dropped in silence or make the no-argument form an error.
+_NUM_ANY = {"__add__": 2, "__radd__": 2, "__sub__": 2, "__rsub__": 2,
+            "__mul__": 2, "__rmul__": 2, "__truediv__": 2, "__rtruediv__": 2,
+            "__pow__": 2, "__rpow__": 2, "__neg__": 1, "__pos__": 1,
+            "__abs__": 1, "__bool__": 1}
+_NUM_REAL = {"__floordiv__": 2, "__rfloordiv__": 2, "__mod__": 2,
+             "__rmod__": 2, "__divmod__": 2, "__rdivmod__": 2, "__int__": 1,
+             "__float__": 1, "__trunc__": 1, "__floor__": 1, "__ceil__": 1}
+_NUM_INT = {"__index__": 1, "__invert__": 1, "__and__": 2, "__rand__": 2,
+            "__or__": 2, "__ror__": 2, "__xor__": 2, "__rxor__": 2,
+            "__lshift__": 2, "__rlshift__": 2, "__rshift__": 2,
+            "__rrshift__": 2}
+
+
+def _number_arity(want: str, is_int: bool, is_complex: bool) -> int:
+    """The arity of a number's dunder, or 0 where that kind has none."""
+    if want in _NUM_ANY:
+        return _NUM_ANY[want]
+    if is_complex:
+        return 1 if want == "__complex__" else 0
+    if want in _NUM_REAL:
+        return _NUM_REAL[want]
+    return _NUM_INT.get(want, 0) if is_int else 0
+
+
+def _apy_object_arity(h, a):
+    """The arity of a dunder every object has, or 0 for anything else.
+
+    A BINDING THAT ANSWERS RATHER THAN REFUSING, unlike `_apy_kind_attr`
+    beside it: the compiled runtime needs the table because a builtin has no
+    class dict to search, and the table is a fact about Python that the
+    interpreter can state as readily.
+    """
+    return _OBJECT_ARITY.get(str(h._get(a[0], "apy_object_arity")), 0)
+
+
+def _apy_number_arity(h, a):
+    """The arity of a number's dunder, or 0. See `_apy_object_arity`."""
+    return _number_arity(str(h._get(a[0], "apy_number_arity")),
+                         bool(a[1]), bool(a[2]))
+
+
+#: The six rich comparisons, which answer a sentinel rather than raising.
+_RICH_COMPARISONS = ("__eq__", "__ne__", "__lt__", "__le__", "__gt__",
+                     "__ge__")
+
+
+#: The kinds whose comparison is CPython's own, because the interpreter
+#: holds a real one of each.
+_PLAIN = (int, float, complex, str, bytes, bytearray, list, tuple, set,
+          frozenset, dict, range, type(None))
+
+
+def _rich_compare(h, want: str, obj, other):
+    """One rich comparison by name, with CPython's `NotImplemented` rule.
+
+    THE SENTINEL IS THE POINT. `(1).__eq__("a")` is NotImplemented and not
+    False: it is `==` above the method that turns a pair of them into False,
+    and `<` that turns them into the TypeError a program sees. A method that
+    answered False directly would break `functools.total_ordering`, which
+    reads the sentinel to decide whether to try the reflected operation.
+
+    CPYTHON'S OWN METHOD DECIDES where both sides are real Python values,
+    which is the whole reason this path is short: the widening rule between
+    the numbers, the one-way reach from a bytearray to bytes, and which kinds
+    refuse an order are all already right there. `runtime/slots.py`'s
+    `apy_compare_how` is the same table written out, for the runtimes that
+    have no Python underneath.
+
+    ANYTHING THIS INTERPRETER MADE GETS `object`'s: identity for `__eq__`,
+    and the sentinel for everything else. An instance reaching here has no
+    comparison of its own, since the class chain was searched first.
+    """
+    if isinstance(obj, _PLAIN) and isinstance(other, _PLAIN):
+        return getattr(obj, want)(other)
+    if want == "__eq__" and obj is other:
+        return True
+    if want == "__ne__" and obj is other:
+        return False
+    return NotImplemented
+
+
 def _kind_attr(h, obj, want: str):
     """A BUILTIN'S PROTOCOL METHODS, AS VALUES.
 
@@ -6310,11 +6407,30 @@ def _kind_attr(h, obj, want: str):
     def made(name, body):
         return h._new(Native(name, body))
 
+    num = isinstance(obj, (int, float, complex))
+    is_int = isinstance(obj, int)
+    is_complex = isinstance(obj, complex)
+
     if want == "__hash__":
         # THE ATTRIBUTE EXISTS EITHER WAY. `[].__hash__ is None` is how a
         # program asks whether a list can be a dict key, and answering "no
         # such attribute" is a different claim from the one CPython makes.
         return h._none if mutable else made("__hash__", lambda: hash(obj))
+    # `object` GIVES THESE TO EVERYTHING, which is why they are gated on no
+    # kind at all: `hasattr(x, "__eq__")` is True for every value in Python.
+    if want in ("__str__", "__repr__"):
+        # THE INTERPRETER'S OWN TEXT and not CPython's `repr`, because a
+        # container here holds the interpreter's values and Python would
+        # print them its way.
+        return made(want, lambda _w=want: h._text(obj, _w == "__repr__"))
+    if want == "__format__":
+        # THE SPEC MINI-LANGUAGE IS `_apy_format`'s, not a second copy of it
+        # -- and its answer is a handle, which this body must hand back
+        # unwrapped because the caller wraps what it gets.
+        return made("__format__", lambda spec: h._get(
+            _apy_format(h, [h._new(obj), h._new(spec)]), "__format__"))
+    if want in _RICH_COMPARISONS:
+        return made(want, lambda o, _w=want: _rich_compare(h, _w, obj, o))
     if want == "__len__" and walks:
         return made("__len__", lambda: len(obj))
     if want == "__iter__" and (walks or isinstance(obj, (Gen, Iterator))):
@@ -6327,6 +6443,36 @@ def _kind_attr(h, obj, want: str):
         return made("__getitem__", lambda i: obj[i])
     if want == "__setitem__" and (isinstance(obj, (list, dict, bytearray))):
         return made("__setitem__", lambda i, v: obj.__setitem__(i, v))
+    # WHATEVER `del x[k]` WOULD REACH -- exactly the kinds that take a
+    # `__setitem__`, because a container that cannot be written cannot have a
+    # piece taken out of it either.
+    if want == "__delitem__" and isinstance(obj, (list, dict, bytearray)):
+        return made("__delitem__", lambda i: obj.__delitem__(i))
+    # `reversed(x)` WALKS ANYTHING INDEXABLE, but only three kinds carry the
+    # method that names it: a str or a tuple is reversed through `__len__`
+    # and `__getitem__`, and CPython gives neither a `__reversed__`.
+    if want == "__reversed__" and isinstance(obj, (list, dict, range)):
+        return made("__reversed__", lambda: list(reversed(obj)))
+    # CONCATENATION AND REPETITION, which a sequence has and a set, a dict
+    # and a range do not -- `range(3) * 2` is a TypeError in Python and the
+    # attribute is absent, not a method that refuses.
+    if (seq or text) and want in ("__add__", "__mul__", "__rmul__"):
+        return made(want, lambda o, _w=want: getattr(obj, _w)(o))
+    if num and _number_arity(want, is_int, is_complex):
+        return made(want, lambda *r, _w=want: getattr(obj, _w)(*r))
+    if rng and want == "__bool__":
+        return made("__bool__", lambda: bool(obj))
+    # `%` ON TEXT IS FORMATTING, not arithmetic -- which is why it belongs to
+    # str and bytes and to no other sequence.
+    if isinstance(obj, (str, bytes, bytearray)) and want == "__mod__":
+        return made("__mod__", lambda o: obj.__mod__(o))
+    # `d | e` MERGES TWO DICTS, and the same four spellings are a set's
+    # operations.
+    if dict_ and want in ("__or__", "__ror__"):
+        return made(want, lambda o, _w=want: getattr(obj, _w)(o))
+    if set_ and want in ("__or__", "__and__", "__sub__", "__xor__",
+                         "__ror__", "__rand__", "__rsub__", "__rxor__"):
+        return made(want, lambda o, _w=want: getattr(obj, _w)(o))
     if dict_ and want in ("keys", "values", "items"):
         return made(want, lambda: list(getattr(obj, want)()))
     if (seq or text) and want in ("index", "count"):

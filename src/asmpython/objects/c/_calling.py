@@ -427,6 +427,101 @@ APY_API apy_value apy_kind_prototype(apy_value type_namev) {
 /* THE NAME ITS CALLERS USE, kept as a delegate: the body is IR's now,
    and the exported half above stands in when nothing is ported. */
 
+/* The arity of a dunder EVERY object has, or 0 for anything else.
+
+   WHAT `object` CARRIES, and the reason this is one table rather than a test
+   per kind: `hasattr(x, "__eq__")` is True for every value in Python, a list
+   and an int and a function alike, so the answer cannot depend on what `x`
+   is. Comparison is the part programs actually read -- `functools`'
+   `total_ordering` asks a class which orderings it already has, and `abc`
+   asks the same question structurally.
+
+   THE ORDERINGS ARE HERE EVEN THOUGH MOST KINDS REFUSE THEM, because that is
+   what CPython does: `{}.__lt__({})` answers `NotImplemented` rather than
+   raising, and it is the operator above it that turns that into the
+   TypeError a program sees. */
+APY_API int64_t apy_object_arity(apy_value wantv) {
+    const char *want = (const char *)wantv;
+    if (strcmp(want, "__eq__") == 0) return 2;
+    if (strcmp(want, "__ne__") == 0) return 2;
+    if (strcmp(want, "__lt__") == 0) return 2;
+    if (strcmp(want, "__le__") == 0) return 2;
+    if (strcmp(want, "__gt__") == 0) return 2;
+    if (strcmp(want, "__ge__") == 0) return 2;
+    if (strcmp(want, "__str__") == 0) return 1;
+    if (strcmp(want, "__repr__") == 0) return 1;
+    if (strcmp(want, "__format__") == 0) return 2;
+    return 0;
+}
+
+/* The arity of a NUMBER's dunder, or 0 where that kind has none.
+
+   THREE OVERLAPPING SETS, and the overlaps are what make this one function.
+   Every number adds, multiplies, divides, negates and has a truth; only an
+   int and a float floor-divide, take a remainder and convert between the
+   two; only an int has bits. A complex has neither of the last two groups --
+   `(1j).__floordiv__` is an AttributeError in Python rather than a method
+   that refuses -- which is the distinction a `numbers` registration reads.
+
+   THE REFLECTED HALVES ARE REAL METHODS. `(1).__radd__(2)` is 3, and a class
+   implementing a numeric tower calls them by name. */
+APY_API int64_t apy_number_arity(apy_value wantv, int64_t is_int,
+                                 int64_t is_complex) {
+    const char *want = (const char *)wantv;
+    if (strcmp(want, "__add__") == 0) return 2;
+    if (strcmp(want, "__radd__") == 0) return 2;
+    if (strcmp(want, "__sub__") == 0) return 2;
+    if (strcmp(want, "__rsub__") == 0) return 2;
+    if (strcmp(want, "__mul__") == 0) return 2;
+    if (strcmp(want, "__rmul__") == 0) return 2;
+    if (strcmp(want, "__truediv__") == 0) return 2;
+    if (strcmp(want, "__rtruediv__") == 0) return 2;
+    if (strcmp(want, "__pow__") == 0) return 2;
+    if (strcmp(want, "__rpow__") == 0) return 2;
+    if (strcmp(want, "__neg__") == 0) return 1;
+    if (strcmp(want, "__pos__") == 0) return 1;
+    if (strcmp(want, "__abs__") == 0) return 1;
+    if (strcmp(want, "__bool__") == 0) return 1;
+    if (is_complex) {
+        if (strcmp(want, "__complex__") == 0) return 1;
+        return 0;
+    }
+    /* AN INT AND A FLOAT, BOTH: the whole-number operations and the two
+       conversions between them. A complex has left above. */
+    if (strcmp(want, "__floordiv__") == 0) return 2;
+    if (strcmp(want, "__rfloordiv__") == 0) return 2;
+    if (strcmp(want, "__mod__") == 0) return 2;
+    if (strcmp(want, "__rmod__") == 0) return 2;
+    if (strcmp(want, "__divmod__") == 0) return 2;
+    if (strcmp(want, "__rdivmod__") == 0) return 2;
+    if (strcmp(want, "__int__") == 0) return 1;
+    if (strcmp(want, "__float__") == 0) return 1;
+    if (strcmp(want, "__trunc__") == 0) return 1;
+    if (strcmp(want, "__floor__") == 0) return 1;
+    if (strcmp(want, "__ceil__") == 0) return 1;
+    /* NOT `__round__`, though CPython's numbers have one: a native carries a
+       fixed arity and no defaults, so the optional `ndigits` would either be
+       dropped in silence or make the no-argument form an error. `round(x, n)`
+       is the spelling that works, and answering a wrong number to
+       `x.__round__(2)` is worse than not carrying the name. */
+    if (!is_int) return 0;
+    /* AN INT'S OWN: the bit operations and `__index__`, which is the promise
+       that this value may stand where a position is wanted. */
+    if (strcmp(want, "__index__") == 0) return 1;
+    if (strcmp(want, "__invert__") == 0) return 1;
+    if (strcmp(want, "__and__") == 0) return 2;
+    if (strcmp(want, "__rand__") == 0) return 2;
+    if (strcmp(want, "__or__") == 0) return 2;
+    if (strcmp(want, "__ror__") == 0) return 2;
+    if (strcmp(want, "__xor__") == 0) return 2;
+    if (strcmp(want, "__rxor__") == 0) return 2;
+    if (strcmp(want, "__lshift__") == 0) return 2;
+    if (strcmp(want, "__rlshift__") == 0) return 2;
+    if (strcmp(want, "__rshift__") == 0) return 2;
+    if (strcmp(want, "__rrshift__") == 0) return 2;
+    return 0;
+}
+
 APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
                                   int64_t bind) {
     const char *want = (const char *)wantv;
@@ -446,6 +541,16 @@ APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
         if (mutable_) return apy_none();
         return apy_kind_method(obj, 1, "__hash__", bind);
     }
+    /* `object` GIVES THESE TO EVERYTHING, which is why they are gated on no
+       kind at all: `hasattr(x, "__eq__")` is True for every value in Python,
+       a list and an int and a function alike. Comparison is the part
+       programs read rather than call -- `functools.total_ordering` asks a
+       class which orderings it already has, and `abc` asks structurally. */
+    {
+        int64_t common = apy_object_arity((apy_value)(uintptr_t)want);
+        if (common)
+            return apy_kind_method(obj, common, want, bind);
+    }
     if (strcmp(want, "__len__") == 0 && walks)
         return apy_kind_method(obj, 1, "__len__", bind);
     if (strcmp(want, "__iter__") == 0
@@ -463,6 +568,55 @@ APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
             && (k == APY_LIST_K || dict
                 || (k == APY_BYTES_K && O(obj)->v.s.mut)))
         return apy_kind_method(obj, 3, "__setitem__", bind);
+    /* WHATEVER `del x[k]` WOULD REACH -- exactly the three kinds that take a
+       `__setitem__`, because a container that cannot be written cannot have
+       a piece taken out of it either. */
+    if (strcmp(want, "__delitem__") == 0
+            && (k == APY_LIST_K || dict
+                || (k == APY_BYTES_K && O(obj)->v.s.mut)))
+        return apy_kind_method(obj, 2, "__delitem__", bind);
+    /* `reversed(x)` WALKS ANYTHING INDEXABLE, but only three kinds carry the
+       method that names it: a str or a tuple is reversed through `__len__`
+       and `__getitem__`, and CPython gives neither a `__reversed__`. */
+    if (strcmp(want, "__reversed__") == 0
+            && (k == APY_LIST_K || dict || k == APY_RANGE_K))
+        return apy_kind_method(obj, 1, "__reversed__", bind);
+    /* CONCATENATION AND REPETITION, which a sequence has and a set, a dict
+       and a range do not -- `range(3) * 2` is a TypeError in Python and the
+       attribute is absent, not a method that refuses. */
+    if ((seq || text) && (strcmp(want, "__add__") == 0
+                          || strcmp(want, "__mul__") == 0
+                          || strcmp(want, "__rmul__") == 0))
+        return apy_kind_method(obj, 2, want, bind);
+    if (apy_is_num(obj) || k == APY_COMPLEX_K) {
+        int64_t arity = apy_number_arity(
+            (apy_value)(uintptr_t)want, apy_is_int_like(obj),
+            k == APY_COMPLEX_K);
+        if (arity) return apy_kind_method(obj, arity, want, bind);
+    }
+    /* A RANGE IS FALSE WHEN IT IS EMPTY and says so with `__bool__` rather
+       than through `__len__`, which is the one place it parts company with
+       the other walkable kinds. */
+    if (k == APY_RANGE_K && strcmp(want, "__bool__") == 0)
+        return apy_kind_method(obj, 1, "__bool__", bind);
+    /* `%` ON TEXT IS FORMATTING, not arithmetic -- which is why it belongs
+       to str and bytes and to no other sequence. */
+    if (text && strcmp(want, "__mod__") == 0)
+        return apy_kind_method(obj, 2, "__mod__", bind);
+    /* `d | e` MERGES TWO DICTS, and the same four spellings are a set's
+       operations. A `collections.abc` mixin composes them by name, which is
+       the reading that needed them to exist as values. */
+    if (dict && (strcmp(want, "__or__") == 0
+                 || strcmp(want, "__ror__") == 0))
+        return apy_kind_method(obj, 2, want, bind);
+    if (set && (strcmp(want, "__or__") == 0 || strcmp(want, "__and__") == 0
+                || strcmp(want, "__sub__") == 0
+                || strcmp(want, "__xor__") == 0
+                || strcmp(want, "__ror__") == 0
+                || strcmp(want, "__rand__") == 0
+                || strcmp(want, "__rsub__") == 0
+                || strcmp(want, "__rxor__") == 0))
+        return apy_kind_method(obj, 2, want, bind);
     if (dict && (strcmp(want, "keys") == 0 || strcmp(want, "values") == 0
                  || strcmp(want, "items") == 0))
         return apy_kind_method(obj, 1, want, bind);
@@ -514,6 +668,90 @@ APY_API apy_value apy_kind_attr(apy_value obj, apy_value wantv) {
 }
 /* THE NAME ITS CALLERS USE, kept as a delegate: the body is IR's now,
    and the exported half above stands in when nothing is ported. */
+
+/* How a pair of values compares: 0 answers `NotImplemented`, 1 uses this
+   runtime's own comparison, 2 uses `object`'s -- identity, or the sentinel.
+
+   CPYTHON'S RICH COMPARISONS ANSWER A SENTINEL RATHER THAN RAISING:
+   `(1).__eq__("a")` is NotImplemented, and it is `==` above the method that
+   turns a pair of them into False and `<` that turns them into the TypeError
+   a program sees. A method answering False directly would break
+   `functools.total_ordering`, which reads the sentinel to decide whether to
+   try the reflected operation.
+
+   NUMBERS WIDEN ONE WAY AND ONLY ONE. `(1).__eq__(1.0)` is NotImplemented
+   and `(1.0).__eq__(1)` is True -- the narrower type declines and the wider
+   one answers, which is how Python arranges for exactly one of the two to
+   decide. Nothing else here is asymmetric except the same rule for a
+   bytearray against bytes.
+
+   `ordering` DROPS WHAT HAS NO `<`: a complex, a dict and a range each
+   answer equality and refuse an order. */
+static int64_t apy_num_rank(apy_value v) {
+    if (apy_is_int_like(v)) return 1;
+    return O(v)->kind == APY_FLOAT_K ? 2 : 3;
+}
+
+/* A COMPLEX COUNTS HERE AND NOT IN `apy_is_num`, whose callers go on to ask
+   for a `double` and a complex has two. What this asks is whether the value
+   is a NUMBER, which a complex is. */
+static int apy_is_number(apy_value v) {
+    return apy_is_num(v) || O(v)->kind == APY_COMPLEX_K;
+}
+
+static int apy_compare_how(apy_value a, apy_value b, int ordering) {
+    int ka = O(a)->kind, kb = O(b)->kind;
+    if (apy_is_number(a)) {
+        if (!apy_is_number(b)) return 0;
+        if (ordering && ka == APY_COMPLEX_K) return 0;
+        return apy_num_rank(a) >= apy_num_rank(b) ? 1 : 0;
+    }
+    if (apy_is_number(b)) return 0;
+    /* ONE KIND, TWO TYPES: `mut` is what tells a bytearray from bytes, and
+       a bytearray reaches for bytes where bytes does not reach back. */
+    if (ka == APY_BYTES_K || kb == APY_BYTES_K) {
+        if (ka != APY_BYTES_K || kb != APY_BYTES_K) return 0;
+        return (O(a)->v.s.mut || !O(b)->v.s.mut) ? 1 : 0;
+    }
+    /* A SET AND A FROZENSET COMPARE EITHER WAY, and the order between them
+       is the subset relation rather than a sequence's. */
+    if (apy_is_set(a) || apy_is_set(b))
+        return (apy_is_set(a) && apy_is_set(b)) ? 1 : 0;
+    if (ka != kb) return 0;
+    if (ka == APY_STR_K || ka == APY_LIST_K || ka == APY_TUPLE_K) return 1;
+    if (!ordering && (ka == APY_DICT_K || ka == APY_RANGE_K)) return 1;
+    /* EVERYTHING ELSE IS `object`'s, which is what a function, a generator
+       and an instance with no `__eq__` of its own all get. */
+    return 2;
+}
+
+/* `object`'s own comparison: identity, and the sentinel for the rest. Two
+   objects of one user class are not equal in Python merely for being of one
+   class, and nothing at all is ordered by it. */
+static apy_value apy_object_compare(const char *w, apy_value a, apy_value b) {
+    if (strcmp(w, "__eq__") == 0 && a == b) return apy_from_bool(1);
+    if (strcmp(w, "__ne__") == 0 && a == b) return apy_from_bool(0);
+    return apy_notimplemented();
+}
+
+/* One rich comparison, named. See `apy_compare_how` for the sentinel. */
+static apy_value apy_kind_compare(const char *w, apy_value a, apy_value b) {
+    int how;
+    int ordering = strcmp(w, "__eq__") != 0 && strcmp(w, "__ne__") != 0;
+    /* AN INSTANCE THAT REACHED HERE HAS NO COMPARISON OF ITS OWN -- the
+       class chain was searched first -- so what it gets is `object`'s. */
+    if (O(a)->kind == APY_INST_K || O(b)->kind == APY_INST_K)
+        return apy_object_compare(w, a, b);
+    how = apy_compare_how(a, b, ordering);
+    if (how == 0) return apy_notimplemented();
+    if (how == 2) return apy_object_compare(w, a, b);
+    if (strcmp(w, "__eq__") == 0) return apy_eq(a, b);
+    if (strcmp(w, "__ne__") == 0) return apy_ne(a, b);
+    if (strcmp(w, "__lt__") == 0) return apy_lt(a, b);
+    if (strcmp(w, "__le__") == 0) return apy_le(a, b);
+    if (strcmp(w, "__gt__") == 0) return apy_gt(a, b);
+    return apy_ge(a, b);
+}
 
 static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
     switch (O(f)->v.fn.native) {
@@ -674,8 +912,68 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
             return apy_dict_parts(a[0], APY_PART_VALUES);
         if (strcmp(w, "items") == 0)
             return apy_dict_parts(a[0], APY_PART_ITEMS);
+        /* THE ONE-ARGUMENT HALF OF WHAT `object` AND THE NUMBERS CARRY. Each
+           is an existing runtime entry point under the name Python gives it,
+           which is the whole reason one selector serves the lot. */
+        if (strcmp(w, "__str__") == 0) return apy_str(a[0]);
+        if (strcmp(w, "__repr__") == 0) return apy_repr(a[0]);
+        if (strcmp(w, "__bool__") == 0) return apy_from_bool(apy_truth(a[0]));
+        if (strcmp(w, "__neg__") == 0) return apy_neg(a[0]);
+        if (strcmp(w, "__pos__") == 0) return apy_pos(a[0]);
+        if (strcmp(w, "__abs__") == 0) return apy_abs(a[0]);
+        if (strcmp(w, "__invert__") == 0) return apy_invert(a[0]);
+        if (strcmp(w, "__int__") == 0) return apy_to_int(a[0]);
+        if (strcmp(w, "__float__") == 0) return apy_to_float(a[0]);
+        /* A COMPLEX IS ALREADY ONE, and `__index__` on an int answers the
+           int -- except for a bool, which becomes the 0 or 1 it stands for:
+           `True.__index__()` is `1` and not `True`. */
+        if (strcmp(w, "__complex__") == 0) return a[0];
+        if (strcmp(w, "__index__") == 0)
+            return apy_is_big(a[0]) ? a[0] : apy_from_int(O(a[0])->v.i);
+        if (strcmp(w, "__trunc__") == 0) return apy_math_trunc(a[0]);
+        if (strcmp(w, "__floor__") == 0) return apy_math_floor(a[0]);
+        if (strcmp(w, "__ceil__") == 0) return apy_math_ceil(a[0]);
+        if (strcmp(w, "__reversed__") == 0) return apy_reversed(a[0]);
         if (n < 2) return apy_fail("TypeError",
                                    "builtin method takes an argument");
+        /* THE RICH COMPARISONS, which answer `NotImplemented` for a pair
+           that does not compare rather than False. See `apy_kind_compare`. */
+        if (w[0] == '_' && w[1] == '_' && apy_object_arity(
+                (apy_value)(uintptr_t)w) == 2
+                && strcmp(w, "__format__") != 0)
+            return apy_kind_compare(w, a[0], a[1]);
+        if (strcmp(w, "__format__") == 0) return apy_format(a[0], a[1]);
+        /* THE BINARY OPERATORS AS METHODS. A reflected one is the same
+           entry point with the operands the other way round, which is what
+           `__radd__` means. */
+        if (strcmp(w, "__add__") == 0) return apy_add(a[0], a[1]);
+        if (strcmp(w, "__radd__") == 0) return apy_add(a[1], a[0]);
+        if (strcmp(w, "__sub__") == 0) return apy_sub(a[0], a[1]);
+        if (strcmp(w, "__rsub__") == 0) return apy_sub(a[1], a[0]);
+        if (strcmp(w, "__mul__") == 0) return apy_mul(a[0], a[1]);
+        if (strcmp(w, "__rmul__") == 0) return apy_mul(a[1], a[0]);
+        if (strcmp(w, "__truediv__") == 0) return apy_truediv(a[0], a[1]);
+        if (strcmp(w, "__rtruediv__") == 0) return apy_truediv(a[1], a[0]);
+        if (strcmp(w, "__floordiv__") == 0) return apy_floordiv(a[0], a[1]);
+        if (strcmp(w, "__rfloordiv__") == 0) return apy_floordiv(a[1], a[0]);
+        if (strcmp(w, "__mod__") == 0) return apy_mod(a[0], a[1]);
+        if (strcmp(w, "__rmod__") == 0) return apy_mod(a[1], a[0]);
+        if (strcmp(w, "__pow__") == 0) return apy_pow(a[0], a[1]);
+        if (strcmp(w, "__rpow__") == 0) return apy_pow(a[1], a[0]);
+        if (strcmp(w, "__divmod__") == 0) return apy_divmod(a[0], a[1]);
+        if (strcmp(w, "__rdivmod__") == 0) return apy_divmod(a[1], a[0]);
+        if (strcmp(w, "__and__") == 0) return apy_bitand(a[0], a[1]);
+        if (strcmp(w, "__rand__") == 0) return apy_bitand(a[1], a[0]);
+        if (strcmp(w, "__or__") == 0) return apy_bitor(a[0], a[1]);
+        if (strcmp(w, "__ror__") == 0) return apy_bitor(a[1], a[0]);
+        if (strcmp(w, "__xor__") == 0) return apy_bitxor(a[0], a[1]);
+        if (strcmp(w, "__rxor__") == 0) return apy_bitxor(a[1], a[0]);
+        if (strcmp(w, "__lshift__") == 0) return apy_lshift(a[0], a[1]);
+        if (strcmp(w, "__rlshift__") == 0) return apy_lshift(a[1], a[0]);
+        if (strcmp(w, "__rshift__") == 0) return apy_rshift(a[0], a[1]);
+        if (strcmp(w, "__rrshift__") == 0) return apy_rshift(a[1], a[0]);
+        if (strcmp(w, "__delitem__") == 0)
+            return apy_delitem(a[0], a[1]);
         /* `x in obj` -- the NEEDLE FIRST, which is the order `apy_contains`
            takes and the reverse of the method's. */
         if (strcmp(w, "__contains__") == 0) return apy_contains(a[1], a[0]);
