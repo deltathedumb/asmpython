@@ -5593,25 +5593,35 @@ class DynamicLowering:
         # like a one-argument call and the limit was DROPPED. Folded into the
         # slot it names first; see `methods.fold_keywords`.
         #
-        # ONLY WHERE THE BUILTIN IS THE ONLY ANSWER. On a name COLLISION the
-        # receiver chooses between a builtin and a user method at run time,
-        # and a keyword the builtin does not know may be exactly right for the
-        # user one -- `datetime.replace(tzinfo=...)` against `str.replace`'s
-        # `count` is that case, and refusing it here would break it.
+        # THREE THINGS HAVE TO BE TRUE BEFORE FOLDING IS SAFE.
+        #
+        # THE NAME MUST BE A BUILTIN METHOD. `asyncio.wait_for(c, timeout=1)`
+        # is an attribute call with a keyword and no builtin method at all --
+        # it resolves through `apy_getattr`, which handles keywords perfectly
+        # well. Folding every attribute call refused that one.
+        #
+        # THE CALL MUST NOT COLLIDE. When a program defines a method of the
+        # same name the receiver chooses at run time, and a keyword the
+        # builtin does not know may be exactly right for the user method --
+        # `datetime.replace(tzinfo=...)` against `str.replace`'s `count`.
+        #
+        # AND THE KEYWORDS MUST NOT BE LOWERED TWICE, which is why they are
+        # lowered HERE and only on the path that uses them. Every other path
+        # hands `node.keywords` on as AST and the callee lowers it, so
+        # lowering it early as well runs each one TWICE. That is not a
+        # performance note: `self.node("Starred", t, value=self.expression())`
+        # in the bundled parser CONSUMES TOKENS, and doing it twice made
+        # every starred form a SyntaxError.
         collides = (attr in self.user_method_names or self.extends_builtin)
-        # ONLY A NAME THE BUILTIN DISPATCH KNOWS. `asyncio.wait_for(c,
-        # timeout=1)` is an attribute call with a keyword and is not a builtin
-        # method at all -- it resolves through `apy_getattr`, which handles
-        # keywords perfectly well. Folding every attribute call refused that
-        # one, which is how this guard came to be written.
         foldable = (attr in DYN_METHOD_TABLE
-                    and attr not in _KEYWORDS_OF_THEIR_OWN)
-        args, lowered_kw, spreads = self._dyn_lower_call(node.args,
-                                                         node.keywords)
-        if foldable and not collides and (node.keywords or attr == "to_bytes"):
+                    and attr not in _KEYWORDS_OF_THEIR_OWN
+                    and not collides)
+        if foldable and (node.keywords or attr == "to_bytes"):
             # `to_bytes` FOLDS WHETHER OR NOT A KEYWORD WAS WRITTEN: `signed`
             # is keyword-only and the other two have defaults, so every arity
             # pads to one three-argument entry point rather than a family.
+            args, lowered_kw, spreads = self._dyn_lower_call(node.args,
+                                                            node.keywords)
             try:
                 args = self._dyn_arrange(
                     attr, args, [kw.arg for kw in node.keywords], lowered_kw,
@@ -5627,26 +5637,10 @@ class DynamicLowering:
                         attr, len(args)) is not None:
                     self._dyn_keyword_error(exc)
                     return self.b.call(T.PTR, "apy_none", [])
+        else:
+            args = self._dyn_operands(node.args)
         sym = method_symbol(attr, len(args))
         if sym is not None and collides:
-            # THE BUILTIN HALF GETS THE FOLDED ARGUMENTS TOO, when folding is
-            # possible at all. A program that happens to define its own
-            # `replace` should not make `"aaa".replace("a", "z", count=1)`
-            # start ignoring the count -- which it did, because the collision
-            # path skipped the folding entirely.
-            builtin_args, builtin_sym = args, sym
-            if node.keywords and attr not in _KEYWORDS_OF_THEIR_OWN:
-                try:
-                    builtin_args = self._dyn_arrange(
-                        attr, args, [kw.arg for kw in node.keywords],
-                        lowered_kw, spreads,
-                        pad_to=3 if attr == "to_bytes" else 0)
-                except KeywordError:
-                    # THE KEYWORD IS THE USER METHOD'S. Refusing here would
-                    # reject `datetime.replace(tzinfo=...)`, which is the call
-                    # this whole branch exists to keep working.
-                    builtin_args = args
-                builtin_sym = method_symbol(attr, len(builtin_args)) or sym
             # THE NAME COLLIDES. `add` is a set's method and may equally be a
             # method of a class in this same program, and which one `x.add(1)`
             # means is decided by the receiver at run time -- there is no
@@ -5665,9 +5659,7 @@ class DynamicLowering:
             # plainly has. The receiver decides here too, so it gets the same
             # two-way shape; a program with no such class still pays nothing.
             return self._dyn_method_either(receiver, attr, args, sym,
-                                           node.keywords,
-                                           builtin_args=builtin_args,
-                                           builtin_sym=builtin_sym)
+                                           node.keywords)
         if sym is None:
             # Not a built-in method name: look the attribute up on the
             # receiver and call what comes back. This is the only path a user
@@ -5707,6 +5699,14 @@ class DynamicLowering:
         them into slots afterwards cannot change it. An earlier shape of this
         lowered the positionals, decided to fold, and lowered them again, so
         `"a,b".split(sep(), maxsplit=1)` called `sep` TWICE.
+
+        ONLY CALL THIS ON A PATH THAT USES WHAT IT RETURNS. Every other path
+        passes `node.keywords` on as AST and the callee lowers it there, so
+        lowering it here as well is the same double evaluation from the other
+        end -- and it is not a performance note. The bundled parser writes
+        `self.node("Starred", t, value=self.expression())`, and
+        `self.expression()` CONSUMES TOKENS: doing it twice ate the rest of
+        the statement and made every starred form a SyntaxError.
         """
         lowered_pos = self._dyn_operands(positional)
         named = {}
@@ -5916,8 +5916,7 @@ class DynamicLowering:
         return any(c.builtin_base is not None for c in self.classes.values())
 
     def _dyn_method_either(self, receiver: int, attr: str, args: list,
-                           sym: str, keywords=(), builtin_args=None,
-                           builtin_sym=None) -> int:
+                           sym: str, keywords=()) -> int:
         """One call site, two answers, chosen by the receiver's kind.
 
         The result lands in ONE register written on both paths, which is what
@@ -5964,10 +5963,7 @@ class DynamicLowering:
             args=[self._dyn_builtin_method(
                 self.b.call(T.PTR, "apy_method_self",
                             [receiver, self._dyn_str_literal(attr)]),
-                attr,
-                args if builtin_args is None else builtin_args,
-                sym if builtin_sym is None else builtin_sym,
-                keywords)]))
+                attr, args, sym, keywords)]))
         self.b.jump(done)
 
         self.b.switch_to(done)

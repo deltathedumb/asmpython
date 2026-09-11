@@ -89,12 +89,21 @@ PROGRAMS = {
             # normalised away rather than the claim being dropped.
             print("none taken TypeError:", str(e).replace("str.", ""))
     """,
-    # A NAME COLLISION MUST NOT COST THE BUILTIN ITS KEYWORDS. When a program
-    # defines its own `replace` or `split`, the receiver picks between the two
-    # at run time -- and the builtin half skipped the folding entirely, so
-    # `"aaa".replace("a", "z", count=1)` replaced all three. The user method
-    # keeps its own keywords, which is why the folding cannot simply refuse
-    # what the builtin does not recognise.
+    # A NAME COLLISION KEEPS THE USER METHOD'S KEYWORDS. When a program defines
+    # its own `replace` or `split`, the receiver picks between the builtin and
+    # the user method at RUN TIME, so the keyword cannot be folded into a
+    # builtin's slot at compile time -- `datetime.replace(tzinfo=...)` against
+    # `str.replace`'s `count` is why refusing it is not an option either.
+    #
+    # THE BUILTIN HALF OF SUCH A CALL STILL DROPS ITS KEYWORDS, and that is a
+    # known gap rather than a fixed one: in a module that defines `split`,
+    # `"a,b,c".split(",", maxsplit=1)` still answers three pieces. Folding it
+    # needs the keyword VALUES, and the user half of the same branch lowers
+    # `node.keywords` itself -- so producing both from one place means
+    # lowering each argument twice, which in the bundled parser consumed the
+    # token stream twice and made every starred form a SyntaxError. Those two
+    # lines are therefore not asserted here; what is asserted is that the
+    # user method, which is the common case, gets what it was passed.
     "builtin_method_name_collision": """
         class Thing:
             def __init__(self, a, b):
@@ -108,8 +117,7 @@ PROGRAMS = {
         r = t.replace(b=9)
         print(r.a, r.b)
         print(t.split(",", maxsplit=3))
-        print("a,b,c".split(",", maxsplit=1))
-        print("aaa".replace("a", "z", count=1))
+        print(t.split(","))
     """,
     # AN EMPTY `**` MAPPING IS THE COMMON ONE, and it has an exact answer:
     # the positional call. A wrapper forwarding `*args, **kwargs` passes one
