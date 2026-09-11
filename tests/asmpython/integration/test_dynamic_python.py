@@ -260,6 +260,64 @@ PROGRAMS = {
         print(p.__eq__(p), p.__eq__(q), p.__ne__(p), p.__lt__(q))
         print(type(p.__repr__()) is str, p.__format__("") == str(p))
     """,
+    # A SLICE DELETES A SET OF POSITIONS AND NOT A SPAN. `del xs[::2]` was
+    # refused with a message of this runtime's own invention -- "only step 1
+    # slice deletion is supported" -- and a bytearray could not be deleted
+    # from at all, by index or by slice, on any of the three runtimes.
+    "delete_slices_and_bytearrays": """
+        def show(label, fn):
+            try:
+                print(label, repr(fn()))
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        def onlist(fn):
+            def go():
+                xs = [0, 1, 2, 3, 4, 5]
+                fn(xs)
+                return xs
+            return go
+
+        def onbytes(fn):
+            def go():
+                ba = bytearray(b"abcdef")
+                fn(ba)
+                return ba
+            return go
+
+        show("xs [::2]   ", onlist(lambda x: x.__delitem__(slice(None, None, 2))))
+        show("xs [::-2]  ", onlist(lambda x: x.__delitem__(slice(None, None, -2))))
+        show("xs [1:5:2] ", onlist(lambda x: x.__delitem__(slice(1, 5, 2))))
+        show("xs [1:3]   ", onlist(lambda x: x.__delitem__(slice(1, 3))))
+        show("xs [:]     ", onlist(lambda x: x.__delitem__(slice(None))))
+        show("xs [::0]   ", onlist(lambda x: x.__delitem__(slice(None, None, 0))))
+        show("xs [2]     ", onlist(lambda x: x.__delitem__(2)))
+        show("ba [0]     ", onbytes(lambda b: b.__delitem__(0)))
+        show("ba [-1]    ", onbytes(lambda b: b.__delitem__(-1)))
+        show("ba [1:3]   ", onbytes(lambda b: b.__delitem__(slice(1, 3))))
+        show("ba [:]     ", onbytes(lambda b: b.__delitem__(slice(None))))
+        show("ba [::2]   ", onbytes(lambda b: b.__delitem__(slice(None, None, 2))))
+        show("ba [::-2]  ", onbytes(lambda b: b.__delitem__(slice(None, None, -2))))
+        show("ba [1:9]   ", onbytes(lambda b: b.__delitem__(slice(1, 9))))
+        show("ba oob     ", onbytes(lambda b: b.__delitem__(99)))
+        show("ba bad key ", onbytes(lambda b: b.__delitem__("x")))
+
+        # AND THE STATEMENT, which is what a program actually writes.
+        ys = [0, 1, 2, 3, 4, 5]
+        del ys[::2]
+        zs = [0, 1, 2, 3, 4, 5]
+        del zs[1::2]
+        ba = bytearray(b"abcdef")
+        del ba[2]
+        bb = bytearray(b"abcdef")
+        del bb[::3]
+        print(ys, zs, ba, bb)
+        # THE BUFFER KEEPS ITS TERMINATOR: a shrunk bytearray is still a
+        # string to the C that reads it, so what follows the last byte
+        # matters even though nothing reads past the length.
+        print(bytes(bb), len(bb), bb.decode())
+        show("bytes del  ", lambda: b"abc".__delitem__(0))
+    """,
     "traceback_positions": """
         try:
             (1).missing

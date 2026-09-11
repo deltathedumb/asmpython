@@ -9,6 +9,11 @@
 # index path asked `apy_index_arg` for an integer, got a slice, and reported
 # an IndexError about a subscript the program never wrote.
 #
+# A SLICE DELETES A SET OF POSITIONS AND NOT A SPAN, which is what makes
+# `del xs[::2]` no harder than `del xs[1:3]`: one pass copies the survivors
+# down over the gaps, and `apy_del_run` turns a negative step round first so
+# that pass only ever moves forwards.
+#
 # INSERTION ORDER IS PRESERVED BY SHIFTING, not by swapping the last entry
 # into the hole. Dict order has been part of the language since 3.7, so the
 # swap would be a WRONG ANSWER rather than a faster one -- and the list has
@@ -60,6 +65,12 @@ def apy_delitem(seq: ptr, key: ptr) -> ptr:
             i = i + 1
         store(i64, n - 1, offset(seq, apy_d_n_offset()))
         return apy_none()
+    # A BYTEARRAY DELETES TOO, and its buffer is BYTES rather than values --
+    # which is the whole reason it is a case of its own rather than a wider
+    # test above. `mut` is what separates it from bytes, which does not.
+    if i64(load(i32, offset(seq, 0))) == apy_bytes_kind():
+        if load(i32, offset(seq, apy_s_mut_offset())):
+            return apy_del_bytes(seq, key)
     if i64(load(i32, offset(seq, 0))) != apy_list_kind():
         return apy_raise_fmt(
             rodata(b"TypeError\0"),
@@ -92,42 +103,147 @@ def apy_delitem_slot() -> ptr:
     return reserve("apy_delitem_slot_ir", 8)
 
 
-def apy_del_span(seq: ptr, key: ptr) -> ptr:
-    """`del xs[1:3]` -- the slice case, which removes a SPAN.
+def apy_del_run(key: ptr, n: i64, out: ptr) -> i64:
+    """The ASCENDING run of positions a slice deletes: first, stride, count.
 
-    STEP 1 ONLY, which is a real limit and not an oversight: CPython deletes
-    a strided slice too, and doing it needs a second pass that compacts around
-    the survivors rather than one that shifts the tail down. Refusing is the
-    honest answer until that is written.
+    Three words written to `out`; 0 with an error set if the slice refuses.
+
+    A NEGATIVE STEP WALKS THE SAME SET BACKWARDS, and a delete is about the
+    SET and not the order -- `del xs[::-2]` and `del xs[::2]` take the same
+    three positions out of six, starting from opposite ends. Turning it round
+    here is what lets the compaction that follows only ever move forwards.
+
+    THE COUNT IS ARITHMETIC AND NOT A WALK, because the compaction needs to
+    know where the NEXT position is while it is copying, and recomputing it
+    from `first + taken * stride` is one multiply against a second pass.
     """
-    n: i64 = load(i64, offset(seq, apy_q_n_offset()))
     bounds: ptr = apy_slice_indices(key, apy_from_int(n))
     if not bounds:
-        return bounds
+        return 0
     b: ptr = ptr(load(u64, offset(bounds, apy_q_items_offset())))
     start: i64 = apy_int_payload(ptr(load(u64, b)))
     stop: i64 = apy_int_payload(ptr(load(u64, offset(b, apy_value_size()))))
     step: i64 = apy_int_payload(
         ptr(load(u64, offset(b, 2 * apy_value_size()))))
-    if step != 1:
-        return apy_raise_at(
-            rodata(b"ValueError\0"),
-            rodata(b"only step 1 slice deletion is supported\0"))
-    if start < 0:
-        start = 0
-    if stop > n:
-        stop = n
-    if stop < start:
-        stop = start
+    count: i64 = 0
+    if step > 0:
+        if stop > start:
+            count = (stop - start + step - 1) // step
+    else:
+        if stop < start:
+            count = (stop - start + step + 1) // step
+    # PAST THE END WHEN NOTHING MATCHES, so the copy loop's position test is
+    # false at every step without a count test of its own.
+    first: i64 = n
+    stride: i64 = 1
+    if count > 0:
+        if step > 0:
+            first = start
+            stride = step
+        else:
+            first = start + (count - 1) * step
+            stride = -step
+    store(i64, first, out)
+    store(i64, stride, offset(out, 8))
+    store(i64, count, offset(out, 16))
+    return 1
+
+
+def apy_del_span(seq: ptr, key: ptr) -> ptr:
+    """`del xs[1:3]` and `del xs[::2]` -- a slice removes a SET of positions.
+
+    ONE PASS THAT COMPACTS, which is what makes the strided case no harder
+    than the contiguous one: the survivors are copied down over the gaps as
+    they are met, and the length is what the copy ended at.
+    """
+    n: i64 = load(i64, offset(seq, apy_q_n_offset()))
+    run: ptr = alloca(24)
+    if not apy_del_run(key, n, run):
+        return ptr(0)
+    first: i64 = load(i64, run)
+    stride: i64 = load(i64, offset(run, 8))
+    count: i64 = load(i64, offset(run, 16))
     items: ptr = ptr(load(u64, offset(seq, apy_q_items_offset())))
-    frm: i64 = stop
-    to: i64 = start
+    at: i64 = first
+    taken: i64 = 0
+    frm: i64 = 0
+    to: i64 = 0
     while frm < n:
-        store(u64, load(u64, offset(items, frm * apy_value_size())),
-              offset(items, to * apy_value_size()))
+        drop: i64 = 0
+        if taken < count:
+            if frm == at:
+                drop = 1
+        if drop:
+            taken = taken + 1
+            at = first + taken * stride
+        else:
+            store(u64, load(u64, offset(items, frm * apy_value_size())),
+                  offset(items, to * apy_value_size()))
+            to = to + 1
         frm = frm + 1
-        to = to + 1
-    store(i64, n - (stop - start), offset(seq, apy_q_n_offset()))
+    store(i64, to, offset(seq, apy_q_n_offset()))
+    return apy_none()
+
+
+def apy_del_bytes(seq: ptr, key: ptr) -> ptr:
+    """`del ba[i]` and `del ba[a:b:c]`, on a bytearray.
+
+    THE SAME TWO SHAPES AS A LIST over a different buffer, and the messages
+    name `bytearray` rather than `list` because CPython's do.
+
+    THE BUFFER KEEPS ITS TERMINATOR. Nothing here reads past `n`, but the
+    cell is shared with str, whose bytes are handed to C as a string -- so
+    shrinking writes the NUL rather than leaving the old byte behind.
+    """
+    p: ptr = ptr(load(u64, offset(seq, apy_str_ptr_offset())))
+    n: i64 = load(i64, offset(seq, apy_str_len_offset()))
+    if key:
+        if i64(load(i32, offset(key, 0))) == apy_slice_kind():
+            run: ptr = alloca(24)
+            if not apy_del_run(key, n, run):
+                return ptr(0)
+            first: i64 = load(i64, run)
+            stride: i64 = load(i64, offset(run, 8))
+            count: i64 = load(i64, offset(run, 16))
+            spot: i64 = first
+            taken: i64 = 0
+            frm: i64 = 0
+            to: i64 = 0
+            while frm < n:
+                drop: i64 = 0
+                if taken < count:
+                    if frm == spot:
+                        drop = 1
+                if drop:
+                    taken = taken + 1
+                    spot = first + taken * stride
+                else:
+                    store(u8, load(u8, offset(p, frm)), offset(p, to))
+                    to = to + 1
+                frm = frm + 1
+            store(i64, to, offset(seq, apy_str_len_offset()))
+            store(u8, u8(0), offset(p, to))
+            return apy_none()
+    if not apy_is_int_like_of(key):
+        return apy_raise_fmt(
+            rodata(b"TypeError\0"),
+            rodata(b"bytearray indices must be integers or slices, "
+                   b"not %s%s\0"),
+            apy_kind_name_of(key), rodata(b"\0"))
+    slot: ptr = apy_delitem_slot()
+    if not apy_index_arg_of(key, slot, apy_idx_sub()):
+        return ptr(0)
+    at: i64 = load(i64, slot)
+    if at < 0:
+        at = at + n
+    if at < 0 or at >= n:
+        return apy_raise_at(rodata(b"IndexError\0"),
+                            rodata(b"bytearray index out of range\0"))
+    while at + 1 < n:
+        store(u8, load(u8, offset(p, at + 1)), offset(p, at))
+        at = at + 1
+    store(i64, n - 1, offset(seq, apy_str_len_offset()))
+    store(u8, u8(0), offset(p, n - 1))
     return apy_none()
 
 

@@ -865,6 +865,82 @@ APY_API apy_value apy_repr(apy_value v) { return apy_text(v, 1); }
 
    A tuple is refused: immutability is the whole distinction from a list, and
    letting a `del` through would erase it. */
+/* The ASCENDING run of positions a slice deletes: first, stride and count.
+
+   A NEGATIVE STEP WALKS THE SAME SET BACKWARDS, and a delete is about the
+   SET and not the order -- `del xs[::-2]` and `del xs[::2]` take the same
+   three positions out of six, starting from opposite ends. Turning it round
+   here is what lets the compaction that follows only ever move forwards.
+
+   `first` IS PAST THE END WHEN NOTHING MATCHES, so the copy loop's position
+   test is false at every step without a count test of its own. */
+APY_API int64_t apy_del_run(apy_value key, int64_t n, apy_value outv) {
+    /* AN `apy_value` AND NOT AN `int64_t *`, because the ported half takes a
+       `ptr` and the two halves are one translation unit: the declarations
+       have to agree before the bodies can. */
+    int64_t *out = (int64_t *)(uintptr_t)outv;
+    apy_value bounds = apy_slice_indices(key, apy_from_int(n));
+    int64_t start, stop, step, count = 0;
+    if (!bounds) return 0;
+    start = O(O(bounds)->v.q.items[0])->v.i;
+    stop = O(O(bounds)->v.q.items[1])->v.i;
+    step = O(O(bounds)->v.q.items[2])->v.i;
+    if (step > 0) {
+        if (stop > start) count = (stop - start + step - 1) / step;
+    } else {
+        if (stop < start) count = (stop - start + step + 1) / step;
+    }
+    out[0] = n;
+    out[1] = 1;
+    out[2] = count;
+    if (count > 0) {
+        out[0] = step > 0 ? start : start + (count - 1) * step;
+        out[1] = step > 0 ? step : -step;
+    }
+    return 1;
+}
+
+/* `del ba[i]` and `del ba[a:b:c]`, on a bytearray.
+
+   THE SAME TWO SHAPES AS A LIST over a different buffer, and the messages
+   name `bytearray` rather than `list` because CPython's do.
+
+   THE BUFFER KEEPS ITS TERMINATOR. Nothing here reads past `n`, but the cell
+   is shared with str, whose bytes are handed to C as a string -- so shrinking
+   writes the NUL rather than leaving the old byte behind. */
+APY_API apy_value apy_del_bytes(apy_value seq, apy_value key) {
+    char *p = (char *)O(seq)->v.s.p;
+    int64_t n = O(seq)->v.s.n, i;
+    if (key && O(key)->kind == APY_SLICE_K) {
+        int64_t run[3], from, to = 0, taken = 0, at;
+        if (!apy_del_run(key, n, (apy_value)(uintptr_t)run)) return 0;
+        at = run[0];
+        for (from = 0; from < n; from++) {
+            if (taken < run[2] && from == at) {
+                taken++;
+                at = run[0] + taken * run[1];
+                continue;
+            }
+            p[to++] = p[from];
+        }
+        O(seq)->v.s.n = to;
+        p[to] = 0;
+        return apy_none();
+    }
+    if (!apy_is_int_like(key))
+        return apy_fail2("TypeError", "bytearray indices must be integers "
+                                      "or slices, not %s%s",
+                         apy_kind_name(key), "");
+    if (!apy_index_arg(key, &i, APY_IDX_SUB)) return 0;
+    if (i < 0) i += n;
+    if (i < 0 || i >= n)
+        return apy_fail("IndexError", "bytearray index out of range");
+    for (; i + 1 < n; i++) p[i] = p[i + 1];
+    O(seq)->v.s.n = n - 1;
+    p[n - 1] = 0;
+    return apy_none();
+}
+
 APY_API apy_value apy_delitem(apy_value seq, apy_value key) {
     int64_t i;
     if (O(seq)->kind == APY_INST_K) {
@@ -895,29 +971,32 @@ APY_API apy_value apy_delitem(apy_value seq, apy_value key) {
         O(seq)->v.d.n--;
         return apy_none();
     }
+    /* A BYTEARRAY DELETES TOO, and its buffer is BYTES rather than values --
+       which is the whole reason it is a case of its own rather than a wider
+       test below. `mut` is what separates it from bytes, which does not. */
+    if (O(seq)->kind == APY_BYTES_K && O(seq)->v.s.mut)
+        return apy_del_bytes(seq, key);
     if (O(seq)->kind != APY_LIST_K)
         return apy_fail2("TypeError", "'%s' object doesn't support item deletion%s",
                          apy_kind_name(seq), "");
-    /* `del xs[1:3]` REMOVES A SPAN. Falling through to the index path asked
-       `apy_index_arg` for an integer, got the slice, and reported an
-       IndexError about a subscript the program never wrote. */
+    /* `del xs[1:3]` AND `del xs[::2]` REMOVE A SET OF POSITIONS. Falling
+       through to the index path asked `apy_index_arg` for an integer, got
+       the slice, and reported an IndexError about a subscript the program
+       never wrote. ONE PASS THAT COMPACTS is what makes the strided case no
+       harder than the contiguous one. */
     if (key && O(key)->kind == APY_SLICE_K) {
-        apy_value bounds = apy_slice_indices(key,
-                                             apy_from_int(O(seq)->v.q.n));
-        int64_t start, stop, step, from, to;
-        if (!bounds) return 0;
-        start = O(O(bounds)->v.q.items[0])->v.i;
-        stop = O(O(bounds)->v.q.items[1])->v.i;
-        step = O(O(bounds)->v.q.items[2])->v.i;
-        if (step != 1)
-            return apy_fail("ValueError",
-                            "only step 1 slice deletion is supported");
-        if (start < 0) start = 0;
-        if (stop > O(seq)->v.q.n) stop = O(seq)->v.q.n;
-        if (stop < start) stop = start;
-        for (from = stop, to = start; from < O(seq)->v.q.n; from++, to++)
-            O(seq)->v.q.items[to] = O(seq)->v.q.items[from];
-        O(seq)->v.q.n -= stop - start;
+        int64_t run[3], from, to = 0, taken = 0, at, n = O(seq)->v.q.n;
+        if (!apy_del_run(key, n, (apy_value)(uintptr_t)run)) return 0;
+        at = run[0];
+        for (from = 0; from < n; from++) {
+            if (taken < run[2] && from == at) {
+                taken++;
+                at = run[0] + taken * run[1];
+                continue;
+            }
+            O(seq)->v.q.items[to++] = O(seq)->v.q.items[from];
+        }
+        O(seq)->v.q.n = to;
         return apy_none();
     }
     if (!apy_index_arg(key, &i, APY_IDX_SUB)) return 0;

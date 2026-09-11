@@ -10258,18 +10258,41 @@ def _apy_delitem(h, a):
         if old_h is not None:
             h.decref(old_h)
         return h._none
+    # A BYTEARRAY DELETES TOO, and its buffer holds BYTES rather than values
+    # -- so nothing here is a reference and there is nothing to decref.
+    # `bytes` is the same Python type family and does not delete, which is
+    # what the `bytearray` test rather than a wider one is for.
+    if isinstance(seq, bytearray):
+        if isinstance(key, slice):
+            try:
+                del seq[key]
+            except ValueError as exc:
+                return h._fail_like(exc)
+            return h._none
+        if not isinstance(key, (int, bool)):
+            return h._fail("TypeError",
+                           f"bytearray indices must be integers or slices, "
+                           f"not {h.kind_name(key)}")
+        i = int(key)
+        if i < 0:
+            i += len(seq)
+        if not 0 <= i < len(seq):
+            return h._fail("IndexError", "bytearray index out of range")
+        del seq[i]
+        return h._none
     if not isinstance(seq, list):
         return h._fail("TypeError",
                        f"'{h.kind_name(seq)}' object doesn't support item "
                        f"deletion")
-    # `del xs[1:3]` REMOVES A SPAN. Falling through to the index path asked
-    # `int()` for the slice and raised out of the bridge.
+    # `del xs[1:3]` AND `del xs[::2]` REMOVE A SET OF POSITIONS. Falling
+    # through to the index path asked `int()` for the slice and raised out of
+    # the bridge.
     if isinstance(key, slice):
-        if key.step not in (None, 1):
-            return h._fail("ValueError",
-                           "only step 1 slice deletion is supported")
-        removed = seq[key]
-        del seq[key]
+        try:
+            removed = seq[key]
+            del seq[key]
+        except ValueError as exc:
+            return h._fail_like(exc)
         for item in removed:
             item_h = h._referent(item)
             if item_h is not None:
@@ -10289,6 +10312,27 @@ def _apy_delitem(h, a):
 
 
 _TABLE["apy_delitem"] = _apy_delitem
+
+
+def _apy_del_run(h, a):
+    """The ascending run of positions a slice deletes. See the ported one.
+
+    NO HOST EQUIVALENT, and the reason is the same one `_apy_kind_attr` gives:
+    the compiled runtime needs the arithmetic because it compacts a buffer by
+    hand, and the interpreter holds a real Python list and deletes through
+    Python's own slice -- which needs no run at all.
+    """
+    raise RuntimeError(
+        "apy_del_run has no host equivalent: the interpreter deletes "
+        "through Python's own slice")
+
+
+def _apy_del_bytes(h, a):
+    """`del ba[i]` on a bytearray. See `_apy_del_run`, and `_apy_delitem`,
+    which answers the bytearray itself."""
+    raise RuntimeError(
+        "apy_del_bytes has no host equivalent: `apy_delitem` answers the "
+        "bytearray through Python's own delete")
 
 
 def _apy_call_spread(h, a):

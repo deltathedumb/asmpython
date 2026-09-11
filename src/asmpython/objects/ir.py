@@ -108,7 +108,13 @@ REPLACES: dict[str, tuple[str, ...]] = {
     # AND WHAT WAS BEHIND THE WALL. Two containers, four failure modes, and
     # CPython's own wording for each -- see the file.
     "delitem.py": ("apy_delitem", "apy_default_delattr",
-                    "apy_delattr"),
+                    "apy_delattr",
+                    # THE TWO HALVES OF A SLICE DELETE. They are exported --
+                    # rather than private the way `apy_del_span` beside them
+                    # is -- because the C has them under the same names, and
+                    # the C and the IR are ONE translation unit: a name is
+                    # either replaced properly or it is a different name.
+                    "apy_del_run", "apy_del_bytes"),
     # A PER-CHARACTER SUBSTITUTION whose output length is not a function of
     # its input length -- a replacement may be a whole string or a deletion.
     "str_translate.py": ("apy_str_translate",),
