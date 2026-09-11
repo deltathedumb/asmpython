@@ -97,6 +97,11 @@ _API_TOKEN = "@APY_API@"
 #: here nor concatenated with the parts -- it goes in at `@UNICODE_TABLE@`.
 from .c.unicode_table import UNICODE_C
 
+#: The generated Unicode CASE mappings, spliced in the same way and at
+#: its own marker. A separate table from the classes because it answers
+#: a different question: not what a character IS but what it BECOMES.
+from .c.unicase_table import UNICASE_C
+
 #: THE RUNTIME'S C, whole. It was written out longhand right here, all
 #: sixteen thousand lines of it, which made this module unopenable in an
 #: editor and unreviewable in a diff. It is nineteen modules under `c/`
@@ -240,7 +245,8 @@ _IR_TYPES = {"apy_value": "ptr", "int64_t": "i64", "double": "f64",
 #: THE C A BACKEND ACTUALLY SEES: the runtime with the generated Unicode
 #: table spliced in at its marker. One file, as it always was -- the split is
 #: only so this module stays readable.
-_WITH_TABLE = OBJECTS_C.replace("/* @UNICODE_TABLE@ */", UNICODE_C)
+_WITH_TABLE = OBJECTS_C.replace("/* @UNICODE_TABLE@ */", UNICODE_C) \
+                       .replace("/* @UNICASE_TABLE@ */", UNICASE_C)
 
 
 def _param_type(text: str) -> str:

@@ -342,94 +342,10 @@ APY_API int64_t apy_c_space(int64_t c) {
 
 enum { APY_UPPER, APY_LOWER, APY_TITLE, APY_CAPITAL, APY_SWAP, APY_FOLD };
 
-/* THE OUTPUT CAN BE LONGER THAN THE INPUT, which is why this does not write
-   in place over a same-sized buffer: 'ß'.upper() is 'SS', one character
-   becoming two. Only Latin-1 is mapped -- the two-byte sequences starting
-   0xC3, which covers the accented letters and the one length-changing case
-   that programs actually meet. Anything above that is left alone rather than
-   half-done; a full Unicode case table is not here. */
-static apy_value apy_str_case(apy_value s, int mode) {
-    int64_t n = O(s)->v.s.n, i;
-    /* Room for every byte to become two, which is the worst this can do. */
-    char *buf = (char *)malloc((size_t)n * 2 + 1);
-    int64_t out_n = 0;
-    int prev_cased = 0;
-    for (i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)O(s)->v.s.p[i];
-        unsigned char out = c;
-        /* A LATIN-1 LETTER: 0xC3 then the low byte. Uppercase runs
-           0x80..0x9E and lowercase 0xA0..0xBE, offset by 0x20 exactly as
-           ASCII is by 32 -- with 0x97 and 0xB7 the multiplication and
-           division signs, which are not letters, and 0x9F the sharp s,
-           which is lowercase despite sitting in the uppercase run. */
-        if (c == 0xC3 && i + 1 < n) {
-            unsigned char d = (unsigned char)O(s)->v.s.p[i + 1];
-            int is_upper = d >= 0x80 && d <= 0x9E && d != 0x97;
-            int is_lower = d >= 0xA0 && d <= 0xBE && d != 0xB7;
-            /* U+00DF IS LOWERCASE despite sitting one past the end of
-               the uppercase run, so `is_lower` -- which is a range test --
-               misses it, and `swapcase` left it alone where Python raises it
-               to 'SS'. */
-            int raise = mode == APY_UPPER
-                || (mode == APY_SWAP && (is_lower || d == 0x9F))
-                || (mode == APY_CAPITAL && i == 0)
-                || (mode == APY_TITLE && !prev_cased);
-            if (d == 0x9F && (raise || mode == APY_FOLD)) {
-                /* 'ß' has no single uppercase form: it becomes 'SS', and
-                   casefold gives 'ss' so that the two match caselessly. */
-                /* TITLE-CASING AN EXPANSION RAISES ONLY ITS FIRST
-                   LETTER: `title` and `capitalize` of U+00DF both give 'Ss'
-                   where `upper` gives 'SS'. Both letters came from one
-                   character, so "the first character" of the result means
-                   the first letter of what that character became. */
-                buf[out_n++] = raise ? 'S' : 's';
-                buf[out_n++] = (raise && mode != APY_TITLE
-                                && mode != APY_CAPITAL) ? 'S' : 's';
-                prev_cased = 1;
-                i++;
-                continue;
-            }
-            if (raise && is_lower) d = (unsigned char)(d - 0x20);
-            else if (!raise && is_upper) d = (unsigned char)(d + 0x20);
-            buf[out_n++] = (char)c;
-            buf[out_n++] = (char)d;
-            prev_cased = is_upper || is_lower || d == 0x9F;
-            i++;
-            continue;
-        }
-        switch (mode) {
-        case APY_UPPER: if (apy_c_lower(c)) out = (unsigned char)(c - 32); break;
-        /* `casefold` IS lowercasing for ASCII -- the pair it exists for,
-           'ß' against 'ss', is handled in the Latin-1 branch above. */
-        case APY_FOLD:
-        case APY_LOWER: if (apy_c_upper(c)) out = (unsigned char)(c + 32); break;
-        case APY_SWAP:
-            if (apy_c_lower(c)) out = (unsigned char)(c - 32);
-            else if (apy_c_upper(c)) out = (unsigned char)(c + 32);
-            break;
-        case APY_CAPITAL:
-            /* Only the FIRST character is raised and the whole rest is
-               lowered -- `'hello World'.capitalize()` is 'Hello world', not
-               'Hello World'. */
-            if (i == 0) { if (apy_c_lower(c)) out = (unsigned char)(c - 32); }
-            else if (apy_c_upper(c)) out = (unsigned char)(c + 32);
-            break;
-        default:
-            /* `title` tracks whether the PREVIOUS character was cased, which
-               is why `'a1b'` titles to 'A1B' and `"don't"` to "Don'T": a digit
-               and an apostrophe are both uncased, so the letter after either
-               starts a new word. Anything simpler -- splitting on spaces, or
-               on non-alphanumerics -- disagrees with one of those two. */
-            if (prev_cased) { if (apy_c_upper(c)) out = (unsigned char)(c + 32); }
-            else if (apy_c_lower(c)) out = (unsigned char)(c - 32);
-            break;
-        }
-        prev_cased = apy_c_alpha(c);
-        buf[out_n++] = (char)out;
-    }
-    buf[out_n] = '\0';
-    return apy_str_take(buf, out_n);
-}
+/* THE OUTPUT CAN BE LONGER THAN THE INPUT, which is why the body sits below
+   the case tables rather than here: `ß` uppercases to `SS` and `ﬃ` to `FFI`,
+   and saying so needs the generated data. */
+static apy_value apy_str_case(apy_value s, int mode);
 
 APY_API apy_value apy_str_upper(apy_value s) {
     if (!apy_str_self("upper", s)) return 0;
@@ -473,8 +389,138 @@ enum { APY_ISALPHA, APY_ISDIGIT, APY_ISALNUM, APY_ISSPACE, APY_ISLOWER,
    walk a string by code point. */
 static int64_t apy_utf8_step(const unsigned char *p, int64_t n, int64_t i,
                              uint32_t *out);
+/* And its inverse, which the case transforms need: a mapping can hand back a
+   code point that was never in the input. */
+static int apy_utf8_put(char *out, uint32_t cp);
 
 /* @UNICODE_TABLE@ */
+
+/* @UNICASE_TABLE@ */
+
+/* --- case, the whole of it ----------------------------------------------
+
+   THE SIX TRANSFORMS ARE ONE WALK over code points, differing in which
+   mapping each character takes and in what the walk remembers between them.
+   Written here rather than beside the other string methods because it stands
+   on the generated tables above, and a forward declaration is what the
+   callers up there see. The six mode names are the enum declared with
+   them. */
+
+/* Which mapping one character takes under one transform.
+
+   `capitalize` AND `title` RAISE TO TITLECASE AND NOT TO UPPERCASE, which is
+   a difference exactly one class of character can show: `ß` capitalizes to
+   `Ss` where it uppercases to `SS`, and `ǆ` to `ǅ` where it uppercases to
+   `Ǆ`. Both are single characters with a titlecase form of their own. */
+static int apy_case_mode_for(int mode, int64_t at, int prev_cased) {
+    if (mode == APY_UPPER) return 0;
+    if (mode == APY_LOWER) return 1;
+    if (mode == APY_FOLD) return 3;
+    if (mode == APY_CAPITAL) return at == 0 ? 2 : 1;
+    if (mode == APY_TITLE) return prev_cased ? 1 : 2;
+    return -1;                          /* swapcase decides per character */
+}
+
+/* A GREEK CAPITAL SIGMA AT THE END OF A WORD LOWERCASES TO `ς` AND NOT `σ`.
+
+   The rule is the only context-sensitive thing in Python's case mapping, and
+   it is not optional: `"ΟΣ".lower()` is `"ος"` and `"ΣΟ".lower()` is `"σο"`,
+   so a sigma-blind implementation is wrong about one of them whichever form
+   it picks.
+
+   FINAL MEANS: preceded by a cased character, with only case-ignorable
+   characters in between, and NOT followed by the same. The full stop in
+   `"ΟΣ."` is case-ignorable and does not stop the sigma being final; the
+   space in `"Ο Σ"` is not, and does. */
+static int apy_case_final_sigma(const unsigned char *p, int64_t n, int64_t at,
+                                int64_t after) {
+    int64_t i = at;
+    uint32_t cp;
+    int64_t used;
+    int before = 0;
+    /* BACKWARDS over what came before, which is a re-walk from the start:
+       UTF-8 is scanned forwards here, and the alternative is remembering the
+       last two states through the main loop -- state this rule is the only
+       reader of. */
+    for (i = 0; i < at; ) {
+        used = apy_utf8_step(p, n, i, &cp);
+        if (used <= 0) break;
+        i += used;
+        if (i > at) break;
+        {
+            unsigned f = apy_ucase_flags(cp);
+            if (f & APY_CASED) before = 1;
+            else if (!(f & APY_CASE_IGNORABLE)) before = 0;
+        }
+    }
+    if (!before) return 0;
+    for (i = after; i < n; ) {
+        used = apy_utf8_step(p, n, i, &cp);
+        if (used <= 0) break;
+        i += used;
+        {
+            unsigned f = apy_ucase_flags(cp);
+            if (f & APY_CASED) return 0;
+            if (!(f & APY_CASE_IGNORABLE)) return 1;
+        }
+    }
+    return 1;
+}
+
+static apy_value apy_str_case(apy_value s, int mode) {
+    const unsigned char *p = (const unsigned char *)O(s)->v.s.p;
+    int64_t n = O(s)->v.s.n, i = 0, out_n = 0;
+    /* THREE CODE POINTS IS THE WIDEST ANY MAPPING GROWS TO -- `ﬃ` becomes
+       `FFI` -- and a code point is at most four UTF-8 bytes, so twelve bytes
+       of output per byte of input cannot be exceeded. */
+    char *buf = (char *)malloc((size_t)n * 12 + 1);
+    int prev_cased = 0;
+    if (!buf) { fputs("asmpython: out of memory\n", stderr); exit(1); }
+    while (i < n) {
+        uint32_t cp, got[4];
+        int64_t used = apy_utf8_step(p, n, i, &cp);
+        int which, k, count;
+        unsigned flags;
+        if (used <= 0) { buf[out_n++] = (char)p[i++]; continue; }
+        flags = apy_ucase_flags(cp);
+        which = apy_case_mode_for(mode, i, prev_cased);
+        if (which < 0) {
+            /* SWAPCASE ASKS WHAT THE CHARACTER IS, not what it maps to: a
+               LOWERCASE one is raised and an UPPERCASE one is lowered, and
+               everything else -- including a TITLECASE character like `ǅ`,
+               which is neither -- is copied. Asking the mapping instead
+               raised `ǅ` to `Ǆ`, where Python leaves it alone. */
+            unsigned m = cp < 0x80
+                ? ((cp >= 'a' && cp <= 'z') ? APY_UC_LOWER
+                   : (cp >= 'A' && cp <= 'Z') ? APY_UC_UPPER : 0u)
+                : apy_uc_mask(cp);
+            if (m & APY_UC_LOWER) which = 0;
+            else if (m & APY_UC_UPPER) which = 1;
+            else {
+                out_n += apy_utf8_put(buf + out_n, cp);
+                prev_cased = (flags & APY_CASED) != 0;
+                i += used;
+                continue;
+            }
+        }
+        count = apy_ucase_map(cp, which, got);
+        /* U+03A3 IS THE ONE CHARACTER WHOSE ANSWER DEPENDS ON ITS
+           NEIGHBOURS. `casefold` is exempt: it maps every sigma to `σ`, which
+           is the point of a fold. */
+        if (cp == 0x3A3 && which == 1
+                && apy_case_final_sigma(p, n, i, i + used))
+            got[0] = 0x3C2;
+        for (k = 0; k < count; k++)
+            out_n += apy_utf8_put(buf + out_n, got[k]);
+        /* WHAT THE NEXT CHARACTER SEES. `title` needs to know whether a word
+           is running, and an uncased character ends one -- which is why
+           `"don't"` titles to `"Don'T"`: the apostrophe is uncased. */
+        prev_cased = (flags & APY_CASED) != 0;
+        i += used;
+    }
+    buf[out_n] = '\0';
+    return apy_str_take(buf, out_n);
+}
 
 /* The classes ONE CODE POINT belongs to. ASCII is decided here -- it is the
    dense half of the range and the table starts past it -- and everything

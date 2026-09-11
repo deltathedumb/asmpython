@@ -350,6 +350,33 @@ PROGRAMS = {
         print("{:.2}".format(s), format(s, ">7"), f"{s:>7}")
         print("{:>7}".format(42), "{:08.2f}".format(-1.5))
     """,
+    # CASE MAPPING WAS ASCII PLUS A HAND-CODED LATIN-1 BRANCH, and the C
+    # said so: "a full Unicode case table is not here". So `"Σ".lower()`
+    # answered its input, `"İ".lower()` did too where Python gives an `i` and
+    # a combining dot, and `"ﬁx".title()` came out `"ﬁX"` -- the ligature
+    # unraised and the `x` raised, which is both halves wrong at once.
+    "unicode_case_mapping": """
+        # A CHARACTER CAN GROW. None of these has a single-character form.
+        print("ß".upper(), "ﬁ".upper(), "ﬃ".upper(), "ﬅ".upper())
+        print("İ".lower(), "ǰ".upper(), "ᾼ".upper())
+        # TITLECASE IS NOT UPPERCASE, and exactly one class of character can
+        # show the difference: `ß` capitalizes to `Ss` and uppercases to `SS`.
+        print("ß".title(), "ß".capitalize(), "ﬁ".title(), "ǆ".title())
+        print("ǅ".upper(), "ǅ".lower(), "ǅ".title(), "ǅ".swapcase())
+        # A GREEK CAPITAL SIGMA AT THE END OF A WORD TAKES THE FINAL FORM.
+        print("ΟΣ".lower(), "ΣΟ".lower(), "Ο Σ".lower(), "ΟΣ.".lower())
+        print("ΑΣΑ".lower(), "Σ".lower(), "ΟΣ".swapcase(), "ΟΣ".casefold())
+        print("ΟΣ".title(), "Ο Σ".capitalize())
+        # AND THE REST OF THE ALPHABETS, which a Latin-1 branch could not see.
+        print("ΑΒΓ".lower(), "αβγ".upper(), "ЖУК".lower(), "жук".upper())
+        print("İstanbul".upper(), "İstanbul".swapcase())
+        # WHAT WAS ALREADY RIGHT, kept right: the word rule, and the ASCII
+        # the table deliberately leaves out.
+        print("a1b".title(), "don't".title(), "hello World".capitalize())
+        print("a中b".title(), "中a".upper(), "éàbcé".title())
+        print("ﬁx".title(), "ﬁx".upper(), "ﬁx".capitalize())
+        print("ẞ".lower(), "ẞ".casefold(), "ı".upper(), "ｱ".upper())
+    """,
     "traceback_positions": """
         try:
             (1).missing
