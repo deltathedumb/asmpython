@@ -1404,6 +1404,15 @@ class ObjectHost:
         nothing else: a metaclass that overrides `__call__` and ends by
         delegating upward has to reach the default without re-entering it.
         """
+        # A BUILTIN TYPE OBJECT IS CALLABLE. `type(5)()` is `0` and
+        # `x.__class__()` is an empty one of whatever `x` is -- both are the
+        # ordinary way to make a fresh value of a type you were handed, and a
+        # generic copy or merge helper does exactly that. A type INVENTED for
+        # a kind the program never NAMED had no constructor at all and
+        # allocated an instance of a nameless class.
+        made = _builtin_ctor(self, f, args, kwrest)
+        if made is not _NO_CTOR:
+            return made
         if True:
             maker = f.find("__new__")
             if isinstance(maker, (Func, Native)):
@@ -1691,6 +1700,72 @@ class ObjectHost:
 # own definitions; `Trap` is the interpreter's "the program did something
 # undefined" signal and this file raises exactly one kind of it.
 from .interpreter import Trap as _Trap, _FUNC_TAG  # noqa: E402
+
+#: "not a builtin type" -- distinct from every value a constructor can
+#: answer, including None and 0, which `bool()` and `int()` really do give.
+_NO_CTOR = object()
+
+#: The builtin type NAMES and what calling one with nothing and with one
+#: argument answers. BY NAME AND NOT BY A PROTOTYPE'S KIND: `bool` and `int`
+#: share a prototype -- the attribute question cannot tell them apart and
+#: does not need to -- and `type(True)()` is `False`, not `0`.
+_BUILTIN_CTORS = {
+    "int": (lambda: 0, int), "bool": (lambda: False, bool),
+    "float": (lambda: 0.0, float), "str": (lambda: "", None),
+    "bytes": (lambda: b"", None), "bytearray": (lambda: bytearray(), None),
+    "list": (list, list), "tuple": (tuple, tuple), "dict": (dict, dict),
+    "set": (set, set), "frozenset": (frozenset, frozenset),
+    "complex": (complex, complex),
+}
+
+#: THREE KINDS HAVE NO EMPTY FORM AT ALL, and allocating an instance of a
+#: nameless class for them was the old answer. Their refusals are CPython's.
+_NO_EMPTY_CTOR = {
+    "range": "range expected at least 1 argument, got 0",
+    "slice": "slice expected at least 1 argument, got 0",
+    "memoryview": "memoryview() missing required argument 'object' (pos 1)",
+}
+
+
+def _builtin_ctor(h, f, args, kwrest):
+    """`type(5)()` and `x.__class__(v)`, or `_NO_CTOR` for anything else.
+
+    ONLY FOR A TYPE WITH NOTHING OF ITS OWN -- no `__new__`, no `__init__`,
+    no metaclass -- which is exactly the shape a type invented for a builtin
+    kind has and nothing a program writes.
+    """
+    name = getattr(f, "name", None)
+    if (name in _NO_EMPTY_CTOR and not args and not kwrest
+            and getattr(f, "meta", None) is None
+            and f.find("__new__") is None and f.find("__init__") is None):
+        h._fail("TypeError", _NO_EMPTY_CTOR[name])
+        raise _UserFailed
+    if (name not in _BUILTIN_CTORS or kwrest
+            or getattr(f, "meta", None) is not None
+            or f.find("__new__") is not None
+            or f.find("__init__") is not None):
+        return _NO_CTOR
+    empty, one = _BUILTIN_CTORS[name]
+    # A VALUE AND NOT A HANDLE, because that is what `_instantiate` answers
+    # everywhere else -- the runtime symbols below hand back handles, so
+    # those are unwrapped on the way out.
+    if not args:
+        return empty()
+    if len(args) != 1:
+        return _NO_CTOR
+    given = args[0]
+    by_symbol = {"str": "apy_str", "bytes": "apy_to_bytes",
+                 "bytearray": "apy_to_bytearray"}
+    try:
+        if name in by_symbol:
+            got = _TABLE[by_symbol[name]](h, [h._new(given)])
+            if not got:
+                raise _UserFailed
+            return h._get(got, name)
+        return one(given)
+    except _HOST_RAISES as exc:
+        h._fail_like(exc)
+        raise _UserFailed
 
 
 def _user(h, body, fail=0):

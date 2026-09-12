@@ -1341,6 +1341,74 @@ static apy_value apy_instantiate(apy_value f, apy_value *argv, int64_t argc,
     apy_value self;
     apy_value init;
     apy_value maker = apy_class_find(f, apy_name("__new__"));
+    /* A BUILTIN TYPE OBJECT IS CALLABLE. `type(5)()` is `0` and
+       `x.__class__()` is an empty one of whatever `x` is -- both are the
+       ordinary way to make a fresh value of a type you were handed, and a
+       generic copy or merge helper does exactly that.
+
+       A TYPE INVENTED FOR A KIND THE PROGRAM NEVER NAMED had no constructor
+       at all: it allocated an INSTANCE of a nameless class and answered
+       `<int object at 0x...>` for `type(5)()`. Whether it worked depended on
+       whether the module happened to write the bare word `int` somewhere,
+       because only then is a canonical thunk registered for it.
+
+       THROUGH THE PROTOTYPE, which already knows which kind each builtin
+       type name stands for, and then through the same `apy_call_kind` a
+       class extending a builtin uses. Only for a type with NOTHING OF ITS
+       OWN -- no `__new__`, no `__init__`, no metaclass -- which is exactly
+       the shape `apy_type_new` invents and nothing a program writes. */
+    if (O(f)->kind == APY_TYPE_K && !maker && !O(f)->v.t.meta
+            && !apy_class_find(f, apy_name("__init__"))) {
+        /* THE KIND CHECK IS NOT REDUNDANT. A `class` statement lowers to a
+           FUNC that carries `is_type`, and `type.__call__` hands one here --
+           so reading `v.t.name` without asking would read a FUNC's code
+           pointer as a string, which segfaults rather than answering. */
+        const char *tn = APY_CSTR(O(f)->v.t.name);
+        /* BY NAME AND NOT BY THE PROTOTYPE'S KIND. `bool` and `int` share a
+           prototype -- the attribute question cannot tell them apart and does
+           not need to -- and `type(True)()` is `False`, not `0`. */
+        /* THREE KINDS HAVE NO EMPTY FORM AT ALL, and allocating an instance
+           of a nameless class for them was the old answer. Named here
+           because `apy_kind_prototype` cannot say "this one refuses" -- it
+           answers a value or nothing, and nothing already means "not a
+           builtin kind". */
+        if (argc == 0 && !kwrest) {
+            apy_value proto;
+            if (!strcmp(tn, "range"))
+                return apy_fail("TypeError",
+                                "range expected at least 1 argument, got 0");
+            if (!strcmp(tn, "slice"))
+                return apy_fail("TypeError",
+                                "slice expected at least 1 argument, got 0");
+            if (!strcmp(tn, "memoryview"))
+                return apy_fail("TypeError", "memoryview() missing required "
+                                             "argument 'object' (pos 1)");
+            if (!strcmp(tn, "bool")) return apy_from_bool(0);
+            if (!strcmp(tn, "complex"))
+                return apy_complex_of(apy_from_float(0.0),
+                                      apy_from_float(0.0));
+            proto = apy_kind_prototype((apy_value)(uintptr_t)tn);
+            if (proto) return proto;
+        } else if (argc == 1 && !kwrest) {
+            /* EACH NAMED, because `apy_call_kind` serves five kinds and
+               answers 0 for the rest -- and a 0 with no error set is a null
+               that segfaults downstream rather than reporting. */
+            if (!strcmp(tn, "int")) return apy_to_int(argv[0]);
+            if (!strcmp(tn, "bool")) return apy_from_bool(apy_truth(argv[0]));
+            if (!strcmp(tn, "float")) return apy_to_float(argv[0]);
+            if (!strcmp(tn, "str")) return apy_str(argv[0]);
+            if (!strcmp(tn, "bytes")) return apy_to_bytes(argv[0]);
+            if (!strcmp(tn, "bytearray")) return apy_to_bytearray(argv[0]);
+            if (!strcmp(tn, "frozenset")) return apy_to_frozenset(argv[0]);
+            if (!strcmp(tn, "list")) return apy_call_kind(APY_LIST_K, argv[0]);
+            if (!strcmp(tn, "tuple"))
+                return apy_call_kind(APY_TUPLE_K, argv[0]);
+            if (!strcmp(tn, "dict")) return apy_call_kind(APY_DICT_K, argv[0]);
+            if (!strcmp(tn, "set")) return apy_call_kind(APY_SET_K, argv[0]);
+            if (!strcmp(tn, "complex"))
+                return apy_complex_of(argv[0], apy_from_float(0.0));
+        }
+    }
     if (maker) {
         /* `__new__` IS AN IMPLICIT STATICMETHOD: it receives the CLASS as
            its first argument, not an instance, so it is called unbound

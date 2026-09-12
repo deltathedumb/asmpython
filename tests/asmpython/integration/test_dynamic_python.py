@@ -799,6 +799,62 @@ PROGRAMS = {
             except TypeError as e:
                 print("TypeError:", e)
     """,
+    # A BUILTIN TYPE OBJECT WAS ONLY CALLABLE WHEN THE PROGRAM HAPPENED TO
+    # WRITE THAT TYPE'S NAME. `type(5)()` answered `<int object at 0x...>` --
+    # a fresh empty instance of a class with no constructor -- because the
+    # canonical thunk that turns a type object back into a call is registered
+    # by the sweep that SEES the bare word `int`. A module that never writes
+    # `int` got a type object that instantiated like a user class, so whether
+    # `type(x)()` worked depended on unrelated text elsewhere in the file.
+    #
+    # The fix keys the instantiation on the TYPE'S OWN NAME rather than on
+    # what the module mentions, so `type(x)()` and `x.__class__(...)` reach
+    # the same constructor the bare word does. The three kinds that have no
+    # empty form -- range, slice and memoryview -- refuse in CPython's words
+    # rather than answering an empty instance.
+    "a_builtin_type_object_is_callable": """
+        class C:
+            def __init__(self):
+                self.x = 1
+
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except TypeError as e:
+                print(label, "TypeError:", e)
+
+        # THE EMPTY FORM of every builtin type, reached through a VALUE
+        # rather than through the bare word.
+        show("list", lambda: type([])())
+        show("int", lambda: type(5)())
+        show("str", lambda: type("")())
+        show("dict", lambda: type({})())
+        show("set", lambda: type(set())())
+        show("tuple", lambda: type(())())
+        show("float", lambda: type(1.5)())
+        show("bytes", lambda: type(b"")())
+        show("bytearray", lambda: type(bytearray())())
+        show("frozenset", lambda: type(frozenset())())
+        show("bool", lambda: type(True)())
+        show("complex", lambda: type(1j)())
+        # `__class__` IS THE SAME OBJECT, so it calls the same way.
+        show("int cls", lambda: (5).__class__())
+        show("list cls", lambda: [1].__class__())
+        # THE CONVERTING FORMS convert, exactly as the named spelling does.
+        show("list(it)", lambda: type([])((1, 2)))
+        show("int(str)", lambda: type(5)("7"))
+        show("str(int)", lambda: type("")(5))
+        show("bool(1)", lambda: type(True)(1))
+        show("dict(pairs)", lambda: type({})([("a", 1)]))
+        show("set(it)", lambda: sorted(type(set())([1, 2, 1])))
+        show("complex(2)", lambda: type(1j)(2))
+        # AND THE THREE WITH NO EMPTY FORM refuse rather than invent one.
+        show("range", lambda: type(range(3))())
+        show("slice", lambda: type(slice(1))())
+        show("memoryview", lambda: type(memoryview(b"a"))())
+        # A USER CLASS was never the broken half, and stays whole.
+        print(type(C())().x, type(C()) is C)
+    """,
     "traceback_positions": """
         try:
             (1).missing
