@@ -5884,10 +5884,19 @@ class DynamicLowering:
             for i in range(2):
                 call_args.append(args[i] if i < len(args)
                                  else self.b.call(T.PTR, "apy_none", []))
-        elif attr in ("hex", "expandtabs") and not args:
-            # The no-argument form. A separator of None means "none" and a
-            # tab width of None means the default 8, which the runtime reads
-            # off the kind rather than from a sentinel number.
+        elif attr == "expandtabs" and not args:
+            # THE DEFAULT ITSELF, NOT A SENTINEL. A tab width of None used to
+            # stand for "not given", which made `s.expandtabs(None)` -- a
+            # TypeError in Python -- answer exactly what `s.expandtabs()`
+            # answers: once a keyword or an omission has been folded into a
+            # slot, nothing downstream can tell it from a written value. So
+            # the slot carries 8, and the runtime refuses anything that is
+            # not an integer.
+            call_args = [receiver, self.b.call(T.PTR, "apy_from_int",
+                                               [self.b.const(T.I64, 8)])]
+        elif attr == "hex" and not args:
+            # The no-argument form. A separator of None means "none", which
+            # is a value `bytes.hex` really does take.
             call_args = [receiver, self.b.call(T.PTR, "apy_none", [])]
         elif attr in ("get", "setdefault") and len(args) == 1:
             call_args = [receiver, args[0],

@@ -252,6 +252,25 @@ APY_API apy_value apy_str_rfind3(apy_value s, apy_value sub, apy_value start,
 APY_API apy_value apy_str_rindex(apy_value s, apy_value sub) {
     return apy_str_search(s, sub, 0, 0, 1, 1);
 }
+/* `index` AND `rindex` TAKE THE SAME BOUNDS `find` AND `rfind` DO, and did
+   not: `"abcabc".index("c", 3)` fell off the arity table, reached the generic
+   attribute lookup, and reported about a one-argument method. The search
+   itself already took the window -- only the entry points were missing. */
+APY_API apy_value apy_str_index2(apy_value s, apy_value sub, apy_value start) {
+    return apy_str_search(s, sub, start, 0, 0, 1);
+}
+APY_API apy_value apy_str_index3(apy_value s, apy_value sub, apy_value start,
+                                 apy_value end) {
+    return apy_str_search(s, sub, start, end, 0, 1);
+}
+APY_API apy_value apy_str_rindex2(apy_value s, apy_value sub,
+                                  apy_value start) {
+    return apy_str_search(s, sub, start, 0, 1, 1);
+}
+APY_API apy_value apy_str_rindex3(apy_value s, apy_value sub, apy_value start,
+                                  apy_value end) {
+    return apy_str_search(s, sub, start, end, 1, 1);
+}
 
 /* Reached from `apy_index_of` and `apy_count_of` when the receiver is a str,
    so that `'abcabc'.index('bc')` looks for a SUBSTRING rather than for an

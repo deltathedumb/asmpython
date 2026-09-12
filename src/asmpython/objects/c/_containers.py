@@ -171,6 +171,45 @@ APY_API apy_value apy_index_of(apy_value seq, apy_value item) {
                      apy_kind_name(seq), apy_kind_name(seq));
 }
 
+/* `xs.index(v, start)` and `xs.index(v, start, stop)` -- the BOUNDED search,
+   which a list and a tuple have as well as a str. A range does NOT:
+   `range(10).index(5, 1)` is `range.index() takes exactly one argument` in
+   CPython, so it falls through to the sequence refusal rather than being
+   given a window it has no method for. */
+static apy_value apy_index_bounded(apy_value seq, apy_value item,
+                                   apy_value start, apy_value end) {
+    int64_t i, n, lo = 0, hi;
+    /* A str or bytes receiver means SUBSTRING, exactly as at one argument --
+       the element loop below would answer for a one-character needle and
+       silently wrongly for any longer one. */
+    if (O(seq)->kind == APY_STR_K || O(seq)->kind == APY_BYTES_K)
+        return end ? apy_str_index3(seq, item, start, end)
+                   : apy_str_index2(seq, item, start);
+    if (!apy_is_seq(seq))
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'index'%s",
+                         apy_kind_name(seq), "");
+    n = O(seq)->v.q.n;
+    hi = n;
+    if (start && !apy_slice_arg(start, &lo)) return 0;
+    if (end && !apy_slice_arg(end, &hi)) return 0;
+    apy_clamp_range(n, &lo, &hi);
+    for (i = lo; i < hi; i++)
+        if (apy_eq_raw(O(seq)->v.q.items[i], item)) return apy_from_int(i);
+    return apy_fail2("ValueError", "%s.index(x): x not in %s",
+                     apy_kind_name(seq), apy_kind_name(seq));
+}
+
+APY_API apy_value apy_index_of2(apy_value seq, apy_value item,
+                                apy_value start) {
+    return apy_index_bounded(seq, item, start, 0);
+}
+
+APY_API apy_value apy_index_of3(apy_value seq, apy_value item,
+                                apy_value start, apy_value end) {
+    return apy_index_bounded(seq, item, start, end);
+}
+
 APY_API apy_value apy_count_of(apy_value seq, apy_value item) {
     /* A RANGE HOLDS EACH VALUE AT MOST ONCE, so the count is the membership
        test -- and arithmetic rather than a walk. */

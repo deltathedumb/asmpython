@@ -30,7 +30,11 @@ DYN_METHOD_TABLE = {
     "append":       [None, "apy_seq_push"],
     "add":          [None, "apy_set_add"],
     "discard":      [None, "apy_set_discard"],
-    "index":        [None, "apy_index_of"],
+    # `index` TAKES THE SAME BOUNDS `find` DOES, on a str, bytes, a list and
+    # a tuple alike -- `xs.index(v, start)` is how a scan resumes past the
+    # last hit. A range has no bounded form; it falls through to the
+    # sequence refusal.
+    "index":        [None, "apy_index_of", "apy_index_of2", "apy_index_of3"],
     # `count` on a LIST takes only the item; the start/end forms are str's
     # alone, which is why the wider arities name the string entry points
     # directly. A list reaching them is not a shape Python allows.
@@ -100,7 +104,8 @@ DYN_METHOD_TABLE = {
     # str: searching
     "find":         [None, "apy_str_find", "apy_str_find2", "apy_str_find3"],
     "rfind":        [None, "apy_str_rfind", "apy_str_rfind2", "apy_str_rfind3"],
-    "rindex":       [None, "apy_str_rindex"],
+    "rindex":       [None, "apy_str_rindex", "apy_str_rindex2",
+                     "apy_str_rindex3"],
     "startswith":   [None, "apy_str_startswith", "apy_str_startswith2",
                      "apy_str_startswith3"],
     "endswith":     [None, "apy_str_endswith", "apy_str_endswith2",

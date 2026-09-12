@@ -1505,7 +1505,23 @@ class ObjectHost:
             # argument. Tested here rather than at each call site, so every
             # route into a callable reaches one the same way.
             given = ([f.bound] if f.bound is not None else []) + list(args)
-            return f.body(*given)
+            try:
+                return f.body(*given)
+            except TypeError as exc:
+                # THE LAMBDA'S NAME IS AN IMPLEMENTATION DETAIL OF THIS FILE.
+                # A wrong argument count against a runtime-owned callable
+                # reported `_kind_attr.<locals>.<lambda>() takes 1 positional
+                # argument but 3 were given` -- a name from here, in a message
+                # the program sees and may print. Rewritten to name the METHOD
+                # instead, and ONLY when the failure is the body's own
+                # signature: a TypeError raised BY the body is the program's
+                # and travels unchanged.
+                where = getattr(f.body, "__qualname__", "")
+                text = str(exc)
+                if not where or not text.startswith(where + "()"):
+                    raise
+                self._fail("TypeError", f.name + text[len(where):])
+                raise _UserFailed
         slots = [f.bound] if f.bound is not None else []
         declared = f.arity - (1 if f.vararg else 0) - (1 if f.kwarg else 0)
         # WHERE POSITIONS STOP. A keyword-only parameter is declared but not
@@ -3739,12 +3755,25 @@ def _apy_as_integer_ratio(h, a):
 
 
 def _apy_str_expandtabs(h, a):
+    """`s.expandtabs(width)`. BYTES TOO -- `b"a\tb".expandtabs()` is an
+    ordinary call in Python, and a column there is a BYTE rather than a
+    character, which is the only thing the receiver's kind changes.
+
+    THE WIDTH IS REQUIRED AND MUST BE AN INTEGER. It arrives always -- the
+    frontend supplies 8 for the no-argument form -- so a value that is not an
+    integer is one the PROGRAM wrote, and `"a\tb".expandtabs(None)` is a
+    TypeError in Python. Reading a non-integer as the default made the
+    written None answer what the omitted argument answers.
+    """
     s = h._get(a[0], "apy_str_expandtabs")
     width = h._get(a[1], "apy_str_expandtabs")
-    if not isinstance(s, str):
+    if not isinstance(s, (str, bytes, bytearray)):
         return h._fail("AttributeError", f"'{h.kind_name(s)}' object has no "
                                          f"attribute 'expandtabs'")
-    return h._new(s.expandtabs(int(width) if _is_int_like(width) else 8))
+    if not _is_int_like(width):
+        return h._fail("TypeError", f"'{h.kind_name(width)}' object cannot "
+                                    f"be interpreted as an integer")
+    return h._new(s.expandtabs(int(width)))
 
 
 #: The one class every `typing` special form is an instance of, made on first
@@ -9492,6 +9521,88 @@ def _apy_index_of(h, a):
         if x == item:
             return h._int(i)
     return h._fail("ValueError", f"{h._text(item, True)} is not in list")
+
+
+def _index_bounded(h, a, has_end):
+    """`xs.index(v, start)` and `xs.index(v, start, stop)`.
+
+    THE BOUNDED SEARCH, which a list and a tuple have as well as a str --
+    `xs.index(v, start)` is how a scan resumes past the last hit. A str or
+    bytes receiver means SUBSTRING, exactly as at one argument. A RANGE HAS
+    NO BOUNDED FORM: CPython says `range.index() takes exactly one argument`,
+    so it is refused rather than given a window it has no method for.
+    """
+    seq = h._get(a[0], "apy_index_of")
+    item = h._get(a[1], "apy_index_of")
+    lo = h._get(a[2], "apy_index_of")
+    hi = h._get(a[3], "apy_index_of") if has_end else None
+    if not isinstance(seq, (str, bytes, bytearray, list, tuple)):
+        return h._fail("AttributeError",
+                       f"'{h.kind_name(seq)}' object has no attribute 'index'")
+    try:
+        if hi is None:
+            return h._int(seq.index(item, 0 if lo is None else lo))
+        return h._int(seq.index(item, 0 if lo is None else lo,
+                                len(seq) if hi is None else hi))
+    except ValueError:
+        if isinstance(seq, (str, bytes, bytearray)):
+            return h._fail("ValueError", "substring not found")
+        return h._fail("ValueError",
+                       f"{h.kind_name(seq)}.index(x): x not in "
+                       f"{h.kind_name(seq)}")
+    except _HOST_RAISES as exc:
+        return h._fail_like(exc)
+
+
+def _apy_index_of2(h, a):
+    """`xs.index(v, start)`."""
+    return _index_bounded(h, a, False)
+
+
+def _apy_index_of3(h, a):
+    """`xs.index(v, start, stop)`."""
+    return _index_bounded(h, a, True)
+
+
+def _str_rindex(h, a, has_end):
+    """`s.rindex(sub, start)` and `s.rindex(sub, start, stop)` -- str and
+    bytes only, which is why this does not share the sequence walk above."""
+    s = h._get(a[0], "apy_str_rindex")
+    sub = h._get(a[1], "apy_str_rindex")
+    lo = h._get(a[2], "apy_str_rindex")
+    hi = h._get(a[3], "apy_str_rindex") if has_end else None
+    if not isinstance(s, (str, bytes, bytearray)):
+        return h._fail("AttributeError", f"'{h.kind_name(s)}' object has no "
+                                         f"attribute 'rindex'")
+    try:
+        at = s.rindex(sub, 0 if lo is None else lo,
+                      len(s) if hi is None else hi)
+    except ValueError:
+        return h._fail("ValueError", "substring not found")
+    except _HOST_RAISES as exc:
+        return h._fail_like(exc)
+    return h._int(at)
+
+
+def _apy_str_rindex2(h, a):
+    """`s.rindex(sub, start)`."""
+    return _str_rindex(h, a, False)
+
+
+def _apy_str_rindex3(h, a):
+    """`s.rindex(sub, start, stop)`."""
+    return _str_rindex(h, a, True)
+
+
+def _apy_str_index2(h, a):
+    """`s.index(sub, start)` -- the str half, reached when the receiver is
+    known to be text."""
+    return _index_bounded(h, a, False)
+
+
+def _apy_str_index3(h, a):
+    """`s.index(sub, start, stop)`."""
+    return _index_bounded(h, a, True)
 
 
 def _apy_count_of(h, a):

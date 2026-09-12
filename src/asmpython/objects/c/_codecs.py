@@ -537,13 +537,25 @@ APY_API apy_value apy_as_integer_ratio(apy_value v) {
    last newline. Not a fixed number of spaces per tab: the whole point is that
    columns line up. */
 APY_API apy_value apy_str_expandtabs(apy_value s, apy_value width) {
-    int64_t n, i, col = 0, out = 0, cap;
-    int64_t w = apy_is_int_like(width) ? O(width)->v.i : 8;
+    int64_t n, i, col = 0, out = 0, cap, w;
+    /* A COLUMN IS A CHARACTER IN A STR AND A BYTE IN BYTES, which is the only
+       thing the bytes receiver changes: `b"\xc3\xa9\tx"` is two columns
+       before the tab where the str it decodes to is one. */
+    int wide;
     char *buf;
-    if (O(s)->kind != APY_STR_K)
-        return apy_fail2("AttributeError",
-                         "'%s' object has no attribute 'expandtabs'%s",
-                         apy_kind_name(s), "");
+    if (!apy_str_self("expandtabs", s)) return 0;
+    wide = O(s)->kind == APY_STR_K;
+    /* THE WIDTH IS REQUIRED AND MUST BE AN INTEGER. It arrives always -- the
+       frontend supplies 8 for the no-argument form -- so a value that is not
+       an integer is one the PROGRAM wrote, and `"a\tb".expandtabs(None)` is a
+       TypeError in Python. Reading a non-integer as the default made the
+       written None answer what the omitted argument answers, which is the
+       difference no padding scheme can see once it has been applied. */
+    if (!apy_is_int_like(width))
+        return apy_fail2("TypeError",
+                         "'%s' object cannot be interpreted as an integer%s",
+                         apy_kind_name(width), "");
+    w = apy_is_big(width) ? 8 : O(width)->v.i;
     if (w < 1) w = 1;
     n = O(s)->v.s.n;
     cap = n * (w > 1 ? w : 1) + 8;
@@ -561,7 +573,7 @@ APY_API apy_value apy_str_expandtabs(apy_value s, apy_value width) {
                reach column 2 after one character and the tab stop land one
                place early. */
             col = (c == '\n' || c == '\r') ? 0
-                : ((c & 0xC0) == 0x80 ? col : col + 1);
+                : (wide && (c & 0xC0) == 0x80 ? col : col + 1);
         }
     }
     buf[out] = 0;

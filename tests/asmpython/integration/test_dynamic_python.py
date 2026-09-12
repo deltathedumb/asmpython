@@ -545,6 +545,42 @@ PROGRAMS = {
             pass
         print(Point().__class__.__name__, (lambda: 1).__class__.__name__)
     """,
+    # `index` TAKES THE SAME BOUNDS `find` DOES and did not: at two or three
+    # arguments it fell off the arity table, reached the generic attribute
+    # lookup, and reported about a one-argument method -- naming an internal
+    # lambda of the interpreter while it did so. The window is how a scan
+    # resumes past the last hit, and a list and a tuple have it too.
+    #
+    # `expandtabs` IS IN THE SAME PARAGRAPH for the opposite reason: it had a
+    # width it should not accept. The no-argument form padded the slot with
+    # None, so `s.expandtabs(None)` -- a TypeError in Python -- answered what
+    # the omitted argument answers. Once a default has been folded into a
+    # slot nothing downstream can tell it from a written value, so the slot
+    # carries 8. And bytes never had the method at all.
+    "bounded_index_and_expandtabs": """
+        print("abcabc".index("c", 3), "abcabc".index("c", 0, 3))
+        print("abcabc".index("c", None, None), "abcabc".rindex("c", 0, 3))
+        print(b"abcabc".index(b"c", 3), bytearray(b"abcabc").index(b"c", 3))
+        print([1, 2, 3, 2].index(2, 2), [1, 2, 3, 2].index(2, 0, 2))
+        print((1, 2, 3, 2).index(2, 2))
+        # A POSITION IS A CHARACTER, in the bounded form as in the bare one.
+        print("h\u00e9llo h\u00e9llo".index("llo", 3))
+        for body in (lambda: "abcabc".index("z", 0, 3),
+                     lambda: "abcabc".rindex("z"),
+                     lambda: [1, 2, 3].index(2, 2)):
+            try:
+                body()
+            except ValueError as e:
+                print("ValueError:", e)
+        print(repr("a\tb".expandtabs()), repr("a\tb".expandtabs(4)))
+        print(repr("a\tb".expandtabs(tabsize=4)), repr("a\tb".expandtabs(True)))
+        print(b"a\tb".expandtabs(), b"a\tb".expandtabs(4))
+        print(bytearray(b"a\tb").expandtabs())
+        try:
+            "a\tb".expandtabs(None)
+        except TypeError as e:
+            print("TypeError:", e)
+    """,
     "traceback_positions": """
         try:
             (1).missing

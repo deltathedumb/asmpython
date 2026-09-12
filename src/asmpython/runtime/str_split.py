@@ -382,17 +382,30 @@ def apy_str_expandtabs(s: ptr, width: ptr) -> ptr:
     THE BUFFER IS SIZED FOR EVERY BYTE BEING A TAB, which is the worst case
     and cheap in a bump arena.
     """
-    if i64(load(i32, offset(s, 0))) != apy_str_kind():
+    if not apy_str_self_of(rodata(b"expandtabs\0"), s):
+        return ptr(0)
+    # THE WIDTH IS REQUIRED AND MUST BE AN INTEGER. It arrives always -- the
+    # frontend supplies 8 for the no-argument form -- so a value that is not
+    # an integer is one the PROGRAM wrote, and `"a\tb".expandtabs(None)` is a
+    # TypeError in Python. Reading a non-integer as the default made the
+    # written None answer what the omitted argument answers, which is the
+    # difference no padding scheme can see once it has been applied.
+    if not apy_is_int_like_of(width):
         return apy_raise_fmt(
-            rodata(b"AttributeError\0"),
-            rodata(b"'%s' object has no attribute "
-                   b"'expandtabs'%s\0"),
-            apy_kind_name_of(s), rodata(b"\0"))
-    w: i64 = 8
-    if apy_is_int_like_of(width):
-        w = apy_int_payload(width)
+            rodata(b"TypeError\0"),
+            rodata(b"'%s' object cannot be interpreted as an integer%s\0"),
+            apy_kind_name_of(width), rodata(b"\0"))
+    w: i64 = apy_int_payload(width)
+    if apy_is_big_of(width):
+        w = 8
     if w < 1:
         w = 1
+    # A COLUMN IS A CHARACTER IN A STR AND A BYTE IN BYTES, which is the only
+    # thing the bytes receiver changes: `b"\xc3\xa9\tx"` is two columns
+    # before the tab where the str it decodes to is one.
+    wide: i64 = 0
+    if i64(load(i32, offset(s, 0))) == apy_str_kind():
+        wide = 1
     n: i64 = load(i64, offset(s, apy_str_len_offset()))
     cap: i64 = n * w + 8
     buf: ptr = apy_alloc_bytes(cap + 1)
@@ -417,6 +430,8 @@ def apy_str_expandtabs(s: ptr, width: ptr) -> ptr:
                 out = out + 1
             if c == 13 or c == 10:
                 col = 0
+            elif wide == 0:
+                col = col + 1
             elif (c & 192) != 128:
                 col = col + 1
         i = i + 1
