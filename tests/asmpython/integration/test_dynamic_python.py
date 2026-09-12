@@ -775,6 +775,30 @@ PROGRAMS = {
         show(lambda: "aaa".replace("a", "b", count=1))
         show(lambda: "a\\tb".expandtabs(tabsize=4))
     """,
+    # `bytes(s, "utf-8")` IS A DIFFERENT CONSTRUCTOR from `bytes(xs)` -- one
+    # encodes text and the other reads octets -- and only the second existed,
+    # so the constructor spelling of `.encode()` and `.decode()` raised
+    # TypeError for ordinary Python. What tells the two apart is whether an
+    # ENCODING was given, by position or by name; `errors` alone is enough,
+    # because `str(b, errors="replace")` is a call CPython answers.
+    "the_encoding_constructors": """
+        print(bytes("caf\\u00e9", "utf-8"), bytes("a", encoding="utf-8"))
+        print(bytes("a\\u00ff", "ascii", "replace"), bytes("\\u00e9", "latin-1"))
+        print(bytearray("caf\\u00e9", "utf-8"),
+              type(bytearray("a", "utf-8")).__name__)
+        print(str(b"caf\\xc3\\xa9", "utf-8"), str(b"a", encoding="utf-8"))
+        print(str(b"a\\xff", "utf-8", "replace"), str(b"a", errors="replace"))
+        print(str(bytearray(b"ab"), "utf-8"))
+        # AND THE ONE-ARGUMENT FORMS ARE UNTOUCHED, including the two
+        # refusals that are each other's mirror.
+        print(bytes(b"ab"), bytes([1, 2]), bytes(3), str(b"ab"), str(5))
+        for body in (lambda: bytes("a"), lambda: bytes(b"a", "utf-8"),
+                     lambda: str(5, "utf-8"), lambda: bytearray("a")):
+            try:
+                body()
+            except TypeError as e:
+                print("TypeError:", e)
+    """,
     "traceback_positions": """
         try:
             (1).missing

@@ -3766,6 +3766,37 @@ def _apy_str_encode(h, a):
                        f"'{name}' codec can't encode character")
 
 
+def _apy_bytes_ctor(h, a):
+    """`bytes(s, encoding)` and `bytearray(s, encoding, errors)` -- THE
+    CONSTRUCTOR SPELLING OF `.encode()`, and a different constructor from the
+    one-argument form: `bytes(xs)` is a sequence of octets and
+    `bytes(s, "utf-8")` is `s.encode("utf-8")`.
+
+    A NON-STR WITH AN ENCODING IS THE OTHER HALF of the refusal the
+    one-argument form already makes.
+    """
+    v = h._get(a[0], "apy_bytes_ctor")
+    if not isinstance(v, str):
+        return h._fail("TypeError", "encoding without a string argument")
+    made = _apy_str_encode(h, [a[0], a[1], a[2]])
+    if not made:
+        return 0
+    if int(a[3]):
+        return h._new(bytearray(h._get(made, "apy_bytes_ctor")))
+    return made
+
+
+def _apy_str_ctor(h, a):
+    """`str(b, encoding)` -- the constructor spelling of `.decode()`, and the
+    same split: `str(b)` is the REPR of the bytes and `str(b, "utf-8")` is
+    the text they spell."""
+    v = h._get(a[0], "apy_str_ctor")
+    if not isinstance(v, (bytes, bytearray, memoryview)):
+        return h._fail("TypeError", f"decoding to str: need a bytes-like "
+                                    f"object, {h.kind_name(v)} found")
+    return _apy_bytes_decode(h, [a[0], a[1], a[2]])
+
+
 def _apy_bytes_decode(h, a):
     v = h._get(a[0], "apy_bytes_decode")
     if isinstance(v, memoryview):

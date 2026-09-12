@@ -319,6 +319,48 @@ APY_API apy_value apy_bytes_decode(apy_value b, apy_value encoding,
     }
 }
 
+/* `bytes(s, encoding)` and `bytearray(s, encoding, errors)` -- THE
+   CONSTRUCTOR SPELLING OF `.encode()`, and a different constructor from the
+   one-argument form beside it: `bytes(xs)` is a sequence of octets and
+   `bytes(s, "utf-8")` is `s.encode("utf-8")`. What tells them apart is
+   whether an ENCODING was given at all.
+
+   A NON-STR WITH AN ENCODING IS THE OTHER HALF of the refusal the
+   one-argument form already makes: `bytes("a")` is `string argument without
+   an encoding` and `bytes(b"a", "utf-8")` is `encoding without a string
+   argument`. */
+APY_API apy_value apy_bytes_ctor(apy_value v, apy_value encoding,
+                                 apy_value errors, int64_t mut) {
+    apy_value made;
+    if (O(v)->kind != APY_STR_K)
+        return apy_fail("TypeError", "encoding without a string argument");
+    made = apy_str_encode(v, encoding, errors);
+    if (!made) return 0;
+    if (mut) {
+        /* A BYTEARRAY IS A FRESH CELL and not a re-tagged one: `encode`
+           answers bytes, and writing `mut` into it would make the caller's
+           own value writable. */
+        apy_value out = apy_str_copy(O(made)->v.s.p, O(made)->v.s.n);
+        O(out)->kind = APY_BYTES_K;
+        O(out)->v.s.mut = 1;
+        return out;
+    }
+    return made;
+}
+
+/* `str(b, encoding)` -- the constructor spelling of `.decode()`, and the
+   same split: `str(b)` is the REPR of the bytes and `str(b, "utf-8")` is the
+   text they spell. */
+APY_API apy_value apy_str_ctor(apy_value v, apy_value encoding,
+                               apy_value errors) {
+    if (O(v)->kind == APY_MVIEW_K) v = apy_mview_bytes(v);
+    if (O(v)->kind != APY_BYTES_K)
+        return apy_fail2("TypeError",
+                         "decoding to str: need a bytes-like object, %s "
+                         "found%s", apy_kind_name(v), "");
+    return apy_bytes_decode(v, encoding, errors);
+}
+
 /* `b.hex()` and `b.hex(sep)` -- the octets as lowercase hex pairs. The
    separator form is `bytes.hex(':')`, which is what makes a fingerprint
    readable and is the only reason the argument exists. */

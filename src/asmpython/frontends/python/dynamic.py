@@ -2241,6 +2241,14 @@ class DynamicLowering:
         if name in ("locals", "globals"):
             return self._dyn_scope_dict(name)
         if name == "bytearray":
+            # `bytearray(s, encoding)` IS A DIFFERENT CONSTRUCTOR from
+            # `bytearray(xs)`: one encodes text and the other reads octets.
+            spelled = self._dyn_encoding_form(node)
+            if spelled is not None:
+                out = self.b.call(T.PTR, "apy_bytes_ctor",
+                                  [*spelled, self.b.const(T.I64, 1)])
+                self._dyn_check()
+                return out
             # `bytearray()` is empty, and the zero-argument case goes through
             # the same call with an empty list rather than a second entry
             # point -- an empty sequence of octets IS what it means.
@@ -2256,6 +2264,14 @@ class DynamicLowering:
             self._dyn_check()
             return out
         if name == "bytes":
+            # `bytes(s, encoding)` IS A DIFFERENT CONSTRUCTOR from
+            # `bytes(xs)`: one encodes text and the other reads octets.
+            spelled = self._dyn_encoding_form(node)
+            if spelled is not None:
+                out = self.b.call(T.PTR, "apy_bytes_ctor",
+                                  [*spelled, self.b.const(T.I64, 0)])
+                self._dyn_check()
+                return out
             # `bytes()` is empty; `bytes(xs)` takes a sequence of octets.
             if not node.args:
                 return self.b.call(T.PTR, "apy_to_bytes",
@@ -2332,6 +2348,14 @@ class DynamicLowering:
         if name == "bool" and not node.args:
             return self.b.call(T.PTR, "apy_from_bool",
                                [self.b.const(T.I64, 0)])
+        if name == "str":
+            # `str(b, encoding)` IS A DIFFERENT CONSTRUCTOR from `str(x)`:
+            # one decodes octets and the other asks the value for its text.
+            spelled = self._dyn_encoding_form(node)
+            if spelled is not None:
+                out = self.b.call(T.PTR, "apy_str_ctor", list(spelled))
+                self._dyn_check()
+                return out
         if name == "str" and not node.args:
             return self._dyn_str_literal("")
         if name == "float" and not node.args:
@@ -5837,6 +5861,37 @@ class DynamicLowering:
                         [self._dyn_str_literal("TypeError"),
                          self._dyn_str_literal(str(exc))])])
         self._dyn_check()
+
+    def _dyn_encoding_form(self, node):
+        """The three arguments of `bytes(s, encoding, errors)`, or None.
+
+        ANSWERS None FOR THE ONE-ARGUMENT FORM, which is a DIFFERENT
+        CONSTRUCTOR: `bytes(xs)` is a sequence of octets, `bytes(s, "utf-8")`
+        is `s.encode("utf-8")`, and `str(b)` is the repr of the bytes where
+        `str(b, "utf-8")` is the text they spell. What tells them apart is
+        whether an ENCODING was given -- by position or by name.
+
+        `errors` ALONE IS ENOUGH, which is why the test is on either name:
+        `str(b, errors="replace")` is a call CPython answers, with the
+        encoding defaulting to UTF-8.
+        """
+        named = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+        if len(node.args) < 2 and not ({"encoding", "errors"} & set(named)):
+            return None
+        if not node.args:
+            return None
+        first = self._dyn_expr(node.args[0])
+
+        def slot(at: int, key: str) -> int:
+            if len(node.args) > at:
+                return self._dyn_expr(node.args[at])
+            if key in named:
+                return self._dyn_expr(named[key])
+            # NONE MEANS "THE DEFAULT" to the codec pair, which is the same
+            # padding `.encode()` and `.decode()` already take.
+            return self.b.call(T.PTR, "apy_none", [])
+
+        return first, slot(1, "encoding"), slot(2, "errors")
 
     def _dyn_constant(self, value) -> int:
         """A Python constant as a runtime value, for a defaulted parameter."""
