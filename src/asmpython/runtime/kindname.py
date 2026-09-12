@@ -239,9 +239,21 @@ def apy_kind_name_of(v: ptr) -> ptr:
             if load(i64, offset(v, apy_fn_ndefaults_offset())) != 0:
                 if not ptr(load(u64, offset(v, apy_fn_defaults_offset()))):
                     return rodata(b"builtin_function_or_method\0")
-            if apy_name_is_dunder(ptr(load(u64, offset(
-                    ptr(load(u64, offset(v, apy_fn_name_offset()))),
-                    apy_str_ptr_offset())))):
+            named: ptr = ptr(load(u64, offset(
+                ptr(load(u64, offset(v, apy_fn_name_offset()))),
+                apy_str_ptr_offset())))
+            if apy_name_is_dunder(named):
+                # AND THE ARITY WAS ONLY STANDING IN FOR THE REAL QUESTION,
+                # which is whether the type WRITES the method out or fills a
+                # slot with it -- `list.__getitem__` takes exactly one
+                # argument and is written out, `tuple.__getitem__` is
+                # slotted, and nothing in either signature says so. The
+                # answer is read out of CPython per kind and per name; see
+                # `apy_kind_meth_written_of`.
+                held: ptr = ptr(load(u64, offset(v, apy_fn_bound_offset())))
+                if held:
+                    if apy_kind_meth_written_of(named, apy_kind_bit_of(held)):
+                        return rodata(b"builtin_function_or_method\0")
                 return rodata(b"method-wrapper\0")
             return rodata(b"builtin_function_or_method\0")
         return rodata(b"function\0")

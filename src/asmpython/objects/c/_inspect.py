@@ -24,6 +24,10 @@ APY_API int64_t apy_as_int(apy_value v) { return O(v)->v.i; }
    at that offset, which for an instance is its class pointer. */
 /* Defined just below; the bound converter calls it. */
 APY_API int64_t apy_index(apy_value v);
+/* DECLARED AHEAD: both live past the generated method table, which is
+   spliced into `_calling.py` -- see `apy_kind_name_of` for what they decide. */
+static int64_t apy_kind_meth_written(const char *w, unsigned bit);
+static unsigned apy_kind_bit(apy_value v);
 
 /* A SLICE BOUND, WHICH IS NOT AN INDEX. `xs[2 ** 100]` is a request this
    runtime cannot serve and CPython refuses it too; `xs[:2 ** 100]` is the
@@ -249,8 +253,20 @@ static const char *apy_kind_name(apy_value v) {
             if (!O(v)->v.fn.defaults && O(v)->v.fn.ndefaults)
                 return "builtin_function_or_method";
             if (len >= 5 && w[0] == '_' && w[1] == '_'
-                    && w[len - 1] == '_' && w[len - 2] == '_')
+                    && w[len - 1] == '_' && w[len - 2] == '_') {
+                /* AND THE ARITY WAS ONLY STANDING IN FOR THE REAL QUESTION,
+                   which is whether the type WRITES the method out or fills a
+                   slot with it -- `list.__getitem__` takes exactly one
+                   argument and is written out, `tuple.__getitem__` is
+                   slotted, and nothing in either signature says so. The
+                   answer is read out of CPython per kind and per name; see
+                   `apy_kind_meth_written`. */
+                if (O(v)->v.fn.bound
+                        && apy_kind_meth_written(w,
+                                                 apy_kind_bit(O(v)->v.fn.bound)))
+                    return "builtin_function_or_method";
                 return "method-wrapper";
+            }
             return "builtin_function_or_method";
         }
         return "function";

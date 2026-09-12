@@ -1523,6 +1523,65 @@ PROGRAMS = {
         print("content", b"abc" == made, hash(b"abc") == hash(made),
               hash("abc") == hash("ab" + "c"))
     """,
+    # A DUNDER A BUILTIN TYPE WRITES OUT READ AS `method-wrapper` HERE.
+    # `type([1, 2].__getitem__).__name__` is `builtin_function_or_method` in
+    # CPython: a list DEFINES that method where a tuple fills a slot with
+    # it, and nothing in either signature says which. The rule in place was
+    # the ARITY -- a dunder with a range is written out -- which is a proxy,
+    # and it got twenty-seven pairs wrong.
+    #
+    # THE ANSWER IS READ OUT OF CPYTHON, per kind and per name, by the
+    # generator that already asks which kinds own which names. It has to be
+    # per KIND as well as per name: `__contains__` and `__getitem__` really
+    # do differ between a dict and a tuple.
+    #
+    # THE PAIRS BELOW ARE THE ONES THIS RUNTIME HAS. Nineteen dunder names
+    # are missing from every builtin value and are a gap of their own, not
+    # this one.
+    "a_written_out_dunder_is_not_a_slot": """
+        def show(label, f):
+            try:
+                print(label, f())
+            except AttributeError as e:
+                print(label, "AttributeError:", e)
+
+        for name in ('__add__', '__buffer__', '__class__', '__contains__', '__delitem__', '__eq__', '__format__', '__ge__', '__getitem__', '__gt__', '__hash__', '__iadd__', '__imul__', '__iter__', '__le__', '__len__', '__lt__', '__mod__', '__mul__', '__ne__', '__repr__', '__rmul__', '__setitem__', '__str__'):
+            print("bytearray", name,
+                  type(getattr(bytearray(), name)).__name__)
+        for name in ('__add__', '__buffer__', '__class__', '__contains__', '__eq__', '__format__', '__ge__', '__getitem__', '__gt__', '__hash__', '__iter__', '__le__', '__len__', '__lt__', '__mod__', '__mul__', '__ne__', '__repr__', '__rmul__', '__str__'):
+            print("bytes", name,
+                  type(getattr(b"", name)).__name__)
+        for name in ('__abs__', '__add__', '__bool__', '__class__', '__complex__', '__eq__', '__format__', '__ge__', '__gt__', '__hash__', '__le__', '__lt__', '__mul__', '__ne__', '__neg__', '__pos__', '__pow__', '__radd__', '__repr__', '__rmul__', '__rpow__', '__rsub__', '__rtruediv__', '__str__', '__sub__', '__truediv__'):
+            print("complex", name,
+                  type(getattr(1j, name)).__name__)
+        for name in ('__class__', '__contains__', '__delitem__', '__eq__', '__format__', '__ge__', '__getitem__', '__gt__', '__hash__', '__ior__', '__iter__', '__le__', '__len__', '__lt__', '__ne__', '__or__', '__repr__', '__reversed__', '__ror__', '__setitem__', '__str__'):
+            print("dict", name,
+                  type(getattr({}, name)).__name__)
+        for name in ('__abs__', '__add__', '__bool__', '__ceil__', '__class__', '__divmod__', '__eq__', '__float__', '__floor__', '__floordiv__', '__format__', '__ge__', '__gt__', '__hash__', '__int__', '__le__', '__lt__', '__mod__', '__mul__', '__ne__', '__neg__', '__pos__', '__pow__', '__radd__', '__rdivmod__', '__repr__', '__rfloordiv__', '__rmod__', '__rmul__', '__round__', '__rpow__', '__rsub__', '__rtruediv__', '__str__', '__sub__', '__truediv__', '__trunc__'):
+            print("float", name,
+                  type(getattr(1.5, name)).__name__)
+        for name in ('__and__', '__class__', '__contains__', '__eq__', '__format__', '__ge__', '__gt__', '__hash__', '__iter__', '__le__', '__len__', '__lt__', '__ne__', '__or__', '__rand__', '__repr__', '__ror__', '__rsub__', '__rxor__', '__str__', '__sub__', '__xor__'):
+            print("frozenset", name,
+                  type(getattr(frozenset(), name)).__name__)
+        for name in ('__abs__', '__add__', '__and__', '__bool__', '__ceil__', '__class__', '__divmod__', '__eq__', '__float__', '__floor__', '__floordiv__', '__format__', '__ge__', '__gt__', '__hash__', '__index__', '__int__', '__invert__', '__le__', '__lshift__', '__lt__', '__mod__', '__mul__', '__ne__', '__neg__', '__or__', '__pos__', '__pow__', '__radd__', '__rand__', '__rdivmod__', '__repr__', '__rfloordiv__', '__rlshift__', '__rmod__', '__rmul__', '__ror__', '__round__', '__rpow__', '__rrshift__', '__rshift__', '__rsub__', '__rtruediv__', '__rxor__', '__str__', '__sub__', '__truediv__', '__trunc__', '__xor__'):
+            print("int", name,
+                  type(getattr(5, name)).__name__)
+        for name in ('__add__', '__class__', '__contains__', '__delitem__', '__eq__', '__format__', '__ge__', '__getitem__', '__gt__', '__hash__', '__iadd__', '__imul__', '__iter__', '__le__', '__len__', '__lt__', '__mul__', '__ne__', '__repr__', '__reversed__', '__rmul__', '__setitem__', '__str__'):
+            print("list", name,
+                  type(getattr([], name)).__name__)
+        for name in ('__bool__', '__class__', '__contains__', '__eq__', '__format__', '__ge__', '__getitem__', '__gt__', '__hash__', '__iter__', '__le__', '__len__', '__lt__', '__ne__', '__repr__', '__reversed__', '__str__'):
+            print("range", name,
+                  type(getattr(range(3), name)).__name__)
+        for name in ('__and__', '__class__', '__contains__', '__eq__', '__format__', '__ge__', '__gt__', '__hash__', '__iand__', '__ior__', '__isub__', '__iter__', '__ixor__', '__le__', '__len__', '__lt__', '__ne__', '__or__', '__rand__', '__repr__', '__ror__', '__rsub__', '__rxor__', '__str__', '__sub__', '__xor__'):
+            print("set", name,
+                  type(getattr(set(), name)).__name__)
+        for name in ('__add__', '__class__', '__contains__', '__eq__', '__format__', '__ge__', '__getitem__', '__gt__', '__hash__', '__iter__', '__le__', '__len__', '__lt__', '__mod__', '__mul__', '__ne__', '__repr__', '__rmul__', '__str__'):
+            print("str", name,
+                  type(getattr("", name)).__name__)
+        for name in ('__add__', '__class__', '__contains__', '__eq__', '__format__', '__ge__', '__getitem__', '__gt__', '__hash__', '__iter__', '__le__', '__len__', '__lt__', '__mul__', '__ne__', '__repr__', '__rmul__', '__str__'):
+            print("tuple", name,
+                  type(getattr((), name)).__name__)
+    """,
     "traceback_positions": """
         try:
             (1).missing

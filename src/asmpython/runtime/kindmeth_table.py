@@ -319,3 +319,99 @@ def apy_kind_meth_arity_of(w: ptr, bit: i64) -> i64:
             return 512
         return 0
     return 0
+
+
+def apy_kind_meth_written_of(w: ptr, bit: i64) -> i64:
+    """Does CPython WRITE this dunder out for a receiver of kind
+    `bit`, rather than filling a slot with it? That is the whole of
+    what tells `builtin_function_or_method` from `method-wrapper`.
+    """
+    if apy_cstr_eq(w, rodata(b"__alloc__\0")):
+        if bit & 4:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__bytes__\0")):
+        if bit & 2:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__ceil__\0")):
+        if bit & 768:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__class_getitem__\0")):
+        if bit & 248:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__complex__\0")):
+        if bit & 2048:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__contains__\0")):
+        if bit & 224:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__dir__\0")):
+        if bit & 4095:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__floor__\0")):
+        if bit & 768:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__format__\0")):
+        if bit & 4095:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__getformat__\0")):
+        if bit & 512:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__getitem__\0")):
+        if bit & 40:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__getnewargs__\0")):
+        if bit & 2835:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__getstate__\0")):
+        if bit & 4095:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__init_subclass__\0")):
+        if bit & 4095:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__new__\0")):
+        if bit & 4095:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__reduce__\0")):
+        if bit & 4095:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__reduce_ex__\0")):
+        if bit & 4095:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__reversed__\0")):
+        if bit & 1064:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__round__\0")):
+        if bit & 768:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__sizeof__\0")):
+        if bit & 4095:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__subclasshook__\0")):
+        if bit & 4095:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__trunc__\0")):
+        if bit & 768:
+            return 1
+        return 0
+    return 0

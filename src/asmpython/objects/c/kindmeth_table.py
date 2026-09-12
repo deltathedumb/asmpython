@@ -247,6 +247,59 @@ static int64_t apy_kind_meth_sign(const char *w, apy_value *names,
     return 0;
 }
 
+/* Does CPython WRITE this dunder out for a receiver of kind `bit`,
+   rather than filling a slot with it? That is the whole of what
+   tells `builtin_function_or_method` from `method-wrapper`, and it
+   is not derivable from the signature -- see `written_rows` in the
+   generator. */
+static int64_t apy_kind_meth_written(const char *w, unsigned bit) {
+    if (strcmp(w, "__alloc__") == 0)
+        return (bit & 4u) ? 1 : 0;
+    if (strcmp(w, "__bytes__") == 0)
+        return (bit & 2u) ? 1 : 0;
+    if (strcmp(w, "__ceil__") == 0)
+        return (bit & 768u) ? 1 : 0;
+    if (strcmp(w, "__class_getitem__") == 0)
+        return (bit & 248u) ? 1 : 0;
+    if (strcmp(w, "__complex__") == 0)
+        return (bit & 2048u) ? 1 : 0;
+    if (strcmp(w, "__contains__") == 0)
+        return (bit & 224u) ? 1 : 0;
+    if (strcmp(w, "__dir__") == 0)
+        return (bit & 4095u) ? 1 : 0;
+    if (strcmp(w, "__floor__") == 0)
+        return (bit & 768u) ? 1 : 0;
+    if (strcmp(w, "__format__") == 0)
+        return (bit & 4095u) ? 1 : 0;
+    if (strcmp(w, "__getformat__") == 0)
+        return (bit & 512u) ? 1 : 0;
+    if (strcmp(w, "__getitem__") == 0)
+        return (bit & 40u) ? 1 : 0;
+    if (strcmp(w, "__getnewargs__") == 0)
+        return (bit & 2835u) ? 1 : 0;
+    if (strcmp(w, "__getstate__") == 0)
+        return (bit & 4095u) ? 1 : 0;
+    if (strcmp(w, "__init_subclass__") == 0)
+        return (bit & 4095u) ? 1 : 0;
+    if (strcmp(w, "__new__") == 0)
+        return (bit & 4095u) ? 1 : 0;
+    if (strcmp(w, "__reduce__") == 0)
+        return (bit & 4095u) ? 1 : 0;
+    if (strcmp(w, "__reduce_ex__") == 0)
+        return (bit & 4095u) ? 1 : 0;
+    if (strcmp(w, "__reversed__") == 0)
+        return (bit & 1064u) ? 1 : 0;
+    if (strcmp(w, "__round__") == 0)
+        return (bit & 768u) ? 1 : 0;
+    if (strcmp(w, "__sizeof__") == 0)
+        return (bit & 4095u) ? 1 : 0;
+    if (strcmp(w, "__subclasshook__") == 0)
+        return (bit & 4095u) ? 1 : 0;
+    if (strcmp(w, "__trunc__") == 0)
+        return (bit & 768u) ? 1 : 0;
+    return 0;
+}
+
 /* One builtin method call, by name and by the count that arrived.
    The irregular shapes are mirrored from `_dyn_builtin_method`; see
    the generator. Answers 0 having raised for an arity no entry

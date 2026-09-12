@@ -43,6 +43,14 @@ import sys
 KINDS = ["str", "bytes", "bytearray", "list", "tuple", "dict", "set",
          "frozenset", "int", "float", "range", "complex"]
 
+#: One value of each kind, to ask CPython about. Written out rather than
+#: built from the name, because `range` and `complex` take arguments and an
+#: empty one of either would answer differently about nothing.
+SAMPLES = {"str": '""', "bytes": 'b""', "bytearray": "bytearray()",
+           "list": "[]", "tuple": "()", "dict": "{}", "set": "set()",
+           "frozenset": "frozenset()", "int": "5", "float": "1.5",
+           "range": "range(3)", "complex": "1j"}
+
 #: Names the generated table must NOT claim, because something above it
 #: answers them first and differently. `index` and `count` reach
 #: `apy_index_of`/`apy_count_of`, which split on the receiver themselves;
@@ -117,6 +125,7 @@ def emit_c(rows) -> str:
     lines += ["    return 0;", "}", ""]
 
     lines += emit_signatures(rows)
+    lines += emit_written()
 
     lines += [
         "/* One builtin method call, by name and by the count that arrived.",
@@ -250,6 +259,56 @@ def emit_signatures(rows) -> list:
     return lines
 
 
+def written_rows():
+    """Which (kind, dunder) pairs CPython calls a `builtin_function_or_method`.
+
+    THE REAL DISTINCTION IS NOT ARITY. A bound slot is a `method-wrapper` and
+    a method the type WRITES OUT is a `builtin_function_or_method`, and
+    nothing about the signature says which: `list.__getitem__` takes exactly
+    one argument and is written out, while `tuple.__getitem__` fills the slot.
+    The arity was standing in for it and got twenty-seven pairs wrong.
+
+    ASKED OF CPYTHON, per kind and per name, because that is where the answer
+    is -- and `__contains__` and `__getitem__` really do differ BY KIND, so a
+    table keyed by name alone could not hold it.
+    """
+    out = {}
+    for i, kind in enumerate(KINDS):
+        try:
+            sample = eval(SAMPLES[kind])
+        except Exception:                        # pragma: no cover
+            continue
+        for name in dir(sample):
+            if not name.startswith("__"):
+                continue
+            try:
+                got = getattr(sample, name)
+            except AttributeError:               # pragma: no cover
+                continue
+            if type(got).__name__ != "builtin_function_or_method":
+                continue
+            out.setdefault(name, 0)
+            out[name] |= 1 << i
+    return sorted(out.items())
+
+
+def emit_written() -> list:
+    """`apy_kind_meth_written` -- the C half of the table above."""
+    lines = [
+        "/* Does CPython WRITE this dunder out for a receiver of kind `bit`,",
+        "   rather than filling a slot with it? That is the whole of what",
+        "   tells `builtin_function_or_method` from `method-wrapper`, and it",
+        "   is not derivable from the signature -- see `written_rows` in the",
+        "   generator. */",
+        "static int64_t apy_kind_meth_written(const char *w, unsigned bit) {",
+    ]
+    for name, mask_bits in written_rows():
+        lines.append(f'    if (strcmp(w, "{name}") == 0)')
+        lines.append(f"        return (bit & {mask_bits}u) ? 1 : 0;")
+    lines += ["    return 0;", "}", ""]
+    return lines
+
+
 def emit_ir(rows) -> str:
     """The ported half: the arity lookup only.
 
@@ -279,6 +338,21 @@ def emit_ir(rows) -> str:
         lines.append(f'    if apy_cstr_eq(w, rodata(b"{name}\\0")):')
         lines.append(f"        if bit & {mask(kinds)}:")
         lines.append(f"            return {((hi + 1) << 8) | (hi - lo)}")
+        lines.append("        return 0")
+    lines.append("    return 0")
+    lines += [
+        "",
+        "",
+        "def apy_kind_meth_written_of(w: ptr, bit: i64) -> i64:",
+        '    """Does CPython WRITE this dunder out for a receiver of kind',
+        "    `bit`, rather than filling a slot with it? That is the whole of",
+        "    what tells `builtin_function_or_method` from `method-wrapper`.",
+        '    """',
+    ]
+    for name, mask_bits in written_rows():
+        lines.append(f'    if apy_cstr_eq(w, rodata(b"{name}\\0")):')
+        lines.append(f"        if bit & {mask_bits}:")
+        lines.append("            return 1")
         lines.append("        return 0")
     lines.append("    return 0")
     return "\n".join(lines) + "\n"

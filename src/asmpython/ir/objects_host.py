@@ -951,9 +951,23 @@ class ObjectHost:
             # detail of this compiler in a string the program prints. Python
             # says `builtin_function_or_method`, or `method-wrapper` for a
             # bound slot, which is what a dunder name means here.
-            return ("method-wrapper" if len(v.name) >= 5
-                    and v.name.startswith("__") and v.name.endswith("__")
-                    else "builtin_function_or_method")
+            if not (len(v.name) >= 5 and v.name.startswith("__")
+                    and v.name.endswith("__")):
+                return "builtin_function_or_method"
+            # AND THE ARITY WAS ONLY STANDING IN FOR THE REAL QUESTION,
+            # which is whether the type WRITES the method out or fills a slot
+            # with it -- `list.__getitem__` takes exactly one argument and is
+            # written out, `tuple.__getitem__` is slotted, and nothing in
+            # either signature says so. ASKED OF CPYTHON, which is the same
+            # oracle the generated table is built from; the compiled halves
+            # cannot ask at run time and read `apy_kind_meth_written`.
+            who = v.bound if v.bound is not None else (
+                v.owner if v.owner is not _NO_OWNER else None)
+            if isinstance(who, _KIND_SAMPLES):
+                got = getattr(who, v.name, None)
+                if type(got).__name__ == "builtin_function_or_method":
+                    return "builtin_function_or_method"
+            return "method-wrapper"
         if isinstance(v, Func):
             # A BUILTIN reached as a value is not a plain function:
             # `type(print).__name__` is `builtin_function_or_method`.
@@ -6875,6 +6889,13 @@ class Func:
 
 #: "no receiver recorded" -- distinct from None, which is a real receiver.
 _NO_OWNER = object()
+
+#: The kinds a builtin method can be bound to, and the only ones CPython may
+#: be asked about directly: an Instance or a Class here is the interpreter's
+#: own object, and asking Python about one would answer about the wrong
+#: thing entirely.
+_KIND_SAMPLES = (str, bytes, bytearray, list, tuple, dict, set, frozenset,
+                 int, float, range, complex)
 
 
 class Native:
