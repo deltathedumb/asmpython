@@ -6969,6 +6969,16 @@ class Native:
         return self.body(*args)
 
 
+#: The kinds a VALUE can be whose TYPE carries a docstring. Wider than the
+#: method table's twelve, because `True.__doc__`, `None.__doc__` and a view's
+#: are the same question. `_gen_kindmeth.py`'s `DOC_KINDS` is the same list,
+#: written for the compiled halves.
+_DOC_KINDS = (str, bytes, bytearray, list, tuple, dict, set, frozenset,
+              int, float, range, complex, bool, type(None), memoryview)
+
+#: The same list keyed by NAME, for a type object rather than a value.
+_DOC_TYPES = {one.__name__: one for one in _DOC_KINDS}
+
 #: An EMPTY VALUE of the kind a builtin type names, so `_kind_attr` can
 #: answer for the type without a second copy of it. Nothing is done with the
 #: prototype but ask its kind.
@@ -7248,6 +7258,13 @@ def _kind_attr(h, obj, want: str):
     # attribute Python guarantees. NOT A METHOD but the type object itself.
     if want == "__class__":
         return _apy_type_object(h, [h._new(obj)])
+    # PEP 257 FOR THE BUILTINS. `"".__doc__` IS `str.__doc__` -- the text
+    # `help` prints and every docstring tool reads -- and it was an
+    # AttributeError on every builtin value there is. The COMPILED halves
+    # read a generated table for it, because the text is CPython's and not a
+    # fact this compiler could derive; here CPython is in the room.
+    if want == "__doc__" and isinstance(obj, _DOC_KINDS):
+        return h._value(type(obj).__doc__)
 
     if want == "__hash__":
         # THE ATTRIBUTE EXISTS EITHER WAY. `[].__hash__ is None` is how a
@@ -8226,6 +8243,17 @@ def _apy_default_getattr(h, a):
         # frontend's own keys have for classes.
         if name == "__qualname__":
             return h._new(obj.name)
+        # A TYPE OBJECT REACHED THROUGH `type(x)` IS A CLASS CELL, not the
+        # thunk the program's own `bytes` names -- `apy_type_for` mints one
+        # keyed by the kind's name for anything the canonical table has no
+        # entry for. So `type(b"").__doc__` took this path and `bytes.__doc__`
+        # took the Func one, and only the second answered. A class the PROGRAM
+        # wrote that shares a builtin's name is excluded by its own `__doc__`,
+        # which its body bound and which is found first.
+        if name == "__doc__" and "__doc__" not in obj.dict:
+            kind = _DOC_TYPES.get(obj.name)
+            if kind is not None:
+                return h._value(kind.__doc__)
         # `C.__class__` IS THE METACLASS, which is `type` unless the class
         # named one. Every other kind answers this and a class did not, so
         # `C.__class__` was an AttributeError about a class that plainly has
@@ -8557,6 +8585,13 @@ def _apy_default_getattr(h, a):
                     return h._value(found)
             return h._no_attr(obj, name)
         if name == "__doc__":
+            # A TYPE OBJECT'S IS ITS KIND'S. `str.__doc__` and `"".__doc__`
+            # are the same text in Python, and this is the half that reaches
+            # it through the name the type carries.
+            if obj.doc is None and getattr(obj, "is_type", False):
+                kind = _DOC_TYPES.get(obj.name)
+                if kind is not None:
+                    return h._value(kind.__doc__)
             return h._value(obj.doc)
         # PEP 649: `__annotations__` is BUILT ON ACCESS, by the thunk the
         # `def` recorded. Evaluating them at the `def` would make

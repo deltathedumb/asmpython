@@ -4696,6 +4696,22 @@ class DynamicLowering:
         self._dyn_check()
         setter = "apy_dict_set"
         self._dyn_check()
+        # PEP 257: A CLASS BODY OPENING WITH A STRING BINDS `__doc__`, and a
+        # class without one binds None -- CPython puts the name in every
+        # class dict either way. It was a BARE EXPRESSION here, so it ran and
+        # vanished and `C.__doc__` was an AttributeError about the attribute
+        # `help` is built on and every docstring tool reads. Written into the
+        # mapping FIRST, so a class that assigns `__doc__` itself wins.
+        opening = node.body[0] if node.body else None
+        told = (opening.value.value
+                if isinstance(opening, ast.Expr)
+                and isinstance(opening.value, ast.Constant)
+                and isinstance(opening.value.value, str) else None)
+        self.b.call(T.PTR, setter,
+                    [cls, self._dyn_str_literal("__doc__"),
+                     self._dyn_str_literal(told) if told is not None
+                     else self.b.call(T.PTR, "apy_none", [])])
+        self._dyn_check()
         # THE BODY'S OWN NAMESPACE while it runs. A class body is a scope
         # executed top to bottom, and a name it bound is readable further down
         # -- `y = x + 1`, and `@v.setter` reading the property that the `def v`

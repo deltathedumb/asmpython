@@ -172,8 +172,36 @@ static int apy_slot_declares(apy_value cls, apy_value name) {
     return 0;
 }
 
+/* Generated, and spliced into a LATER part -- see `_gen_kindmeth.py`. */
+static const char *apy_kind_doc(const char *kind);
+
 APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
     const char *want = APY_CSTR(name);
+    /* PEP 257 FOR THE BUILTINS. `"".__doc__` IS `str.__doc__` -- the text
+       `help` prints and every docstring tool reads -- and it was an
+       AttributeError on every builtin value there is. Answered before the
+       switch because every one of those kinds has one and none of them
+       stores it; the four that carry their own are excluded, because an
+       instance's comes from its class and a function's from its `def`. */
+    if (strcmp(want, "__doc__") == 0
+            && O(obj)->kind != APY_INST_K && O(obj)->kind != APY_FUNC_K
+            && O(obj)->kind != APY_TYPE_K && O(obj)->kind != APY_EXC_K) {
+        const char *doc = apy_kind_doc(apy_kind_name(obj));
+        if (doc) return apy_lit(doc);
+    }
+    /* AND A TYPE OBJECT REACHED THROUGH `type(x)` IS A CELL, not the thunk
+       the program's own `bytes` names -- `apy_type_for` mints one keyed by
+       the kind's name for anything the canonical table has no entry for. So
+       `type(b"").__doc__` took this path and `bytes.__doc__` took the FUNC
+       one below, and only the second answered. A class the PROGRAM wrote
+       that happens to share a builtin's name is excluded by its own
+       `__doc__`, which the body bound and which is found first. */
+    if (strcmp(want, "__doc__") == 0 && O(obj)->kind == APY_TYPE_K
+            && O(obj)->v.t.dict
+            && !apy_dict_get_or(O(obj)->v.t.dict, name, 0)) {
+        const char *doc = apy_kind_doc(APY_CSTR(O(obj)->v.t.name));
+        if (doc) return apy_lit(doc);
+    }
     switch (O(obj)->kind) {
     case APY_INST_K: {
         /* THE INSTANCE DICT WINS over the class. `self.x = 1` in `__init__`
@@ -659,8 +687,17 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
         /* A DOCSTRING is not recorded -- the frontend drops it as the
            statement it is -- so this is None rather than absent: every
            function has `__doc__`, and one without a docstring has None. */
-        if (strcmp(want, "__doc__") == 0)
-            return O(obj)->v.fn.doc ? O(obj)->v.fn.doc : apy_none();
+        if (strcmp(want, "__doc__") == 0) {
+            /* A TYPE OBJECT'S IS ITS KIND'S. `str.__doc__` and `"".__doc__`
+               are the same text in Python, and this is the half that reaches
+               it through the name the type carries. */
+            if (O(obj)->v.fn.doc) return O(obj)->v.fn.doc;
+            if (O(obj)->v.fn.is_type) {
+                const char *doc = apy_kind_doc(APY_CSTR(O(obj)->v.fn.name));
+                if (doc) return apy_lit(doc);
+            }
+            return apy_none();
+        }
         /* PEP 649: `__annotations__` is BUILT ON ACCESS, by the thunk the
            `def` recorded. Evaluating them at the `def` would make
            `def f(x: Undefined)` an error where Python accepts it -- only

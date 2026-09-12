@@ -1816,6 +1816,55 @@ PROGRAMS = {
             return g()
         print(defaulted())
     """,
+    "a_docstring_survives_where_python_keeps_one": """
+        def show(label, f):
+            try:
+                print(label, repr(f())[:48])
+            except Exception as e:
+                print(label, type(e).__name__ + ":", str(e)[:40])
+
+        # PEP 257: A CLASS BODY OPENING WITH A STRING BINDS `__doc__`, and a class
+        # without one binds None -- CPython puts the name in every class dict either
+        # way. It was a bare expression here, so it ran and vanished, and `C.__doc__`
+        # was an AttributeError about the attribute `help` is built on.
+        class Base:
+            "the base"
+            def m(self):
+                "a method"
+        class Sub(Base):
+            pass
+        class Own:
+            __doc__ = "assigned"
+        class Late:
+            "written"
+            __doc__ = "then assigned"
+        def fn():
+            "a function"
+        def plain():
+            pass
+        show("class", lambda: Base.__doc__)
+        show("instance", lambda: Base().__doc__)
+        show("method", lambda: Base.m.__doc__)
+        show("bound method", lambda: Base().m.__doc__)
+        show("no docstring", lambda: Sub.__doc__)
+        show("in every class dict", lambda: "__doc__" in Base.__dict__)
+        show("assigned instead", lambda: Own.__doc__)
+        show("assigned after", lambda: Late.__doc__)
+        show("function", lambda: fn.__doc__)
+        show("no docstring function", lambda: plain.__doc__)
+        # AND THE BUILTINS. `"".__doc__` IS `str.__doc__` -- the same text -- and it
+        # was an AttributeError on every builtin value there is.
+        show("a value has its type's", lambda: "".__doc__ == str.__doc__)
+        show("reached through type()", lambda: b"".__doc__ == type(b"").__doc__)
+        show("bool is not int's", lambda: True.__doc__ == int.__doc__)
+        show("every kind answers", lambda: all(
+            v.__doc__ == type(v).__doc__
+            for v in ("", b"", bytearray(), [], (), {}, set(), frozenset(),
+                      5, 1.5, range(3), 1j, True, None, memoryview(b"a"))))
+        show("none of them is empty", lambda: min(
+            len(type(v).__doc__) for v in ("", 5, None, memoryview(b"a"))) > 10)
+        show("str says what it takes", lambda: "".__doc__.startswith("str(object="))
+    """,
     "traceback_positions": """
         try:
             (1).missing
