@@ -147,7 +147,12 @@ DYN_METHOD_TABLE = {
     "to_bytes":     [None, None, None, "apy_to_bytes_n"],
     "as_integer_ratio": ["apy_as_integer_ratio"],
     "expandtabs":   ["apy_str_expandtabs", "apy_str_expandtabs"],
-    "translate":    [None, "apy_str_translate"],
+    # `translate` IS TWO METHODS UNDER ONE NAME. A str maps code points
+    # through a dict; bytes map BYTES through a 256-byte table and take a
+    # second `delete` argument the str form does not have. The receiver
+    # is a run-time question, so the split is made in the runtime and
+    # only the arity is decided here.
+    "translate":    [None, "apy_str_translate", "apy_bytes_translate"],
     # DUNDERS CALLED DIRECTLY ON A BUILTIN. `(-5).__abs__()` and
     # `(0.0).__bool__()` are ordinary Python, and every one of these is the
     # operation the runtime already performs for the operator form -- so they
@@ -223,11 +228,13 @@ def method_symbol(name: str, argc: int) -> str | None:
 # the `compile()` probes were: `inspect.signature` over every name in
 # `DYN_METHOD_TABLE`, on every builtin type that has it.
 #
-# ONE TABLE PER METHOD IS SOUND ONLY WHILE THE OWNERS AGREE, and for the eight
-# here they do. `translate` is the one that does not -- `str.translate(table)`
-# takes no keyword and `bytes.translate(table, delete=b"")` takes one -- and it
-# is absent for a simpler reason: this compiler does not implement
-# `bytes.translate` at any arity, so there is no call for the entry to serve.
+# ONE TABLE PER METHOD IS SOUND ONLY WHILE THE OWNERS AGREE, and for eight of
+# the nine here they do. `translate` is the one that does not --
+# `str.translate(table)` takes no keyword and `bytes.translate(table,
+# delete=b"")` takes one -- and the entry below describes the BYTES signature,
+# because that is the only owner a keyword can be meant for. A str receiver
+# reaching the folded call is refused at run time, where the receiver is
+# finally known; see `METHOD_KW_SYMBOL` for how the two wordings survive.
 # `test_method_keywords.py` asks CPython both questions again on every run.
 
 #: A parameter that has no default: leaving it out is a TypeError, not a
@@ -256,7 +263,28 @@ METHOD_PARAMS: dict[str, tuple[tuple[str | None, object], ...]] = {
     "encode":     (("encoding", "utf-8"), ("errors", "strict")),
     "decode":     (("encoding", "utf-8"), ("errors", "strict")),
     "to_bytes":   (("length", 1), ("byteorder", "big"), ("signed", False)),
+    # `bytes.translate(table, /, delete=b"")` -- the BYTES signature, because
+    # a keyword can only be meant for that owner. `str.translate` takes no
+    # keyword at all and is refused at run time, where the receiver is finally
+    # known; see `METHOD_KW_SYMBOL`.
+    "translate":  ((POSITIONAL_ONLY, REQUIRED), ("delete", b"")),
 }
+
+#: A method whose KEYWORD spelling reaches a DIFFERENT runtime symbol than the
+#: same call written positionally.
+#:
+#: ONLY `translate`, and only because CPython gives two different messages:
+#:
+#:     "abc".translate(t, b"c")         str.translate() takes exactly one
+#:                                      argument (2 given)
+#:     "abc".translate(t, delete=b"c")  str.translate() takes no keyword
+#:                                      arguments
+#:
+#: Folding puts the keyword in its slot, and after that nothing in the lowered
+#: call says how it was written -- so the spelling has to survive as far as
+#: the symbol. The receiver decides which message is right and is not known
+#: until run time, which is why this cannot be settled here.
+METHOD_KW_SYMBOL = {"translate": "apy_translate_kw"}
 
 
 class KeywordError(Exception):

@@ -52,6 +52,12 @@ def apy_str_translate(s: ptr, table: ptr) -> ptr:
     """`s.translate(table)`."""
     if not apy_str_self_of(rodata(b"translate\0"), s):
         return ptr(0)
+    # A BYTES RECEIVER IS A DIFFERENT METHOD, mapping bytes through a
+    # 256-byte table rather than code points through a dict. See the bytes
+    # family at the foot of this file; None is the delete set the
+    # one-argument form has.
+    if i64(load(i32, offset(s, 0))) == apy_bytes_kind():
+        return apy_bytes_translate(s, table, apy_none())
     if i64(load(i32, offset(table, 0))) != apy_dict_kind():
         return apy_raise_fmt(
             rodata(b"TypeError\0"),
@@ -103,3 +109,172 @@ def apy_str_translate(s: ptr, table: ptr) -> ptr:
         i = i + used2
     store(u8, u8(0), offset(buf, out))
     return apy_from_bytes(buf, out)
+
+
+# ── the bytes family ────────────────────────────────────────────────────────
+#
+# `bytes.translate` IS A DIFFERENT METHOD WEARING THE SAME NAME. `str` maps by
+# code point through a DICT and may replace one character with a whole string;
+# `bytes` maps by BYTE through a 256-BYTE TABLE and cannot change the length
+# except by deleting. The signatures differ too -- `bytes.translate(table, /,
+# delete=b'')` takes a second argument and `str.translate(table)` does not --
+# and the receiver is not known until run time, so the split is made here
+# rather than in the frontend.
+#
+# WHY THREE ENTRY POINTS AND NOT ONE. CPython gives three different messages
+# for the three ways a call can be wrong, and a program may test for any of
+# them:
+#
+#     "abc".translate(t, b"c")        str.translate() takes exactly one
+#                                     argument (2 given)
+#     "abc".translate(t, delete=b"c") str.translate() takes no keyword
+#                                     arguments
+#     b"abc".translate(t, b"c")       the answer
+#
+# The first two are the SAME CALL by the time the arguments are lowered -- a
+# keyword folded into its slot is indistinguishable from the positional it
+# stands for -- so the spelling has to survive as far as the symbol, which is
+# what `apy_translate_kw` is for.
+
+
+def apy_bytes_like_of(v: ptr) -> ptr:
+    """`v` as bytes if it is bytes-like, else `v` itself.
+
+    A MEMORYVIEW IS BYTES-LIKE and every other bytes method here already
+    takes one -- `b"abcd".find(memoryview(b"bc"))` answers 1. Flattening it
+    is what makes the table and the delete set accept one too; a view has an
+    offset and a step, so its bytes are not laid out where a plain read would
+    look for them.
+    """
+    if i64(load(i32, offset(v, 0))) == apy_mview_kind():
+        return apy_mview_bytes(v)
+    return v
+
+
+def apy_bytes_like_bad_of(v: ptr) -> ptr:
+    """CPython's refusal for a table, a delete set or a maketrans argument
+    that is not bytes."""
+    return apy_raise_fmt(
+        rodata(b"TypeError\0"),
+        rodata(b"a bytes-like object is required, not '%s'%s\0"),
+        apy_kind_name_of(v), rodata(b"\0"))
+
+
+def apy_bytes_maketrans(a: ptr, b: ptr) -> ptr:
+    """`bytes.maketrans(frm, to)` -- the 256-byte table `translate` wants.
+
+    IDENTITY EVERYWHERE ELSE: the table is a full mapping, not a sparse one,
+    so every byte the caller did not name maps to itself. That is why it must
+    be exactly 256 long and why `translate` can refuse any other length.
+    """
+    frm: ptr = apy_bytes_like_of(a)
+    to: ptr = apy_bytes_like_of(b)
+    if i64(load(i32, offset(frm, 0))) != apy_bytes_kind():
+        return apy_bytes_like_bad_of(frm)
+    if i64(load(i32, offset(to, 0))) != apy_bytes_kind():
+        return apy_bytes_like_bad_of(to)
+    n: i64 = apy_str_byte_len(frm)
+    if n != apy_str_byte_len(to):
+        return apy_raise_at(
+            rodata(b"ValueError\0"),
+            rodata(b"maketrans arguments must have same length\0"))
+    buf: ptr = apy_alloc_bytes(257)
+    if not buf:
+        return buf
+    i: i64 = 0
+    while i < 256:
+        store(u8, u8(i), offset(buf, i))
+        i = i + 1
+    ap: ptr = apy_str_data(frm)
+    bp: ptr = apy_str_data(to)
+    i = 0
+    while i < n:
+        store(u8, load(u8, offset(bp, i)),
+              offset(buf, i64(load(u8, offset(ap, i)))))
+        i = i + 1
+    store(u8, u8(0), offset(buf, 256))
+    return apy_bytes_literal(buf, 256)
+
+
+def apy_bytes_translate(s: ptr, table: ptr, delete: ptr) -> ptr:
+    """`b.translate(table)` and `b.translate(table, delete)`.
+
+    A NONE TABLE IS THE IDENTITY and not an error: `b.translate(None, b"a")`
+    is the ordinary way to spell "delete these bytes and change nothing
+    else", and it is the only reason the two-argument form is worth having
+    over building a table that deletes.
+
+    THE DELETE SET IS CONSULTED BEFORE THE TABLE, which is the order CPython
+    uses and is observable: a byte that is both mapped and deleted is
+    deleted.
+    """
+    if not apy_str_self_of(rodata(b"translate\0"), s):
+        return ptr(0)
+    if i64(load(i32, offset(s, 0))) == apy_str_kind():
+        return apy_raise_at(
+            rodata(b"TypeError\0"),
+            rodata(b"str.translate() takes exactly one argument (2 given)\0"))
+    map256: ptr = alloca(256)
+    i: i64 = 0
+    while i < 256:
+        store(u8, u8(i), offset(map256, i))
+        i = i + 1
+    tab: ptr = apy_bytes_like_of(table)
+    if i64(load(i32, offset(tab, 0))) != apy_none_kind():
+        if i64(load(i32, offset(tab, 0))) != apy_bytes_kind():
+            return apy_bytes_like_bad_of(tab)
+        if apy_str_byte_len(tab) != 256:
+            return apy_raise_at(
+                rodata(b"ValueError\0"),
+                rodata(b"translation table must be 256 characters long\0"))
+        tp: ptr = apy_str_data(tab)
+        i = 0
+        while i < 256:
+            store(u8, load(u8, offset(tp, i)), offset(map256, i))
+            i = i + 1
+    drop: ptr = alloca(256)
+    i = 0
+    while i < 256:
+        store(u8, u8(0), offset(drop, i))
+        i = i + 1
+    gone: ptr = apy_bytes_like_of(delete)
+    if i64(load(i32, offset(gone, 0))) != apy_none_kind():
+        if i64(load(i32, offset(gone, 0))) != apy_bytes_kind():
+            return apy_bytes_like_bad_of(gone)
+        dn: i64 = apy_str_byte_len(gone)
+        dp: ptr = apy_str_data(gone)
+        i = 0
+        while i < dn:
+            store(u8, u8(1), offset(drop, i64(load(u8, offset(dp, i)))))
+            i = i + 1
+    n: i64 = apy_str_byte_len(s)
+    p: ptr = apy_str_data(s)
+    buf: ptr = apy_alloc_bytes(n + 1)
+    if not buf:
+        return buf
+    out: i64 = 0
+    i = 0
+    while i < n:
+        c: i64 = i64(load(u8, offset(p, i)))
+        if i64(load(u8, offset(drop, c))) == 0:
+            store(u8, load(u8, offset(map256, c)), offset(buf, out))
+            out = out + 1
+        i = i + 1
+    store(u8, u8(0), offset(buf, out))
+    return apy_from_bytes(buf, out)
+
+
+def apy_translate_kw(s: ptr, table: ptr, delete: ptr) -> ptr:
+    """`x.translate(table, delete=...)` -- the form written with the keyword.
+
+    THE ONLY DIFFERENCE IS THE MESSAGE. `str.translate` takes no keyword at
+    all, and CPython says so rather than complaining about the count; by the
+    time the arguments reach a runtime symbol the keyword has been folded
+    into its slot and nothing left in the call records how it was written, so
+    the frontend picks this symbol instead and the wording survives.
+    """
+    if i64(load(i32, offset(s, 0))) == apy_str_kind():
+        return apy_raise_at(
+            rodata(b"TypeError\0"),
+            rodata(b"str.translate() takes no keyword arguments\0"))
+    return apy_bytes_translate(s, table, delete)

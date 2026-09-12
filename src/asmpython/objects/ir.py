@@ -117,7 +117,12 @@ REPLACES: dict[str, tuple[str, ...]] = {
                     "apy_del_run", "apy_del_bytes"),
     # A PER-CHARACTER SUBSTITUTION whose output length is not a function of
     # its input length -- a replacement may be a whole string or a deletion.
-    "str_translate.py": ("apy_str_translate",),
+    # AND THE BYTES FAMILY THAT SHARES THE NAME: bytes map by BYTE
+    # through a 256-byte table, which is a different method under one
+    # spelling. Exported rather than private because the C has them
+    # under the same names and the two are ONE translation unit.
+    "str_translate.py": ("apy_str_translate", "apy_bytes_maketrans",
+                         "apy_bytes_translate", "apy_translate_kw"),
     # MAKING a big, where every other big function in IR could only READ one
     # -- which is what kept the whole float-to-integer boundary in C. See the
     # file's own header.
@@ -171,6 +176,11 @@ REPLACES: dict[str, tuple[str, ...]] = {
     "makers.py": ("apy_func_new", "apy_gen_new",
                   # FOUR MORE CELLS the fixed survey turned up.
                   "apy_range", "apy_super", "apy_memoryview",
+                  # WHAT A VIEW SHOWS, AS BYTES. Ported because the ported
+                  # runtime has to DEFINE everything it calls -- see
+                  # `test_the_allocator_asks_the_floor_and_nothing_else` --
+                  # and `bytes.translate` takes a bytes-like table.
+                  "apy_mview_bytes",
                   "apy_type_new",
                   # THE NATIVE CACHE AND THE `type` CLASS.
                   "apy_native_of", "apy_type_class", "apy_abs64_of",

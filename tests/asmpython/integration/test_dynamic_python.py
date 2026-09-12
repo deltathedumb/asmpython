@@ -401,6 +401,55 @@ PROGRAMS = {
         # A BYTES RECEIVER IS UNTOUCHED, which is what the `mut` test is for.
         print(b"ab".upper(), b"a-b".split(b"-"), b"c" + bytearray(b"ab"))
     """,
+    # `bytes.translate` IS A DIFFERENT METHOD WEARING `str.translate`'s NAME,
+    # and neither it, `bytes.maketrans` nor `bytearray.copy` existed: all
+    # three answered AttributeError about names Python plainly has. A str maps
+    # code points through a DICT and may replace one character with a whole
+    # string; bytes map BYTES through a 256-byte table and take a second
+    # `delete` argument the str form has no parameter for at all.
+    "bytes_translate_and_copy": """
+        t = bytes.maketrans(b"ab", b"xy")
+        print(len(t), type(t) is bytes, t[97:99])
+        print(b"abc".translate(t), b"abc".translate(None))
+        print(b"abc".translate(t, b"c"), b"abc".translate(t, delete=b"c"))
+        print(b"abc".translate(None, b"a"))
+        # THE RECEIVER'S KIND TRAVELS WITH THE RESULT.
+        print(bytearray(b"abc").translate(t),
+              type(bytearray(b"abc").translate(t)).__name__)
+        print(bytearray.maketrans(b"ab", b"xy")[97:99])
+        # A MEMORYVIEW IS BYTES-LIKE, here as everywhere else.
+        print(b"abc".translate(memoryview(t)), b"abc".translate(bytearray(t)))
+        # THE STR METHOD IS UNTOUCHED, and refuses what only bytes can take.
+        print("abc".translate({97: "X"}))
+        try:
+            "abc".translate({97: "X"}, b"c")
+        except TypeError as e:
+            print("positional:", e)
+        try:
+            "abc".translate({97: "X"}, delete=b"c")
+        except TypeError as e:
+            print("keyword:", e)
+        for bad in (b"xy", "x" * 256):
+            try:
+                print(b"abc".translate(bad))
+            except (TypeError, ValueError) as e:
+                print(type(e).__name__ + ":", e)
+        try:
+            bytes.maketrans(b"ab", b"xyz")
+        except ValueError as e:
+            print("maketrans:", e)
+        # `.copy()` IS THE BYTEARRAY'S ALONE, and it copies the bytes rather
+        # than sharing them.
+        original = bytearray(b"ab")
+        made = original.copy()
+        made[0] = 122
+        print(original, made, made is original)
+        for immutable in (b"ab", "ab"):
+            try:
+                immutable.copy()
+            except AttributeError as e:
+                print("copy:", e)
+    """,
     "traceback_positions": """
         try:
             (1).missing

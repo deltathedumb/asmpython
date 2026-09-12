@@ -1019,6 +1019,11 @@ APY_API apy_value apy_str_maketrans(apy_value a, apy_value b, apy_value drop) {
     return out;
 }
 
+/* Declared here and written at the foot of this file: a bytes receiver takes
+   a different method under this name, and `str.translate` hands it over. */
+APY_API apy_value apy_bytes_translate(apy_value s, apy_value table,
+                                      apy_value delete);
+
 /* `s.translate(table)`. A character with no entry is KEPT -- translate maps
    what it knows and passes the rest through, which is what makes a table
    holding one key a useful thing to write. */
@@ -1027,6 +1032,11 @@ APY_API apy_value apy_str_translate(apy_value s, apy_value table) {
     char *buf;
     const unsigned char *p;
     if (!apy_str_self("translate", s)) return 0;
+    /* A BYTES RECEIVER IS A DIFFERENT METHOD -- bytes through a 256-byte
+       table, not code points through a dict. None is the delete set the
+       one-argument form has. */
+    if (O(s)->kind == APY_BYTES_K)
+        return apy_bytes_translate(s, table, apy_none());
     if (O(table)->kind != APY_DICT_K)
         return apy_fail2("TypeError", "'%s' object is not subscriptable%s",
                          apy_kind_name(table), "");
@@ -1069,6 +1079,125 @@ APY_API apy_value apy_str_translate(apy_value s, apy_value table) {
     }
     buf[out_n] = '\0';
     return apy_str_take(buf, out_n);
+}
+
+/* ── the bytes family ──────────────────────────────────────────────────────
+
+   `bytes.translate` IS A DIFFERENT METHOD WEARING THE SAME NAME. `str` maps
+   by code point through a DICT and may replace one character with a whole
+   string; `bytes` maps by BYTE through a 256-BYTE TABLE and can only shorten,
+   by deleting. The signatures differ too -- `bytes.translate(table, /,
+   delete=b'')` takes a second argument and `str.translate(table)` does not --
+   and the receiver is not known until run time, so the split is made here.
+
+   WHY THREE ENTRY POINTS AND NOT ONE. CPython gives three different messages
+   for the three ways the call can be wrong, and a program may test any:
+
+       "abc".translate(t, b"c")         str.translate() takes exactly one
+                                        argument (2 given)
+       "abc".translate(t, delete=b"c")  str.translate() takes no keyword
+                                        arguments
+       b"abc".translate(t, b"c")        the answer
+
+   The first two are the SAME CALL once the arguments are lowered -- a keyword
+   folded into its slot is indistinguishable from the positional it stands for
+   -- so the spelling has to survive as far as the symbol, which is what
+   `apy_translate_kw` is for. */
+
+static apy_value apy_bytes_like_bad(apy_value v) {
+    return apy_fail2("TypeError", "a bytes-like object is required, not '%s'%s",
+                     apy_kind_name(v), "");
+}
+
+/* `v` as bytes if it is bytes-like, else `v` itself. A MEMORYVIEW IS
+   BYTES-LIKE and every other bytes method already takes one, so the table and
+   the delete set take one too; a view has an offset and a step, so its bytes
+   are not where a plain read would look for them. */
+static apy_value apy_bytes_like(apy_value v) {
+    if (O(v)->kind == APY_MVIEW_K) return apy_mview_bytes(v);
+    return v;
+}
+
+/* `bytes.maketrans(frm, to)` -- the 256-byte table `translate` wants. The
+   table is a FULL mapping and not a sparse one: every byte the caller did not
+   name maps to itself, which is why it must be exactly 256 long and why
+   `translate` can refuse any other length. */
+APY_API apy_value apy_bytes_maketrans(apy_value a, apy_value b) {
+    int64_t i, n;
+    char *buf;
+    const unsigned char *ap, *bp;
+    a = apy_bytes_like(a);
+    b = apy_bytes_like(b);
+    if (O(a)->kind != APY_BYTES_K) return apy_bytes_like_bad(a);
+    if (O(b)->kind != APY_BYTES_K) return apy_bytes_like_bad(b);
+    n = O(a)->v.s.n;
+    if (n != O(b)->v.s.n)
+        return apy_fail("ValueError",
+                        "maketrans arguments must have same length");
+    buf = (char *)malloc(257);
+    for (i = 0; i < 256; i++) buf[i] = (char)(unsigned char)i;
+    ap = (const unsigned char *)O(a)->v.s.p;
+    bp = (const unsigned char *)O(b)->v.s.p;
+    for (i = 0; i < n; i++) buf[ap[i]] = (char)bp[i];
+    buf[256] = '\0';
+    {
+        apy_value out = apy_str_take(buf, 256);
+        O(out)->kind = APY_BYTES_K;
+        return out;
+    }
+}
+
+/* `b.translate(table)` and `b.translate(table, delete)`.
+
+   A NONE TABLE IS THE IDENTITY and not an error: `b.translate(None, b"a")` is
+   the ordinary way to spell "delete these bytes and change nothing else", and
+   it is the only reason the two-argument form is worth having over a table
+   that deletes.
+
+   THE DELETE SET IS CONSULTED BEFORE THE TABLE, which is CPython's order and
+   is observable: a byte that is both mapped and deleted is deleted. */
+APY_API apy_value apy_bytes_translate(apy_value s, apy_value table,
+                                      apy_value delete) {
+    unsigned char map256[256], drop[256];
+    int64_t i, n, out_n = 0;
+    char *buf;
+    const unsigned char *p;
+    if (!apy_str_self("translate", s)) return 0;
+    if (O(s)->kind == APY_STR_K)
+        return apy_fail("TypeError",
+                        "str.translate() takes exactly one argument (2 given)");
+    for (i = 0; i < 256; i++) { map256[i] = (unsigned char)i; drop[i] = 0; }
+    table = apy_bytes_like(table);
+    delete = apy_bytes_like(delete);
+    if (O(table)->kind != APY_NONE_K) {
+        if (O(table)->kind != APY_BYTES_K) return apy_bytes_like_bad(table);
+        if (O(table)->v.s.n != 256)
+            return apy_fail("ValueError",
+                            "translation table must be 256 characters long");
+        memcpy(map256, O(table)->v.s.p, 256);
+    }
+    if (O(delete)->kind != APY_NONE_K) {
+        if (O(delete)->kind != APY_BYTES_K) return apy_bytes_like_bad(delete);
+        p = (const unsigned char *)O(delete)->v.s.p;
+        for (i = 0; i < O(delete)->v.s.n; i++) drop[p[i]] = 1;
+    }
+    n = O(s)->v.s.n;
+    p = (const unsigned char *)O(s)->v.s.p;
+    buf = (char *)malloc((size_t)n + 1);
+    for (i = 0; i < n; i++)
+        if (!drop[p[i]]) buf[out_n++] = (char)map256[p[i]];
+    buf[out_n] = '\0';
+    return apy_str_take(buf, out_n);
+}
+
+/* `x.translate(table, delete=...)` -- the form written with the keyword.
+   THE ONLY DIFFERENCE IS THE MESSAGE; see the block above. */
+APY_API apy_value apy_translate_kw(apy_value s, apy_value table,
+                                   apy_value delete) {
+    if (O(s)->kind == APY_STR_K)
+        return apy_fail("TypeError",
+                        "str.translate() takes no keyword arguments");
+    return apy_bytes_translate(s, table, delete);
 }
 
 APY_API apy_value apy_callable(apy_value v) {

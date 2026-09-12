@@ -3355,6 +3355,11 @@ def _apy_copy(h, a):
     v = h._get(a[0], "apy_copy")
     if isinstance(v, frozenset):
         return a[0]
+    # A BYTEARRAY COPIES ITS BYTES and `bytes` has no `copy` at all -- the
+    # compiled runtimes share one cell between the two and decide on the
+    # `mut` flag, which here is the Python type itself.
+    if isinstance(v, bytearray):
+        return h._new(bytearray(v))
     if not isinstance(v, (list, dict, set)):
         return h._fail("AttributeError",
                        f"'{h.kind_name(v)}' object has no attribute 'copy'")
@@ -4127,6 +4132,11 @@ def _apy_str_translate(h, a):
     table holding one key a useful thing to write."""
     s = h._get(a[0], "apy_str_translate")
     table = h._get(a[1], "apy_str_translate")
+    # A BYTES RECEIVER IS A DIFFERENT METHOD -- bytes through a 256-byte
+    # table, not code points through a dict. None is the delete set the
+    # one-argument form has.
+    if isinstance(s, (bytes, bytearray)):
+        return _apy_bytes_translate(h, [a[0], a[1], h._none])
     if not isinstance(s, str):
         return h._fail("AttributeError", f"'{h.kind_name(s)}' object has no "
                                          f"attribute 'translate'")
@@ -4149,6 +4159,81 @@ def _apy_str_translate(h, a):
             return h._fail("TypeError",
                            "character mapping must be in range(0x110000)")
     return h._new("".join(out))
+
+
+#: What counts as bytes for a translation table or a delete set. A MEMORYVIEW
+#: IS BYTES-LIKE and every other bytes method here already takes one --
+#: `b"abcd".find(memoryview(b"bc"))` answers 1 -- so these take one too.
+_BYTES_LIKE = (bytes, bytearray, memoryview)
+
+
+def _bytes_like_bad(h, v):
+    """CPython's refusal for a table, a delete set or a maketrans argument
+    that is not bytes."""
+    return h._fail("TypeError",
+                   f"a bytes-like object is required, not '{h.kind_name(v)}'")
+
+
+def _apy_bytes_maketrans(h, a):
+    """`bytes.maketrans(frm, to)` -- the 256-byte table `translate` wants.
+
+    A FULL MAPPING AND NOT A SPARSE ONE: every byte the caller did not name
+    maps to itself, which is why the table must be exactly 256 long and why
+    `translate` can refuse any other length.
+    """
+    frm = h._get(a[0], "apy_bytes_maketrans")
+    to = h._get(a[1], "apy_bytes_maketrans")
+    if not isinstance(frm, _BYTES_LIKE):
+        return _bytes_like_bad(h, frm)
+    if not isinstance(to, _BYTES_LIKE):
+        return _bytes_like_bad(h, to)
+    if len(frm) != len(to):
+        return h._fail("ValueError",
+                       "maketrans arguments must have same length")
+    return h._new(bytes.maketrans(bytes(frm), bytes(to)))
+
+
+def _apy_bytes_translate(h, a):
+    """`b.translate(table)` and `b.translate(table, delete)`.
+
+    A NONE TABLE IS THE IDENTITY and not an error: `b.translate(None, b"a")`
+    is the ordinary way to spell "delete these bytes and change nothing
+    else". The delete set is consulted BEFORE the table, which is CPython's
+    order and is observable -- a byte that is both mapped and deleted goes.
+    """
+    s = h._get(a[0], "apy_bytes_translate")
+    table = h._get(a[1], "apy_bytes_translate")
+    drop = h._get(a[2], "apy_bytes_translate")
+    if not isinstance(s, (str, bytes, bytearray)):
+        return h._fail("AttributeError", f"'{h.kind_name(s)}' object has no "
+                                         f"attribute 'translate'")
+    if isinstance(s, str):
+        return h._fail("TypeError",
+                       "str.translate() takes exactly one argument (2 given)")
+    if table is not None and not isinstance(table, _BYTES_LIKE):
+        return _bytes_like_bad(h, table)
+    if table is not None and len(table) != 256:
+        return h._fail("ValueError",
+                       "translation table must be 256 characters long")
+    if drop is not None and not isinstance(drop, _BYTES_LIKE):
+        return _bytes_like_bad(h, drop)
+    out = bytes(s).translate(None if table is None else bytes(table),
+                             b"" if drop is None else bytes(drop))
+    return h._new(bytearray(out) if isinstance(s, bytearray) else out)
+
+
+def _apy_translate_kw(h, a):
+    """`x.translate(table, delete=...)` -- the form written with the keyword.
+
+    THE ONLY DIFFERENCE IS THE MESSAGE. `str.translate` takes no keyword at
+    all, and CPython says so rather than complaining about the count; the
+    keyword is folded into its slot before any runtime symbol sees the call,
+    so the frontend picks this name and the wording survives.
+    """
+    if isinstance(h._get(a[0], "apy_translate_kw"), str):
+        return h._fail("TypeError",
+                       "str.translate() takes no keyword arguments")
+    return _apy_bytes_translate(h, a)
 
 
 # ── math ────────────────────────────────────────────────────────────────────

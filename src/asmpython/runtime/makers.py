@@ -160,6 +160,39 @@ def apy_mv_step_offset() -> i64:
     return 32
 
 
+def apy_mview_at_of(v: ptr, i: i64) -> i64:
+    """Where the view's `i`th byte sits in the buffer underneath.
+
+    THE STRIDE IS APPLIED HERE and nowhere else, so a reversed view reads,
+    writes and converts through one piece of arithmetic.
+    """
+    return (load(i64, offset(v, apy_mv_off_offset()))
+            + i * load(i64, offset(v, apy_mv_step_offset())))
+
+
+def apy_mview_bytes(v: ptr) -> ptr:
+    """What the view shows right now, as bytes.
+
+    `bytes(mv)` goes through here, and so does every consumer that wants a
+    bytes-like argument to be one -- a translation table, a delete set.
+    COPIED rather than aliased: a view can be a stride over somebody else's
+    buffer, so its bytes are not contiguous and there is nothing to point at.
+    """
+    n: i64 = load(i64, offset(v, apy_mv_n_offset()))
+    src: ptr = ptr(load(u64, offset(v, apy_mv_src_offset())))
+    buf: ptr = apy_str_data(src)
+    out: ptr = apy_alloc_bytes(n + 1)
+    if not out:
+        return out
+    i: i64 = 0
+    while i < n:
+        store(u8, load(u8, offset(buf, apy_mview_at_of(v, i))),
+              offset(out, i))
+        i = i + 1
+    store(u8, u8(0), offset(out, n))
+    return apy_bytes_literal(out, n)
+
+
 def apy_t_base_offset() -> i64:
     return 16
 

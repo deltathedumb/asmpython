@@ -314,11 +314,22 @@ APY_API apy_value apy_clear(apy_value v) {
 
 /* `.copy()` -- SHALLOW, like Python's: the new container holds the same
    elements, not copies of them. A frozenset's copy is itself, which is what
-   CPython returns and is safe for the same reason `frozenset(f)` is. */
+   CPython returns and is safe for the same reason `frozenset(f)` is.
+
+   A BYTEARRAY IS THE ONE THAT COPIES ITS CONTENTS, and `bytes` has no `copy`
+   at all -- the two share this cell and `mut` is the whole difference, so the
+   flag is what decides. The bytes are copied rather than the pointer shared
+   because `b.copy()[0] = 1` must not reach into `b`. */
 APY_API apy_value apy_copy(apy_value v) {
     int64_t i;
     apy_value out;
     if (O(v)->kind == APY_FROZEN_K) return v;
+    if (O(v)->kind == APY_BYTES_K && O(v)->v.s.mut) {
+        out = apy_str_copy(O(v)->v.s.p, O(v)->v.s.n);
+        O(out)->kind = APY_BYTES_K;
+        O(out)->v.s.mut = 1;
+        return out;
+    }
     if (O(v)->kind == APY_DICT_K) {
         out = apy_dict_new_cap(O(v)->v.d.n + 1);
         for (i = 0; i < O(v)->v.d.n; i++)

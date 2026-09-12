@@ -32,8 +32,8 @@ from .analysis import (
     sem_type, span_of,
 )
 from .methods import (
-    DICT_PARTS, DYN_METHOD_TABLE, METHOD_PARAMS, KeywordError, fold_keywords,
-    method_symbol,
+    DICT_PARTS, DYN_METHOD_TABLE, METHOD_KW_SYMBOL, METHOD_PARAMS,
+    KeywordError, fold_keywords, method_symbol,
 )
 
 #: Methods whose keywords are read by a branch of their own in
@@ -186,6 +186,11 @@ _TYPE_STATICS = {
     # in whether anything is deleted, and None says "nothing" without the
     # table needing to carry two arities.
     ("str", "maketrans"): ("apy_str_maketrans", 3, ()),
+    # `bytes.maketrans(frm, to)` is NOT the str one under another name: it
+    # answers a 256-byte table rather than a dict, because `bytes.translate`
+    # maps by byte. `bytearray` inherits the same staticmethod.
+    ("bytes", "maketrans"): ("apy_bytes_maketrans", 2, ()),
+    ("bytearray", "maketrans"): ("apy_bytes_maketrans", 2, ()),
     ("float", "fromhex"): ("apy_float_fromhex", 1, ()),
 }
 
@@ -5640,6 +5645,13 @@ class DynamicLowering:
         else:
             args = self._dyn_operands(node.args)
         sym = method_symbol(attr, len(args))
+        if sym is not None and foldable and node.keywords \
+                and attr in METHOD_KW_SYMBOL:
+            # THE KEYWORD SPELLING REACHES ITS OWN SYMBOL. Folding has just
+            # made this call indistinguishable from the positional one, and
+            # for `translate` the two are different errors on a str receiver.
+            # See `methods.METHOD_KW_SYMBOL`.
+            sym = METHOD_KW_SYMBOL[attr]
         if sym is not None and collides:
             # THE NAME COLLIDES. `add` is a set's method and may equally be a
             # method of a class in this same program, and which one `x.add(1)`

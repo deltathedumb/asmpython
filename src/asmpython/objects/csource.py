@@ -196,6 +196,7 @@ OBJECT_NAMES = (
     "apy_str_rfind", "apy_str_rfind2", "apy_str_rfind3", "apy_str_rindex",
     "apy_str_count2", "apy_str_count3",
     "apy_str_maketrans", "apy_str_translate", "apy_str_like",
+    "apy_bytes_maketrans", "apy_bytes_translate", "apy_translate_kw",
     "apy_pop_or", "apy_dict_popitem",
     #: `match`: the predicates a `case` pattern needs and nothing else does.
     "apy_match_seq", "apy_match_map", "apy_match_args", "apy_match_rest",

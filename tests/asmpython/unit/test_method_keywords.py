@@ -27,20 +27,29 @@ from asmpython.frontends.python.methods import (
     KeywordError, fold_keywords,
 )
 
-#: Which builtin type to ask about each method. No method IN THE TABLE has
-#: parameters that differ between owners, so one owner each is enough --
-#: `test_no_owner_disagrees` is what keeps that true. `translate` is the one
-#: that differs, and is not in the table; see `UNIMPLEMENTED`.
+#: Which builtin type to ask about each method. All but one have parameters
+#: that agree between owners, so one owner each is enough --
+#: `test_no_owner_disagrees` is what keeps that true.
 OWNER = {
     "split": str, "rsplit": str, "splitlines": str, "replace": str,
     "expandtabs": str, "encode": str, "decode": bytes, "to_bytes": int,
+    # `bytes.translate(table, /, delete=b"")` against `str.translate(table)`.
+    # BYTES IS THE OWNER THE TABLE DESCRIBES, because a keyword can only be
+    # meant for the owner that has one; see `DIFFERS_BY_OWNER`.
+    "translate": bytes,
 }
 
+#: A method whose CPython signature really does differ between the types that
+#: have it, so the one-table-per-method shortcut does not hold and the entry
+#: describes a single named owner. `translate` is the only one: `str` takes
+#: the table and nothing else, `bytes` takes a `delete` after it. The receiver
+#: is a run-time question here, so the difference is settled in the runtime --
+#: see `METHOD_KW_SYMBOL` and `apy_bytes_translate`.
+DIFFERS_BY_OWNER = {"translate"}
+
 #: A method that takes a keyword in CPython and is DELIBERATELY absent from
-#: `METHOD_PARAMS`, with the reason. `bytes.translate(table, delete=b"")` is
-#: the only one: this compiler implements no `translate` for bytes at any
-#: arity, so an entry would describe a call that cannot be made.
-UNIMPLEMENTED = {"translate"}
+#: `METHOD_PARAMS`, with the reason. There are none left.
+UNIMPLEMENTED: set[str] = set()
 
 OWNERS = (str, bytes, bytearray, list, dict, set, frozenset, tuple, int, float)
 
@@ -90,6 +99,8 @@ class TestTheTableMatchesCPython:
         """One table per METHOD rather than per method per type, which is only
         sound while the owners agree. They do; this is what says so."""
         for method in sorted(METHOD_PARAMS):
+            if method in DIFFERS_BY_OWNER:
+                continue
             shapes = set()
             for owner in OWNERS:
                 fn = getattr(owner, method, None)

@@ -437,8 +437,13 @@ _BUILTINS_NAME = "__builtins__"
 #: `dict.fromkeys`, `int.from_bytes`. Not unbound methods: there is no
 #: receiver of that type to be the first argument.
 _BUILTIN_TYPE_NAMES = frozenset({"dict", "int", "bytes", "str", "list",
-                                 "tuple", "set", "frozenset", "float"})
-_TYPE_STATIC_NAMES = frozenset({"fromkeys", "from_bytes", "fromhex"})
+                                 "tuple", "set", "frozenset", "float",
+                                 # `bytearray.maketrans` is the same
+                                 # staticmethod `bytes` has; the name is here
+                                 # for that call shape and for no other.
+                                 "bytearray"})
+_TYPE_STATIC_NAMES = frozenset({"fromkeys", "from_bytes", "fromhex",
+                                "maketrans"})
 
 _EXC_NAMES = frozenset({
     # The WARNING categories are exceptions like any other: `Warning`

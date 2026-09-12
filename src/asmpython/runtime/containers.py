@@ -1464,10 +1464,23 @@ def apy_copy(v: ptr) -> ptr:
     THE ELEMENTS ARE SHARED, NOT COPIED, which is what 'shallow' means and
     what makes `d.copy()` cheap: the new container holds the same objects, so
     mutating one THROUGH the copy is visible through the original.
+
+    A BYTEARRAY COPIES ITS BYTES, and `bytes` HAS NO `copy` AT ALL -- the two
+    share this cell and the `mut` flag is the whole difference, so the flag is
+    what decides here. Copying the bytes rather than sharing the pointer is
+    the point of the method: `b.copy()[0] = 1` must not reach into `b`.
     """
     k: i64 = i64(load(i32, offset(v, 0)))
     if k == apy_frozen_kind():
         return v
+    if k == apy_bytes_kind():
+        if i64(load(i32, offset(v, apy_s_mut_offset()))) != 0:
+            ba: ptr = apy_str_copy_bytes(apy_str_data(v), apy_str_byte_len(v))
+            if not ba:
+                return ba
+            store(i32, i32(apy_bytes_kind()), offset(ba, 0))
+            store(i32, i32(1), offset(ba, apy_s_mut_offset()))
+            return ba
     if k == apy_dict_kind():
         n: i64 = load(i64, offset(v, apy_d_n_offset()))
         out: ptr = apy_dict_new(n + 1)
