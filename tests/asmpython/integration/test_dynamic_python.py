@@ -581,6 +581,25 @@ PROGRAMS = {
         except TypeError as e:
             print("TypeError:", e)
     """,
+    # A LONE SURROGATE IS A LEGAL str AND CRASHED THE COMPILER. It is what
+    # `errors="surrogateescape"` produces and what `os.fsdecode` hands back
+    # for an undecodable filename, so any program touching a non-UTF-8 path
+    # can hold one -- and the literal was encoded with plain UTF-8, which
+    # raises on it. Not a diagnostic: the compiler died with a Python
+    # traceback and never reached the program.
+    #
+    # NOTHING HERE PRINTS THE CHARACTER ITSELF, because CPython's own stdout
+    # refuses it too -- `repr` and the comparisons are what a program can
+    # actually do with one.
+    "a_lone_surrogate_is_a_string": """
+        s = "a\\udcffb"
+        print(len(s), repr(s))
+        print(s[0], s[2], len(s[1]), ord(s[1]))
+        print(s == "a\\udcffb", s != "a\\udcfeb")
+        print(s.upper() == "A\\udcffB", s.startswith("a"), s.endswith("b"))
+        print("x".join([s, s]) == s + "x" + s)
+        print([len(part) for part in s.split("x")])
+    """,
     "traceback_positions": """
         try:
             (1).missing

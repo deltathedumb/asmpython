@@ -426,8 +426,18 @@ class DynamicLowering:
         space: `x is y` on two equal literals then answers True the way it does
         in CPython, and a program printing that comparison would otherwise
         depend on how many times the compiler happened to see the text.
+
+        `surrogatepass` BECAUSE A LONE SURROGATE IS A LEGAL str. It is what
+        `errors="surrogateescape"` produces and what `os.fsdecode` hands back
+        for an undecodable filename, so any program that touches a non-UTF-8
+        path can hold one -- and plain `.encode("utf-8")` raises on it, which
+        here meant the COMPILER died with a UnicodeEncodeError and a Python
+        traceback rather than compiling the program. The runtime's cell holds
+        UTF-8 bytes, and this is the encoding of a string with a surrogate in
+        it: three bytes with an `ED` lead, which every walk here already
+        counts as one character.
         """
-        raw = text.encode("utf-8") + b"\x00"
+        raw = text.encode("utf-8", "surrogatepass") + b"\x00"
         name = self._strings.get(raw)
         if name is None:
             name = f"__str{len(self._strings)}"
@@ -456,8 +466,11 @@ class DynamicLowering:
         wants the raw pointer, because the runtime parses the digits rather
         than holding them. Interning is shared, so the same text used both
         ways is one global.
+
+        `surrogatepass` FOR THE REASON `_dyn_str_literal` GIVES: a lone
+        surrogate is a legal str and plain UTF-8 cannot spell one.
         """
-        raw = text.encode("utf-8") + b"\x00"
+        raw = text.encode("utf-8", "surrogatepass") + b"\x00"
         name = self._strings.get(raw)
         if name is None:
             name = f"__str{len(self._strings)}"

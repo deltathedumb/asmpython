@@ -1716,10 +1716,38 @@ def _apy_from_float(h, a):
     return h._new(float(a[0]))
 
 
+def _decode_cell(raw: bytes) -> str:
+    """The str a run of the runtime's bytes stands for.
+
+    TWO ERROR HANDLERS, TRIED IN ORDER, because the cell holds two different
+    kinds of not-quite-UTF-8 and only one handler reads each correctly.
+
+    A LONE SURROGATE IS A LEGAL str -- `errors="surrogateescape"` produces
+    one and `os.fsdecode` hands one back for an undecodable filename -- and
+    the compiler spells it in the cell as WTF-8: three bytes with an `ED`
+    lead, which is what every character walk in the compiled runtimes already
+    reads as one character. `surrogateescape` maps those three bytes to THREE
+    surrogates, so the interpreter counted a three-character string holding
+    one as five, where both compiled runtimes said three.
+
+    NO SURROGATE IS WRITTEN OUT IN THIS DOCSTRING, deliberately: a module
+    whose own text carries one cannot be imported on a UTF-8 stream, and
+    writing the example cost a debugging session.
+
+    `surrogatepass` reads them back as the one character they are and refuses
+    genuinely invalid bytes, which is what the fallback is for: a cell holding
+    raw undecodable data still round-trips the way it did.
+    """
+    try:
+        return raw.decode("utf-8", "surrogatepass")
+    except UnicodeDecodeError:
+        return raw.decode("utf-8", "surrogateescape")
+
+
 def _read_cstr(h, addr: int) -> str:
     buf = h._interp.mem.buf
     end = buf.index(0, addr)
-    return bytes(buf[addr:end]).decode("utf-8", "surrogateescape")
+    return _decode_cell(bytes(buf[addr:end]))
 
 
 def _apy_from_cstr(h, a):
@@ -1729,7 +1757,7 @@ def _apy_from_cstr(h, a):
 def _apy_from_bytes(h, a):
     addr, n = int(a[0]), int(a[1])
     buf = h._interp.mem.buf
-    return h._new(bytes(buf[addr:addr + n]).decode("utf-8", "surrogateescape"))
+    return h._new(_decode_cell(bytes(buf[addr:addr + n])))
 
 
 # ── extraction ──────────────────────────────────────────────────────────────
