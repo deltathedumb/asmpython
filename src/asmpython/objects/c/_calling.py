@@ -51,6 +51,10 @@ typedef apy_value (*apy_fn16)(apy_value, apy_value, apy_value, apy_value, apy_va
    binding any function does. */
 /* Declared here because the exported half calls it. */
 static apy_value apy_native(int sel, int64_t arity, const char *name);
+/* THE TYPE OBJECT FOR A VALUE'S KIND, declared here because
+   `__class_getitem__` needs the origin of `list[int]` and the definition is
+   in the type-objects section below. */
+APY_API apy_value apy_type_for(apy_value v);
 APY_API apy_value apy_native_of(int64_t sel, int64_t arity,
                                 apy_value name) {
     return apy_native((int)sel, arity, (const char *)name);
@@ -475,6 +479,23 @@ APY_API int64_t apy_object_arity(apy_value wantv) {
     if (strcmp(want, "__str__") == 0) return 1;
     if (strcmp(want, "__repr__") == 0) return 1;
     if (strcmp(want, "__format__") == 0) return 2;
+    /* AND THE TWELVE `object` HANDS DOWN THAT NOTHING OVERRIDES. Every one
+       was missing from every builtin value, which is 144 attributes a
+       program can ask for and Python guarantees: `__reduce_ex__` is how
+       pickle finds a value, `__dir__` is what `dir()` reads, and
+       `__init__` and `__new__` are on everything there is. */
+    if (strcmp(want, "__init__") == 0) return 1;
+    if (strcmp(want, "__new__") == 0) return 2;
+    if (strcmp(want, "__getattribute__") == 0) return 2;
+    if (strcmp(want, "__setattr__") == 0) return 3;
+    if (strcmp(want, "__delattr__") == 0) return 2;
+    if (strcmp(want, "__init_subclass__") == 0) return 1;
+    if (strcmp(want, "__subclasshook__") == 0) return 2;
+    if (strcmp(want, "__dir__") == 0) return 1;
+    if (strcmp(want, "__sizeof__") == 0) return 1;
+    if (strcmp(want, "__reduce__") == 0) return 1;
+    if (strcmp(want, "__reduce_ex__") == 0) return 2;
+    if (strcmp(want, "__getstate__") == 0) return 1;
     return 0;
 }
 
@@ -720,6 +741,46 @@ APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
     if (strcmp(want, "__buffer__") == 0
             && (k == APY_BYTES_K || k == APY_MVIEW_K))
         return apy_kind_method(obj, 2, "__buffer__", bind);
+    /* PEP 688's OTHER HALF, and the one bytearray internal a program can
+       read. `__release_buffer__` is what a `with memoryview(...)` block
+       calls on the way out, and only the buffer that can be RESIZED carries
+       it -- bytes cannot move under a view and has nothing to be told. */
+    if (k == APY_BYTES_K && O(obj)->v.s.mut) {
+        if (strcmp(want, "__release_buffer__") == 0)
+            return apy_kind_method(obj, 2, want, bind);
+        if (strcmp(want, "__alloc__") == 0)
+            return apy_kind_method(obj, 1, want, bind);
+    }
+    /* WHAT `copy` AND `pickle` REBUILD A VALUE FROM. Every immutable builtin
+       answers `(self,)` -- a complex answers its two halves -- and a mutable
+       one has none at all, because anything it handed back would be SHARED
+       with the copy rather than rebuild it. */
+    if (strcmp(want, "__getnewargs__") == 0
+            && (k == APY_STR_K || k == APY_TUPLE_K || k == APY_INT_K
+                || k == APY_BIG_K || k == APY_BOOL_K || k == APY_FLOAT_K
+                || k == APY_COMPLEX_K
+                || (k == APY_BYTES_K && !O(obj)->v.s.mut)))
+        return apy_kind_method(obj, 1, want, bind);
+    /* `bytes(x)` ASKS `x` FOR ITSELF FIRST, and bytes is the kind that
+       answers -- a bytearray does not, which is why `bytes(ba)` copies. */
+    if (strcmp(want, "__bytes__") == 0
+            && k == APY_BYTES_K && !O(obj)->v.s.mut)
+        return apy_kind_method(obj, 1, want, bind);
+    /* `list[int]` REACHED BY NAME. The written form is a subscript the
+       frontend lowers; this is the method behind it, which `typing` calls
+       directly when it parameterises a container. TEXT HAS NONE: `str[int]`
+       is a TypeError in Python and the attribute is absent. */
+    if (strcmp(want, "__class_getitem__") == 0 && (seq || dict || set))
+        return apy_kind_method(obj, 2, want, bind);
+    /* WHICH FLOATING-POINT FORMAT THIS BUILD USES. One answer, and a float
+       is the only kind ever asked. */
+    if (strcmp(want, "__getformat__") == 0 && k == APY_FLOAT_K)
+        return apy_kind_method(obj, 2, want, bind);
+    /* THE REFLECTED `%`, which text carries and always refuses -- `1 % "a"`
+       is a TypeError the OPERATOR raises after this answers NotImplemented.
+       A NUMBER'S IS ELSEWHERE: `apy_number_arity` already has it. */
+    if (strcmp(want, "__rmod__") == 0 && text)
+        return apy_kind_method(obj, 2, want, bind);
     /* THE TWO WAYS A VIEW HANDS ITS CONTENTS OVER, and the reason a program
        makes one at all: `mv.tobytes()` copies them out and `mv.tolist()`
        reads them as numbers. Neither existed, so a view could be indexed and
@@ -1025,6 +1086,111 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
                         (int64_t)(unsigned char)O(bytes)->v.s.p[i])))
                     return 0;
             return out;
+        }
+        /* WHAT `object` HANDS DOWN, for a receiver that is a builtin value
+           rather than an instance. Each is the answer CPython gives, and the
+           four that do nothing really do nothing there too. */
+        if (strcmp(w, "__init__") == 0) return apy_none();
+        if (strcmp(w, "__init_subclass__") == 0) return apy_none();
+        if (strcmp(w, "__getstate__") == 0) return apy_none();
+        if (strcmp(w, "__release_buffer__") == 0) {
+            /* PEP 688 SAYS WHAT IT IS HANDED: the view being closed, and one
+               over THIS buffer. CPython checks both, and a `with
+               memoryview(...)` block that ends on the wrong object is a
+               mistake worth naming rather than a silent no-op. */
+            if (n < 2 || O(a[1])->kind != APY_MVIEW_K)
+                return apy_fail("TypeError",
+                                "expected a memoryview object");
+            if (O(a[1])->v.mv.src != a[0])
+                return apy_fail("ValueError",
+                                "memoryview's buffer is not this object");
+            return apy_none();
+        }
+        if (strcmp(w, "__subclasshook__") == 0) return apy_notimplemented();
+        if (strcmp(w, "__dir__") == 0) return apy_dir(a[0]);
+        if (strcmp(w, "__sizeof__") == 0) return apy_sizeof(a[0]);
+        if (strcmp(w, "__new__") == 0) {
+            /* `[].__new__(list)` IS AN EMPTY LIST: an implicit staticmethod,
+               so the receiver is ignored and the CLASS decides. */
+            if (n < 2) return apy_fail("TypeError",
+                                       "__new__() takes at least 1 argument");
+            return apy_call_n(a[1], 0, 0);
+        }
+        if (strcmp(w, "__getattribute__") == 0) {
+            if (n < 2) return apy_fail("TypeError",
+                                       "__getattribute__() takes exactly one "
+                                       "argument (0 given)");
+            return apy_getattr(a[0], a[1]);
+        }
+        if (strcmp(w, "__setattr__") == 0 || strcmp(w, "__delattr__") == 0)
+            /* A BUILTIN VALUE HAS NO `__dict__` to write into, which is the
+               whole of what CPython says here. */
+            return apy_fail2("AttributeError",
+                             "'%s' object has no attribute '%s' and no "
+                             "__dict__ for setting new attributes",
+                             apy_kind_name(a[0]),
+                             n > 1 && O(a[1])->kind == APY_STR_K
+                                 ? APY_CSTR(a[1]) : "?");
+        if (strcmp(w, "__reduce__") == 0 || strcmp(w, "__reduce_ex__") == 0)
+            /* PICKLING IS NOT SERVED HERE, and CPython refuses most of these
+               in exactly these words. The four it answers -- bytearray, set,
+               frozenset and range -- build a tuple through `copyreg`, which
+               this runtime has no counterpart for. */
+            return apy_fail2("TypeError", "cannot pickle '%s' object%s",
+                             apy_kind_name(a[0]), "");
+        /* AND THE SEVEN A PARTICULAR KIND CARRIES, which `apy_kind_attr_of`
+           gates -- so a name reaching here already belongs to the receiver
+           and nothing below needs to ask which kind it is twice. */
+        if (strcmp(w, "__getnewargs__") == 0) {
+            /* WHAT `copy` AND `pickle` REBUILD A VALUE FROM. `(self,)` for
+               every immutable kind, because handing the value back IS the
+               argument that remakes it -- and a complex is the one that
+               rebuilds from two numbers rather than from itself. */
+            apy_value out = apy_tuple_new(2);
+            if (!out) return 0;
+            if (O(a[0])->kind == APY_COMPLEX_K) {
+                if (!apy_seq_push(out, apy_from_float(O(a[0])->v.z.re)))
+                    return 0;
+                if (!apy_seq_push(out, apy_from_float(O(a[0])->v.z.im)))
+                    return 0;
+                return out;
+            }
+            if (!apy_seq_push(out, a[0])) return 0;
+            return out;
+        }
+        if (strcmp(w, "__rmod__") == 0) return apy_notimplemented();
+        if (strcmp(w, "__bytes__") == 0) return a[0];
+        if (strcmp(w, "__alloc__") == 0)
+            /* THE ONE BYTEARRAY INTERNAL A PROGRAM CAN READ, and CPython's
+               answer for a freshly built one is its length plus the
+               terminator -- nought for an empty one, which holds no buffer
+               at all. */
+            return apy_from_int(O(a[0])->v.s.n ? O(a[0])->v.s.n + 1 : 0);
+        if (strcmp(w, "__getformat__") == 0) {
+            /* THE ONLY TWO KEYS, and CPython names both in the refusal. */
+            if (n < 2 || O(a[1])->kind != APY_STR_K
+                || (strcmp(APY_CSTR(a[1]), "double") != 0
+                    && strcmp(APY_CSTR(a[1]), "float") != 0))
+                return apy_fail("ValueError",
+                                "__getformat__() argument 1 must be "
+                                "'double' or 'float'");
+            return apy_lit("IEEE, little-endian");
+        }
+        if (strcmp(w, "__class_getitem__") == 0) {
+            /* `list[int]` REACHED BY NAME. The written form is a subscript
+               the frontend lowers; this is the method behind it, which
+               `typing` calls directly to parameterise a container. */
+            apy_value args;
+            if (n < 2) return apy_fail("TypeError",
+                                       "__class_getitem__() takes exactly "
+                                       "one argument (0 given)");
+            if (O(a[1])->kind == APY_TUPLE_K) args = a[1];
+            else {
+                args = apy_tuple_new(2);
+                if (!args) return 0;
+                if (!apy_seq_push(args, a[1])) return 0;
+            }
+            return apy_alias_new(apy_type_for(a[0]), args);
         }
         if (strcmp(w, "__hash__") == 0) return apy_hash(a[0]);
         if (strcmp(w, "__len__") == 0) return apy_len(a[0]);

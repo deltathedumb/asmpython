@@ -1582,6 +1582,82 @@ PROGRAMS = {
             print("tuple", name,
                   type(getattr((), name)).__name__)
     """,
+    "a_builtin_value_carries_what_object_hands_down": """
+        def show(label, f):
+            try:
+                print(label, f())
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        # THE TWELVE `object` HANDS DOWN, on a builtin value rather
+        # than an instance. Every one was an AttributeError about an
+        # attribute Python guarantees to every object there is.
+        names = ('__init__', '__init_subclass__', '__getstate__',
+                 '__subclasshook__',
+                 '__dir__', '__sizeof__', '__new__', '__getattribute__',
+                 '__setattr__', '__delattr__', '__reduce__', '__reduce_ex__')
+        for sample in ("", b"", bytearray(), [], (), {}, set(), frozenset(),
+                       5, 1.5, range(3), 1j):
+            print(type(sample).__name__,
+                  [n for n in names if hasattr(sample, n)] == list(names))
+        show("init", lambda: [].__init__())
+        show("init_subclass", lambda: (5).__init_subclass__())
+        show("getstate", lambda: "a".__getstate__())
+        show("subclasshook", lambda: [].__subclasshook__(int))
+        show("new", lambda: [].__new__(list))
+        show("getattribute", lambda: "abc".__getattribute__("upper")())
+        show("getattribute miss", lambda: "abc".__getattribute__("nope"))
+        show("setattr", lambda: [].__setattr__("a", 1))
+        show("delattr", lambda: {}.__delattr__("a"))
+        show("reduce", lambda: "a".__reduce__())
+        show("dir answers a list", lambda: type("a".__dir__()).__name__)
+        # `__sizeof__` IS AN IMPLEMENTATION NUMBER -- CPython's own differs between
+        # builds -- so what is checked is what a program can rely on: an int, and one
+        # that grows with what the value holds.
+        show("sizeof", lambda: (type("abc".__sizeof__()).__name__,
+                                "abcd".__sizeof__() > "a".__sizeof__()))
+    """,
+    "a_kind_carries_the_dunders_only_it_has": """
+        def show(label, f):
+            try:
+                print(label, f())
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        # WHAT `copy` AND `pickle` REBUILD A VALUE FROM. Every immutable builtin
+        # answers `(self,)` -- a complex answers its two halves -- and a mutable one
+        # does not carry the attribute at all.
+        show("str", lambda: "ab".__getnewargs__())
+        show("bytes", lambda: b"ab".__getnewargs__())
+        show("tuple", lambda: (1, 2).__getnewargs__())
+        show("int", lambda: (5).__getnewargs__())
+        show("float", lambda: (1.5).__getnewargs__())
+        show("complex", lambda: (1 + 2j).__getnewargs__())
+        print([hasattr(v, "__getnewargs__")
+               for v in (bytearray(), [], {}, set(), range(3))])
+        # THE REFLECTED `%`, which text carries and always refuses -- the TypeError a
+        # program sees is the operator's, raised after this answers.
+        print("ab".__rmod__(1), b"ab".__rmod__(1), bytearray(b"ab").__rmod__(1))
+        # `bytes(x)` ASKS `x` FOR ITSELF FIRST, and bytes is the kind that answers.
+        print(b"ab".__bytes__(), hasattr(bytearray(), "__bytes__"))
+        # THE ONE BYTEARRAY INTERNAL A PROGRAM CAN READ.
+        print(bytearray(b"abc").__alloc__(), bytearray().__alloc__(),
+              hasattr(b"", "__alloc__"))
+        show("format double", lambda: (1.5).__getformat__("double"))
+        show("format bad", lambda: (1.5).__getformat__("x"))
+        print(hasattr(5, "__getformat__"))
+        # `list[int]` REACHED BY NAME rather than written as a subscript.
+        print([].__class_getitem__(int), {}.__class_getitem__(str),
+              ().__class_getitem__(int).__args__)
+        print([hasattr(v, "__class_getitem__") for v in ("", b"", 5, 1.5)])
+        # PEP 688's OTHER HALF, and the two arguments it refuses.
+        held = bytearray(b"abc")
+        print(held.__release_buffer__(memoryview(held)))
+        show("release none", lambda: held.__release_buffer__(None))
+        show("release other",
+             lambda: held.__release_buffer__(memoryview(bytearray(b"x"))))
+        print(hasattr(b"", "__release_buffer__"))
+    """,
     "traceback_positions": """
         try:
             (1).missing

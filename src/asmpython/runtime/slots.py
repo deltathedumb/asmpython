@@ -938,6 +938,35 @@ def apy_object_arity(want: ptr) -> i64:
         return 1
     if apy_cstr_eq(want, rodata(b"__format__\0")):
         return 2
+    # AND THE TWELVE `object` HANDS DOWN THAT NOTHING OVERRIDES. Every one
+    # was missing from every builtin value, which is 144 attributes a
+    # program can ask for and Python guarantees: `__reduce_ex__` is how
+    # pickle finds a value, `__dir__` is what `dir()` reads, and `__init__`
+    # and `__new__` are on everything there is.
+    if apy_cstr_eq(want, rodata(b"__init__\0")):
+        return 1
+    if apy_cstr_eq(want, rodata(b"__new__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__getattribute__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__setattr__\0")):
+        return 3
+    if apy_cstr_eq(want, rodata(b"__delattr__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__init_subclass__\0")):
+        return 1
+    if apy_cstr_eq(want, rodata(b"__subclasshook__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__dir__\0")):
+        return 1
+    if apy_cstr_eq(want, rodata(b"__sizeof__\0")):
+        return 1
+    if apy_cstr_eq(want, rodata(b"__reduce__\0")):
+        return 1
+    if apy_cstr_eq(want, rodata(b"__reduce_ex__\0")):
+        return 2
+    if apy_cstr_eq(want, rodata(b"__getstate__\0")):
+        return 1
     return 0
 
 
@@ -1236,6 +1265,52 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
         if is_bytes or is_mview:
             return apy_kind_method_of(obj, 2, rodata(b"__buffer__\0"),
                                       bind)
+    # PEP 688's OTHER HALF, and the one bytearray internal a program can
+    # read. `__release_buffer__` is what a `with memoryview(...)` block calls
+    # on the way out, and only the buffer that can be RESIZED carries it --
+    # bytes cannot move under a view and has nothing to be told.
+    if writable_bytes:
+        if apy_name_is(want, rodata(b"__release_buffer__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"__alloc__\0")):
+            return apy_kind_method_of(obj, 1, want, bind)
+    # WHAT `copy` AND `pickle` REBUILD A VALUE FROM. Every immutable builtin
+    # answers `(self,)` -- a complex answers its two halves -- and a mutable
+    # one has none at all, because anything it handed back would be shared
+    # with the copy rather than rebuild it.
+    if apy_name_is(want, rodata(b"__getnewargs__\0")):
+        if is_str or is_int or is_float or is_complex:
+            return apy_kind_method_of(obj, 1, want, bind)
+        if seq:
+            if is_list == 0:
+                return apy_kind_method_of(obj, 1, want, bind)
+        if is_bytes:
+            if writable_bytes == 0:
+                return apy_kind_method_of(obj, 1, want, bind)
+    # `bytes(x)` ASKS `x` FOR ITSELF FIRST, and bytes is the kind that
+    # answers -- a bytearray does not, which is why `bytes(ba)` copies.
+    if apy_name_is(want, rodata(b"__bytes__\0")):
+        if is_bytes:
+            if writable_bytes == 0:
+                return apy_kind_method_of(obj, 1, want, bind)
+    # `list[int]` REACHED BY NAME. The written form is a subscript the
+    # frontend lowers; this is the method behind it, which `typing` calls
+    # directly when it parameterises a container. TEXT HAS NONE: `str[int]`
+    # is a TypeError in Python and the attribute is absent.
+    if apy_name_is(want, rodata(b"__class_getitem__\0")):
+        if seq or is_dict or sset:
+            return apy_kind_method_of(obj, 2, want, bind)
+    # WHICH FLOATING-POINT FORMAT THIS BUILD USES. One answer, and a float is
+    # the only kind ever asked.
+    if is_float:
+        if apy_name_is(want, rodata(b"__getformat__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+    # THE REFLECTED `%`, which text carries and always refuses -- `1 % "a"`
+    # is a TypeError the OPERATOR raises after this answers NotImplemented.
+    # A NUMBER'S IS ELSEWHERE: `apy_number_arity` already has it.
+    if text:
+        if apy_name_is(want, rodata(b"__rmod__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
     # THE TWO WAYS A VIEW HANDS ITS CONTENTS OVER, and the reason a program
     # makes one at all: `mv.tobytes()` copies them out and `mv.tolist()`
     # reads them as numbers. Neither existed, so a view could be indexed and

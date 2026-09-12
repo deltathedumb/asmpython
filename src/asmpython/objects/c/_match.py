@@ -75,6 +75,31 @@ APY_API apy_value apy_match_rest(apy_value d, apy_value used) {
    Without the hook it is the instance's own attributes plus every class in
    the chain -- which IS deduplicated, because a subclass overriding a method
    must not make it appear twice. */
+/* `x.__sizeof__()` -- how many bytes this value occupies, THIS runtime's
+   answer and not CPython's.
+
+   THE NUMBER IS IMPLEMENTATION-SPECIFIC BY DESIGN, which is what makes it
+   answerable at all: CPython's `[].__sizeof__()` counts a CPython list and
+   ours counts one of these cells, and neither is wrong. What a program can
+   rely on is that the attribute EXISTS, that it answers an int, and that a
+   longer container is not smaller than a shorter one -- so the model is the
+   CELL plus whatever the payload really holds. */
+APY_API apy_value apy_sizeof(apy_value v) {
+    int64_t cell = (int64_t)sizeof(apy_obj);
+    switch (O(v)->kind) {
+    case APY_STR_K:
+    case APY_BYTES_K:   return apy_from_int(cell + O(v)->v.s.n + 1);
+    case APY_LIST_K:
+    case APY_TUPLE_K:
+    case APY_SET_K:
+    case APY_FROZEN_K:  return apy_from_int(cell + O(v)->v.q.n * 8);
+    case APY_DICT_K:    return apy_from_int(cell + O(v)->v.d.n * 16);
+    case APY_BIG_K:     return apy_from_int(cell + O(v)->v.big.n * 8);
+    case APY_MVIEW_K:   return apy_from_int(cell);
+    default:            return apy_from_int(cell);
+    }
+}
+
 APY_API apy_value apy_dir(apy_value v) {
     apy_value out, hook;
     if (O(v)->kind == APY_INST_K

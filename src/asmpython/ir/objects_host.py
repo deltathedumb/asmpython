@@ -6968,7 +6968,17 @@ def _unbound_kind(h, want: str):
 #: machine subset.
 _OBJECT_ARITY = {"__eq__": 2, "__ne__": 2, "__lt__": 2, "__le__": 2,
                  "__gt__": 2, "__ge__": 2, "__str__": 1, "__repr__": 1,
-                 "__format__": 2}
+                 "__format__": 2,
+                 # AND THE TWELVE `object` HANDS DOWN THAT NOTHING
+                 # OVERRIDES. `__reduce_ex__` is how pickle finds a value,
+                 # `__dir__` is what `dir()` reads, and `__init__` and
+                 # `__new__` are on everything there is. `_kind_attr` answers
+                 # each of them; this is the same list as a table, for the
+                 # runtime symbol that states it.
+                 "__init__": 1, "__new__": 2, "__getattribute__": 2,
+                 "__setattr__": 3, "__delattr__": 2, "__init_subclass__": 1,
+                 "__subclasshook__": 2, "__dir__": 1, "__sizeof__": 1,
+                 "__reduce__": 1, "__reduce_ex__": 2, "__getstate__": 1}
 
 #: What every number has, what an int and a float share, and what only an
 #: int carries. See `runtime/slots.py`'s `apy_number_arity`, which is the
@@ -7136,6 +7146,37 @@ def _made_table_method(h, obj, want: str):
     return h._new(Native(want, body, ranged=lo != hi, owner=obj))
 
 
+#: How big one runtime cell is, in bytes -- `sizeof(apy_obj)` in the C, which
+#: is what `apy_sizeof` counts from. `__sizeof__` IS AN IMPLEMENTATION
+#: NUMBER: CPython's own answer differs between builds, and what a program can
+#: rely on is that it is an int and that it grows with what the value holds.
+#: Written here so the three runtimes agree with EACH OTHER.
+_CELL_BYTES = 152
+
+
+def _cell_bytes(v) -> int:
+    """`x.__sizeof__()` -- the same arithmetic `apy_sizeof` does in the C."""
+    if isinstance(v, (str, bytes, bytearray)):
+        return _CELL_BYTES + len(v) + 1
+    if isinstance(v, (list, tuple, set, frozenset)):
+        return _CELL_BYTES + len(v) * 8
+    if isinstance(v, dict):
+        return _CELL_BYTES + len(v) * 16
+    if isinstance(v, int) and not isinstance(v, bool):
+        # A BIG INT IS LIMBS, and a small one lives in the cell itself.
+        if v.bit_length() > 63:
+            return _CELL_BYTES + ((v.bit_length() + 63) // 64) * 8
+    return _CELL_BYTES
+
+
+def _unwrap(h, got):
+    """A handle an `_apy_*` entry point answered, as a value -- or the
+    failure it left pending, re-raised so the caller sees it."""
+    if got == 0:
+        raise _UserFailed
+    return h._get(got, "__getattribute__")
+
+
 def _kind_attr(h, obj, want: str):
     """A BUILTIN'S PROTOCOL METHODS, AS VALUES.
 
@@ -7199,6 +7240,53 @@ def _kind_attr(h, obj, want: str):
             _apy_format(h, [h._new(obj), h._new(spec)]), "__format__"))
     if want in _RICH_COMPARISONS:
         return made(want, lambda o, _w=want: _rich_compare(h, _w, obj, o))
+    # AND THE TWELVE `object` HANDS DOWN THAT NOTHING OVERRIDES. Every one
+    # was missing from every builtin value, which is 144 attributes a program
+    # may ask for and Python guarantees: `__reduce_ex__` is how pickle finds
+    # a value, `__dir__` is what `dir()` reads, and `__init__` and `__new__`
+    # are on everything there is. THE SAME TWELVE the compiled halves answer
+    # in `apy_object_arity`, with the same bodies.
+    if want in ("__init__", "__init_subclass__"):
+        return made(want, lambda *a: None)
+    if want == "__getstate__":
+        # A BUILTIN HAS NO `__dict__`, and `object.__getstate__` answers None
+        # for anything that carries no state of its own.
+        return made("__getstate__", lambda: None)
+    if want == "__subclasshook__":
+        # `object`'s ANSWER IS "I HAVE NO OPINION", which is what lets `abc`
+        # fall through to its own structural test.
+        return made("__subclasshook__", lambda c: NotImplemented)
+    if want == "__dir__":
+        return made("__dir__",
+                    lambda: h._get(_apy_dir(h, [h._new(obj)]), "__dir__"))
+    if want == "__sizeof__":
+        return made("__sizeof__", lambda: _cell_bytes(obj))
+    if want == "__new__":
+        # `[].__new__(list)` IS AN EMPTY LIST: an implicit staticmethod, so
+        # the receiver is ignored and the CLASS decides what is built.
+        return made("__new__", lambda cls, *rest: h._invoke(cls, []))
+    if want == "__getattribute__":
+        return made("__getattribute__", lambda n: _unwrap(
+            h, _apy_getattr(h, [h._new(obj), h._new(n)])))
+    if want in ("__setattr__", "__delattr__"):
+        # A BUILTIN VALUE HAS NO `__dict__` to write into, which is the whole
+        # of what CPython says here.
+        def _no_dict(n, *rest, _o=obj):
+            h._fail("AttributeError",
+                    f"'{h.kind_name(_o)}' object has no attribute "
+                    f"'{n}' and no __dict__ for setting new attributes")
+            raise _UserFailed
+        return made(want, _no_dict)
+    if want in ("__reduce__", "__reduce_ex__"):
+        # PICKLING IS NOT SERVED HERE, and CPython refuses most of these in
+        # exactly these words. The four it answers -- bytearray, set,
+        # frozenset and range -- build a tuple through `copyreg`, which this
+        # runtime has no counterpart for.
+        def _no_pickle(*rest, _o=obj):
+            h._fail("TypeError",
+                    f"cannot pickle '{h.kind_name(_o)}' object")
+            raise _UserFailed
+        return made(want, _no_pickle)
     if want == "__len__" and walks:
         return made("__len__", lambda: len(obj))
     if want == "__iter__" and (walks or isinstance(obj, (Gen, Iterator))):
@@ -7277,6 +7365,65 @@ def _kind_attr(h, obj, want: str):
     if want == "__buffer__" and isinstance(obj, (bytes, bytearray,
                                                  memoryview)):
         return made("__buffer__", lambda flags=0: memoryview(obj))
+    # PEP 688's OTHER HALF, and the one bytearray internal a program can
+    # read. `__release_buffer__` is what a `with memoryview(...)` block calls
+    # on the way out, and only the buffer that can be RESIZED carries it --
+    # bytes cannot move under a view and has nothing to be told.
+    if isinstance(obj, bytearray):
+        if want == "__release_buffer__":
+            # PEP 688 SAYS WHAT IT IS HANDED: the view being closed, and one
+            # over THIS buffer. A `with memoryview(...)` block that ends on
+            # the wrong object is a mistake worth naming.
+            def _release(view, _o=obj):
+                if not isinstance(view, memoryview):
+                    h._fail("TypeError", "expected a memoryview object")
+                    raise _UserFailed
+                if view.obj is not _o:
+                    h._fail("ValueError",
+                            "memoryview's buffer is not this object")
+                    raise _UserFailed
+                return None
+            return made("__release_buffer__", _release)
+        if want == "__alloc__":
+            # CPython's answer for a freshly built one is its length plus the
+            # terminator, and nought for an empty one, which holds no buffer.
+            return made("__alloc__", lambda: len(obj) + 1 if obj else 0)
+    # WHAT `copy` AND `pickle` REBUILD A VALUE FROM. Every immutable builtin
+    # answers `(self,)` -- a complex answers its two halves -- and a mutable
+    # one has none at all, because anything it handed back would be SHARED
+    # with the copy rather than rebuild it.
+    if want == "__getnewargs__" and isinstance(obj, (str, bytes, tuple, int,
+                                                     float, complex)):
+        if is_complex:
+            return made("__getnewargs__", lambda: (obj.real, obj.imag))
+        return made("__getnewargs__", lambda: (obj,))
+    # `bytes(x)` ASKS `x` FOR ITSELF FIRST, and bytes is the kind that
+    # answers -- a bytearray does not, which is why `bytes(ba)` copies.
+    if want == "__bytes__" and isinstance(obj, bytes):
+        return made("__bytes__", lambda: obj)
+    # `list[int]` REACHED BY NAME. The written form is a subscript the
+    # frontend lowers; this is the method behind it, which `typing` calls
+    # directly when it parameterises a container. TEXT HAS NONE: `str[int]`
+    # is a TypeError in Python and the attribute is absent.
+    if want == "__class_getitem__" and (seq or dict_ or set_):
+        return made("__class_getitem__", lambda k: Alias(
+            h._get(_apy_type_object(h, [h._new(obj)]), "__class_getitem__"),
+            k if isinstance(k, tuple) else (k,)))
+    # WHICH FLOATING-POINT FORMAT THIS BUILD USES. One answer, and a float is
+    # the only kind ever asked.
+    if want == "__getformat__" and isinstance(obj, float):
+        def _format_of(key):
+            if key not in ("double", "float"):
+                h._fail("ValueError", "__getformat__() argument 1 must be "
+                        "'double' or 'float'")
+                raise _UserFailed
+            return "IEEE, little-endian"
+        return made("__getformat__", _format_of)
+    # THE REFLECTED `%`, which text carries and always refuses -- `1 % "a"`
+    # is a TypeError the OPERATOR raises after this answers NotImplemented.
+    # A NUMBER'S IS ELSEWHERE: `_NUM_REAL` already has it.
+    if want == "__rmod__" and text:
+        return made("__rmod__", lambda o: NotImplemented)
     if want in _TABLE_METHODS and hasattr(type(obj), want):
         # AND THE WHOLE METHOD TABLE. Everything above answers a PROTOCOL
         # name or a field; this answers the ORDINARY methods, which existed
@@ -9448,6 +9595,18 @@ def _apy_slice_indices(h, a):
         return h._new(sl.indices(int(h._get(a[1], "apy_slice_indices"))))
     except _HOST_RAISES as exc:
         return h._fail_like(exc)
+
+
+def _apy_sizeof(h, a):
+    """`x.__sizeof__()` -- how many bytes the value occupies HERE.
+
+    AN IMPLEMENTATION NUMBER, and CPython says so: its own answer differs
+    between builds and between a 32- and a 64-bit one. What a program can
+    rely on is that it is an int and that it grows with what the value
+    holds, and `_cell_bytes` is the same arithmetic `apy_sizeof` does in the
+    C so the three runtimes agree with each other.
+    """
+    return h._new(_cell_bytes(h._get(a[0], "apy_sizeof")))
 
 
 def _apy_dir(h, a):
