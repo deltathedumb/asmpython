@@ -6813,6 +6813,10 @@ class Func:
         return out
 
 
+#: "no receiver recorded" -- distinct from None, which is a real receiver.
+_NO_OWNER = object()
+
+
 class Native:
     """A callable the RUNTIME owns, standing for one of `object`'s defaults.
 
@@ -6825,12 +6829,19 @@ class Native:
     twice is the same object, as any other attribute would be.
     """
 
-    __slots__ = ("name", "body", "bound", "ranged")
+    __slots__ = ("name", "body", "bound", "ranged", "owner")
 
-    def __init__(self, name: str, body, ranged: bool = False) -> None:
+    def __init__(self, name: str, body, ranged: bool = False,
+                 owner=_NO_OWNER) -> None:
         self.name = name
         self.body = body
         self.bound = None
+        #: THE RECEIVER, FOR A MESSAGE AND NOTHING ELSE. A builtin method
+        #: built from the table holds its receiver in the BODY's closure, so
+        #: `bound` is empty and `str.upper() takes no keyword arguments` had
+        #: no owner to name. Recorded rather than derived, and read only
+        #: where CPython writes the owner out.
+        self.owner = owner
         #: Whether the method really takes a RANGE of argument counts.
         #: NOT DERIVABLE FROM THE BODY: nearly every lambda in `_kind_attr`
         #: carries a default (`lambda o, _w=want: ...`) as a CLOSURE CAPTURE,
@@ -6840,7 +6851,7 @@ class Native:
         self.ranged = ranged
 
     def bind(self, receiver) -> "Native":
-        out = Native(self.name, self.body, self.ranged)
+        out = Native(self.name, self.body, self.ranged, self.owner)
         out.bound = receiver
         return out
 
@@ -6969,8 +6980,8 @@ def _rich_compare(h, want: str, obj, other):
 #: so the two spellings cannot drift into two implementations. The generated
 #: C half reads the same table; see `objects/c/_gen_kindmeth.py`.
 from asmpython.frontends.python.methods import (  # noqa: E402
-    DYN_METHOD_TABLE, KeywordError, _suggest, fold_ctor_keywords,
-    method_symbol)
+    DYN_METHOD_TABLE, METHOD_PARAMS, REQUIRED, KeywordError, _suggest,
+    fold_ctor_keywords, method_symbol)
 
 #: The names that table answers -- the dunders are left out, because every
 #: one of them is a PROTOCOL name the arms above answer with their own
@@ -7041,7 +7052,7 @@ def _made_table_method(h, obj, want: str):
             raise _UserFailed
         return h._get(got, _w)
 
-    return h._new(Native(want, body, ranged=lo != hi))
+    return h._new(Native(want, body, ranged=lo != hi, owner=obj))
 
 
 def _kind_attr(h, obj, want: str):
@@ -7071,7 +7082,10 @@ def _kind_attr(h, obj, want: str):
     mutable = isinstance(obj, (list, dict, set, bytearray))
 
     def made(name, body):
-        return h._new(Native(name, body))
+        # THE RECEIVER TRAVELS WITH IT, for the one message that names the
+        # owner: `list.append() takes no keyword arguments`. The body holds
+        # it in a closure, so nothing else could say what it was.
+        return h._new(Native(name, body, owner=obj))
 
     num = isinstance(obj, (int, float, complex))
     is_int = isinstance(obj, int)
@@ -7138,7 +7152,7 @@ def _kind_attr(h, obj, want: str):
         return h._new(Native("__round__",
                              lambda nd=None: (obj.__round__() if nd is None
                                               else obj.__round__(nd)),
-                             ranged=True))
+                             ranged=True, owner=obj))
     if num and _number_arity(want, is_int, is_complex):
         return made(want, lambda *r, _w=want: getattr(obj, _w)(*r))
     if rng and want == "__bool__":
@@ -8530,6 +8544,71 @@ def _apy_call_kw(h, a):
     return _call_kwargs(h, f, args, kwargs)
 
 
+def _native_kwargs(h, f, args, kwargs):
+    """A BUILTIN METHOD REACHED AS A VALUE, handed keywords.
+
+    `g = x.split` then `g(",", maxsplit=1)` is a call CPython answers, and so
+    is the one the COLLISION path makes when a module defines a class
+    extending a builtin. A native declares no parameters, so the binder above
+    had nothing to match the names against and dropped them in silence: the
+    answer came back as though the keyword had never been written.
+
+    THE SAME TABLE THE WRITTEN SPELLING FOLDS AGAINST -- `METHOD_PARAMS`, read
+    here rather than restated, so the two arrangements cannot drift. The C
+    reads a generated copy of it; see `apy_kind_meth_sign`. The refusals are
+    CPython's and in CPython's order: too many first, then a slot given twice,
+    then a name no parameter has.
+    """
+    params = METHOD_PARAMS.get(f.name) if f.name in _TABLE_METHODS else None
+    if params is None:
+        # A METHOD WITH NO KEYWORD SIGNATURE AT ALL names its owner, which is
+        # the receiver's kind: `str.upper() takes no keyword arguments`.
+        who = (f.bound if f.bound is not None
+               else f.owner if f.owner is not _NO_OWNER
+               else args[0] if args else None)
+        return h._fail("TypeError", f"{h.kind_name(who)}.{f.name}() takes no "
+                                    f"keyword arguments")
+    named = [p for p, _ in params]
+    slots = list(args[:len(params)])
+    taken = [True] * len(slots) + [False] * (len(params) - len(slots))
+    slots += [None] * (len(params) - len(slots))
+    if len(args) + len(kwargs) > len(params):
+        plural = "" if len(params) == 1 else "s"
+        return h._fail("TypeError",
+                       f"{f.name}() takes at most {len(params)} "
+                       f"argument{plural} ({len(args) + len(kwargs)} given)")
+    for name, value in kwargs.items():
+        at = named.index(name) if name in named and name is not None else -1
+        if at < 0:
+            return h._fail("TypeError", f"{f.name}() got an unexpected "
+                                        f"keyword argument {name!r}")
+        if taken[at]:
+            return h._fail("TypeError",
+                           f"argument for {f.name}() given by name "
+                           f"({name!r}) and position ({at + 1})")
+        slots[at], taken[at] = value, True
+    top = max((i + 1 for i, got in enumerate(taken) if got), default=0)
+    for i in range(len(params)):
+        if taken[i]:
+            continue
+        _, default = params[i]
+        if default is REQUIRED:
+            if i < top:
+                return h._fail("TypeError",
+                               f"{f.name}() takes at least {i + 1} positional "
+                               f"argument{'' if i == 0 else 's'} "
+                               f"({len(args)} given)")
+            default = None
+        # PADDED TO THE FULL ARITY, which is what the frontend's own fold does
+        # for the written spelling: the entry point takes every parameter and
+        # the defaults supply the rest.
+        slots[i] = default
+    try:
+        return h._value(h._invoke(f, slots))
+    except _UserFailed:
+        return 0
+
+
 def _call_kwargs(h, f, args, kwargs):
     """One call whose keywords are matched by NAME against the callee.
 
@@ -8538,6 +8617,8 @@ def _call_kwargs(h, f, args, kwargs):
     kind="x")` is `M(name, bases, ns, kind="x")`, and the names have to land
     on `M.__new__`'s parameters the same way any other call's do.
     """
+    if isinstance(f, Native) and kwargs:
+        return _native_kwargs(h, f, args, kwargs)
     target, skip = f, 0
     if isinstance(f, Class):
         # `__new__` DECLARES THE KEYWORDS when a class writes one and leaves
@@ -11188,23 +11269,13 @@ def _apy_call_spread_kw(h, a):
             return h._value(h._invoke(callee, args))
         except _UserFailed:
             return 0
-    # MATCHED BY NAME against the callee's parameters, as `_apy_call_kw` does
-    # -- `_invoke` alone would put every keyword into `**kw`.
-    target, skip = callee, 0
-    if isinstance(callee, Class):
-        target, skip = callee.find("__init__"), 1
-    elif isinstance(callee, Func) and callee.bound is not None:
-        skip = 1
-    names = list(getattr(target, "pnames", None) or [])[skip + len(args):]
-    extra = dict(kwd)
-    for pname in names:
-        if pname is None or pname not in extra:
-            break
-        args.append(extra.pop(pname))
-    try:
-        return h._value(h._invoke(callee, args, kwrest=extra))
-    except _UserFailed:
-        return 0
+    # MATCHED BY NAME against the callee's parameters, THROUGH THE SAME
+    # BINDER `apy_call_kw` uses -- `_invoke` alone would put every keyword
+    # into `**kw`. This used to be a shorter binder of its own, which walked
+    # the parameter names only while they arrived in order and knew nothing
+    # about a builtin method's: `fwd("aaa".replace, "a", "b", count=1)`
+    # answered 'bbb', the keyword dropped in silence.
+    return _call_kwargs(h, callee, args, dict(kwd))
 
 
 def _apy_extend(h, a):

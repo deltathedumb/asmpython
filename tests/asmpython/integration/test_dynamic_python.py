@@ -1171,6 +1171,78 @@ PROGRAMS = {
 
         print("in a generator", list(rows()))
     """,
+    # A BOUND BUILTIN METHOD REACHED AS A VALUE REFUSED ITS KEYWORDS.
+    # `f = x.split` then `f(",", maxsplit=1)` dropped the keyword in the
+    # interpreter and reported `got an unexpected keyword argument` on both
+    # compiled paths -- a native declares no parameters, so the keyword
+    # binder had nothing to match the names against.
+    #
+    # IT REACHED ORDINARY CODE through the collision path: a module defining
+    # a class that extends a builtin puts EVERY method name on the two-way
+    # dispatch, and an int's `to_bytes` arrives at the value binder rather
+    # than at the frontend's own fold. `(5).to_bytes(2, byteorder="big")` was
+    # refused for that reason alone.
+    #
+    # THE NAMES ARE THE SAME ONES the written spelling folds against.
+    # `METHOD_PARAMS` is read by the host directly and generated into the C
+    # as `apy_kind_meth_sign`, so the two arrangements cannot drift -- and
+    # the refusals are CPython's, in CPython's order.
+    "a_bound_builtin_method_takes_its_keywords": """
+        class L(list):
+            pass
+
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except TypeError as e:
+                print(label, "TypeError:", e)
+
+        def call(f, *args, **kw):
+            return f(*args, **kw)
+
+        # AS A VALUE, which is what a forwarding wrapper holds.
+        show("replace", lambda: (lambda f: f("a", "b", count=1))("aaa".replace))
+        show("split", lambda: (lambda f: f(",", maxsplit=1))("a,b,c".split))
+        show("split gap", lambda: (lambda f: f(maxsplit=1))("a b c".split))
+        show("split plain", lambda: (lambda f: f(","))("a,b,c".split))
+        show("split none", lambda: (lambda f: f())("a b c".split))
+        show("encode", lambda: (lambda f: f(encoding="utf-8"))("a".encode))
+        show("decode", lambda: (lambda f: f(errors="replace"))(b"a".decode))
+        show("expandtabs",
+             lambda: (lambda f: f(tabsize=2))("a\\tb".expandtabs))
+        show("splitlines",
+             lambda: (lambda f: f(keepends=True))("a\\nb".splitlines))
+        show("to_bytes", lambda: (lambda f: f(2, byteorder="big"))(
+            (5).to_bytes))
+        show("to_bytes named", lambda: (lambda f: f(length=2, signed=False))(
+            (5).to_bytes))
+        # THROUGH A WRAPPER, which is the shape the whole thing exists for.
+        show("forwarded", lambda: call("aaa".replace, "a", "b", count=1))
+        show("forwarded map",
+             lambda: call("a,b,c".split, ",", **{"maxsplit": 1}))
+        show("forwarded plain", lambda: call("aaa".upper))
+        # AND WRITTEN OUT, which the collision path sends the same way
+        # because `L` extends a builtin.
+        print("written", (5).to_bytes(2, byteorder="big"),
+              "a,b,c".split(",", maxsplit=1))
+        print("extended", L([3, 1]).pop(0))
+        # THE REFUSALS, in CPython's order.
+        show("too many", lambda: (lambda f: f(",", 1, maxsplit=2))(
+            "a,b".split))
+        show("twice", lambda: (lambda f: f("utf-8", encoding="ascii"))(
+            "a".encode))
+        show("unknown", lambda: (lambda f: f(",", nope=1))("a,b".split))
+        show("no keywords", lambda: (lambda f: f(x=1))("a".upper))
+        show("no keywords list", lambda: (lambda f: f(x=1))([1].append))
+        show("no keywords dict", lambda: (lambda f: f(x=1))({}.keys))
+        # AND A FIXED-ARITY SLOT still counts its arguments.
+        show("len", lambda: (lambda f: f())([1, 2].__len__))
+        show("len surplus", lambda: (lambda f: f(9))([1, 2].__len__))
+        show("round", lambda: (lambda f: f(1))((1.23).__round__))
+        show("round none", lambda: (lambda f: f())((1.23).__round__))
+        show("find", lambda: (lambda f: f("b"))("abcabc".find))
+        show("find window", lambda: (lambda f: f("b", 2, 6))("abcabc".find))
+    """,
     "traceback_positions": """
         try:
             (1).missing

@@ -116,6 +116,8 @@ def emit_c(rows) -> str:
                      f"? (({hi + 1} << 8) | {hi - lo}) : 0;")
     lines += ["    return 0;", "}", ""]
 
+    lines += emit_signatures(rows)
+
     lines += [
         "/* One builtin method call, by name and by the count that arrived.",
         "   The irregular shapes are mirrored from `_dyn_builtin_method`; see",
@@ -179,6 +181,73 @@ def call_shape(name, sym, argc) -> str:
                            for i in range(3)]
         return f"{sym}({', '.join(args)})"
     return f"{sym}({', '.join(['a[0]'] + [f'a[{i + 1}]' for i in range(argc)])})"
+
+
+def c_value(default) -> str:
+    """One parameter default as the C that builds it."""
+    if default is True or default is False:
+        return f"apy_from_bool({1 if default else 0})"
+    if default is None:
+        return "apy_none()"
+    if isinstance(default, int):
+        return f"apy_from_int({default})"
+    if isinstance(default, str):
+        return f'apy_lit("{default}")'
+    if default == b"":
+        return 'apy_bytes_literal((apy_value)"", 0)'
+    raise AssertionError(f"no C for the default {default!r}")
+
+
+def emit_signatures(rows) -> list:
+    """`apy_kind_meth_sign` -- the parameter NAMES a keyword may use.
+
+    THE SAME TABLE THE WRITTEN FORM FOLDS AGAINST. `METHOD_PARAMS` says what
+    each of these methods calls its parameters and what each defaults to, and
+    the frontend arranges a written `x.split(",", maxsplit=1)` with it. A
+    method reached as a VALUE -- `f = x.split` then `f(",", maxsplit=1)`, or
+    the collision path handing an int's `to_bytes` to `apy_call_kw` -- has no
+    frontend to arrange it, so the names travel on the callable itself and
+    the ordinary keyword binder places them. Without this the bound method
+    reported `got an unexpected keyword argument` for a call CPython answers.
+
+    A PARAMETER CPYTHON MARKS POSITIONAL-ONLY HAS A NULL NAME, which is what
+    keeps it unreachable by keyword while still leaving its slot in place.
+    """
+    from asmpython.frontends.python.methods import (  # noqa: E402
+        METHOD_PARAMS, POSITIONAL_ONLY, REQUIRED)
+    arity = {name: hi + 1 for name, _, _, hi, _ in rows}
+    lines = [
+        "/* THE PARAMETER NAMES A KEYWORD MAY USE, and the value each slot",
+        "   defaults to, for the methods CPython gives a keyword signature.",
+        "",
+        "   GENERATED from `METHOD_PARAMS`, which is the same table the",
+        "   frontend folds the WRITTEN spelling against -- so `x.split(\",\",",
+        "   maxsplit=1)` and `f = x.split` then `f(\",\", maxsplit=1)` are one",
+        "   arrangement rather than two that can drift.",
+        "",
+        "   Answers the count, or 0 for a name with no keyword signature at",
+        "   all. `names[i]` is 0 for a parameter CPython marks positional",
+        "   only; `defs[i]` is 0 for one with no default. */",
+        "static int64_t apy_kind_meth_sign(const char *w, apy_value *names,",
+        "                                  apy_value *defs) {",
+    ]
+    for name, params in sorted(METHOD_PARAMS.items()):
+        # ONLY WHERE THE TWO TABLES AGREE ON THE COUNT. A name whose dispatch
+        # arity does not match its signature would put a keyword in the wrong
+        # slot, which is worse than not placing it at all.
+        if arity.get(name) != len(params) + 1:
+            continue
+        lines.append(f'    if (strcmp(w, "{name}") == 0) {{')
+        for i, (pname, default) in enumerate(params):
+            spelled = ("0" if pname is POSITIONAL_ONLY
+                       else f'apy_lit("{pname}")')
+            filled = "0" if default is REQUIRED else c_value(default)
+            lines.append(f"        names[{i}] = {spelled}; "
+                         f"defs[{i}] = {filled};")
+        lines.append(f"        return {len(params)};")
+        lines.append("    }")
+    lines += ["    return 0;", "}", ""]
+    return lines
 
 
 def emit_ir(rows) -> str:

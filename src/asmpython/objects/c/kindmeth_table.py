@@ -186,6 +186,67 @@ static int64_t apy_kind_meth_arity(const char *w, unsigned bit) {
     return 0;
 }
 
+/* THE PARAMETER NAMES A KEYWORD MAY USE, and the value each slot
+   defaults to, for the methods CPython gives a keyword signature.
+
+   GENERATED from `METHOD_PARAMS`, which is the same table the
+   frontend folds the WRITTEN spelling against -- so `x.split(",",
+   maxsplit=1)` and `f = x.split` then `f(",", maxsplit=1)` are one
+   arrangement rather than two that can drift.
+
+   Answers the count, or 0 for a name with no keyword signature at
+   all. `names[i]` is 0 for a parameter CPython marks positional
+   only; `defs[i]` is 0 for one with no default. */
+static int64_t apy_kind_meth_sign(const char *w, apy_value *names,
+                                  apy_value *defs) {
+    if (strcmp(w, "decode") == 0) {
+        names[0] = apy_lit("encoding"); defs[0] = apy_lit("utf-8");
+        names[1] = apy_lit("errors"); defs[1] = apy_lit("strict");
+        return 2;
+    }
+    if (strcmp(w, "encode") == 0) {
+        names[0] = apy_lit("encoding"); defs[0] = apy_lit("utf-8");
+        names[1] = apy_lit("errors"); defs[1] = apy_lit("strict");
+        return 2;
+    }
+    if (strcmp(w, "expandtabs") == 0) {
+        names[0] = apy_lit("tabsize"); defs[0] = apy_from_int(8);
+        return 1;
+    }
+    if (strcmp(w, "replace") == 0) {
+        names[0] = 0; defs[0] = 0;
+        names[1] = 0; defs[1] = 0;
+        names[2] = apy_lit("count"); defs[2] = apy_from_int(-1);
+        return 3;
+    }
+    if (strcmp(w, "rsplit") == 0) {
+        names[0] = apy_lit("sep"); defs[0] = apy_none();
+        names[1] = apy_lit("maxsplit"); defs[1] = apy_from_int(-1);
+        return 2;
+    }
+    if (strcmp(w, "split") == 0) {
+        names[0] = apy_lit("sep"); defs[0] = apy_none();
+        names[1] = apy_lit("maxsplit"); defs[1] = apy_from_int(-1);
+        return 2;
+    }
+    if (strcmp(w, "splitlines") == 0) {
+        names[0] = apy_lit("keepends"); defs[0] = apy_from_bool(0);
+        return 1;
+    }
+    if (strcmp(w, "to_bytes") == 0) {
+        names[0] = apy_lit("length"); defs[0] = apy_from_int(1);
+        names[1] = apy_lit("byteorder"); defs[1] = apy_lit("big");
+        names[2] = apy_lit("signed"); defs[2] = apy_from_bool(0);
+        return 3;
+    }
+    if (strcmp(w, "translate") == 0) {
+        names[0] = 0; defs[0] = 0;
+        names[1] = apy_lit("delete"); defs[1] = apy_bytes_literal((apy_value)"", 0);
+        return 2;
+    }
+    return 0;
+}
+
 /* One builtin method call, by name and by the count that arrived.
    The irregular shapes are mirrored from `_dyn_builtin_method`; see
    the generator. Answers 0 having raised for an arity no entry

@@ -2147,6 +2147,87 @@ APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
            was intended. */
         return apy_call_nk(f, raw, argc, kwd, 0);
     kwn = apy_raw_len(kwd);
+    /* A BUILTIN METHOD REACHED AS A VALUE, handed keywords. `f = x.split`
+       then `f(",", maxsplit=1)` is a call CPython answers, and so is the one
+       the COLLISION path makes when a module defines a class extending a
+       builtin: `(5).to_bytes(2, byteorder="big")` arrives here rather than
+       through the frontend's own fold. The binder below matches names
+       against `pnames`, which a native has none of, so every one of them
+       reported `got an unexpected keyword argument` for a call that works.
+
+       THE SAME TABLE THE WRITTEN SPELLING FOLDS AGAINST. `apy_kind_meth_sign`
+       is generated from `METHOD_PARAMS`, so the two arrangements cannot
+       drift; the refusals below are CPython's and in CPython's order, the
+       way `apy_kw_check` puts them for a `**` mapping.
+
+       HERE RATHER THAN ON THE CALLABLE, because `apy_kind_method_opt` is
+       replaced by its IR twin -- names installed there would reach the C
+       build and not the ported one. */
+    if (kwn && O(f)->kind == APY_FUNC_K
+            && O(f)->v.fn.native == APY_NAT_KIND) {
+        apy_value names[4], defs[4], slot[4];
+        char taken[4];
+        const char *meth = APY_CSTR(O(f)->v.fn.name);
+        apy_value self = O(f)->v.fn.bound;
+        int64_t np = apy_kind_meth_sign(meth, names, defs);
+        int64_t at, k2, i2, top = 0;
+        char b[200];
+        if (!np || np != O(f)->v.fn.arity - 1)
+            return apy_kw_owner(self ? self : (argc ? raw[0] : apy_none()),
+                                O(f)->v.fn.name);
+        for (i2 = 0; i2 < np; i2++) { slot[i2] = 0; taken[i2] = 0; }
+        for (i2 = 0; i2 < argc && i2 < np; i2++) {
+            slot[i2] = raw[i2];
+            taken[i2] = 1;
+        }
+        /* TOO MANY BEATS EVERY OTHER COMPLAINT, counting the keywords in. */
+        if (argc + kwn > np) {
+            snprintf(b, sizeof b, "%s() takes at most %lld argument%s "
+                     "(%lld given)", meth, (long long)np, np == 1 ? "" : "s",
+                     (long long)(argc + kwn));
+            return apy_fail("TypeError", b);
+        }
+        for (k2 = 0; k2 < kwn; k2++) {
+            apy_value nm = O(kwd)->v.d.keys[k2];
+            at = -1;
+            if (O(nm)->kind != APY_STR_K)
+                return apy_fail("TypeError", "keywords must be strings");
+            for (i2 = 0; i2 < np; i2++)
+                if (names[i2] && !strcmp(APY_CSTR(nm), APY_CSTR(names[i2])))
+                    at = i2;
+            if (at < 0) {
+                snprintf(b, sizeof b, "%s() got an unexpected keyword "
+                         "argument '%.60s'", meth, APY_CSTR(nm));
+                return apy_fail("TypeError", b);
+            }
+            if (taken[at]) {
+                snprintf(b, sizeof b, "argument for %s() given by name "
+                         "('%.60s') and position (%lld)", meth, APY_CSTR(nm),
+                         (long long)(at + 1));
+                return apy_fail("TypeError", b);
+            }
+            slot[at] = O(kwd)->v.d.vals[k2];
+            taken[at] = 1;
+        }
+        for (i2 = 0; i2 < np; i2++) if (taken[i2]) top = i2 + 1;
+        for (i2 = 0; i2 < top; i2++)
+            if (!taken[i2]) {
+                if (!defs[i2]) {
+                    snprintf(b, sizeof b, "%s() takes at least %lld "
+                             "positional argument%s (%lld given)", meth,
+                             (long long)(i2 + 1), i2 ? "s" : "",
+                             (long long)argc);
+                    return apy_fail("TypeError", b);
+                }
+                slot[i2] = defs[i2];
+            }
+        /* PADDED TO THE FULL ARITY, which is what the frontend's own fold
+           does for the written spelling: the entry point takes every
+           parameter and the defaults supply the rest. */
+        for (i2 = top; i2 < np; i2++)
+            slot[i2] = defs[i2] ? defs[i2] : apy_none();
+        return apy_call_nk(f, slot, np, 0, 0);
+    }
     declared = O(target)->v.fn.arity - (O(target)->v.fn.vararg ? 1 : 0)
                                      - (O(target)->v.fn.kwarg ? 1 : 0);
     want = declared - skip;
