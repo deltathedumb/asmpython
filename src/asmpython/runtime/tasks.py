@@ -129,17 +129,35 @@ def apy_str_like(recv: ptr, out: ptr) -> ptr:
     of it needs the same treatment. Recursion rather than a loop over one
     level: `partition` answers a tuple, and a tuple of tuples is not ruled
     out by anything here.
+
+    `mut` TRAVELS WITH THE TAG, which is the whole of what separates a
+    bytearray from bytes: `bytearray(b"ab").upper()` is a bytearray in Python
+    and came back as bytes here, which a program then could not write into.
+
+    AND A RESULT THAT IS ALREADY BYTES STILL MAY NOT BE THE RIGHT ONE.
+    `bytearray(b"a-b").partition(b"-")` hands back the SEPARATOR the caller
+    passed, which is immutable; copying is what makes fixing it safe, since
+    setting `mut` in place would turn the caller's own `b"-"` into a
+    bytearray.
     """
     if not out:
         return out
     if i64(load(i32, offset(recv, 0))) != apy_bytes_kind():
         return out
+    want: i64 = i64(load(i32, offset(recv, apy_s_mut_offset())))
+    retag: i64 = 0
     if i64(load(i32, offset(out, 0))) == apy_str_kind():
+        retag = 1
+    elif i64(load(i32, offset(out, 0))) == apy_bytes_kind():
+        if i64(load(i32, offset(out, apy_s_mut_offset()))) != want:
+            retag = 1
+    if retag:
         made: ptr = apy_str_copy_bytes(apy_str_data(out),
                                        apy_str_byte_len(out))
         if not made:
             return made
         store(i32, i32(apy_bytes_kind()), offset(made, 0))
+        store(i32, i32(want), offset(made, apy_s_mut_offset()))
         return made
     if apy_is_seq_of(out):
         n: i64 = load(i64, offset(out, apy_q_n_offset()))

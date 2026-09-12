@@ -481,6 +481,10 @@ static apy_value apy_bytes_repeat(apy_value v, apy_value count) {
       out[n * k] = 0;
       { apy_value r = apy_str_take(out, n * k);
         O(r)->kind = APY_BYTES_K;
+        /* A BYTEARRAY REPEATS INTO A BYTEARRAY, as `+` already carried:
+           `mut` is the whole of what separates the two kinds and it has to
+           travel with the tag. */
+        O(r)->v.s.mut = O(v)->v.s.mut;
         return r; } }
 }
 

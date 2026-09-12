@@ -726,9 +726,22 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
    call site, rather than a change to each of the fifty-odd methods. */
 APY_API apy_value apy_str_like(apy_value recv, apy_value out) {
     if (!out || O(recv)->kind != APY_BYTES_K) return out;
-    if (O(out)->kind == APY_STR_K) {
+    /* A RESULT THAT IS ALREADY BYTES STILL MAY NOT BE THE RIGHT ONE.
+       `bytearray(b"a-b").partition(b"-")` hands back the SEPARATOR the
+       caller passed, which is immutable bytes, and Python answers a
+       bytearray for all three pieces. Copying is what makes that safe: the
+       separator is the caller's object and setting `mut` on it in place
+       would turn their `b"-"` into a bytearray. */
+    if (O(out)->kind == APY_STR_K
+            || (O(out)->kind == APY_BYTES_K
+                && O(out)->v.s.mut != O(recv)->v.s.mut)) {
         apy_value made = apy_str_copy(O(out)->v.s.p, O(out)->v.s.n);
         O(made)->kind = APY_BYTES_K;
+        /* A BYTEARRAY'S METHODS ANSWER A BYTEARRAY. `mut` is the whole of
+           what separates the two kinds, so it has to travel with the tag:
+           `bytearray(b"ab").upper()` is a bytearray in Python and came back
+           as bytes here -- which a program then could not write into. */
+        O(made)->v.s.mut = O(recv)->v.s.mut;
         return made;
     }
     if (apy_is_seq(out)) {

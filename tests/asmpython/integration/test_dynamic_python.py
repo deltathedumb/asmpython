@@ -377,6 +377,30 @@ PROGRAMS = {
         print("ﬁx".title(), "ﬁx".upper(), "ﬁx".capitalize())
         print("ẞ".lower(), "ẞ".casefold(), "ı".upper(), "ｱ".upper())
     """,
+    # A BYTEARRAY IS A BYTES CELL THAT ADMITS IT IS MUTABLE, and `mut` was
+    # not travelling with the tag: every method came back as plain bytes, so
+    # `bytearray(b"ab").upper()` answered something a program could not write
+    # into. The interpreter had the other half of the same gap and refused
+    # the methods outright, reporting an AttributeError about names Python
+    # plainly has.
+    "bytearray_methods_and_type": """
+        b = bytearray(b"a-b-c")
+        print(b.replace(b"-", b"+"), b.upper(), b.upper().lower())
+        print(bytearray(b" x ").strip(), b.split(b"-"))
+        print(bytearray(b"-").join([b"a", b"b"]), b[1:3])
+        print(b + b"z", bytearray(b"ab") * 2, 2 * bytearray(b"ab"))
+        print(bytearray(b"ab").center(6, b"-"), bytearray(b"ab cd").title())
+        # THE SEPARATOR COMES BACK AS THE RECEIVER'S KIND, not as the kind it
+        # was passed in. All three pieces are a bytearray in Python.
+        print(b.partition(b"-"), b.rpartition(b"-"))
+        print(bytearray(b"a\\nb").splitlines(), bytearray(b"ab").zfill(4))
+        print(bytearray(b"ab").removeprefix(b"a"))
+        # AND THE ONES THAT ARE NOT BYTES AT ALL stay what they are.
+        print(bytearray(b"ab").hex(), bytearray(b"ab").decode())
+        print(bytearray(b"ab").find(b"b"), bytearray(b"ab").isalpha())
+        # A BYTES RECEIVER IS UNTOUCHED, which is what the `mut` test is for.
+        print(b"ab".upper(), b"a-b".split(b"-"), b"c" + bytearray(b"ab"))
+    """,
     "traceback_positions": """
         try:
             (1).missing

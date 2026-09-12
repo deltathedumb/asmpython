@@ -3608,12 +3608,19 @@ def _apy_bytes_decode(h, a):
                        f"'{name}' codec can't decode byte")
 
 
+#: str, bytes and bytearray -- the three receivers that walk TEXT rather than
+#: elements, and the list several gates here were missing the last of.
+#: `isinstance(bytearray(b""), bytes)` is False in Python, so every one of
+#: them refused a bytearray for a method it plainly has.
+_TEXTY = (str, bytes, bytearray)
+
+
 def _apy_bytes_hex(h, a):
     """`b.hex()` and `b.hex(sep)` -- the separator form is what makes a
     fingerprint readable and is the only reason the argument exists."""
     b = h._get(a[0], "apy_bytes_hex")
     sep = h._get(a[1], "apy_bytes_hex")
-    if not isinstance(b, bytes):
+    if not isinstance(b, (bytes, bytearray)):
         return h._fail("AttributeError",
                        f"'{h.kind_name(b)}' object has no attribute 'hex'")
     return h._new(b.hex(sep) if isinstance(sep, str) and len(sep) == 1
@@ -9301,7 +9308,7 @@ def _apy_index_of(h, a):
     # A str OR BYTES receiver means SUBSTRING search, not element search. The
     # element loop below answers for a one-character needle and silently
     # wrongly for any longer one.
-    if isinstance(v, (str, bytes)):
+    if isinstance(v, _TEXTY):
         try:
             return h._int(v.index(item))
         except ValueError:
@@ -9319,7 +9326,7 @@ def _apy_count_of(h, a):
     _v = h._get(a[0], "apy_count_of")
     # Substring counting for a str or bytes, for the same reason `index`
     # splits.
-    if isinstance(_v, (str, bytes)):
+    if isinstance(_v, _TEXTY):
         # A NON-STRING ARGUMENT IS A RUNTIME ERROR AND NOT AN INTERPRETER
         # ONE. `"abc".count(5)` let Python's TypeError escape this binding
         # and take the whole interpreter down with a traceback, where a
@@ -9334,8 +9341,13 @@ def _apy_count_of(h, a):
     # same split `index` makes, and the reason `'aaaa'.count('aa')` is 2 and
     # not 0. Walking a str as a list of characters answered 0 for every
     # multi-character needle.
-    if isinstance(seq, (str, bytes)):
-        if not isinstance(item, type(seq)):
+    if isinstance(seq, _TEXTY):
+        # A BYTEARRAY COUNTS BYTES, so `bytearray(b"a-b").count(b"-")` is an
+        # ordinary call -- the needle need not be the receiver's exact type,
+        # only its FAMILY.
+        family = (bytes, bytearray) if isinstance(seq, (bytes, bytearray)) \
+            else str
+        if not isinstance(item, family):
             return h._fail("TypeError",
                            f"must be {h.kind_name(seq)}, not "
                            f"{h.kind_name(item)}")
@@ -9516,11 +9528,17 @@ def _apy_str_like(h, a):
 def _make_str_method(symbol: str, method: str, argc: int):
     def binding(h, a, _m=method, _n=argc, _sym=symbol):
         receiver = h._get(a[0], _sym)
-        # BYTES TOO. `b.strip()` is the same operation on the same layout, and
-        # Python's bytes type spells it the same way -- so the receiver being
-        # accepted is the whole of it here, and the result comes back as bytes
-        # without any re-tagging. The C needs `apy_str_like` for that.
-        if not isinstance(receiver, (str, bytes)):
+        # BYTES AND BYTEARRAY TOO. `b.strip()` is the same operation on the
+        # same layout, and Python's own types spell it the same way -- so the
+        # receiver being accepted is the whole of it here, and the result
+        # comes back correctly tagged without any re-tagging. The C needs
+        # `apy_str_like` for that.
+        #
+        # A BYTEARRAY WAS LEFT OFF THIS LIST and it is not a third kind: the
+        # compiled runtimes hold one as a bytes cell that admits it is
+        # mutable, and answered every method. Here it was an AttributeError
+        # about a method Python plainly has.
+        if not isinstance(receiver, (str, bytes, bytearray)):
             return h._fail(
                 "AttributeError",
                 f"'{h.kind_name(receiver)}' object has no attribute '{_m}'")
