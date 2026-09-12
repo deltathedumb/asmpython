@@ -2143,12 +2143,11 @@ def _apy_descr_get_of(h, a):
 def _apy_kind_class(h, a):
     """The class object standing for a builtin kind.
 
-    THE HOST ANSWERS PYTHON'S OWN TYPE, which is already one object per kind
-    -- there is no cache to keep because Python keeps it.
+    THE SAME OBJECT `type(x)` ANSWERS, which here needs no cache of its own:
+    Python already keeps one type object per type, and the compiled runtimes
+    reach `apy_type_for` for exactly that reason.
     """
-    raise RuntimeError(
-        "apy_kind_class has no host equivalent: the interpreter answers "
-        "Python's own type object for a builtin")
+    return _apy_type_object(h, a)
 
 
 def _apy_member_descriptor(h, a):
@@ -6561,6 +6560,13 @@ def _kind_attr(h, obj, want: str):
     num = isinstance(obj, (int, float, complex))
     is_int = isinstance(obj, int)
     is_complex = isinstance(obj, complex)
+
+    # `x.__class__` IS `type(x)`, for every value there is -- and it was
+    # missing from all of them. `obj.__class__.__name__` is an everyday
+    # idiom, and a program reaching for it got an AttributeError about the one
+    # attribute Python guarantees. NOT A METHOD but the type object itself.
+    if want == "__class__":
+        return _apy_type_object(h, [h._new(obj)])
 
     if want == "__hash__":
         # THE ATTRIBUTE EXISTS EITHER WAY. `[].__hash__ is None` is how a

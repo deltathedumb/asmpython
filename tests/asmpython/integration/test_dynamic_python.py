@@ -526,6 +526,25 @@ PROGRAMS = {
             except AttributeError as e:
                 print(e)
     """,
+    # `x.__class__` IS THE ONE ATTRIBUTE PYTHON GUARANTEES, and every builtin
+    # value was missing it: `(5).__class__` was an AttributeError while
+    # `type(5)` answered perfectly well. `obj.__class__.__name__` is an
+    # everyday idiom -- duck typing, repr helpers, copy and serialisation
+    # code -- so a program reaching for it heard that an int has no class.
+    "class_of_a_builtin_value": """
+        values = [b"a", bytearray(b"a"), "a", [1], (1,), {1: 2}, {1},
+                  frozenset({1}), 5, 1.5, True, None, range(3), 1j]
+        print([v.__class__.__name__ for v in values])
+        # THE SAME OBJECT `type(x)` ANSWERS, which is what makes a comparison
+        # against it work rather than merely printing the same.
+        print((5).__class__ is type(5), [1].__class__ is type([1]))
+        print((5).__class__ is (7).__class__)
+        print(hasattr(5, "__class__"), hasattr("a", "__class__"))
+        # AND A USER CLASS AND A FUNCTION STILL ANSWER THEIR OWN.
+        class Point:
+            pass
+        print(Point().__class__.__name__, (lambda: 1).__class__.__name__)
+    """,
     "traceback_positions": """
         try:
             (1).missing

@@ -356,17 +356,17 @@ APY_API apy_value apy_type_class(void) {
 }
 
 /* `__class__` for a kind with no attributes of its own -- a generic alias,
-   a slice, a view. INTERNED per kind name, because the object a program
-   compares or reads `__name__` off has to be the same one each time. */
+   a slice, a view.
+
+   THE SAME OBJECT `type(x)` ANSWERS, and it kept its OWN interning table
+   until `__class__` reached the ordinary kinds: two tables, each interned
+   correctly, each handing out a different type object for `list` -- so
+   `[1].__class__ is type([1])` was False while `type([1]) is type([2])` was
+   True. One concept has one table, and `apy_type_for`'s is the one that also
+   honours the canonical registration, which is what makes `type(1) is int`
+   hold. */
 APY_API apy_value apy_kind_class(apy_value obj) {
-    static apy_value classes = 0;
-    apy_value key = apy_lit(apy_kind_name(obj)), found;
-    if (!classes) classes = apy_dict_new(8);
-    found = apy_dict_get_or(classes, key, 0);
-    if (found) return found;
-    found = apy_type_new(key, 0);
-    apy_dict_set(classes, key, found);
-    return found;
+    return apy_type_of(obj);
 }
 /* THE NAME ITS CALLERS USE, kept as a delegate: the body is IR's now,
    and the exported half above stands in when nothing is ported. */
@@ -541,6 +541,13 @@ APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
         if (mutable_) return apy_none();
         return apy_kind_method(obj, 1, "__hash__", bind);
     }
+    /* `x.__class__` IS `type(x)`, for every value there is -- and it was
+       missing from all of them. `obj.__class__.__name__` is an everyday
+       idiom, and a program reaching for it got an AttributeError about the
+       one attribute Python guarantees. NOT A METHOD but the type object
+       itself, which is why it answers before `apy_kind_method` is reached;
+       `apy_type_for` interns per kind, so `x.__class__ is type(x)` holds. */
+    if (strcmp(want, "__class__") == 0) return apy_type_of(obj);
     /* `object` GIVES THESE TO EVERYTHING, which is why they are gated on no
        kind at all: `hasattr(x, "__eq__")` is True for every value in Python,
        a list and an int and a function alike. Comparison is the part

@@ -674,31 +674,18 @@ def apy_member_descriptor() -> ptr:
     return apy_instance_new(held)
 
 
-def apy_kind_class_slot() -> ptr:
-    """The cache of one class per builtin kind name."""
-    return reserve("apy_kind_class_ir", 8)
-
-
 def apy_kind_class(obj: ptr) -> ptr:
     """The class object standing for `obj`'s builtin kind.
 
-    ONE PER NAME, remembered: `type(1) is type(2)` has to hold, and a fresh
-    cell per lookup would make it False.
+    THE SAME OBJECT `type(x)` ANSWERS, and it kept its OWN interning table
+    until `__class__` reached the ordinary kinds: two tables, each interned
+    correctly, each handing out a different type object for `list` -- so
+    `[1].__class__ is type([1])` was False while `type([1]) is type([2])` was
+    True. One concept has one table, and `apy_type_for`'s is the one that
+    also honours the canonical registration, which is what makes
+    `type(1) is int` hold.
     """
-    key: ptr = apy_from_cstr(apy_kind_name_of(obj))
-    slot: ptr = apy_kind_class_slot()
-    classes: ptr = ptr(load(u64, slot))
-    if not classes:
-        classes = apy_dict_new(8)
-        if not classes:
-            return classes
-        store(u64, u64(classes), slot)
-    found: ptr = apy_dict_get_or(classes, key, ptr(0))
-    if found:
-        return found
-    found = apy_type_new(key, ptr(0))
-    apy_dict_set(classes, key, found)
-    return found
+    return apy_type_for(obj)
 
 
 def apy_object_default(want: ptr) -> ptr:
@@ -1031,6 +1018,14 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
         if mut:
             return apy_none()
         return apy_kind_method_of(obj, 1, rodata(b"__hash__\0"), bind)
+    # `x.__class__` IS `type(x)`, for every value there is -- and it was
+    # missing from all of them. `obj.__class__.__name__` is an everyday
+    # idiom, and a program that reaches for it got an AttributeError about
+    # the one attribute Python guarantees. NOT A METHOD but the type object
+    # itself, which is why it answers before `apy_kind_method_of` is reached;
+    # `apy_type_for` interns per kind, so `x.__class__ is type(x)` holds.
+    if apy_name_is(want, rodata(b"__class__\0")):
+        return apy_type_for(obj)
     # `object` GIVES THESE TO EVERYTHING, which is why they are gated on no
     # kind at all: `hasattr(x, "__eq__")` is True for every object there is,
     # and a structural test written against `collections.abc` -- or
