@@ -1865,6 +1865,60 @@ PROGRAMS = {
             len(type(v).__doc__) for v in ("", 5, None, memoryview(b"a"))) > 10)
         show("str says what it takes", lambda: "".__doc__.startswith("str(object="))
     """,
+    "a_view_is_a_sequence_and_carries_one_s_methods": """
+        def show(label, f):
+            try:
+                print(label, f())
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        # A VIEW IS A SEQUENCE, and it carries what a sequence carries. `hex`, `count`
+        # and `index` read the bytes it shows, and the subscript dunders are the
+        # methods behind the `m[i]` a program writes.
+        view = memoryview(bytearray(b"abcd"))
+        show("hex", lambda: view.hex())
+        show("hex with a separator", lambda: view.hex(" "))
+        show("count", lambda: view.count(98))
+        show("count of nothing there", lambda: view.count(200))
+        show("index", lambda: view.index(98))
+        # THE NEEDLE IS COMPARED, NOT CHECKED: a view answers "not found" for one of
+        # the wrong kind where the same needle handed to bytes is a TypeError.
+        show("index of nothing there", lambda: view.index(200))
+        show("count of the wrong kind", lambda: view.count("a"))
+        show("index of the wrong kind", lambda: view.index("a"))
+        show("iterating one", lambda: list(memoryview(b"ab")))
+        def written(op):
+            held = memoryview(bytearray(b"abcd"))
+            if op == "set":
+                held[0] = 65
+            else:
+                held.__setitem__(1, 66)
+            return bytes(held)
+        show("subscript assignment", lambda: written("set"))
+        show("the method behind it", lambda: written("dunder"))
+        # `__delitem__` EXISTS AND ALWAYS REFUSES, which is not the same claim as
+        # having no such method: a window onto a buffer cannot shorten the buffer.
+        def deleted():
+            held = memoryview(bytearray(b"abcd"))
+            del held[0]
+            return bytes(held)
+        show("deleting from one", deleted)
+        show("the delete method", lambda: view.__delitem__(0))
+        show("writing a read-only one", lambda: memoryview(b"ab").__setitem__(0, 65))
+        show("parameterised by name", lambda: view.__class_getitem__(int))
+        # AND AN INTEGER IS A LEGAL NEEDLE FOR THE BYTES SEARCHES, which their own
+        # wording says and which they refused anyway. One byte, so anything outside
+        # a byte's range is a ValueError rather than a wrong answer.
+        show("bytes index of a byte", lambda: b"abcd".index(98))
+        show("bytes count of a byte", lambda: b"abcd".count(98))
+        show("bytearray index", lambda: bytearray(b"abcd").index(98))
+        show("bytes find of a byte", lambda: b"abcd".find(98))
+        show("out of a byte's range", lambda: b"abcd".index(300))
+        show("below it", lambda: b"abcd".index(-1))
+        show("still a substring search", lambda: b"abcd".index(b"bc"))
+        print([type(getattr(view, n)).__name__ for n in
+               ("hex", "count", "index", "__setitem__", "__delitem__")])
+    """,
     "traceback_positions": """
         try:
             (1).missing

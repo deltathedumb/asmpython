@@ -3315,8 +3315,11 @@ def _apy_raw_len(h, a):
     # and iterate both; only this path refused, so `list(bytearray(b'ab'))`
     # was `'bytearray' object is not iterable` about a thing whose whole
     # point is being a sequence of octets.
+    # AND A VIEW IS A SEQUENCE TOO, which both compiled runtimes already
+    # walked and this refused: `list(memoryview(b"ab"))` was "not iterable"
+    # about the one kind whose whole point is showing a sequence of octets.
     if isinstance(v, (list, tuple, dict, set, frozenset, bytes, bytearray,
-                      range)):
+                      range, memoryview)):
         return len(v)
     # A user object with `__len__`. Together with `apy_key_at` falling through
     # to `__getitem__`, that is the whole `__len__`/`__getitem__` iteration
@@ -4167,6 +4170,10 @@ def _apy_bytes_hex(h, a):
     fingerprint readable and is the only reason the argument exists."""
     b = h._get(a[0], "apy_bytes_hex")
     sep = h._get(a[1], "apy_bytes_hex")
+    # A VIEW HEXES THE BYTES IT SHOWS, which is most of what a program makes
+    # one to look at.
+    if isinstance(b, memoryview):
+        b = b.tobytes()
     if not isinstance(b, (bytes, bytearray)):
         return h._fail("AttributeError",
                        f"'{h.kind_name(b)}' object has no attribute 'hex'")
@@ -4187,6 +4194,21 @@ def _apy_bytes_fromhex(h, a):
         return h._fail_like(exc)
     # AND THE ANSWER IS THE KIND IT WAS REACHED THROUGH.
     return h._new(bytearray(got) if isinstance(held, bytearray) else got)
+
+
+def _mview_call(h, view, name, args):
+    """One of a view's methods, with Python's own failures passed through.
+
+    THE REFUSALS ARE PART OF THE METHOD: `del m[0]` is "cannot delete memory"
+    and `m[0] = 1` on a read-only view is "cannot modify read-only memory",
+    and both are worth reaching rather than being an AttributeError about a
+    method a memoryview plainly has.
+    """
+    try:
+        return getattr(view, name)(*args)
+    except (TypeError, ValueError, IndexError) as exc:
+        h._fail_like(exc)
+        raise _UserFailed
 
 
 def _apy_any_fromhex(h, a):
@@ -8491,6 +8513,24 @@ def _apy_default_getattr(h, a):
             return h._new(Native(name,
                                  lambda _n=name, _o=obj: getattr(_o, _n)(),
                                  owner=obj))
+        # WHAT A VIEW CARRIES BESIDE THOSE TWO. `hex`, `count` and `index`
+        # read the bytes it shows -- a memoryview IS a sequence in Python --
+        # and the three subscript dunders are the methods behind the `m[i]` a
+        # program writes. `__delitem__` exists and always refuses, which is
+        # not the same claim as having no such method.
+        if name == "hex":
+            return h._new(Native("hex", lambda *r, _o=obj: _o.hex(*r),
+                                 ranged=True, owner=obj))
+        if name in ("count", "index", "__setitem__", "__delitem__",
+                    "__getitem__", "__len__", "__iter__",
+                    "__release_buffer__"):
+            return h._new(Native(
+                name, lambda *r, _n=name, _o=obj: _mview_call(h, _o, _n, r),
+                owner=obj))
+        if name == "__class_getitem__":
+            return h._new(Native("__class_getitem__", lambda k, _o=obj: Alias(
+                h._get(_apy_type_object(h, [h._new(_o)]), "__class_getitem__"),
+                k if isinstance(k, tuple) else (k,)), owner=obj))
         return h._no_attr(obj, name)
     if isinstance(obj, complex):
         # `.real` and `.imag` are floats, not complexes -- `(1+2j).real` is
@@ -10483,13 +10523,27 @@ def _apy_dict_popitem(h, a):
 def _apy_index_of(h, a):
     v = h._get(a[0], "apy_index_of")
     item = h._get(a[1], "apy_index_of")
+    # A VIEW IS A SEQUENCE OF NUMBERS, and CPython COMPARES the element
+    # rather than refusing a needle of the wrong kind: `m.index("a")` is the
+    # not-found ValueError, where the same needle handed to a bytes receiver
+    # is a TypeError.
+    if isinstance(v, memoryview):
+        for at, one in enumerate(v.tolist()):
+            if one == item:
+                return h._int(at)
+        return h._fail("ValueError", "memoryview.index(x): x not found")
     # A str OR BYTES receiver means SUBSTRING search, not element search. The
     # element loop below answers for a one-character needle and silently
     # wrongly for any longer one.
     if isinstance(v, _TEXTY):
         try:
             return h._int(v.index(item))
-        except ValueError:
+        except ValueError as exc:
+            # AN INTEGER NEEDLE OUT OF A BYTE'S RANGE IS ITS OWN COMPLAINT,
+            # not a miss: `b"abc".index(300)` is `byte must be in range(0,
+            # 256)` and rewriting it to "not found" claimed the search ran.
+            if isinstance(item, int) and not isinstance(v, str):
+                return h._fail_like(exc)
             # A BYTES RECEIVER HAS NO SUBSTRINGS: CPython says `subsection
             # not found` for one.
             return h._fail("ValueError", "substring not found"
@@ -10591,6 +10645,10 @@ def _apy_str_index3(h, a):
 
 def _apy_count_of(h, a):
     _v = h._get(a[0], "apy_count_of")
+    # A VIEW IS A SEQUENCE OF NUMBERS. See `_apy_index_of`.
+    if isinstance(_v, memoryview):
+        want = h._get(a[1], "apy_count_of")
+        return h._int(sum(1 for one in _v.tolist() if one == want))
     # Substring counting for a str or bytes, for the same reason `index`
     # splits.
     if isinstance(_v, _TEXTY):
@@ -11618,6 +11676,11 @@ def _apy_delitem(h, a):
         # A CLASS THAT EXTENDS A BUILTIN deletes from the one it carries.
         if seq.held is not None:
             return _apy_delitem(h, [h._new(seq.held), a[1]])
+    # A VIEW REFUSES IN ITS OWN WORDS. Deleting from one is not "this kind
+    # has no such operation" -- a memoryview HAS `__delitem__` and it always
+    # refuses, because a window onto a buffer cannot make the buffer shorter.
+    if isinstance(seq, memoryview):
+        return h._fail("TypeError", "cannot delete memory")
     if isinstance(seq, dict):
         try:
             hash(key)

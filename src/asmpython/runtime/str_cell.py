@@ -260,7 +260,14 @@ def apy_bytes_hex(b: ptr, sep: ptr) -> ptr:
     `n * 3 + 2`. Over-allocating a few bytes in a bump arena costs a few
     bytes.
     """
-    if i64(load(i32, offset(b, 0))) != apy_bytes_kind():
+    # A VIEW HEXES THE BYTES IT SHOWS, which is most of what a program makes
+    # one to look at. The no-separator form is converted the same way.
+    held: ptr = b
+    if i64(load(i32, offset(held, 0))) == apy_mview_kind():
+        held = apy_mview_bytes(held)
+        if not held:
+            return held
+    if i64(load(i32, offset(held, 0))) != apy_bytes_kind():
         return apy_raise_fmt(
             rodata(b"AttributeError\0"),
             rodata(b"'%s' object has no attribute 'hex'%s\0"),
@@ -270,11 +277,11 @@ def apy_bytes_hex(b: ptr, sep: ptr) -> ptr:
         if load(i64, offset(sep, apy_str_len_offset())) == 1:
             s = i64(load(u8, ptr(load(u64, offset(
                 sep, apy_str_ptr_offset())))))
-    n: i64 = load(i64, offset(b, apy_str_len_offset()))
+    n: i64 = load(i64, offset(held, apy_str_len_offset()))
     buf: ptr = apy_alloc_bytes(n * 3 + 2)
     if not buf:
         return buf
-    src: ptr = ptr(load(u64, offset(b, apy_str_ptr_offset())))
+    src: ptr = ptr(load(u64, offset(held, apy_str_ptr_offset())))
     out: i64 = 0
     i: i64 = 0
     while i < n:

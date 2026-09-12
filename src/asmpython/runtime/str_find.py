@@ -361,6 +361,24 @@ def apy_text_arg_of(meth: ptr, argno: i64, indexy: i64, self: ptr,
     if want == apy_str_kind():
         apy_arg_must_be_str_of(meth, argno, v)
         return ptr(0)
+    # AN INTEGER IS A LEGAL NEEDLE FOR THE SEARCHES, which is what the
+    # wording below says and what this refused anyway: `b"abc".index(98)` is
+    # 1 in Python. ONE BYTE, so anything outside a byte's range is a
+    # ValueError and not a wrong answer.
+    if indexy:
+        if apy_is_int_like_of(v):
+            byte: i64 = apy_int_payload(v)
+            if byte < 0 or byte > 255:
+                apy_raise_at(
+                    rodata(b"ValueError\0"),
+                    rodata(b"byte must be in range(0, 256)\0"))
+                return ptr(0)
+            one: ptr = apy_alloc_bytes(2)
+            if not one:
+                return one
+            store(u8, u8(byte), one)
+            store(u8, u8(0), offset(one, 1))
+            return apy_from_bytes(one, 1)
     if indexy:
         apy_raise_fmt(
             rodata(b"TypeError\0"),

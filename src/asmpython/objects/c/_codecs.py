@@ -639,6 +639,13 @@ APY_API apy_value apy_bytes_hex(apy_value b, apy_value sep) {
     int64_t n, i, out = 0;
     char *buf;
     char s = 0;
+    /* A VIEW HEXES THE BYTES IT SHOWS, which is most of what a program
+       makes one to look at. The no-separator form reaches `apy_hex_of` and
+       is converted there; this is the same conversion for the other. */
+    if (O(b)->kind == APY_MVIEW_K) {
+        b = apy_mview_bytes(b);
+        if (!b) return 0;
+    }
     if (O(b)->kind != APY_BYTES_K)
         return apy_fail2("AttributeError",
                          "'%s' object has no attribute 'hex'%s",

@@ -1019,6 +1019,12 @@ APY_API apy_value apy_delitem(apy_value seq, apy_value key) {
        test below. `mut` is what separates it from bytes, which does not. */
     if (O(seq)->kind == APY_BYTES_K && O(seq)->v.s.mut)
         return apy_del_bytes(seq, key);
+    /* A VIEW REFUSES IN ITS OWN WORDS. Deleting from one is not "this kind
+       has no such operation" -- a memoryview HAS `__delitem__` and it always
+       refuses, because a window onto a buffer cannot make the buffer
+       shorter. CPython says so and a program may print it. */
+    if (O(seq)->kind == APY_MVIEW_K)
+        return apy_fail("TypeError", "cannot delete memory");
     if (O(seq)->kind != APY_LIST_K)
         return apy_fail2("TypeError", "'%s' object doesn't support item deletion%s",
                          apy_kind_name(seq), "");

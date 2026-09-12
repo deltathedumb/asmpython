@@ -814,6 +814,23 @@ APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
     if (k == APY_MVIEW_K
             && (strcmp(want, "tobytes") == 0 || strcmp(want, "tolist") == 0))
         return apy_kind_method(obj, 1, want, bind);
+    /* WHAT A VIEW CARRIES BESIDE ITS TWO CONVERSIONS. `hex`, `count` and
+       `index` read the bytes it shows -- a memoryview IS a sequence in
+       Python -- and the three subscript dunders are the methods behind the
+       `m[i]` a program writes. `__delitem__` exists and always refuses,
+       which is not the same claim as having no such method. */
+    if (k == APY_MVIEW_K) {
+        if (strcmp(want, "hex") == 0)
+            return apy_kind_method_opt(obj, 2, 1,
+                                       (apy_value)(uintptr_t)want, bind);
+        if (strcmp(want, "count") == 0 || strcmp(want, "index") == 0
+                || strcmp(want, "__delitem__") == 0
+                || strcmp(want, "__class_getitem__") == 0
+                || strcmp(want, "__release_buffer__") == 0)
+            return apy_kind_method(obj, 2, want, bind);
+        if (strcmp(want, "__setitem__") == 0)
+            return apy_kind_method(obj, 3, want, bind);
+    }
     if (k == APY_RANGE_K) {
         /* THE THREE NUMBERS A RANGE IS, read back. */
         if (strcmp(want, "start") == 0)

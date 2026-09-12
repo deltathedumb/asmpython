@@ -137,7 +137,26 @@ static int apy_has_index(const char *name, apy_value v) {
     return 0;
 }
 
+static int apy_eq_raw(apy_value a, apy_value b);
+
 APY_API apy_value apy_index_of(apy_value seq, apy_value item) {
+    /* A VIEW IS A SEQUENCE OF NUMBERS, and CPython COMPARES the element
+       rather than refusing a needle of the wrong kind: `m.count("a")` is 0
+       and `m.index("a")` is the not-found ValueError, where the same needle
+       handed to a bytes receiver is a TypeError. */
+    if (O(seq)->kind == APY_MVIEW_K) {
+        apy_value held = apy_mview_bytes(seq);
+        int64_t i, hits = 0;
+        if (!held) return 0;
+        for (i = 0; i < O(held)->v.s.n; i++) {
+            apy_value one = apy_from_int(
+                (int64_t)(unsigned char)O(held)->v.s.p[i]);
+            if (!apy_eq_raw(one, item)) continue;
+            return apy_from_int(i);
+        }
+        return apy_fail("ValueError",
+                        "memoryview.index(x): x not found");
+    }
     /* ON A RANGE THIS IS ARITHMETIC, not a walk: the position of a value in
        `range(0, 10**12, 3)` is one division. */
     if (O(seq)->kind == APY_RANGE_K) {
@@ -218,6 +237,22 @@ APY_API apy_value apy_index_of3(apy_value seq, apy_value item,
 }
 
 APY_API apy_value apy_count_of(apy_value seq, apy_value item) {
+    /* A VIEW IS A SEQUENCE OF NUMBERS, and CPython COMPARES the element
+       rather than refusing a needle of the wrong kind: `m.count("a")` is 0
+       and `m.index("a")` is the not-found ValueError, where the same needle
+       handed to a bytes receiver is a TypeError. */
+    if (O(seq)->kind == APY_MVIEW_K) {
+        apy_value held = apy_mview_bytes(seq);
+        int64_t i, hits = 0;
+        if (!held) return 0;
+        for (i = 0; i < O(held)->v.s.n; i++) {
+            apy_value one = apy_from_int(
+                (int64_t)(unsigned char)O(held)->v.s.p[i]);
+            if (!apy_eq_raw(one, item)) continue;
+            hits++;
+        }
+        return apy_from_int(hits);
+    }
     /* A RANGE HOLDS EACH VALUE AT MOST ONCE, so the count is the membership
        test -- and arithmetic rather than a walk. */
     if (O(seq)->kind == APY_RANGE_K) {

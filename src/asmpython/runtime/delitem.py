@@ -71,6 +71,13 @@ def apy_delitem(seq: ptr, key: ptr) -> ptr:
     if i64(load(i32, offset(seq, 0))) == apy_bytes_kind():
         if load(i32, offset(seq, apy_s_mut_offset())):
             return apy_del_bytes(seq, key)
+    # A VIEW REFUSES IN ITS OWN WORDS. Deleting from one is not "this kind
+    # has no such operation" -- a memoryview HAS `__delitem__` and it always
+    # refuses, because a window onto a buffer cannot make the buffer shorter.
+    if i64(load(i32, offset(seq, 0))) == apy_mview_kind():
+        return apy_raise_at(
+            rodata(b"TypeError\0"),
+            rodata(b"cannot delete memory\0"))
     if i64(load(i32, offset(seq, 0))) != apy_list_kind():
         return apy_raise_fmt(
             rodata(b"TypeError\0"),

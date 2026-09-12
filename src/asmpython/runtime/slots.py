@@ -1348,6 +1348,26 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
     # makes one at all: `mv.tobytes()` copies them out and `mv.tolist()`
     # reads them as numbers. Neither existed, so a view could be indexed and
     # sliced and never emptied.
+    # WHAT A VIEW CARRIES BESIDE ITS TWO CONVERSIONS. `hex`, `count` and
+    # `index` read the bytes it shows -- a memoryview IS a sequence in Python
+    # -- and the three subscript dunders are the methods behind the `m[i]` a
+    # program writes. `__delitem__` exists and always refuses, which is not
+    # the same claim as having no such method.
+    if is_mview:
+        if apy_name_is(want, rodata(b"hex\0")):
+            return apy_kind_method_opt(obj, 2, 1, want, bind)
+        if apy_name_is(want, rodata(b"count\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"index\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"__delitem__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"__class_getitem__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"__release_buffer__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"__setitem__\0")):
+            return apy_kind_method_of(obj, 3, want, bind)
     if is_mview:
         if apy_name_is(want, rodata(b"tobytes\0")):
             return apy_kind_method_of(obj, 1, rodata(b"tobytes\0"), bind)

@@ -544,6 +544,13 @@ APY_API apy_value apy_hex_of(apy_value x, apy_value sep) {
     /* The separator is bytes' alone -- the no-argument form supplies a
        default for it, which is why this takes two even though a float uses
        neither. */
+    /* A VIEW HEXES THE BYTES IT SHOWS, which is what a program makes one to
+       look at. */
+    if (O(x)->kind == APY_MVIEW_K) {
+        apy_value held = apy_mview_bytes(x);
+        if (!held) return 0;
+        return apy_bytes_hex(held, sep);
+    }
     return apy_bytes_hex(x, sep);
 }
 

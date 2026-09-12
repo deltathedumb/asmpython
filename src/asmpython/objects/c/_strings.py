@@ -121,6 +121,22 @@ static apy_value apy_text_arg(const char *meth, int argno, int indexy,
     char buf[160];
     if (want_bytes && O(v)->kind == APY_MVIEW_K) v = apy_mview_bytes(v);
     if (O(v)->kind == (want_bytes ? APY_BYTES_K : APY_STR_K)) return v;
+    /* AN INTEGER IS A LEGAL NEEDLE FOR THE SEARCHES, which is what the
+       wording below says and what this refused anyway: `b"abc".index(98)` is
+       1 in Python. One byte, so anything outside a byte's range is a
+       ValueError and not a wrong answer. */
+    if (want_bytes && indexy && apy_is_int_like(v)) {
+        int64_t byte = O(v)->v.i;
+        char one[1];
+        if (apy_is_big(v) || byte < 0 || byte > 255)
+            { apy_fail("ValueError", "byte must be in range(0, 256)");
+              return 0; }
+        one[0] = (char)byte;
+        { apy_value made = apy_str_copy(one, 1);
+          if (!made) return 0;
+          O(made)->kind = APY_BYTES_K;
+          return made; }
+    }
     if (!want_bytes) {
         apy_arg_must_be_str(meth, argno, v);
         return 0;
