@@ -2959,7 +2959,14 @@ def _apy_raw_len(h, a):
         # takes its bound from here and its elements from the subscript, so a
         # string with any non-ASCII character in it walked off the end.
         return len(v)
-    if isinstance(v, (list, tuple, dict, set, frozenset, bytes, range)):
+    # A BYTEARRAY IS NOT A `bytes` TO `isinstance` -- it is not a subclass
+    # of it -- so every list here that says `bytes` and means "the bytes
+    # cell" left one out. Both compiled runtimes hold the two in one cell
+    # and iterate both; only this path refused, so `list(bytearray(b'ab'))`
+    # was `'bytearray' object is not iterable` about a thing whose whole
+    # point is being a sequence of octets.
+    if isinstance(v, (list, tuple, dict, set, frozenset, bytes, bytearray,
+                      range)):
         return len(v)
     # A user object with `__len__`. Together with `apy_key_at` falling through
     # to `__getitem__`, that is the whole `__len__`/`__getitem__` iteration
@@ -8198,7 +8205,8 @@ def _seq_items(h, v, where: str):
         return None if got is None else list(got)
     if isinstance(v, dict):
         return list(v)
-    if isinstance(v, (list, tuple, set, frozenset, str, bytes, range)):
+    if isinstance(v, (list, tuple, set, frozenset, str, bytes, bytearray,
+                      range)):
         return list(v)
     if isinstance(v, _VIEW_TYPES):
         # READ WHEN WALKED, which is what makes a view live: the keys are the
@@ -9541,7 +9549,10 @@ def _apy_index_of(h, a):
         try:
             return h._int(v.index(item))
         except ValueError:
-            return h._fail("ValueError", "substring not found")
+            # A BYTES RECEIVER HAS NO SUBSTRINGS: CPython says `subsection
+            # not found` for one.
+            return h._fail("ValueError", "substring not found"
+                           if isinstance(v, str) else "subsection not found")
     items = _seq_items(h, v, "apy_index_of")
     if items is None:
         return 0
@@ -9574,7 +9585,10 @@ def _index_bounded(h, a, has_end):
                                 len(seq) if hi is None else hi))
     except ValueError:
         if isinstance(seq, (str, bytes, bytearray)):
-            return h._fail("ValueError", "substring not found")
+            # A BYTES RECEIVER HAS NO SUBSTRINGS: CPython says `subsection
+            # not found` for one.
+            return h._fail("ValueError", "substring not found"
+                           if isinstance(seq, str) else "subsection not found")
         return h._fail("ValueError",
                        f"{h.kind_name(seq)}.index(x): x not in "
                        f"{h.kind_name(seq)}")
@@ -9606,7 +9620,8 @@ def _str_rindex(h, a, has_end):
         at = s.rindex(sub, 0 if lo is None else lo,
                       len(s) if hi is None else hi)
     except ValueError:
-        return h._fail("ValueError", "substring not found")
+        return h._fail("ValueError", "substring not found"
+                       if isinstance(s, str) else "subsection not found")
     except _HOST_RAISES as exc:
         return h._fail_like(exc)
     return h._int(at)
@@ -10756,7 +10771,8 @@ def _apy_extend(h, a):
     # not iterable while the compiled program extended happily. The C reaches
     # `apy_iterable` first, which drains it; this is where the interpreter
     # does the same thing.
-    if not isinstance(other, (list, tuple, set, frozenset, str, bytes, dict,
+    if not isinstance(other, (list, tuple, set, frozenset, str, bytes,
+                              bytearray, dict,
                               Iterator, Gen, range))             and not isinstance(other, _VIEW_TYPES):
         return h._fail("TypeError",
                        f"'{h.kind_name(other)}' object is not iterable")
@@ -12308,7 +12324,8 @@ def _apy_getiter(h, a):
         if v.cls.find("__getitem__") is None:
             return h._fail("TypeError",
                            f"'{h.kind_name(v)}' object is not iterable")
-    elif not isinstance(v, (list, tuple, set, frozenset, dict, str, bytes, range)):
+    elif not isinstance(v, (list, tuple, set, frozenset, dict, str, bytes,
+                            bytearray, range)):
         return h._fail("TypeError",
                        f"'{h.kind_name(v)}' object is not iterable")
     return h._new(Iterator(v))
@@ -12497,7 +12514,8 @@ def _apy_iter(h, a):
     # `list(d.items())` accepts, on this path and on the compiled one.
     if isinstance(v, _VIEW_TYPES):
         return h._new(Iterator(list(v)))
-    if not isinstance(v, (list, tuple, set, frozenset, dict, str, bytes, range)):
+    if not isinstance(v, (list, tuple, set, frozenset, dict, str, bytes,
+                          bytearray, range)):
         return h._fail("TypeError",
                        f"'{h.kind_name(v)}' object is not iterable")
     return h._new(Iterator(v))

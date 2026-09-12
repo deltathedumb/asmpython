@@ -224,8 +224,12 @@ static apy_value apy_str_search(apy_value s, apy_value sub, apy_value start,
     lo = apy_char_to_byte(s, lo);
     hi = apy_char_to_byte(s, hi);
     at = from_right ? apy_rfind_at(s, sub, lo, hi) : apy_find_at(s, sub, lo, hi);
+    /* A BYTES RECEIVER HAS NO SUBSTRINGS: CPython says `subsection not
+       found` for one, which is the same distinction the rest of this
+       function now makes about units. */
     if (at < 0 && want_index)
-        return apy_fail("ValueError", "substring not found");
+        return apy_fail("ValueError", O(s)->kind == APY_STR_K
+                        ? "substring not found" : "subsection not found");
     return apy_from_int(at < 0 ? at : apy_byte_to_char(s, at));
 }
 
@@ -486,9 +490,17 @@ static int apy_case_final_sigma(const unsigned char *p, int64_t n, int64_t at,
     return 1;
 }
 
+/* Written below, beside the predicates that share them: one "character" of a
+   receiver, and its class. Declared here because the case transforms sit
+   above the character table they both rest on. */
+static int64_t apy_text_step(int wide, const unsigned char *p, int64_t n,
+                             int64_t i, uint32_t *cp);
+static unsigned apy_text_class(int wide, uint32_t cp);
+
 static apy_value apy_str_case(apy_value s, int mode) {
     const unsigned char *p = (const unsigned char *)O(s)->v.s.p;
     int64_t n = O(s)->v.s.n, i = 0, out_n = 0;
+    int wide = O(s)->kind == APY_STR_K;
     /* THREE CODE POINTS IS THE WIDEST ANY MAPPING GROWS TO -- `ﬃ` becomes
        `FFI` -- and a code point is at most four UTF-8 bytes, so twelve bytes
        of output per byte of input cannot be exceeded. */
@@ -497,10 +509,20 @@ static apy_value apy_str_case(apy_value s, int mode) {
     if (!buf) { fputs("asmpython: out of memory\n", stderr); exit(1); }
     while (i < n) {
         uint32_t cp, got[4];
-        int64_t used = apy_utf8_step(p, n, i, &cp);
+        int64_t used = apy_text_step(wide, p, n, i, &cp);
         int which, k, count;
         unsigned flags;
         if (used <= 0) { buf[out_n++] = (char)p[i++]; continue; }
+        /* ASCII-ONLY FOR BYTES. A byte above 0x7F has no case and is not
+           cased, so it neither maps nor carries a word across -- which is
+           why `b"\xc3\xa9ab".title()` is `b"\xc3\xa9Ab"`: the two bytes
+           are uncased and the `a` after them starts a word. */
+        if (!wide && cp >= 0x80) {
+            buf[out_n++] = (char)cp;
+            prev_cased = 0;
+            i += used;
+            continue;
+        }
         flags = apy_ucase_flags(cp);
         which = apy_case_mode_for(mode, i, prev_cased);
         if (which < 0) {
@@ -581,9 +603,30 @@ static int apy_cp_printable(uint32_t cp) {
     return (int)apy_cp_printable_of((int64_t)cp);
 }
 
+/* ONE "CHARACTER" OF A RECEIVER -- which for BYTES is one BYTE and for a str
+   is one code point -- and its class, which for bytes stops at ASCII.
+
+   THE PREDICATES AND THE CASE TRANSFORMS SHARE ONE BODY between the two kinds
+   and that body took the str view of both questions: it decoded
+   `b"\xc3\xa9"` as one character and asked the Unicode table about it, so
+   `b"\xc3\xa9".isalpha()` was True and `.upper()` answered `b"\xc3\x89"` --
+   changing bytes the program never spelled as a character. Python's bytes
+   methods are ASCII-ONLY: a byte above 0x7F is not a letter, has no case, is
+   not whitespace, and is copied. */
+static int64_t apy_text_step(int wide, const unsigned char *p, int64_t n,
+                             int64_t i, uint32_t *cp) {
+    if (!wide) { *cp = p[i]; return 1; }
+    return apy_utf8_step(p, n, i, cp);
+}
+static unsigned apy_text_class(int wide, uint32_t cp) {
+    if (!wide && cp >= 0x80) return 0u;
+    return apy_char_class(cp);
+}
+
 static apy_value apy_str_is(apy_value s, int which) {
     int64_t n = O(s)->v.s.n, i;
     const unsigned char *p = (const unsigned char *)O(s)->v.s.p;
+    int wide = O(s)->kind == APY_STR_K;
     int cased = 0, prev_cased = 0, ok = 1, first = 1, any = 0;
     if (which == APY_ISASCII) {
         for (i = 0; i < n; i++)
@@ -598,12 +641,12 @@ static apy_value apy_str_is(apy_value s, int which) {
        string answered False. */
     for (i = 0; i < n; ) {
         uint32_t cp;
-        int64_t used = apy_utf8_step(p, n, i, &cp);
+        int64_t used = apy_text_step(wide, p, n, i, &cp);
         unsigned m;
         if (!used) { cp = 0xFFFD; used = 1; }
         i += used;
         any = 1;
-        m = apy_char_class(cp);
+        m = apy_text_class(wide, cp);
         switch (which) {
         case APY_ISALPHA: if (!(m & APY_UC_ALPHA)) ok = 0; break;
         case APY_ISDIGIT: if (!(m & APY_UC_DIGIT)) ok = 0; break;
@@ -721,15 +764,20 @@ APY_API apy_value apy_str_isascii(apy_value s) {
    THE SET: `chars` was compared a byte at a time, so a multi-byte character
    in it matched the HALVES of other characters -- `'ab'.strip('é')`
    would have eaten a 0xC3 lead byte and left a dangling continuation. */
-static int apy_in_chars(apy_value chars, uint32_t cp) {
+/* AND FOR A BYTES RECEIVER, ASCII AGAIN. `b"\xc2\xa0a\xc2\xa0".strip()` is
+   itself in Python: U+00A0 is whitespace, the two BYTES that spell it are
+   not, and reading them as the character stripped bytes the program never
+   spelled as one. `wide` says which receiver is asking; the set is walked in
+   the same unit for the same reason. */
+static int apy_in_chars(int wide, apy_value chars, uint32_t cp) {
     const unsigned char *p;
     int64_t n, i = 0;
-    if (!chars) return (apy_char_class(cp) & APY_UC_SPACE) != 0;
+    if (!chars) return (apy_text_class(wide, cp) & APY_UC_SPACE) != 0;
     p = (const unsigned char *)O(chars)->v.s.p;
     n = O(chars)->v.s.n;
     while (i < n) {
         uint32_t c2;
-        int64_t used = apy_utf8_step(p, n, i, &c2);
+        int64_t used = apy_text_step(wide, p, n, i, &c2);
         if (!used) { c2 = 0xFFFD; used = 1; }
         if (c2 == cp) return 1;
         i += used;
@@ -758,13 +806,14 @@ static apy_value apy_str_trim(apy_value s, apy_value chars, const char *meth,
        one variable and no second way to be wrong. */
     {
         const unsigned char *p = (const unsigned char *)O(s)->v.s.p;
+        int wide = O(s)->kind == APY_STR_K;
         int64_t i, last;
         if (left) {
             for (i = 0; i < hi; ) {
                 uint32_t cp;
-                int64_t used = apy_utf8_step(p, hi, i, &cp);
+                int64_t used = apy_text_step(wide, p, hi, i, &cp);
                 if (!used) { cp = 0xFFFD; used = 1; }
-                if (!apy_in_chars(chars, cp)) break;
+                if (!apy_in_chars(wide, chars, cp)) break;
                 i += used;
             }
             lo = i;
@@ -773,10 +822,10 @@ static apy_value apy_str_trim(apy_value s, apy_value chars, const char *meth,
             last = lo;
             for (i = lo; i < hi; ) {
                 uint32_t cp;
-                int64_t used = apy_utf8_step(p, hi, i, &cp);
+                int64_t used = apy_text_step(wide, p, hi, i, &cp);
                 if (!used) { cp = 0xFFFD; used = 1; }
                 i += used;
-                if (!apy_in_chars(chars, cp)) last = i;
+                if (!apy_in_chars(wide, chars, cp)) last = i;
             }
             hi = last;
         }

@@ -388,6 +388,13 @@ APY_API int64_t apy_truth(apy_value v) {
 static int64_t apy_str_chars(apy_value v) {
     const unsigned char *p = (const unsigned char *)O(v)->v.s.p;
     int64_t i, n = O(v)->v.s.n, chars = 0;
+    /* A BYTES RECEIVER HAS NO CHARACTERS IN IT, so its count IS its byte
+       count -- the two words mean the same thing for bytes in Python, and
+       every caller here wants whichever the receiver's own unit is. Running
+       the UTF-8 walk over one read `b"\xc3\xa9"` as ONE character, so
+       `b"\xc3\xa9".center(9)` padded to nine CHARACTERS and answered ten
+       bytes, and every bounded search counted the same way. */
+    if (O(v)->kind != APY_STR_K) return n;
     for (i = 0; i < n; i++)
         if ((p[i] & 0xC0) != 0x80) chars++;
     return chars;

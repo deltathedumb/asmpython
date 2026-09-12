@@ -33,8 +33,15 @@ def apy_str_char_count(v: ptr) -> i64:
     AN IR-ONLY HELPER. It does not replace the C's `apy_str_chars`, which is
     `static` and therefore invisible to the subset -- the two coexist and must
     agree, which is what the differential suite is for.
+    A BYTES RECEIVER HAS NO CHARACTERS IN IT, so its count IS its byte
+    count -- the two words mean the same thing for bytes in Python, and every
+    caller wants whichever the receiver's own unit is. Running the walk over
+    one read two bytes as one character, so a bytes `center` padded to that
+    many CHARACTERS and answered one byte too many.
     """
     n: i64 = load(i64, offset(v, apy_str_len_offset()))
+    if not apy_is_str(v):
+        return n
     p: ptr = ptr(load(u64, offset(v, apy_str_ptr_offset())))
     chars: i64 = 0
     i: i64 = 0

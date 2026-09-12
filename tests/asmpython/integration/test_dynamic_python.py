@@ -600,6 +600,40 @@ PROGRAMS = {
         print("x".join([s, s]) == s + "x" + s)
         print([len(part) for part in s.split("x")])
     """,
+    # BYTES AND STR SHARE ONE IMPLEMENTATION and it took the STR view of
+    # every question, so every bytes method was wrong on a byte above 0x7F:
+    # it decoded two bytes as one character, asked the Unicode table about
+    # it, and answered accordingly. Python's bytes methods are ASCII-ONLY --
+    # a byte above 0x7F is not a letter, has no case, is not whitespace --
+    # and a bytes WIDTH is a byte count where a str's is a character count,
+    # which is the opposite of the fix the str side needed.
+    "bytes_methods_are_byte_methods": """
+        b = b"\\xc3\\xa9"
+        print(b.upper(), b"\\xc3\\x89".lower(), b"\\xc3\\xa9ab".title())
+        print(b"\\xc3\\xa9ab".capitalize(), b"\\xc3\\xa9aB".swapcase())
+        print(b.isalpha(), b.isalnum(), b.isascii(), b"\\xc2\\xa0".isspace())
+        print(b"\\xc3\\x89".isupper(), b.islower(), b"\\xc3\\x89\\xc3\\xa9".istitle())
+        # A WIDTH IS A BYTE COUNT. Two bytes, so nine leaves seven to pad.
+        print(b.center(9), b.ljust(9), b.rjust(9), b.zfill(9), len(b))
+        print(b"\\xc2\\xa0a\\xc2\\xc2".strip())
+        # AND THE STR SIDE IS UNTOUCHED, which is the half the shared body
+        # was right about all along.
+        print("\\u00e9".upper(), "\\u00e9".isalpha(), "\\u00e9".center(5))
+        try:
+            b"".index(b"b")
+        except ValueError as e:
+            print("bytes:", e)
+        try:
+            "".index("b")
+        except ValueError as e:
+            print("str:", e)
+        # A BYTEARRAY IS A SEQUENCE OF OCTETS and the interpreter alone
+        # refused to walk one -- `bytearray` is not a `bytes` to isinstance.
+        print(list(bytearray(b"abc")), [x for x in bytearray(b"ab")])
+        print(sum(bytearray(b"ab")), sorted(bytearray(b"ba")))
+        print(list(zip(bytearray(b"ab"), "xy")))
+        print(list(reversed(bytearray(b"ab"))), 97 in bytearray(b"abc"))
+    """,
     "traceback_positions": """
         try:
             (1).missing
