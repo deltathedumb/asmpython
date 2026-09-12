@@ -697,6 +697,44 @@ PROGRAMS = {
             except TypeError as e:
                 print("TypeError:", e)
     """,
+    # `"abc".upper` IS LOWERED AT THE CALL SITE, so it existed as a CALL and
+    # never as an attribute: `getattr("abc", "upper")` was an AttributeError
+    # about a method the object plainly has, and `hasattr` said False. Every
+    # ordinary builtin method was unreachable by NAME -- which is what
+    # `operator.methodcaller`, a plugin table and `getattr(x, name)(...)` all
+    # do. The table is generated from CPython's own `hasattr` and from the
+    # frontend's own `DYN_METHOD_TABLE`, so the written form and the
+    # looked-up form are ONE implementation rather than two that can drift.
+    "a_builtin_method_by_name": """
+        print(getattr("abc", "upper")(), getattr("abcabc", "find")("c"))
+        print(getattr("abcabc", "find")("c", 0, 3), getattr("a,b", "split")(","))
+        print(getattr("a b", "split")(), getattr("aaa", "replace")("a", "b"))
+        print(getattr("aaa", "replace")("a", "b", 1))
+        print(getattr({"a": 1}, "keys")(), getattr({"a": 1}, "get")("z", 7))
+        print(getattr(b"a", "decode")(), getattr("a", "encode")())
+        print(getattr(b"ab", "hex")(), getattr("a\\tb", "expandtabs")())
+        print(getattr(258, "to_bytes")(4, "little"), getattr([1], "copy")())
+        print(sorted(getattr({1}, "union")({2})))
+        # THE IN-PLACE ONES CHANGE THE RECEIVER, which is the half a value
+        # comparison cannot see.
+        for name, args in (("append", (9,)), ("pop", ()), ("pop", (0,)),
+                           ("sort", ()), ("reverse", ())):
+            v = [3, 1]
+            print(name, getattr(v, name)(*args), v)
+        d = {"a": 1}
+        print(getattr(d, "update")({"b": 2}), d)
+        # AND THE GATING IS CPYTHON'S: a list has no `upper` and a str no
+        # `append`, which is what keeps `hasattr` honest.
+        print(hasattr("abc", "upper"), hasattr("abc", "append"))
+        print(hasattr([1], "append"), hasattr([1], "upper"))
+        print(hasattr({}, "keys"), hasattr([1], "keys"))
+        for body in (lambda: getattr("abc", "nosuch"),
+                     lambda: getattr([1], "upper")):
+            try:
+                body()
+            except AttributeError as e:
+                print(e)
+    """,
     "traceback_positions": """
         try:
             (1).missing

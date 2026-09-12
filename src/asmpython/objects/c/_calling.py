@@ -545,6 +545,29 @@ APY_API int64_t apy_number_arity(apy_value wantv, int64_t is_int,
     return 0;
 }
 
+/* @KINDMETH_TABLE@ */
+
+/* The bit the generated table wants for this receiver. One place that knows
+   the pairing, so the enum and the table cannot drift apart silently. */
+static unsigned apy_kind_bit(apy_value v) {
+    switch (O(v)->kind) {
+    case APY_STR_K:    return APY_MK_STR;
+    case APY_BYTES_K:  return O(v)->v.s.mut ? APY_MK_BYTEARRAY : APY_MK_BYTES;
+    case APY_LIST_K:   return APY_MK_LIST;
+    case APY_TUPLE_K:  return APY_MK_TUPLE;
+    case APY_DICT_K:   return APY_MK_DICT;
+    case APY_SET_K:    return APY_MK_SET;
+    case APY_FROZEN_K: return APY_MK_FROZENSET;
+    case APY_INT_K:
+    case APY_BIG_K:
+    case APY_BOOL_K:   return APY_MK_INT;
+    case APY_FLOAT_K:  return APY_MK_FLOAT;
+    case APY_RANGE_K:  return APY_MK_RANGE;
+    case APY_COMPLEX_K: return APY_MK_COMPLEX;
+    default: return 0;
+    }
+}
+
 APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
                                   int64_t bind) {
     const char *want = (const char *)wantv;
@@ -715,6 +738,22 @@ APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
             return apy_kind_method(obj, 2, "__contains__", bind);
         if (strcmp(want, "__getitem__") == 0)
             return apy_kind_method(obj, 2, "__getitem__", bind);
+    }
+    {
+        /* AND THE WHOLE METHOD TABLE, generated. Everything above answers a
+           PROTOCOL name or a field; this answers the ORDINARY methods, which
+           existed only as calls the frontend lowered and so could not be
+           reached by NAME at all -- `getattr("abc", "upper")` was an
+           AttributeError about a method the object plainly has, and anything
+           dispatching by method name saw a builtin as having none.
+
+           LAST, so every hand-written arm above still decides first: a few
+           names mean different things to different kinds and are split there
+           rather than in a table keyed by name. */
+        int64_t packed = apy_kind_meth_arity(want, apy_kind_bit(obj));
+        if (packed)
+            return apy_kind_method_opt(obj, packed >> 8, packed & 0xFF,
+                                       (apy_value)(uintptr_t)want, bind);
     }
     return 0;
 }
@@ -961,6 +1000,12 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
            name would be twenty enum members that differ only in which. */
         const char *w = APY_CSTR(O(f)->v.fn.name);
         if (n < 1) return apy_fail("TypeError", "unbound builtin method");
+        /* THE GENERATED TABLE FIRST for a name it knows. Everything below
+           answers a PROTOCOL name, and the arity guards between those arms
+           would refuse the no-argument forms the table serves -- `upper` has
+           none to give. A name the table knows means the same thing on every
+           arm they share, because both read `DYN_METHOD_TABLE`. */
+        if (apy_kind_meth_arity(w, 0xFFFFu)) return apy_kind_meth_call(w, a, n);
         if (strcmp(w, "__hash__") == 0) return apy_hash(a[0]);
         if (strcmp(w, "__len__") == 0) return apy_len(a[0]);
         if (strcmp(w, "__iter__") == 0) return apy_iter(a[0]);
@@ -1074,12 +1119,8 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
         /* `b.__buffer__(flags)` answers a memoryview over it, which is what
            the protocol is for and what `memoryview(b)` already does. */
         if (strcmp(w, "__buffer__") == 0) return apy_memoryview(a[0]);
-        if (n < 3) return apy_fail("TypeError",
-                                   "builtin method takes two arguments");
-        if (strcmp(w, "__setitem__") == 0)
+        if (strcmp(w, "__setitem__") == 0 && n >= 3)
             return apy_setitem(a[0], a[1], a[2]);
-        if (strcmp(w, "insert") == 0)
-            return apy_list_insert(a[0], a[1], a[2]);
         return apy_fail("TypeError", "not callable");
     }
     case APY_NAT_DESCR_GET:

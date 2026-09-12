@@ -102,6 +102,12 @@ from .c.unicode_table import UNICODE_C
 #: a different question: not what a character IS but what it BECOMES.
 from .c.unicase_table import UNICASE_C
 
+#: WHICH BUILTIN METHODS A KIND HAS, and which entry point serves each
+#: arity. Generated from CPython's own `hasattr` and from the frontend's
+#: `DYN_METHOD_TABLE`, so the written form and the looked-up form are ONE
+#: implementation rather than two that can drift.
+from .c.kindmeth_table import KINDMETH_C
+
 #: THE RUNTIME'S C, whole. It was written out longhand right here, all
 #: sixteen thousand lines of it, which made this module unopenable in an
 #: editor and unreviewable in a diff. It is nineteen modules under `c/`
@@ -247,7 +253,8 @@ _IR_TYPES = {"apy_value": "ptr", "int64_t": "i64", "double": "f64",
 #: table spliced in at its marker. One file, as it always was -- the split is
 #: only so this module stays readable.
 _WITH_TABLE = OBJECTS_C.replace("/* @UNICODE_TABLE@ */", UNICODE_C) \
-                       .replace("/* @UNICASE_TABLE@ */", UNICASE_C)
+                       .replace("/* @UNICASE_TABLE@ */", UNICASE_C) \
+                       .replace("/* @KINDMETH_TABLE@ */", KINDMETH_C)
 
 
 def _param_type(text: str) -> str:

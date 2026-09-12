@@ -6660,6 +6660,75 @@ def _rich_compare(h, want: str, obj, other):
     return NotImplemented
 
 
+#: The ordinary builtin methods, and which symbol serves each arity. THE
+#: FRONTEND'S OWN TABLE, read here rather than restated: `x.upper()` is
+#: lowered through it and `getattr(x, "upper")()` is dispatched through it,
+#: so the two spellings cannot drift into two implementations. The generated
+#: C half reads the same table; see `objects/c/_gen_kindmeth.py`.
+from asmpython.frontends.python.methods import (  # noqa: E402
+    DYN_METHOD_TABLE, method_symbol)
+
+#: The names that table answers -- the dunders are left out, because every
+#: one of them is a PROTOCOL name the arms above answer with their own
+#: gating, and a table keyed by name alone cannot make those distinctions.
+_TABLE_METHODS = frozenset(n for n in DYN_METHOD_TABLE
+                           if not n.startswith("__"))
+
+
+def _table_shape(h, name: str, held, args):
+    """The handles one runtime entry point takes, which is not always the
+    receiver followed by the arguments.
+
+    SEVEN SHAPES ARE IRREGULAR and every one is mirrored from the frontend's
+    `_dyn_builtin_method` and from the generated C: the two spellings have to
+    reach the same call.
+    """
+    argc = len(args)
+    if name in ("keys", "values", "items"):
+        return [held, {"keys": 0, "values": 1, "items": 2}[name]]
+    if name == "pop" and argc < 2:
+        return [held, args[0] if args else h._none, 1 if args else 0]
+    if name in ("encode", "decode"):
+        return [held] + [args[i] if i < argc else h._none for i in range(2)]
+    if name in ("hex", "expandtabs") and argc == 0:
+        return [held, h._int(8) if name == "expandtabs" else h._none]
+    if name in ("get", "setdefault") and argc == 1:
+        return [held, args[0], h._none]
+    if name == "sort":
+        return [held, h._none, h._new(False)]
+    if name == "update" and argc == 0:
+        return [held, h._new({})]
+    if name == "to_bytes":
+        pad = [h._int(1), h._new("big"), h._new(False)]
+        return [held] + [args[i] if i < argc else pad[i] for i in range(3)]
+    return [held, *args]
+
+
+def _made_table_method(h, obj, want: str):
+    """One ordinary builtin method, as a bound callable value."""
+    held = h._new(obj)
+    live = [i for i, sym in enumerate(DYN_METHOD_TABLE[want]) if sym]
+    lo, hi = (0, 3) if want == "to_bytes" else (min(live), max(live))
+
+    def body(*args, _w=want, _h=held):
+        sym = method_symbol(_w, len(args))
+        if _w == "to_bytes":
+            sym = DYN_METHOD_TABLE[_w][3]
+        if sym is None or len(args) < lo or len(args) > hi:
+            h._fail("TypeError",
+                    f"{_w}() takes no {len(args)}-argument form")
+            raise _UserFailed
+        # A NATIVE'S BODY IS HANDED VALUES and a runtime symbol takes
+        # HANDLES, which is the whole of the conversion here.
+        shaped = _table_shape(h, _w, _h, [h._new(v) for v in args])
+        got = _TABLE[sym](h, shaped)
+        if not got:
+            raise _UserFailed
+        return h._get(got, _w)
+
+    return h._new(Native(want, body, ranged=lo != hi))
+
+
 def _kind_attr(h, obj, want: str):
     """A BUILTIN'S PROTOCOL METHODS, AS VALUES.
 
@@ -6782,8 +6851,6 @@ def _kind_attr(h, obj, want: str):
     if set_ and want in ("__or__", "__and__", "__sub__", "__xor__",
                          "__ror__", "__rand__", "__rsub__", "__rxor__"):
         return made(want, lambda o, _w=want: getattr(obj, _w)(o))
-    if dict_ and want in ("keys", "values", "items"):
-        return made(want, lambda: list(getattr(obj, want)()))
     if (seq or text) and want in ("index", "count"):
         return made(want, lambda x: getattr(obj, want)(x))
     if isinstance(obj, list) and want == "append":
@@ -6800,6 +6867,18 @@ def _kind_attr(h, obj, want: str):
     if want == "__buffer__" and isinstance(obj, (bytes, bytearray,
                                                  memoryview)):
         return made("__buffer__", lambda flags=0: memoryview(obj))
+    if want in _TABLE_METHODS and hasattr(type(obj), want):
+        # AND THE WHOLE METHOD TABLE. Everything above answers a PROTOCOL
+        # name or a field; this answers the ORDINARY methods, which existed
+        # only as calls the frontend lowered and so could not be reached by
+        # NAME at all -- `getattr("abc", "upper")` was an AttributeError
+        # about a method the object plainly has.
+        #
+        # THROUGH THE RUNTIME'S OWN SYMBOLS rather than through Python's
+        # method, so the written form and the looked-up form are ONE
+        # implementation: `DYN_METHOD_TABLE` says which symbol serves which
+        # arity, and the compiled halves read the same table.
+        return _made_table_method(h, obj, want)
     if rng:
         # THE THREE NUMBERS A RANGE IS, read back -- and `index`/`count`,
         # which are arithmetic on them rather than a walk.

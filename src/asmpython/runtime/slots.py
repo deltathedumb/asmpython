@@ -818,6 +818,45 @@ def apy_kind_method_of(obj: ptr, arity: i64, name: ptr, bind: i64) -> ptr:
     return fn
 
 
+def apy_kind_bit_of(v: ptr) -> i64:
+    """The bit the generated method table wants for this receiver.
+
+    ONE PLACE THAT KNOWS THE PAIRING, so the kind tags and the generated
+    table cannot drift apart silently. The bits are `KINDS` in
+    `objects/c/_gen_kindmeth.py` and are private to the pair.
+    """
+    k: i64 = i64(load(i32, offset(v, 0)))
+    if k == apy_str_kind():
+        return 1
+    if k == apy_bytes_kind():
+        if i64(load(i32, offset(v, apy_s_mut_offset()))) != 0:
+            return 4
+        return 2
+    if k == apy_list_kind():
+        return 8
+    if k == apy_tuple_kind():
+        return 16
+    if k == apy_dict_kind():
+        return 32
+    if k == apy_set_kind():
+        return 64
+    if k == apy_frozen_kind():
+        return 128
+    if k == apy_int_kind():
+        return 256
+    if k == apy_big_kind():
+        return 256
+    if k == apy_bool_kind():
+        return 256
+    if k == apy_float_kind():
+        return 512
+    if k == apy_range_kind():
+        return 1024
+    if k == apy_complex_kind():
+        return 2048
+    return 0
+
+
 def apy_kind_method_opt(obj: ptr, arity: i64, nopt: i64, name: ptr,
                         bind: i64) -> ptr:
     """The same, WITH AN OPTIONAL TAIL: the method may be called with up to
@@ -1219,6 +1258,18 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
         if apy_name_is(want, rodata(b"__getitem__\0")):
             return apy_kind_method_of(obj, 2, rodata(b"__getitem__\0"),
                                       bind)
+    # AND THE WHOLE METHOD TABLE, generated. Everything above answers a
+    # PROTOCOL name or a field; this answers the ORDINARY methods, which
+    # existed only as calls the frontend lowered and so could not be reached
+    # by NAME at all -- `getattr("abc", "upper")` was an AttributeError about
+    # a method the object plainly has.
+    #
+    # LAST, so every arm above still decides first: a few names mean
+    # different things to different kinds and are split there rather than in
+    # a table keyed by name.
+    packed: i64 = apy_kind_meth_arity_of(want, apy_kind_bit_of(obj))
+    if packed:
+        return apy_kind_method_opt(obj, packed >> 8, packed & 255, want, bind)
     return ptr(0)
 
 

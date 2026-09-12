@@ -121,6 +121,10 @@ REPLACES: dict[str, tuple[str, ...]] = {
     # through a 256-byte table, which is a different method under one
     # spelling. Exported rather than private because the C has them
     # under the same names and the two are ONE translation unit.
+    # GENERATED, and it DISPLACES NOTHING: the C keeps its own copy under a
+    # `static` name and this is the `_of` twin, so the key is here to satisfy
+    # "every runtime module is named" rather than to claim a C definition.
+    "kindmeth_table.py": (),
     "str_translate.py": ("apy_str_translate", "apy_bytes_maketrans",
                          "apy_bytes_translate", "apy_translate_kw"),
     # MAKING a big, where every other big function in IR could only READ one
