@@ -1709,6 +1709,11 @@ _NO_CTOR = object()
 #: argument answers. BY NAME AND NOT BY A PROTOTYPE'S KIND: `bool` and `int`
 #: share a prototype -- the attribute question cannot tell them apart and
 #: does not need to -- and `type(True)()` is `False`, not `0`.
+#:
+#: CPYTHON'S OWN CONSTRUCTOR where the answer and every refusal already
+#: agree, and a RUNTIME SYMBOL where they do not: the three text ones go
+#: through `_BY_SYMBOL` below, because this compiler's `str(x)` asks the
+#: value for its text the way the compiled halves do.
 _BUILTIN_CTORS = {
     "int": (lambda: 0, int), "bool": (lambda: False, bool),
     "float": (lambda: 0.0, float), "str": (lambda: "", None),
@@ -1716,15 +1721,141 @@ _BUILTIN_CTORS = {
     "list": (list, list), "tuple": (tuple, tuple), "dict": (dict, dict),
     "set": (set, set), "frozenset": (frozenset, frozenset),
     "complex": (complex, complex),
+    # `range(stop)` and `slice(stop)` PUT THE LONE ARGUMENT IN STOP, and
+    # neither has an empty form at all -- `_ctor_make` answers both, and the
+    # entry here is what says the name is a builtin type.
+    "range": (None, None), "slice": (None, None),
+    "memoryview": (None, memoryview),
 }
 
-#: THREE KINDS HAVE NO EMPTY FORM AT ALL, and allocating an instance of a
-#: nameless class for them was the old answer. Their refusals are CPython's.
-_NO_EMPTY_CTOR = {
-    "range": "range expected at least 1 argument, got 0",
-    "slice": "slice expected at least 1 argument, got 0",
-    "memoryview": "memoryview() missing required argument 'object' (pos 1)",
+#: THE ONE-ARGUMENT FORMS GO THROUGH THE RUNTIME, every one of them, and
+#: not through CPython's constructor of the same name.
+#:
+#: The argument may be an INSTANCE of a user class, which is an interpreter
+#: object and not the thing it stands for: `int(Fraction(6, 3))` has to reach
+#: that class's `__int__`, and CPython's own `int` sees only the host object
+#: and reports `'Fraction' object cannot be interpreted as an integer`. The
+#: compiled halves have always gone through these symbols; the interpreter
+#: reached them only for the three text ones, which is what made `f = int`
+#: then `f(fraction)` fail where the written `int(fraction)` answered.
+_BY_SYMBOL = {
+    "int": "apy_to_int", "float": "apy_to_float", "bool": "apy_to_bool",
+    "str": "apy_str", "bytes": "apy_to_bytes", "bytearray": "apy_to_bytearray",
+    "dict": "apy_to_dict", "set": "apy_to_set", "frozenset": "apy_to_frozenset",
+    "memoryview": "apy_memoryview",
 }
+
+
+def _ctor_run(h, symbol, values, raw=()):
+    """One runtime entry point, with values in and a value out.
+
+    The host's constructors answer VALUES -- that is what `_instantiate`
+    answers everywhere else -- and the runtime symbols take and answer
+    HANDLES, so the wrapping happens here rather than at each call.
+
+    `raw` IS THE TAIL THAT IS NOT A VALUE. `apy_bytes_ctor` ends in an
+    `int64_t mut`, a machine word rather than an object, and handing it a
+    handle made every `bytes(s, "utf-8")` answer a bytearray -- a handle is
+    a nonzero index, so the flag read as set.
+    """
+    got = _TABLE[symbol](h, [h._new(v) for v in values] + list(raw))
+    if not got:
+        raise _UserFailed
+    return h._get(got, symbol)
+
+
+def _ctor_make(h, tn, vals):
+    """The positional forms of a builtin constructor, once its keywords are
+    folded into slots. The same arms `apy_ctor_make` holds in the C, so the
+    interpreter and the compiled runtimes answer one thing."""
+    n = len(vals)
+    if tn in ("range", "slice"):
+        start = vals[0] if n > 1 else None
+        stop = vals[1] if n > 1 else vals[0]
+        step = vals[2] if n > 2 else None
+        if tn == "slice":
+            return slice(start, stop, step)
+        return range(*((stop,) if n == 1 else (start, stop)
+                       if n == 2 else (start, stop, step)))
+    if n == 0:
+        return _BUILTIN_CTORS[tn][0]()
+    if n == 1:
+        if tn in _BY_SYMBOL:
+            return _ctor_run(h, _BY_SYMBOL[tn], vals)
+        if tn in ("list", "tuple"):
+            # BUILT AND FILLED, the way `apy_call_kind` fills one: `apy_extend`
+            # is the one thing that already knows how to drain every kind of
+            # source -- a generator, a dict (its keys), a str, an instance.
+            made = _TABLE["apy_tuple_new" if tn == "tuple"
+                          else "apy_list_new"](h, [4])
+            if not _TABLE["apy_extend"](h, [made, h._new(vals[0])]):
+                raise _UserFailed
+            return h._get(made, tn)
+        if tn == "complex":
+            # NONE FOR "NOT GIVEN", not the number 0: `complex(x)` asks the
+            # class through `__complex__` and `complex(x, 0)` builds from
+            # parts, and a zero default made the two indistinguishable.
+            return _ctor_run(h, "apy_complex_of", [vals[0], None])
+        return _BUILTIN_CTORS[tn][1](vals[0])
+    if n == 2 and tn == "int":
+        return _ctor_run(h, "apy_to_int_base", vals)
+    if n == 2 and tn == "complex":
+        return _ctor_run(h, "apy_complex_of", vals)
+    if tn == "str" and n in (2, 3):
+        return _ctor_run(h, "apy_str_ctor", list(vals) + [None] * (3 - n))
+    if tn in ("bytes", "bytearray") and n in (2, 3):
+        return _ctor_run(h, "apy_bytes_ctor", list(vals) + [None] * (3 - n),
+                         raw=(1 if tn == "bytearray" else 0,))
+    return _NO_CTOR
+
+
+def _ctor_call(h, tn, args, kwrest):
+    """A builtin type constructor: the keywords folded, then the positions.
+
+    THE FRONTEND'S OWN FOLD, read here rather than restated -- `int(x,
+    base=16)` written out and `type(5)(x, base=16)` reached through a value
+    are arranged against one signature and refused in one set of words. See
+    `CTOR_PARAMS`.
+    """
+    if tn not in _BUILTIN_CTORS:
+        return _NO_CTOR
+    try:
+        plan = fold_ctor_keywords(tn, len(args), list(kwrest or ()))
+    except KeywordError as exc:
+        h._fail("TypeError", str(exc))
+        raise _UserFailed
+    if plan is None:
+        vals = list(args)
+        if tn == "dict" and kwrest:
+            made = dict(args[0]) if args else {}
+            made.update(kwrest)
+            return made
+    else:
+        vals = []
+        for kind, value in plan:
+            vals.append(args[value] if kind == "pos"
+                        else kwrest[value] if kind == "kw" else value)
+    try:
+        return _ctor_make(h, tn, vals)
+    except _HOST_RAISES as exc:
+        h._fail_like(exc)
+        raise _UserFailed
+
+
+def _apy_ctor_call(h, a):
+    """A BUILTIN TYPE REACHED AS A VALUE: `f = int` then `f("ff", 16)`,
+    `map(int, xs)`, `defaultdict(list)`. The thunk the frontend synthesises
+    for a named builtin type calls exactly this, so the value form, the
+    written form and the type-object form are one implementation."""
+    tn = h._get(a[0], "apy_ctor_call")
+    args = list(h._get(a[1], "apy_ctor_call"))
+    # AN EMPTY BAG IS NO BAG: the thunk always declares the `**kw` slot, so
+    # an ordinary `list(xs)` arrives with an empty dict in it.
+    kwrest = h._get(a[2], "apy_ctor_call") if a[2] else None
+    made = _ctor_call(h, tn, args, kwrest or None)
+    if made is _NO_CTOR:
+        return h._fail("TypeError", f"{tn}() takes no arguments")
+    return h._new(made)
 
 
 def _builtin_ctor(h, f, args, kwrest):
@@ -1735,37 +1866,13 @@ def _builtin_ctor(h, f, args, kwrest):
     kind has and nothing a program writes.
     """
     name = getattr(f, "name", None)
-    if (name in _NO_EMPTY_CTOR and not args and not kwrest
-            and getattr(f, "meta", None) is None
-            and f.find("__new__") is None and f.find("__init__") is None):
-        h._fail("TypeError", _NO_EMPTY_CTOR[name])
-        raise _UserFailed
-    if (name not in _BUILTIN_CTORS or kwrest
+    if (name not in _BUILTIN_CTORS
             or getattr(f, "meta", None) is not None
             or f.find("__new__") is not None
             or f.find("__init__") is not None):
         return _NO_CTOR
-    empty, one = _BUILTIN_CTORS[name]
-    # A VALUE AND NOT A HANDLE, because that is what `_instantiate` answers
-    # everywhere else -- the runtime symbols below hand back handles, so
-    # those are unwrapped on the way out.
-    if not args:
-        return empty()
-    if len(args) != 1:
-        return _NO_CTOR
-    given = args[0]
-    by_symbol = {"str": "apy_str", "bytes": "apy_to_bytes",
-                 "bytearray": "apy_to_bytearray"}
-    try:
-        if name in by_symbol:
-            got = _TABLE[by_symbol[name]](h, [h._new(given)])
-            if not got:
-                raise _UserFailed
-            return h._get(got, name)
-        return one(given)
-    except _HOST_RAISES as exc:
-        h._fail_like(exc)
-        raise _UserFailed
+    return _ctor_call(h, name, list(args),
+                      dict(kwrest) if kwrest else None)
 
 
 def _user(h, body, fail=0):
@@ -3841,6 +3948,22 @@ def _apy_str_encode(h, a):
                        f"'{name}' codec can't encode character")
 
 
+def _codec_arg(h, who, slot, handle):
+    """Refuse a non-string encoding or errors, in the CONSTRUCTOR's wording.
+
+    NAMES THE PARAMETER where the method family beside it NUMBERS it, which
+    is CPython's own split. None is not checked: it is how "not given"
+    travels to the codec pair, and `str(b, errors="replace")` defaults the
+    encoding to UTF-8 rather than refusing.
+    """
+    v = h._get(handle, "apy_codec_arg")
+    if v is None or isinstance(v, str):
+        return 0
+    h._fail("TypeError", f"{who}() argument {slot!r} must be str, "
+                         f"not {h.kind_name(v)}")
+    return 1
+
+
 def _apy_bytes_ctor(h, a):
     """`bytes(s, encoding)` and `bytearray(s, encoding, errors)` -- THE
     CONSTRUCTOR SPELLING OF `.encode()`, and a different constructor from the
@@ -3850,6 +3973,11 @@ def _apy_bytes_ctor(h, a):
     A NON-STR WITH AN ENCODING IS THE OTHER HALF of the refusal the
     one-argument form already makes.
     """
+    who = "bytearray" if int(a[3]) else "bytes"
+    if _codec_arg(h, who, "encoding", a[1]):
+        return 0
+    if _codec_arg(h, who, "errors", a[2]):
+        return 0
     v = h._get(a[0], "apy_bytes_ctor")
     if not isinstance(v, str):
         return h._fail("TypeError", "encoding without a string argument")
@@ -3865,6 +3993,10 @@ def _apy_str_ctor(h, a):
     """`str(b, encoding)` -- the constructor spelling of `.decode()`, and the
     same split: `str(b)` is the REPR of the bytes and `str(b, "utf-8")` is
     the text they spell."""
+    if _codec_arg(h, "str", "encoding", a[1]):
+        return 0
+    if _codec_arg(h, "str", "errors", a[2]):
+        return 0
     v = h._get(a[0], "apy_str_ctor")
     if not isinstance(v, (bytes, bytearray, memoryview)):
         return h._fail("TypeError", f"decoding to str: need a bytes-like "
@@ -6772,7 +6904,7 @@ def _rich_compare(h, want: str, obj, other):
 #: so the two spellings cannot drift into two implementations. The generated
 #: C half reads the same table; see `objects/c/_gen_kindmeth.py`.
 from asmpython.frontends.python.methods import (  # noqa: E402
-    DYN_METHOD_TABLE, method_symbol)
+    DYN_METHOD_TABLE, KeywordError, fold_ctor_keywords, method_symbol)
 
 #: The names that table answers -- the dunders are left out, because every
 #: one of them is a PROTOCOL name the arms above answer with their own

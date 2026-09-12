@@ -33,7 +33,8 @@ from .analysis import (
 )
 from .methods import (
     DICT_PARTS, DYN_METHOD_TABLE, METHOD_KW_SYMBOL, METHOD_PARAMS,
-    KeywordError, fold_keywords, method_symbol,
+    CTOR_ANY_KEYWORD, CTOR_PARAMS, KeywordError, fold_ctor_keywords,
+    fold_keywords, method_symbol,
 )
 
 #: Methods whose keywords are read by a branch of their own in
@@ -253,9 +254,14 @@ _OBJRT_DYNAMIC_NAMES = frozenset({
     "apy_weakref_existing", "apy_gc_collect",
 })
 
+#: `complex` IS ONE OF THEM. It was left off, so `f = complex` then `f()`
+#: reported `complex() takes 1 positional argument but 0 were given` -- the
+#: one-argument thunk every non-type builtin gets -- where CPython answers
+#: `0j`. Every name here goes through `apy_ctor_call`, which already serves
+#: complex's two-parameter signature.
 _BUILTIN_TYPE_VALUES = frozenset({
     "int", "float", "bool", "str", "bytes", "list", "tuple", "dict", "set",
-    "frozenset", "bytearray"})
+    "frozenset", "bytearray", "complex"})
 
 #: The two builtin CLASSES that are values in their own right. `object` is
 #: what `object.__new__(cls)` and `class C(object)` name, and `type` is a
@@ -263,29 +269,19 @@ _BUILTIN_TYPE_VALUES = frozenset({
 #: as text the way `_BUILTIN_TYPE_VALUES` do.
 _CLASS_BUILTINS = {"object": "apy_object_class", "type": "apy_type_class"}
 
-#: The builtins whose one argument is OPTIONAL, and what they answer with
-#: none. `defaultdict(list)` calls the value form with nothing, and a thunk
-#: that declared a required parameter reported an arity error for a call
-#: CPython answers with the type's zero value.
-_EMPTY_DEFAULTS = {
-    "list": "apy_list_new", "tuple": "apy_tuple_new", "str": "",
-    "float": 0.0, "int": 0, "dict": "apy_dict_new", "set": "apy_set_new",
-    "frozenset": "apy_frozenset_new", "bytes": "", "bool": False,
-    # `bytearray()` IS AN EMPTY LIST OF OCTETS, which is exactly what the
-    # written zero-argument form lowers to -- see the `bytearray` branch in
-    # `_dyn_call`, which this default feeds so the thunk's body branches on
-    # nothing.
-    "bytearray": "apy_list_new",
-}
-
 #: The runtime kind number for each builtin a class may extend. These are
 #: the values of the C's kind enum, and the two lists must agree -- a wrong
 #: number gives an instance the wrong kind of storage.
 _BUILTIN_BASE_KIND = {"str": 4, "list": 5, "tuple": 6, "dict": 7, "set": 9}
 
-_VARIADIC_THUNKS = {
-    "print": "apy_print_seq", "dict": "apy_dict_of", "bytes": "apy_bytes_of",
-}
+#: The builtins whose value form takes `*args` rather than exactly one.
+#:
+#: EVERY BUILTIN TYPE IS ONE OF THEM, through `apy_ctor_call` rather than a
+#: symbol apiece: `int("ff", 16)`, `str(b, "utf-8")` and `dict(pairs, a=1)`
+#: are all calls CPython answers, and a one-argument thunk DROPPED the rest
+#: without a word. See `_BUILTIN_TYPE_VALUES`, whose names all take this
+#: shape, and `CTOR_PARAMS`, which says what each of them accepts.
+_VARIADIC_THUNKS = {"print": "apy_print_seq"}
 
 #: The builtins whose VALUE FORM has to carry `**kw`.
 #:
@@ -300,7 +296,10 @@ _VARIADIC_THUNKS = {
 #: thunk keywords its own lowering does not expect could turn a call that
 #: works today into an error, so a name joins this list only once its answer
 #: has been checked against CPython.
-_KEYWORD_THUNKS = frozenset({"dict", "sorted", "min", "max"})
+#: EVERY BUILTIN TYPE IS ON IT: `bytes(source=b"a")` and `int(x, base=16)`
+#: are keyword calls CPython answers, and the fold that arranges them needs
+#: the names to arrive rather than be dropped on the way in.
+_KEYWORD_THUNKS = frozenset({"sorted", "min", "max"}) | _BUILTIN_TYPE_VALUES
 
 
 class _TypeParams(ast.NodeTransformer):
@@ -1255,12 +1254,14 @@ class DynamicLowering:
             self._pending_thunks.append((name, symbol))
         code = self.b.reg(T.PTR)
         self.b.emit(Instruction(Op.FUNC_ADDR, T.PTR, dst=code, sym=symbol))
-        variadic = 1 if name in _VARIADIC_THUNKS else 0
+        variadic = 1 if (name in _VARIADIC_THUNKS
+                         or name in _BUILTIN_TYPE_VALUES) else 0
         takes_kw = 1 if name in _KEYWORD_THUNKS else 0
-        # ONE OPTIONAL PARAMETER for the types whose zero-argument form is
-        # legal, so `defaultdict(list)` can call the value with nothing.
-        optional = 1 if (name in _EMPTY_DEFAULTS
-                         and name not in _VARIADIC_THUNKS) else 0
+        # NO OPTIONAL PARAMETER ANY MORE. Every builtin type's thunk is
+        # VARIADIC, so `defaultdict(list)` calls it with an empty `*rest`
+        # and the constructor's own zero-argument form answers -- one rule
+        # instead of a defaulted parameter that only the empty call used.
+        optional = 0
         made = self.b.call(T.PTR, "apy_func_new",
                            [code, self.b.const(T.I64, 1 + takes_kw),
                             self._dyn_str_literal(name),
@@ -1272,10 +1273,6 @@ class DynamicLowering:
             # dropping what the caller could not place. See `_KEYWORD_THUNKS`.
             self.b.call(T.PTR, "apy_func_kwarg",
                         [made, self.b.const(T.I64, 1)])
-        if optional:
-            self.b.call(T.PTR, "apy_func_default",
-                        [made, self.b.const(T.I64, 0),
-                         self._dyn_empty_value(name)])
         if name not in _BUILTIN_TYPE_VALUES:
             # A BUILTIN REACHED AS A VALUE. `type(print).__name__` is
             # `builtin_function_or_method` in CPython, and a synthesised thunk
@@ -1289,27 +1286,6 @@ class DynamicLowering:
             # `int` are one object and `int == int` is True.
             made = self.b.call(T.PTR, "apy_func_is_type", [made])
         return made
-
-    def _dyn_empty_value(self, name: str) -> int:
-        """What `list()` and friends answer with no argument.
-
-        Handed to the thunk as its parameter's DEFAULT, so the body converts
-        an already-empty value of the right type rather than branching on
-        whether it was called with anything.
-        """
-        want = _EMPTY_DEFAULTS[name]
-        if want == "":
-            return (self._dyn_bytes_literal(b"") if name == "bytes"
-                    else self._dyn_str_literal(""))
-        if want is False:
-            return self.b.call(T.PTR, "apy_from_bool",
-                               [self.b.const(T.I64, 0)])
-        if want == 0:
-            return self.b.call(T.PTR, "apy_from_int", [self.b.const(T.I64, 0)])
-        if want == 0.0:
-            return self.b.call(T.PTR, "apy_from_float",
-                               [self.b.const(T.F64, 0.0)])
-        return self.b.call(T.PTR, want, [self.b.const(T.I64, 1)])
 
     def _dyn_emit_thunks(self) -> None:
         """Emit the body of every builtin thunk this module asked for.
@@ -1349,16 +1325,20 @@ class DynamicLowering:
             # A synthetic call whose single argument is already a value. The
             # `_Given` node hands the register straight back, so the ordinary
             # builtin lowering runs unchanged rather than being reimplemented.
-            if name in _VARIADIC_THUNKS:
+            if name in _VARIADIC_THUNKS or name in _BUILTIN_TYPE_VALUES:
                 # The single parameter IS the `*rest` tuple the caller built,
                 # so the body is one call that takes it whole.
-                _out = self.b.call(T.PTR, _VARIADIC_THUNKS[name], [arg])
-                if kwbag is not None:
-                    # `dict(*rest, **kw)`: the positional half first, the
-                    # keywords over the top of it, which is the order
-                    # `_dyn_call`'s own `dict` branch uses for the written
-                    # spelling. One rule, two ways of reaching it.
-                    self.b.call(T.PTR, "apy_update", [_out, kwbag])
+                if name in _BUILTIN_TYPE_VALUES:
+                    # A BUILTIN TYPE gets the whole call -- positions and
+                    # keywords -- and the runtime folds it against the same
+                    # signature the written spelling is folded against here.
+                    # See `apy_ctor_call`.
+                    _out = self.b.call(T.PTR, "apy_ctor_call",
+                                       [self._dyn_str_literal(name), arg,
+                                        kwbag])
+                else:
+                    _out = self.b.call(T.PTR, _VARIADIC_THUNKS[name], [arg])
+                self._dyn_check()
                 self.b.ret(_out)
                 self.module.functions.append(fn)
                 self.b, self.info = saved_b, saved_info
@@ -2154,6 +2134,14 @@ class DynamicLowering:
         # The one-for-one builtins: one runtime call each, arguments in
         # order. Kept as a table rather than a case apiece, because that is
         # all any of them is.
+        if name in CTOR_PARAMS or name in CTOR_ANY_KEYWORD:
+            # A BUILTIN TYPE CONSTRUCTOR, whose keywords used to be DROPPED:
+            # `int(x="1")` answered 0 and `list(x=1)` answered `[]`. Folded
+            # once, here, so every branch below sees a positional call and
+            # none of them has to know a parameter name. See `CTOR_PARAMS`.
+            node = self._dyn_ctor_fold(name, node)
+            if node is None:
+                return self.b.call(T.PTR, "apy_none", [])
         if name in _MULTI_BUILTINS:
             out = self._dyn_multi_builtin(name, node)
             if out is not None:
@@ -5861,6 +5849,46 @@ class DynamicLowering:
                         [self._dyn_str_literal("TypeError"),
                          self._dyn_str_literal(str(exc))])])
         self._dyn_check()
+
+    def _dyn_ctor_fold(self, name: str, node: ast.Call):
+        """A builtin constructor call in positional form, or None if refused.
+
+        THE KEYWORDS BECOME POSITIONS, so `int("ff", base=16)` and
+        `int("ff", 16)` are one call by the time any of the lowering below
+        sees them -- and a constructor that takes no keyword at all reports
+        rather than dropping what it was given.
+
+        ANSWERS A REWRITTEN NODE rather than lowering anything, because the
+        branches that lower each constructor read `node.args` and there is
+        nothing to be gained by teaching all fifteen of them a second shape.
+        """
+        try:
+            plan = fold_ctor_keywords(name, len(node.args),
+                                      [kw.arg for kw in node.keywords])
+        except KeywordError as exc:
+            # EVERY ARGUMENT STILL RUNS. CPython evaluates the whole call
+            # before it decides it cannot make it, so a call written
+            # `list(f(), g(), x=1)` runs both before the TypeError.
+            for given in node.args:
+                self._dyn_expr(given)
+            for kw in node.keywords:
+                self._dyn_expr(kw.value)
+            self._dyn_keyword_error(exc)
+            return None
+        if plan is None:
+            return node
+        named = {kw.arg: kw.value for kw in node.keywords}
+        args = []
+        for kind, value in plan:
+            if kind == "pos":
+                args.append(node.args[value])
+            elif kind == "kw":
+                args.append(named[value])
+            else:
+                args.append(ast.copy_location(ast.Constant(value=value),
+                                              node))
+        return ast.copy_location(
+            ast.Call(func=node.func, args=args, keywords=[]), node)
 
     def _dyn_encoding_form(self, node):
         """The three arguments of `bytes(s, encoding, errors)`, or None.

@@ -1336,6 +1336,366 @@ static apy_value apy_call_kind(int kind, apy_value src) {
     return 0;
 }
 
+/* THE BUILTIN TYPE CONSTRUCTORS, reached through a TYPE OBJECT rather than
+   through the bare word: `type(5)("ff", 16)`, `x.__class__(v)`, and every
+   `getattr(x, "__class__")(...)` a generic copy helper writes. The written
+   form folds its keywords in the frontend against this same table -- see
+   `CTOR_PARAMS` in `frontends/python/methods.py` -- and this is the half
+   that cannot be folded there, because the NAME is not known until run time.
+
+   ONE NARROWING against the written form, stated rather than hidden: an
+   unknown keyword gets CPython's message without the `Did you mean` hint.
+   The hint is an edit distance over the parameter names, and the runtime has
+   no port of one. */
+typedef struct {
+    const char *name;
+    signed char most, least, paren;
+    const char *slot0, *slot1, *slot2;
+    /* What a MISSING REQUIRED first argument says, and what an EMPTY first
+       slot under a filled one says. A null `headless` means the type answers
+       its ZERO-ARGUMENT form instead of refusing, which is `str`. */
+    const char *missing, *headless;
+} apy_ctor_shape;
+
+static const apy_ctor_shape APY_CTORS[] = {
+    {"int",        2, 0, 0, 0, "base", 0, 0, "int() missing string argument"},
+    {"bool",       1, 0, 0, 0, 0, 0, 0, 0},
+    {"float",      1, 0, 0, 0, 0, 0, 0, 0},
+    {"list",       1, 0, 0, 0, 0, 0, 0, 0},
+    {"tuple",      1, 0, 0, 0, 0, 0, 0, 0},
+    {"set",        1, 0, 0, 0, 0, 0, 0, 0},
+    {"frozenset",  1, 0, 0, 0, 0, 0, 0, 0},
+    {"dict",       1, 0, 0, 0, 0, 0, 0, 0},
+    {"range",      3, 1, 0, 0, 0, 0,
+     "range expected at least 1 argument, got 0", 0},
+    {"slice",      3, 1, 0, 0, 0, 0,
+     "slice expected at least 1 argument, got 0", 0},
+    {"memoryview", 1, 1, 1, "object", 0, 0,
+     "memoryview() missing required argument 'object' (pos 1)",
+     "memoryview() missing required argument 'object' (pos 1)"},
+    {"complex",    2, 0, 1, "real", "imag", 0, 0, 0},
+    {"str",        3, 0, 0, "object", "encoding", "errors", 0, 0},
+    {"bytes",      3, 0, 1, "source", "encoding", "errors", 0,
+     "encoding without a string argument"},
+    {"bytearray",  3, 0, 1, "source", "encoding", "errors", 0,
+     "encoding without a string argument"},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0}
+};
+
+/* CPYTHON'S OWN EDIT DISTANCE, ported from `Python/suggestions.c` -- the
+   same port `frontends/python/methods.py` carries for the WRITTEN spelling,
+   here so the run-time refusal says the same thing. A suggestion this
+   compiler makes where CPython makes none is a new divergence, not a
+   kindness, which is why the constants are reproduced rather than guessed:
+   a CASE change is cheaper than a real one, so `SEP` finds `sep` and a
+   longer all-caps name does not find its lowercase twin. */
+#define APY_MOVE_COST 2
+#define APY_CASE_COST 1
+#define APY_MAX_SUGGEST 40
+
+static int apy_sub_cost(char a, char b) {
+    /* ASCII LOWERCASING WRITTEN OUT rather than through `tolower`, which is
+       locale-sensitive and would need `<ctype.h>` -- a parameter name is
+       ASCII by construction. */
+    char la = a >= 'A' && a <= 'Z' ? (char)(a + 32) : a;
+    char lb = b >= 'A' && b <= 'Z' ? (char)(b + 32) : b;
+    if (a == b) return 0;
+    if (la == lb) return APY_CASE_COST;
+    return APY_MOVE_COST;
+}
+
+static int apy_edits(const char *a, const char *b, int max_cost) {
+    int row[APY_MAX_SUGGEST], la, lb, i, k, result = 0;
+    /* THE COMMON AFFIXES COME OFF FIRST, which is not an optimisation here
+       but part of the answer: the trimmed lengths are what the row below is
+       sized against, and the early exits depend on them. */
+    while (*a && *b && *a == *b) { a++; b++; }
+    la = (int)strlen(a); lb = (int)strlen(b);
+    while (la && lb && a[la - 1] == b[lb - 1]) { la--; lb--; }
+    if (!la || !lb) return (la + lb) * APY_MOVE_COST;
+    if (la > APY_MAX_SUGGEST || lb > APY_MAX_SUGGEST) return max_cost + 1;
+    if (lb < la) {
+        const char *t = a; int tl = la;
+        a = b; la = lb; b = t; lb = tl;
+    }
+    if ((lb - la) * APY_MOVE_COST > max_cost) return max_cost + 1;
+    for (k = 0; k < la; k++) row[k] = (k + 1) * APY_MOVE_COST;
+    for (i = 0; i < lb; i++) {
+        int distance = result = i * APY_MOVE_COST, minimum = -1;
+        for (k = 0; k < la; k++) {
+            int substitute = distance + apy_sub_cost(b[i], a[k]);
+            int best;
+            distance = row[k];
+            best = (result < distance ? result : distance) + APY_MOVE_COST;
+            result = best < substitute ? best : substitute;
+            row[k] = result;
+            if (minimum < 0 || result < minimum) minimum = result;
+        }
+        if (minimum >= 0 && minimum > max_cost) return max_cost + 1;
+    }
+    return result;
+}
+
+/* The parameter CPython would propose for a misspelling, or null. NEAREST
+   WINS AND TIES KEEP THE FIRST, which is the walk CPython makes. */
+static const char *apy_suggest(const char *wrong, const char *const *names) {
+    const char *best = 0;
+    int best_at = -1, i;
+    for (i = 0; i < 3; i++) {
+        int limit, far;
+        if (!names[i]) continue;
+        limit = (int)((strlen(wrong) + strlen(names[i]) + 3)
+                      * APY_MOVE_COST / 6);
+        far = apy_edits(wrong, names[i], limit);
+        if (far > limit) continue;
+        if (best_at < 0 || far < best_at) { best = names[i]; best_at = far; }
+    }
+    return best;
+}
+
+static const apy_ctor_shape *apy_ctor_find(const char *tn) {
+    int i;
+    for (i = 0; APY_CTORS[i].name; i++)
+        if (!strcmp(tn, APY_CTORS[i].name)) return &APY_CTORS[i];
+    return 0;
+}
+
+/* `list expected at most 1 argument, got 2` -- and `bytes() takes at most 3
+   arguments (4 given)`, which is the SAME complaint worded differently. Read
+   out of CPython rather than regularised: the two forms differ in every
+   visible way, and the parenthesised one is what every type uses once a
+   KEYWORD is in the count. */
+static apy_value apy_ctor_surplus(const apy_ctor_shape *sh, int64_t argc,
+                                  int64_t kwc) {
+    char buf[160];
+    const char *plural = sh->most == 1 ? "" : "s";
+    if (kwc || sh->paren)
+        snprintf(buf, sizeof buf, "%s() takes at most %d argument%s "
+                 "(%lld given)", sh->name, (int)sh->most, plural,
+                 (long long)(argc + kwc));
+    else
+        snprintf(buf, sizeof buf, "%s expected at most %d argument%s, "
+                 "got %lld", sh->name, (int)sh->most, plural,
+                 (long long)argc);
+    return apy_fail("TypeError", buf);
+}
+
+/* The positional forms, once the keywords have been folded into slots. Each
+   arm is the same runtime entry point the WRITTEN spelling reaches, so
+   `int("ff", 16)` and `type(5)("ff", 16)` are one implementation. */
+static apy_value apy_ctor_make(const char *tn, apy_value *argv, int64_t argc) {
+    if (argc == 0) {
+        apy_value proto;
+        if (!strcmp(tn, "bool")) return apy_from_bool(0);
+        if (!strcmp(tn, "complex"))
+            return apy_complex_of(apy_from_float(0.0), apy_from_float(0.0));
+        /* `bytearray()` IS AN EMPTY SEQUENCE OF OCTETS, which is exactly what
+           the written zero-argument form lowers to. There is no prototype for
+           it -- a bytearray is a bytes cell with a flag -- so the conversion
+           is named here rather than left to answer nothing. */
+        if (!strcmp(tn, "bytearray")) return apy_to_bytearray(apy_list_new(1));
+        proto = apy_kind_prototype((apy_value)(uintptr_t)tn);
+        if (proto) return proto;
+        return 0;
+    }
+    if (argc == 1) {
+        /* EACH NAMED, because `apy_call_kind` serves five kinds and answers 0
+           for the rest -- and a 0 with no error set is a null that segfaults
+           downstream rather than reporting. */
+        if (!strcmp(tn, "int")) return apy_to_int(argv[0]);
+        if (!strcmp(tn, "bool")) return apy_from_bool(apy_truth(argv[0]));
+        if (!strcmp(tn, "float")) return apy_to_float(argv[0]);
+        if (!strcmp(tn, "str")) return apy_str(argv[0]);
+        if (!strcmp(tn, "bytes")) return apy_to_bytes(argv[0]);
+        if (!strcmp(tn, "bytearray")) return apy_to_bytearray(argv[0]);
+        if (!strcmp(tn, "frozenset")) return apy_to_frozenset(argv[0]);
+        if (!strcmp(tn, "list")) return apy_call_kind(APY_LIST_K, argv[0]);
+        if (!strcmp(tn, "tuple")) return apy_call_kind(APY_TUPLE_K, argv[0]);
+        if (!strcmp(tn, "dict")) return apy_call_kind(APY_DICT_K, argv[0]);
+        if (!strcmp(tn, "set")) return apy_call_kind(APY_SET_K, argv[0]);
+        if (!strcmp(tn, "complex"))
+            return apy_complex_of(argv[0], apy_from_float(0.0));
+        if (!strcmp(tn, "memoryview")) return apy_memoryview(argv[0]);
+    }
+    if (argc >= 1 && argc <= 3
+            && (!strcmp(tn, "range") || !strcmp(tn, "slice"))) {
+        /* `range(stop)` AND `slice(stop)` BOTH PUT THE LONE ARGUMENT IN STOP,
+           which is why neither can be a plain positional forward. */
+        apy_value start = argc > 1 ? argv[0] : apy_none();
+        apy_value stop = argc > 1 ? argv[1] : argv[0];
+        apy_value step = argc > 2 ? argv[2] : apy_none();
+        if (!strcmp(tn, "slice")) return apy_slice_new(start, stop, step);
+        {
+            int64_t a = argc > 1 ? apy_index(start) : 0;
+            int64_t b = apy_index(stop);
+            int64_t c = argc > 2 ? apy_index(step) : 1;
+            if (apy_err_type) return 0;
+            return apy_range(a, b, c);
+        }
+    }
+    if (argc == 2 && !strcmp(tn, "int"))
+        return apy_to_int_base(argv[0], argv[1]);
+    if (argc == 2 && !strcmp(tn, "complex"))
+        return apy_complex_of(argv[0], argv[1]);
+    if (argc >= 2 && argc <= 3 && !strcmp(tn, "str"))
+        return apy_str_ctor(argv[0], argv[1],
+                            argc > 2 ? argv[2] : apy_none());
+    if (argc >= 2 && argc <= 3
+            && (!strcmp(tn, "bytes") || !strcmp(tn, "bytearray")))
+        return apy_bytes_ctor(argv[0], argv[1],
+                              argc > 2 ? argv[2] : apy_none(),
+                              !strcmp(tn, "bytearray"));
+    return 0;
+}
+
+/* The whole call: the keywords folded into slots, then `apy_ctor_make`.
+   `*handled` says whether this was a builtin type at all -- 0 leaves the
+   caller to go on allocating an instance, which is what a user class wants.
+   A handled call answers a value, or 0 with the failure already reported. */
+static apy_value apy_builtin_ctor(const char *tn, apy_value *argv,
+                                  int64_t argc, apy_value kwrest,
+                                  int *handled) {
+    const apy_ctor_shape *sh = apy_ctor_find(tn);
+    apy_value filled[3];
+    int taken[3];
+    int64_t kwc = 0, i, j, top;
+    const char *names[3];
+    *handled = 0;
+    if (!sh) return 0;
+    *handled = 1;
+    kwc = kwrest ? O(kwrest)->v.d.n : 0;
+    names[0] = sh->slot0; names[1] = sh->slot1; names[2] = sh->slot2;
+    /* `dict` TAKES ANY KEYWORD AT ALL -- they become the mapping's own keys,
+       so there is nothing to fold, only a count to check. */
+    if (!strcmp(tn, "dict")) {
+        apy_value made;
+        if (argc > 1) return apy_ctor_surplus(sh, argc, 0);
+        made = argc ? apy_call_kind(APY_DICT_K, argv[0]) : apy_dict_new(1);
+        if (!made) return 0;
+        if (kwc && !apy_update(made, kwrest)) return 0;
+        return made;
+    }
+    /* THE ORDER OF THESE REFUSALS IS CPYTHON'S. A type that takes NO keyword
+       at all says exactly that and names none of them, ahead of every other
+       complaint. */
+    if (kwc && !names[0] && !names[1] && !names[2]) {
+        char buf[96];
+        snprintf(buf, sizeof buf, "%s() takes no keyword arguments", tn);
+        return apy_fail("TypeError", buf);
+    }
+    for (i = 0; i < 3; i++) { filled[i] = 0; taken[i] = 0; }
+    for (i = 0; i < argc && i < 3; i++) { filled[i] = argv[i]; taken[i] = 1; }
+    /* THEN A MISSING REQUIRED FIRST ARGUMENT, in the type's own wording. */
+    if (argc < sh->least) {
+        int named_first = 0;
+        for (i = 0; i < kwc; i++) {
+            apy_value k = O(kwrest)->v.d.keys[i];
+            if (O(k)->kind == APY_STR_K && names[0]
+                    && !strcmp(APY_CSTR(k), names[0])) named_first = 1;
+        }
+        if (!named_first) return apy_fail("TypeError", sh->missing);
+    }
+    if (argc + kwc > sh->most) {
+        if (argc == 0 && kwc) {
+            char buf[128];
+            snprintf(buf, sizeof buf, "%s() takes at most %d keyword "
+                     "argument%s (%lld given)", tn, (int)sh->most,
+                     sh->most == 1 ? "" : "s", (long long)kwc);
+            return apy_fail("TypeError", buf);
+        }
+        return apy_ctor_surplus(sh, argc, kwc);
+    }
+    for (i = 0; i < kwc; i++) {
+        apy_value k = O(kwrest)->v.d.keys[i];
+        int at = -1;
+        if (O(k)->kind == APY_STR_K)
+            for (j = 0; j < 3; j++)
+                if (names[j] && !strcmp(APY_CSTR(k), names[j])) at = (int)j;
+        if (at < 0) {
+            char buf[200];
+            const char *wrong = O(k)->kind == APY_STR_K ? APY_CSTR(k) : "?";
+            const char *near = apy_suggest(wrong, names);
+            if (near)
+                snprintf(buf, sizeof buf, "%s() got an unexpected keyword "
+                         "argument '%.60s'. Did you mean '%s'?",
+                         tn, wrong, near);
+            else
+                snprintf(buf, sizeof buf, "%s() got an unexpected keyword "
+                         "argument '%.60s'", tn, wrong);
+            return apy_fail("TypeError", buf);
+        }
+        if (taken[at]) {
+            char buf[160];
+            snprintf(buf, sizeof buf, "argument for %s() given by name "
+                     "('%s') and position (%d)", tn, names[at], at + 1);
+            return apy_fail("TypeError", buf);
+        }
+        filled[at] = O(kwrest)->v.d.vals[i];
+        taken[at] = 1;
+    }
+    /* `errors` WITHOUT AN `encoding` is its own refusal for the two byte
+       constructors, whatever the source is. */
+    if (taken[2] && !taken[1]
+            && (!strcmp(tn, "bytes") || !strcmp(tn, "bytearray")))
+        return apy_fail("TypeError", "errors without a string argument");
+    if (!taken[0] && (taken[1] || taken[2])) {
+        if (!strcmp(tn, "complex")) {
+            filled[0] = apy_from_int(0);
+            taken[0] = 1;
+        } else if (sh->headless) {
+            return apy_fail("TypeError", sh->headless);
+        } else {
+            /* `str(encoding="x")` IS `''`. There is nothing to decode, and
+               CPython answers the empty string rather than refusing. */
+            return apy_ctor_make(tn, filled, 0);
+        }
+    }
+    /* NONE MEANS "THE DEFAULT" to the codec pair, which is the padding
+       `.encode()` and `.decode()` already take. */
+    top = 0;
+    for (i = 0; i < 3; i++) if (taken[i]) top = i + 1;
+    for (i = 0; i < top; i++) if (!taken[i]) filled[i] = apy_none();
+    {
+        apy_value out = apy_ctor_make(tn, filled, top);
+        /* A SHAPE NOBODY SERVES is not a failure: it hands the call back to
+           the caller, which goes on allocating an instance exactly as it did
+           before any of this existed. A 0 with the flag UP is a real refusal
+           and travels as one. */
+        if (!out && !apy_err_type) *handled = 0;
+        return out;
+    }
+}
+
+/* A BUILTIN TYPE REACHED AS A VALUE: `f = int` then `f("ff", 16)`,
+   `map(int, xs)`, `defaultdict(list)`, `sorted(xs, key=str)`.
+
+   THE THUNK `_dyn_builtin_value` SYNTHESISES CALLS EXACTLY THIS, so the
+   value form, the written form and the type-object form are ONE
+   implementation. The thunk used to take a single argument with a default,
+   which meant `f("ff", 16)` silently dropped the base and `f(x=1)` silently
+   dropped the keyword -- wrong answers with nothing to mark them. */
+APY_API apy_value apy_ctor_call(apy_value namev, apy_value args,
+                                apy_value kwrest) {
+    const char *tn = APY_CSTR(namev);
+    int handled = 0;
+    apy_value out;
+    /* AN EMPTY BAG IS NO BAG. The thunk always declares the `**kw` slot, so
+       an ordinary `list(xs)` arrives with an empty dict in it and the fold
+       must not read that as a keyword given. */
+    if (kwrest && (O(kwrest)->kind != APY_DICT_K || !O(kwrest)->v.d.n))
+        kwrest = 0;
+    out = apy_builtin_ctor(tn, (apy_value *)O(args)->v.q.items,
+                           O(args)->v.q.n, kwrest, &handled);
+    if (handled) return out;
+    /* UNREACHABLE while the thunk is only built for the names the table
+       holds, and kept as the backstop it is. */
+    {
+        char buf[96];
+        snprintf(buf, sizeof buf, "%s() takes no arguments", tn);
+        return apy_fail("TypeError", buf);
+    }
+}
+
 static apy_value apy_instantiate(apy_value f, apy_value *argv, int64_t argc,
                                  apy_value kwrest, int bound) {
     apy_value self;
@@ -1364,50 +1724,12 @@ static apy_value apy_instantiate(apy_value f, apy_value *argv, int64_t argc,
            so reading `v.t.name` without asking would read a FUNC's code
            pointer as a string, which segfaults rather than answering. */
         const char *tn = APY_CSTR(O(f)->v.t.name);
+        int handled = 0;
+        apy_value made = apy_builtin_ctor(tn, argv, argc, kwrest, &handled);
         /* BY NAME AND NOT BY THE PROTOTYPE'S KIND. `bool` and `int` share a
            prototype -- the attribute question cannot tell them apart and does
            not need to -- and `type(True)()` is `False`, not `0`. */
-        /* THREE KINDS HAVE NO EMPTY FORM AT ALL, and allocating an instance
-           of a nameless class for them was the old answer. Named here
-           because `apy_kind_prototype` cannot say "this one refuses" -- it
-           answers a value or nothing, and nothing already means "not a
-           builtin kind". */
-        if (argc == 0 && !kwrest) {
-            apy_value proto;
-            if (!strcmp(tn, "range"))
-                return apy_fail("TypeError",
-                                "range expected at least 1 argument, got 0");
-            if (!strcmp(tn, "slice"))
-                return apy_fail("TypeError",
-                                "slice expected at least 1 argument, got 0");
-            if (!strcmp(tn, "memoryview"))
-                return apy_fail("TypeError", "memoryview() missing required "
-                                             "argument 'object' (pos 1)");
-            if (!strcmp(tn, "bool")) return apy_from_bool(0);
-            if (!strcmp(tn, "complex"))
-                return apy_complex_of(apy_from_float(0.0),
-                                      apy_from_float(0.0));
-            proto = apy_kind_prototype((apy_value)(uintptr_t)tn);
-            if (proto) return proto;
-        } else if (argc == 1 && !kwrest) {
-            /* EACH NAMED, because `apy_call_kind` serves five kinds and
-               answers 0 for the rest -- and a 0 with no error set is a null
-               that segfaults downstream rather than reporting. */
-            if (!strcmp(tn, "int")) return apy_to_int(argv[0]);
-            if (!strcmp(tn, "bool")) return apy_from_bool(apy_truth(argv[0]));
-            if (!strcmp(tn, "float")) return apy_to_float(argv[0]);
-            if (!strcmp(tn, "str")) return apy_str(argv[0]);
-            if (!strcmp(tn, "bytes")) return apy_to_bytes(argv[0]);
-            if (!strcmp(tn, "bytearray")) return apy_to_bytearray(argv[0]);
-            if (!strcmp(tn, "frozenset")) return apy_to_frozenset(argv[0]);
-            if (!strcmp(tn, "list")) return apy_call_kind(APY_LIST_K, argv[0]);
-            if (!strcmp(tn, "tuple"))
-                return apy_call_kind(APY_TUPLE_K, argv[0]);
-            if (!strcmp(tn, "dict")) return apy_call_kind(APY_DICT_K, argv[0]);
-            if (!strcmp(tn, "set")) return apy_call_kind(APY_SET_K, argv[0]);
-            if (!strcmp(tn, "complex"))
-                return apy_complex_of(argv[0], apy_from_float(0.0));
-        }
+        if (handled) return made;
     }
     if (maker) {
         /* `__new__` IS AN IMPLICIT STATICMETHOD: it receives the CLASS as

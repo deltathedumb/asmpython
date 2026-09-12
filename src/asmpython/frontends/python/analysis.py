@@ -363,7 +363,12 @@ _DYN_BUILTINS = {
     "hasattr": 2, "getattr": None, "iter": None, "next": None,
     "dict": None, "bytes": None,
     # `bytearray()`, `bytearray(5)`, `bytearray(b"ab")`.
-    "bytearray": None, "memoryview": 1,
+    # `memoryview` COUNTS ITS OWN ARGUMENTS now, along with every other type
+    # constructor -- see `CTOR_PARAMS`. A count here refused
+    # `memoryview(object=b"a")` as a diagnostic, which is a call CPython
+    # answers, and put the refusal at compile time where CPython puts a
+    # catchable TypeError.
+    "bytearray": None, "memoryview": None,
     # A SNAPSHOT of the names in scope, built at the call site.
     "locals": 0, "globals": 0,
     "issubclass": 2, "vars": 1, "setattr": 3, "delattr": 2,

@@ -238,6 +238,7 @@ OBJECT_NAMES = (
     # arbitrary precision integers
     "apy_pow3", "apy_bit_length", "apy_bit_count",
     "apy_bin", "apy_oct", "apy_hex", "apy_to_int_base", "apy_divmod",
+    "apy_ctor_call",
 )
 
 

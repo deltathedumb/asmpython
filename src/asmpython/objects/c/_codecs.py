@@ -319,6 +319,26 @@ APY_API apy_value apy_bytes_decode(apy_value b, apy_value encoding,
     }
 }
 
+/* `str() argument 'encoding' must be str, not int` -- THE CONSTRUCTOR'S OWN
+   WORDING, which NAMES the parameter where the method family beside it
+   NUMBERS it (`decode() argument 'encoding'` is the method's, and
+   `find() argument 1` is `apy_arg_must_be_str`'s). A non-string encoding
+   used to be passed straight through to the codec lookup, which answered
+   `LookupError: unknown encoding: 5` in the interpreter and IGNORED it
+   entirely when compiled -- a three-way split on one call.
+
+   NONE IS NOT CHECKED HERE, because None is how "not given" travels to the
+   codec pair: `str(b, errors="replace")` has no encoding to pass and CPython
+   defaults it to UTF-8. */
+static apy_value apy_codec_arg(const char *who, const char *slot,
+                               apy_value v) {
+    char buf[160];
+    if (O(v)->kind == APY_NONE_K || O(v)->kind == APY_STR_K) return 0;
+    snprintf(buf, sizeof buf, "%s() argument '%s' must be str, not %s",
+             who, slot, apy_kind_name(v));
+    return apy_fail("TypeError", buf);
+}
+
 /* `bytes(s, encoding)` and `bytearray(s, encoding, errors)` -- THE
    CONSTRUCTOR SPELLING OF `.encode()`, and a different constructor from the
    one-argument form beside it: `bytes(xs)` is a sequence of octets and
@@ -332,6 +352,9 @@ APY_API apy_value apy_bytes_decode(apy_value b, apy_value encoding,
 APY_API apy_value apy_bytes_ctor(apy_value v, apy_value encoding,
                                  apy_value errors, int64_t mut) {
     apy_value made;
+    const char *who = mut ? "bytearray" : "bytes";
+    if (apy_codec_arg(who, "encoding", encoding)) return 0;
+    if (apy_codec_arg(who, "errors", errors)) return 0;
     if (O(v)->kind != APY_STR_K)
         return apy_fail("TypeError", "encoding without a string argument");
     made = apy_str_encode(v, encoding, errors);
@@ -353,6 +376,8 @@ APY_API apy_value apy_bytes_ctor(apy_value v, apy_value encoding,
    text they spell. */
 APY_API apy_value apy_str_ctor(apy_value v, apy_value encoding,
                                apy_value errors) {
+    if (apy_codec_arg("str", "encoding", encoding)) return 0;
+    if (apy_codec_arg("str", "errors", errors)) return 0;
     if (O(v)->kind == APY_MVIEW_K) v = apy_mview_bytes(v);
     if (O(v)->kind != APY_BYTES_K)
         return apy_fail2("TypeError",

@@ -855,6 +855,142 @@ PROGRAMS = {
         # A USER CLASS was never the broken half, and stays whole.
         print(type(C())().x, type(C()) is C)
     """,
+    # THE BUILTIN CONSTRUCTORS HAD NO SIGNATURES. Every keyword written to
+    # one was DROPPED without a word -- `int(x="1")` answered 0, `list(x=1)`
+    # answered `[]`, `str(object=5)` answered `''` and `complex(real=1,
+    # imag=2)` answered `0j`. Surplus positionals were dropped the same way:
+    # `int("1", 10, 3)` answered 1 and `bool(1, 2)` answered True. Two of
+    # them did not even reach the runtime: `range(1, 2, 3, 4)` emitted C that
+    # would not compile and `slice(start=1)` crashed the compiler outright.
+    #
+    # The signatures are CPython's, read out of it and kept in `CTOR_PARAMS`
+    # beside the method table that has done the same job since the keyword
+    # round. So is the wording of all six refusals -- and their ORDER, which
+    # is not the order they occur to a reader: a type that takes no keyword
+    # at all says so ahead of the first argument it also did not get.
+    #
+    # THE SURPLUS WORDING IS TWO WORDINGS and both are reproduced: most types
+    # say `list expected at most 1 argument, got 2` and four say
+    # `bytes() takes at most 3 arguments (4 given)` -- with the second form
+    # taking over for every type once a KEYWORD is in the count.
+    "the_constructor_signatures": """
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except TypeError as e:
+                print(label, "TypeError:", e)
+
+        # THE KEYWORD FORMS, which are calls CPython answers.
+        show("int base", lambda: int("ff", base=16))
+        show("str object", lambda: str(object=5))
+        show("str decode", lambda: str(b"a", encoding="utf-8"))
+        show("str errors", lambda: str(b"a", errors="replace"))
+        show("bytes source", lambda: bytes(source="a", encoding="utf-8"))
+        show("bytearray src", lambda: bytearray(source=b"ab"))
+        show("complex parts", lambda: complex(real=1, imag=2))
+        show("complex imag", lambda: complex(imag=2))
+        show("headless str", lambda: str(encoding="utf-8"))
+        # A TYPE THAT TAKES NO KEYWORD AT ALL says exactly that, and says it
+        # ahead of every other complaint it could make.
+        for body in (lambda: list(iterable=[1]), lambda: float(x=1),
+                     lambda: bool(x=1, y=2), lambda: range(start=1),
+                     lambda: slice(start=1), lambda: tuple(x=1)):
+            show("no keywords", body)
+        # THEN A MISSING REQUIRED FIRST ARGUMENT, in the type's own wording.
+        show("range none", lambda: range())
+        show("slice none", lambda: slice())
+        show("mview none", lambda: memoryview())
+        show("mview wrong", lambda: memoryview(x=1))
+        show("int headless", lambda: int(base=16))
+        show("bytes headless", lambda: bytes(encoding="utf-8"))
+        show("errors alone", lambda: bytes(b"a", errors="replace"))
+        # THEN TOO MANY, in both of CPython's two wordings.
+        show("list surplus", lambda: list(1, 2))
+        show("int surplus", lambda: int("1", 10, 3))
+        show("bool surplus", lambda: bool(1, 2))
+        show("dict surplus", lambda: dict(1, 2))
+        show("str surplus", lambda: str(1, 2, 3, 4))
+        show("range surplus", lambda: range(1, 2, 3, 4))
+        show("bytes surplus", lambda: bytes(1, 2, 3, 4))
+        show("complex surplus", lambda: complex(1, 2, 3))
+        show("mview surplus", lambda: memoryview(b"a", "x"))
+        show("kw counted in", lambda: int("1", 10, base=2))
+        show("kw only count", lambda: memoryview(object=b"a", x=1))
+        # THEN A SLOT GIVEN TWICE, and only then an unknown name -- with
+        # CPython's own edit distance deciding whether there is a suggestion
+        # to make. `bas` finds `base` and `nos` finds nothing.
+        show("twice", lambda: complex(1, real=2))
+        show("twice str", lambda: str(b"a", object=1))
+        show("unknown", lambda: int(x="1"))
+        show("suggested", lambda: int("1", bas=16))
+        show("suggested enc", lambda: str(b"a", encodng="utf-8"))
+        show("unsuggested", lambda: str(b"a", nos=1))
+        show("suggested real", lambda: complex(rea=1))
+        # AND A NON-STRING ENCODING is refused rather than looked up: it used
+        # to split three ways, LookupError in the interpreter and IGNORED
+        # when compiled.
+        show("encoding kind", lambda: str(b"a", 5))
+        show("errors kind", lambda: str(b"a", "utf-8", 5))
+        show("bytes enc kind", lambda: bytes("a", 5))
+        show("barr err kind", lambda: bytearray("a", "utf-8", 5))
+        # AND THE CALLS THAT WERE ALWAYS FINE STAY FINE.
+        print(int("ff", 16), str(b"a", "utf-8"), bytes("a", "utf-8"))
+        print(dict(a=1), dict([("a", 1)], b=2), complex(1, 2))
+        print(range(1, 2), slice(1, 2), bytes(b"ab"), str(5))
+        print(int(), str(), bool(), float(), list(), tuple(), dict())
+        print(bytes(), bytearray(), set(), frozenset(), complex())
+    """,
+    # THE SAME SIGNATURE, THROUGH A TYPE OBJECT AND THROUGH A VALUE. A
+    # builtin type reached as a value became a ONE-ARGUMENT thunk, so
+    # `f = int` then `f("ff", 16)` dropped the base and `f(x=1)` dropped the
+    # keyword; a type object reached through `type(x)` served only the empty
+    # and one-argument forms and reported `int() takes no arguments` for the
+    # rest. All three spellings are one implementation now -- the frontend
+    # folds what it can see, and `apy_ctor_call` folds the rest against the
+    # same table at run time.
+    "a_builtin_type_is_a_constructor_everywhere": """
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except TypeError as e:
+                print(label, "TypeError:", e)
+
+        # THROUGH A TYPE OBJECT, which no module has to name for this to work.
+        show("int base", lambda: type(5)("ff", 16))
+        show("int by name", lambda: type(5)("ff", base=16))
+        show("str decode", lambda: type("")(b"a", "utf-8"))
+        show("str by name", lambda: type("")(b"a", encoding="utf-8"))
+        show("bytes encode", lambda: type(b"")("a", "utf-8"))
+        show("complex parts", lambda: type(1j)(real=1, imag=2))
+        show("dict kw", lambda: type({})(a=1))
+        show("dict both", lambda: type({})([("a", 1)], b=2))
+        show("range two", lambda: type(range(3))(1, 4))
+        show("slice two", lambda: type(slice(1))(1, 4))
+        show("mview", lambda: bytes(type(memoryview(b"a"))(b"xy")))
+        show("surplus", lambda: type([])(1, 2))
+        show("unknown kw", lambda: type([])(x=1))
+        show("suggested", lambda: type(5)("1", bas=16))
+        show("twice", lambda: type(1j)(1, real=2))
+        # AND AS A VALUE, which is what `map`, a key function and a
+        # `defaultdict` factory all hold.
+        show("value base", lambda: (lambda f: f("ff", 16))(int))
+        show("value kw", lambda: (lambda f: f("ff", base=16))(int))
+        show("value decode", lambda: (lambda f: f(b"a", "utf-8"))(str))
+        show("value dict kw", lambda: (lambda f: f(a=1))(dict))
+        show("value surplus", lambda: (lambda f: f(1, 2))(list))
+        show("value bad kw", lambda: (lambda f: f(x=1))(list))
+        print(list(map(int, ["1", "2"])), sorted([10, 9], key=str))
+        print(list(map(str, [1, 2])), list(filter(bool, [0, 1, 2, 0])))
+        # THE EMPTY CALL through a value is the type's own zero value, which
+        # is what a `defaultdict` factory asks for.
+        for kind in (int, float, str, bytes, bytearray, list, tuple, dict,
+                     set, frozenset, bool, complex):
+            print(kind.__name__, repr(kind()))
+        # AND THE TYPE IS STILL A TYPE: one object per name, and the answer
+        # to `type(x) is int` rather than merely something callable.
+        print(type(5) is int, type("") is str, isinstance(1, int))
+        print(int is int, repr(int.__name__), type(5).__name__)
+    """,
     "traceback_positions": """
         try:
             (1).missing

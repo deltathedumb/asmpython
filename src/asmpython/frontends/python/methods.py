@@ -458,3 +458,174 @@ def fold_keywords(name: str, argc: int, given: list[str],
                 f"argument{'' if required == 1 else 's'} ({argc} given)")
         plan.append(("default", default))
     return plan
+
+
+#: NOT GIVEN AT ALL -- a slot nobody filled, which SHORTENS the call rather
+#: than filling it. `int()` is 0 and `int(x)` converts, and the two are
+#: different runtime entry points; a default that made the short call long
+#: would send `int()` down the conversion path with nothing to convert.
+ABSENT = object()
+
+#: The builtin TYPE CONSTRUCTORS, as `METHOD_PARAMS` holds the methods:
+#: `(keyword name or POSITIONAL_ONLY, default)` per slot, read out of CPython.
+#:
+#: THE NAMES ARE THE POINT. `bytes(source="a", encoding="utf-8")` and
+#: `int("ff", base=16)` are calls CPython answers, and every one of them used
+#: to have its keywords DROPPED -- `int(x="1")` answered 0 and `list(x=1)`
+#: answered `[]` rather than reporting anything at all.
+#:
+#: `dict` IS NOT HERE. It takes ARBITRARY keywords -- they become the
+#: mapping's own keys -- so there is nothing to fold, only a count to check.
+CTOR_PARAMS = {
+    "int":        ((POSITIONAL_ONLY, ABSENT), ("base", ABSENT)),
+    "bool":       ((POSITIONAL_ONLY, ABSENT),),
+    "float":      ((POSITIONAL_ONLY, ABSENT),),
+    "list":       ((POSITIONAL_ONLY, ABSENT),),
+    "tuple":      ((POSITIONAL_ONLY, ABSENT),),
+    "set":        ((POSITIONAL_ONLY, ABSENT),),
+    "frozenset":  ((POSITIONAL_ONLY, ABSENT),),
+    "range":      ((POSITIONAL_ONLY, REQUIRED), (POSITIONAL_ONLY, ABSENT),
+                   (POSITIONAL_ONLY, ABSENT)),
+    "slice":      ((POSITIONAL_ONLY, REQUIRED), (POSITIONAL_ONLY, ABSENT),
+                   (POSITIONAL_ONLY, ABSENT)),
+    "memoryview": (("object", REQUIRED),),
+    # `complex(imag=2)` IS `2j`: the real part defaults to a real zero, which
+    # is not the same as not being given -- `complex(x)` asks `x` through
+    # `__complex__` and `complex(x, 0)` builds from parts.
+    "complex":    (("real", 0), ("imag", ABSENT)),
+    # NONE MEANS "THE DEFAULT" to the codec pair, which is the padding
+    # `.encode()` and `.decode()` already take.
+    "str":        (("object", ABSENT), ("encoding", None), ("errors", None)),
+    "bytes":      (("source", ABSENT), ("encoding", None), ("errors", None)),
+    "bytearray":  (("source", ABSENT), ("encoding", None), ("errors", None)),
+}
+
+#: The constructors that take ONE positional argument and any keyword at all,
+#: because the keywords ARE the value: `dict(a=1)` is `{"a": 1}`.
+CTOR_ANY_KEYWORD = {"dict": 1}
+
+#: THE SURPLUS-ARGUMENT WORDING IS NOT ONE WORDING. Most of the builtin types
+#: are `list expected at most 1 argument, got 2` -- the bare name, no
+#: parentheses -- and four of them are `bytes() takes at most 3 arguments (4
+#: given)`. Read out of CPython rather than guessed, because the two forms
+#: differ in every visible way and a test tells them apart.
+_CTOR_PARENTHESISED = {"bytes", "bytearray", "complex", "memoryview"}
+
+#: What a constructor says when its FIRST slot was left empty and a later one
+#: was not. `str` is the odd one and says nothing at all: `str(encoding="x")`
+#: is `''`, the zero-argument call, because there is nothing to decode.
+_CTOR_HEADLESS = {
+    "int": "int() missing string argument",
+    "memoryview": "memoryview() missing required argument 'object' (pos 1)",
+    "bytes": "encoding without a string argument",
+    "bytearray": "encoding without a string argument",
+}
+
+#: WHAT A MISSING REQUIRED FIRST ARGUMENT IS CALLED. Two of the three count
+#: their arguments and the third names the one it wanted, which is the arg
+#: clinic's wording rather than the bare type's.
+_CTOR_MISSING = {
+    "range": "range expected at least 1 argument, got 0",
+    "slice": "slice expected at least 1 argument, got 0",
+    "memoryview": "memoryview() missing required argument 'object' (pos 1)",
+}
+
+#: `errors` WITHOUT AN `encoding` is its own refusal for the two byte
+#: constructors, whatever the source is: `bytes(b"a", errors="replace")` is
+#: `errors without a string argument` and not a decode with a default codec.
+_CTOR_ERRORS_ALONE = {"bytes", "bytearray"}
+
+#: The zero-argument call answers for a constructor whose first slot is empty
+#: but whose later slots are not. Only `str`, and see `_CTOR_HEADLESS`.
+CTOR_HEADLESS_IS_EMPTY = {"str"}
+
+
+def _ctor_surplus(name: str, most: int, argc: int, kwc: int) -> str:
+    """CPython's wording for too many arguments to a builtin constructor."""
+    plural = "" if most == 1 else "s"
+    if kwc or name in _CTOR_PARENTHESISED:
+        # THE PARENTHESISED FORM, which is what every one of them uses once a
+        # KEYWORD is in the count: `int("1", 10, base=2)` is `int() takes at
+        # most 2 arguments (3 given)` where `int("1", 10, 3)` is not.
+        return (f"{name}() takes at most {most} argument{plural} "
+                f"({argc + kwc} given)")
+    return f"{name} expected at most {most} argument{plural}, got {argc}"
+
+
+def fold_ctor_keywords(name: str, argc: int, given: list[str]) -> list | None:
+    """How to arrange a builtin CONSTRUCTOR's arguments, or None.
+
+    THE SAME PLAN `fold_keywords` ANSWERS, and for the same reason: the
+    caller lowers each argument in SOURCE order and then places it. What
+    differs is the wording of every refusal -- a type constructor and a method
+    disagree about all four of them -- and that a slot nobody filled makes the
+    call SHORTER rather than taking a default. See `ABSENT`.
+
+    `None` means the call is already positional and needs no rearranging.
+    """
+    params = CTOR_PARAMS.get(name)
+    if params is None:
+        most = CTOR_ANY_KEYWORD.get(name)
+        if most is not None:
+            # `dict`. THE KEYWORDS ARE THE VALUE, so only the count is ours.
+            if argc > most:
+                raise KeywordError(_ctor_surplus(name, most, argc, 0))
+            return None
+        return None
+    most = len(params)
+    index = {p: i for i, (p, _) in enumerate(params) if p is not POSITIONAL_ONLY}
+    # THE ORDER OF THESE REFUSALS IS CPYTHON'S. A TYPE THAT TAKES NO KEYWORD
+    # AT ALL says exactly that and names none of them, ahead of every other
+    # complaint: `range(start=1)` is `range() takes no keyword arguments` and
+    # not the missing first argument it also does not have.
+    if given and not index:
+        raise KeywordError(f"{name}() takes no keyword arguments")
+    # THEN A MISSING REQUIRED FIRST ARGUMENT, in the type's own wording --
+    # `range` counts them and `memoryview` names the one it wanted.
+    required = sum(1 for _, d in params if d is REQUIRED)
+    if argc < required and not any(g in index and index[g] < required
+                                   for g in given):
+        raise KeywordError(_CTOR_MISSING[name])
+    if argc + len(given) > most:
+        if argc == 0 and given:
+            raise KeywordError(
+                f"{name}() takes at most {most} keyword "
+                f"argument{'' if most == 1 else 's'} ({len(given)} given)")
+        raise KeywordError(_ctor_surplus(name, most, argc, len(given)))
+    if not given:
+        return None
+    slots: dict[int, tuple] = {i: ("pos", i) for i in range(argc)}
+    for kw in given:
+        at = index.get(kw)
+        if at is None:
+            near = _suggest(kw, [p for p, _ in params
+                                 if p is not POSITIONAL_ONLY])
+            raise KeywordError(
+                f"{name}() got an unexpected keyword argument {kw!r}"
+                + (f". Did you mean {near!r}?" if near else ""))
+        if at in slots:
+            raise KeywordError(f"argument for {name}() given by name "
+                               f"({kw!r}) and position ({at + 1})")
+        slots[at] = ("kw", kw)
+    if name in _CTOR_ERRORS_ALONE and "errors" in given and 1 not in slots:
+        raise KeywordError("errors without a string argument")
+    if 0 not in slots and params[0][1] in (ABSENT, REQUIRED):
+        if name in CTOR_HEADLESS_IS_EMPTY:
+            # `str(encoding="x")` IS `''`. There is nothing to decode, and
+            # CPython answers the empty string rather than refusing.
+            return []
+        raise KeywordError(_CTOR_HEADLESS[name])
+    plan = []
+    for i in range(max(slots) + 1):
+        if i in slots:
+            plan.append(slots[i])
+            continue
+        _, default = params[i]
+        if default is ABSENT or default is REQUIRED:
+            # UNREACHABLE while the checks above stand: slot 0 is the only one
+            # that can be empty under a filled one for these shapes, and it is
+            # answered above. Kept as the backstop it is.
+            raise KeywordError(_CTOR_HEADLESS.get(
+                name, f"{name}() takes no keyword arguments"))
+        plan.append(("default", default))
+    return plan
