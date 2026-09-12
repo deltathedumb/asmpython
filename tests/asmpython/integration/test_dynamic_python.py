@@ -450,6 +450,29 @@ PROGRAMS = {
             except AttributeError as e:
                 print("copy:", e)
     """,
+    # `bytearray` WAS THE ONE BUILTIN TYPE THAT COULD NOT BE A VALUE. Calling
+    # it worked, `isinstance(x, bytearray)` worked and `bytearray.__name__`
+    # worked -- but naming it anywhere a value belongs was a COMPILE ERROR
+    # (`E0056`), for a name Python hands out like any other type object. So
+    # `type(x) is bytearray` did not fail at run time: the program did not
+    # build.
+    "bytearray_as_a_value": """
+        print(bytearray(b"ab"), bytearray())
+        print(repr(bytearray), bytearray.__name__)
+        print(type(bytearray(b"a")) is bytearray, type(b"a") is bytearray)
+        print(isinstance(bytearray(b"a"), bytearray), isinstance(b"a", bytearray))
+        print(isinstance(bytearray(b"a"), (bytes, bytearray)))
+        print(list(map(bytearray, [b"ab", b"c"])))
+        # ONE OBJECT PER NAME, which is what `is` and a dict key both need.
+        print(bytearray is bytearray, {bytearray: 1}[bytearray])
+        # THE VALUE FORM TAKES THE ZERO-ARGUMENT CALL TOO, which is what
+        # `defaultdict(bytearray)` does with it.
+        make = bytearray
+        print(make(), make(b"ab"), make([1, 2]))
+        # AND BYTES IS STILL ITS OWN TYPE, not swept up by the new name.
+        print(type(b"a") is bytes, [type(x).__name__ for x in
+                                    [bytearray(b"a"), b"a"]])
+    """,
     "traceback_positions": """
         try:
             (1).missing

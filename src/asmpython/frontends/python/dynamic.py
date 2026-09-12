@@ -255,7 +255,7 @@ _OBJRT_DYNAMIC_NAMES = frozenset({
 
 _BUILTIN_TYPE_VALUES = frozenset({
     "int", "float", "bool", "str", "bytes", "list", "tuple", "dict", "set",
-    "frozenset"})
+    "frozenset", "bytearray"})
 
 #: The two builtin CLASSES that are values in their own right. `object` is
 #: what `object.__new__(cls)` and `class C(object)` name, and `type` is a
@@ -271,6 +271,11 @@ _EMPTY_DEFAULTS = {
     "list": "apy_list_new", "tuple": "apy_tuple_new", "str": "",
     "float": 0.0, "int": 0, "dict": "apy_dict_new", "set": "apy_set_new",
     "frozenset": "apy_frozenset_new", "bytes": "", "bool": False,
+    # `bytearray()` IS AN EMPTY LIST OF OCTETS, which is exactly what the
+    # written zero-argument form lowers to -- see the `bytearray` branch in
+    # `_dyn_call`, which this default feeds so the thunk's body branches on
+    # nothing.
+    "bytearray": "apy_list_new",
 }
 
 #: The runtime kind number for each builtin a class may extend. These are

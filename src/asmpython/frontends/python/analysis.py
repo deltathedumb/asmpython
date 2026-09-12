@@ -407,6 +407,12 @@ _VALUE_BUILTINS = frozenset({
     # and hands the tuple to one runtime call, which is why they can be
     # values even though the one-argument thunk shape does not fit them.
     "print", "dict", "bytes",
+    # `bytearray` IS A TYPE LIKE THE REST and was the only builtin type left
+    # out. `isinstance(x, bytearray)` and `bytearray.__name__` already
+    # worked, so the gap was narrow and total: `type(x) is bytearray`,
+    # `map(bytearray, xs)` and `[bytearray][0](b"ab")` were COMPILE ERRORS
+    # for a name Python hands out as an ordinary value.
+    "bytearray",
     # THE RUNTIME DESCRIPTORS, which are written `@property` far more often
     # than `property(f)`. A bare decorator is a NAME USED AS A VALUE, so
     # without these three here every `@staticmethod` was refused as a builtin
