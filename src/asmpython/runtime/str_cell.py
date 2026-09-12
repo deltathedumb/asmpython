@@ -61,6 +61,55 @@ def apy_str_mut_offset() -> i64:
     return 24
 
 
+def apy_is_bytearray_of(v: ptr) -> i64:
+    """Whether `v` is a bytearray: the bytes cell that admits it is writable.
+
+    THE FLAG IS THE WHOLE OF WHAT SEPARATES THE TWO, so it is what every
+    mutating method tests -- `bytes` reaching one of them has no such method
+    and must say so rather than quietly rewrite a literal.
+    """
+    if i64(load(i32, offset(v, 0))) != apy_bytes_kind():
+        return 0
+    return i64(load(i32, offset(v, apy_str_mut_offset())))
+
+
+def apy_byte_arg_of(v: ptr) -> i64:
+    """The octet a bytearray method's argument stands for, or -1 raising.
+
+    A BYTEARRAY HOLDS NUMBERS AND NOT ONE-BYTE STRINGS -- `b.append(b"z")` is
+    a TypeError and `b.append(300)` a ValueError -- and `append`, `insert`
+    and `remove` all say it the same way, which is why it is said once.
+
+    A BIG IS OUT OF RANGE AND NOT A CRASH: `2 ** 100` is an int like any
+    other to the caller, and reading its payload as a machine word would
+    answer a number that is not in it.
+    """
+    if not apy_is_int_like_of(v):
+        return apy_raise_int_arg(v)
+    if apy_is_big_of(v):
+        return apy_raise_byte_range()
+    byte: i64 = apy_int_payload(v)
+    if byte < 0 or byte > 255:
+        return apy_raise_byte_range()
+    return byte
+
+
+def apy_raise_int_arg(v: ptr) -> i64:
+    """CPython's refusal for a non-integer where an integer belongs."""
+    apy_raise_fmt(
+        rodata(b"TypeError\0"),
+        rodata(b"'%s' object cannot be interpreted as an integer%s\0"),
+        apy_kind_name_of(v), rodata(b"\0"))
+    return -1
+
+
+def apy_raise_byte_range() -> i64:
+    """And its refusal for an integer that is not an octet."""
+    apy_raise_at(rodata(b"ValueError\0"),
+                 rodata(b"byte must be in range(0, 256)\0"))
+    return -1
+
+
 # ── construction ────────────────────────────────────────────────────────────
 #
 # THE BYTES ARE BORROWED, NEVER COPIED. Nothing in the cell records whether

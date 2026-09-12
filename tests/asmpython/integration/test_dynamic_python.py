@@ -473,6 +473,59 @@ PROGRAMS = {
         print(type(b"a") is bytes, [type(x).__name__ for x in
                                     [bytearray(b"a"), b"a"]])
     """,
+    # A BYTEARRAY IS A MUTABLE SEQUENCE AND HAD HALF THE PROTOCOL. `append`
+    # and `extend` worked; `insert`, `pop`, `remove`, `clear` and `reverse`
+    # answered AttributeError about methods Python plainly gives it.
+    #
+    # AND `+=` REBOUND RATHER THAN EXTENDING, which is the worse half and the
+    # one no error marks: `b += data` built a NEW bytearray, so every other
+    # name for the old one kept the old bytes. `*=` had it too, on a LIST as
+    # well -- the two mutable sequences are the kinds where the distinction
+    # between `x += y` and `x = x + y` is visible at all.
+    "bytearray_is_a_mutable_sequence": """
+        b = bytearray(b"abc")
+        b.append(100); b.extend(b"ef"); b.insert(0, 122)
+        print(b, b.pop(), b.pop(0), b)
+        b.remove(98)
+        print(b)
+        b.reverse()
+        print(b)
+        b.clear()
+        print(b, len(b), bool(b))
+        # AN ALIAS SEES THE CHANGE, which is the whole of what in place means.
+        grown = bytearray(b"ab")
+        alias = grown
+        grown += b"z"
+        print(grown, alias, grown is alias)
+        grown *= 2
+        print(grown, alias, grown is alias)
+        xs = [1]
+        ys = xs
+        xs *= 3
+        print(xs, ys, xs is ys)
+        # AND THE DUNDERS THAT NAME THEM ARE VALUES, on the mutable kinds
+        # only -- a tuple falls through to `+` and has none.
+        print([1].__iadd__([2]), bytearray(b"a").__iadd__(b"z"))
+        print(hasattr([1], "__iadd__"), hasattr((1,), "__iadd__"))
+        print(hasattr({1}, "__ior__"), hasattr(frozenset({1}), "__ior__"))
+        # THE REFUSALS ARE CPYTHON'S, and a bytearray holds NUMBERS.
+        for body in (lambda: bytearray().pop(),
+                     lambda: bytearray(b"ab").pop(5),
+                     lambda: bytearray(b"ab").remove(122),
+                     lambda: bytearray(b"ab").remove(b"a"),
+                     lambda: bytearray(b"ab").insert(0, 300),
+                     lambda: bytearray(b"ab").append(b"z")):
+            try:
+                body()
+            except (IndexError, ValueError, TypeError) as e:
+                print(type(e).__name__ + ":", e)
+        # BYTES HAS NONE OF THEM, which is the flag doing its work.
+        for name in ("pop", "clear", "reverse", "insert", "remove"):
+            try:
+                getattr(b"ab", name)
+            except AttributeError as e:
+                print(e)
+    """,
     "traceback_positions": """
         try:
             (1).missing

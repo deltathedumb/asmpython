@@ -433,16 +433,54 @@ static int apy_bytes_push(apy_value b, int byte) {
     return 1;
 }
 
+/* Whether `v` is a bytearray: the bytes cell that admits it is writable. The
+   flag is the whole of what separates the two, so it is what every mutating
+   method tests -- `bytes` reaching one of them has no such method and must
+   say so rather than quietly rewrite a literal. */
+static int apy_is_bytearray(apy_value v) {
+    return O(v)->kind == APY_BYTES_K && O(v)->v.s.mut;
+}
+
+/* THE OCTET A BYTEARRAY METHOD'S ARGUMENT STANDS FOR, or -1 with CPython's
+   own refusal already raised. A bytearray holds NUMBERS and not one-byte
+   strings -- `b.append(b"z")` is a TypeError and `b.append(300)` a
+   ValueError -- and `append`, `insert` and `remove` all say it the same way,
+   which is why it is said once. */
+static int64_t apy_byte_arg(apy_value v) {
+    int64_t byte;
+    /* THE TYPE IS CHECKED BEFORE THE PAYLOAD IS READ. `apy_index_arg` takes
+       an argument already known to be an integer and reads the payload word
+       straight out -- so handing it `b"z"` read a POINTER as a number and
+       reported `byte must be in range(0, 256)` about a value the program
+       never wrote. The original inline copy of this had the same hole. */
+    if (!apy_is_int_like(v)) {
+        apy_fail2("TypeError",
+                  "'%s' object cannot be interpreted as an integer%s",
+                  apy_kind_name(v), "");
+        return -1;
+    }
+    /* AND A BIG IS OUT OF RANGE RATHER THAN AN OVERFLOW: `2 ** 100` is an
+       int like any other here, and CPython says so in those words. */
+    if (apy_is_big(v)) {
+        apy_fail("ValueError", "byte must be in range(0, 256)");
+        return -1;
+    }
+    if (!apy_index_arg(v, &byte, APY_IDX_SUB)) return -1;
+    if (byte < 0 || byte > 255) {
+        apy_fail("ValueError", "byte must be in range(0, 256)");
+        return -1;
+    }
+    return byte;
+}
+
 APY_API apy_value apy_seq_push(apy_value seq, apy_value item) {
     /* A BYTEARRAY APPENDS AN INT. It was missing here and in the
        interpreter both -- `.append` on the most ordinary way there is to
        build one up answered "'bytearray' object has no attribute
        'append'", which `bundled/subprocess.py` found. */
-    if (O(seq)->kind == APY_BYTES_K && O(seq)->v.s.mut) {
-        int64_t byte;
-        if (!apy_index_arg(item, &byte, APY_IDX_SUB)) return 0;
-        if (byte < 0 || byte > 255)
-            return apy_fail("ValueError", "byte must be in range(0, 256)");
+    if (apy_is_bytearray(seq)) {
+        int64_t byte = apy_byte_arg(item);
+        if (byte < 0) return 0;
         if (!apy_bytes_push(seq, (int)byte))
             return apy_fail("MemoryError", "out of memory");
         return apy_none();

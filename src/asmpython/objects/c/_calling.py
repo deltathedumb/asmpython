@@ -599,6 +599,28 @@ APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
        the other walkable kinds. */
     if (k == APY_RANGE_K && strcmp(want, "__bool__") == 0)
         return apy_kind_method(obj, 1, "__bool__", bind);
+    /* THE IN-PLACE OPERATORS, which belong to the MUTABLE kinds and to no
+       other: `(1,).__iadd__` is an AttributeError in Python and `[1].__iadd__`
+       is the method that makes `xs += ys` change the list every other name
+       for it also sees. A tuple falls through to `+` and has nothing to
+       name. A FROZENSET HAS NONE of them, which is why the set arm asks for
+       APY_SET_K rather than `set`. */
+    if (k == APY_LIST_K || (k == APY_BYTES_K && O(obj)->v.s.mut)) {
+        if (strcmp(want, "__iadd__") == 0)
+            return apy_kind_method(obj, 2, "__iadd__", bind);
+        if (strcmp(want, "__imul__") == 0)
+            return apy_kind_method(obj, 2, "__imul__", bind);
+    }
+    if ((dict || k == APY_SET_K) && strcmp(want, "__ior__") == 0)
+        return apy_kind_method(obj, 2, "__ior__", bind);
+    if (k == APY_SET_K) {
+        if (strcmp(want, "__iand__") == 0)
+            return apy_kind_method(obj, 2, "__iand__", bind);
+        if (strcmp(want, "__isub__") == 0)
+            return apy_kind_method(obj, 2, "__isub__", bind);
+        if (strcmp(want, "__ixor__") == 0)
+            return apy_kind_method(obj, 2, "__ixor__", bind);
+    }
     /* `%` ON TEXT IS FORMATTING, not arithmetic -- which is why it belongs
        to str and bytes and to no other sequence. */
     if (text && strcmp(want, "__mod__") == 0)
@@ -991,6 +1013,15 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
                                         "value is not in range");
             return apy_from_int(at);
         }
+        /* THE IN-PLACE OPERATORS, each the runtime entry point the operator
+           form already reaches -- so `xs.__iadd__(ys)` and `xs += ys` are one
+           implementation rather than two that could disagree. */
+        if (strcmp(w, "__iadd__") == 0) return apy_iadd(a[0], a[1]);
+        if (strcmp(w, "__imul__") == 0) return apy_iop(a[0], a[1], apy_lit("*"));
+        if (strcmp(w, "__ior__") == 0) return apy_iop(a[0], a[1], apy_lit("|"));
+        if (strcmp(w, "__iand__") == 0) return apy_iop(a[0], a[1], apy_lit("&"));
+        if (strcmp(w, "__isub__") == 0) return apy_iop(a[0], a[1], apy_lit("-"));
+        if (strcmp(w, "__ixor__") == 0) return apy_iop(a[0], a[1], apy_lit("^"));
         if (strcmp(w, "index") == 0) return apy_index_of(a[0], a[1]);
         if (strcmp(w, "count") == 0) return apy_count_of(a[0], a[1]);
         if (strcmp(w, "append") == 0) return apy_seq_push(a[0], a[1]);

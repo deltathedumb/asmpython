@@ -200,6 +200,17 @@ def apy_list_reverse(seq: ptr) -> ptr:
     HALF THE WALK, because each swap places two elements. A loop to `n`
     would reverse the list and then reverse it back.
     """
+    if apy_is_bytearray_of(seq):
+        # THE SAME HALF-WALK OVER BYTES rather than over an items array.
+        bn: i64 = load(i64, offset(seq, apy_str_len_offset()))
+        bp: ptr = apy_str_data(seq)
+        k: i64 = 0
+        while k < bn // 2:
+            kept: u8 = load(u8, offset(bp, k))
+            store(u8, load(u8, offset(bp, bn - 1 - k)), offset(bp, k))
+            store(u8, kept, offset(bp, bn - 1 - k))
+            k = k + 1
+        return apy_none()
     if i64(load(i32, offset(seq, 0))) != apy_list_kind():
         return apy_raise_fmt(
             rodata(b"AttributeError\0"),
@@ -1079,6 +1090,27 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
     # the other walkable kinds.
     if is_range and apy_name_is(want, rodata(b"__bool__\0")):
         return apy_kind_method_of(obj, 1, rodata(b"__bool__\0"), bind)
+    # THE IN-PLACE OPERATORS, which belong to the MUTABLE kinds and to no
+    # other: `(1,).__iadd__` is an AttributeError in Python and `[1].__iadd__`
+    # is the method that makes `xs += ys` change the list every other name for
+    # it also sees. A tuple falls through to `+` and has nothing to name.
+    if is_list or writable_bytes:
+        if apy_name_is(want, rodata(b"__iadd__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"__imul__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+    # A DICT HAS ONLY `__ior__`; a set has the four. A FROZENSET HAS NONE,
+    # which is why this asks `is_set` and not `sset`.
+    if is_dict or is_set:
+        if apy_name_is(want, rodata(b"__ior__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+    if is_set:
+        if apy_name_is(want, rodata(b"__iand__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"__isub__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"__ixor__\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
     # `%` ON TEXT IS FORMATTING, not arithmetic -- which is why it belongs to
     # str and bytes and to no other sequence.
     if is_str or is_bytes:

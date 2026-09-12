@@ -86,6 +86,26 @@ APY_API apy_value apy_list_pop(apy_value seq, apy_value index, int64_t given) {
     if (O(seq)->kind == APY_DICT_K)
         return apy_dict_pop(seq, index, apy_none(), 0);
     if (apy_is_set(seq) && !given) return apy_set_pop(seq);
+    /* A BYTEARRAY POPS AN INT, because that is what indexing one answers.
+       The bytes move down over the hole rather than an items array, and the
+       message names the kind -- CPython says "pop from empty bytearray". */
+    if (apy_is_bytearray(seq)) {
+        char *p = (char *)O(seq)->v.s.p;
+        int64_t taken;
+        n = O(seq)->v.s.n;
+        if (n == 0) return apy_fail("IndexError", "pop from empty bytearray");
+        if (given) {
+            if (!apy_index_arg(index, &i, APY_IDX_SIZE)) return 0;
+        } else i = n - 1;
+        if (i < 0) i += n;
+        if (i < 0 || i >= n)
+            return apy_fail("IndexError", "pop index out of range");
+        taken = (unsigned char)p[i];
+        for (k = i; k + 1 < n; k++) p[k] = p[k + 1];
+        p[n - 1] = 0;                        /* the terminator moves with it */
+        O(seq)->v.s.n = n - 1;
+        return apy_from_int(taken);
+    }
     if (O(seq)->kind != APY_LIST_K)
         return apy_fail2("AttributeError", "'%s' object has no attribute 'pop'%s",
                          apy_kind_name(seq), "");
@@ -179,6 +199,24 @@ APY_API apy_value apy_list_remove(apy_value seq, apy_value item) {
            ValueError naming it differently. Same method name, two languages. */
         if (!apy_mutable_set("remove", seq)) return 0;
         return apy_set_remove(seq, item);
+    }
+    /* A BYTEARRAY REMOVES AN OCTET BY VALUE, not a subsequence: `remove(98)`
+       and not `remove(b"b")`. Searched here rather than through
+       `apy_index_of`, which reads a bytes receiver as a SUBSTRING search and
+       would take a one-byte bytes where CPython insists on a number. */
+    if (apy_is_bytearray(seq)) {
+        const unsigned char *p = (const unsigned char *)O(seq)->v.s.p;
+        int64_t i, n = O(seq)->v.s.n, want = apy_byte_arg(item);
+        if (want < 0) return 0;
+        for (i = 0; i < n; i++)
+            if (p[i] == (unsigned char)want) {
+                /* THE OCTET IS DROPPED, NOT ANSWERED: `remove` is None and
+                   `pop` is the value, and sharing the walk must not share
+                   the result. */
+                if (!apy_list_pop(seq, apy_from_int(i), 1)) return 0;
+                return apy_none();
+            }
+        return apy_fail("ValueError", "value not found in bytearray");
     }
     /* ONLY a list and a set have `remove`. Without this the miss below turns
        every other kind's missing attribute into `list.remove(x): x not in
@@ -308,6 +346,16 @@ APY_API apy_value apy_clear(apy_value v) {
         O(v)->v.q.n = 0;
         return apy_none();
     }
+    if (apy_is_bytearray(v)) {
+        /* THE TERMINATOR IS WRITTEN and the count is not merely dropped: two
+           hundred places in here read `v.s.p` as a C string, so an emptied
+           bytearray whose first byte still said 'a' would print as `a` to
+           every one of them. Only when there is a byte to write -- an
+           already-empty one may be pointing at a literal. */
+        if (O(v)->v.s.n) ((char *)O(v)->v.s.p)[0] = 0;
+        O(v)->v.s.n = 0;
+        return apy_none();
+    }
     return apy_fail2("AttributeError", "'%s' object has no attribute 'clear'%s",
                      apy_kind_name(v), "");
 }
@@ -367,6 +415,22 @@ APY_API apy_value apy_iadd(apy_value a, apy_value b) {
         if (!apy_extend(a, b)) return 0;
         return a;
     }
+    /* A BYTEARRAY EXTENDS ITSELF TOO, and for the same reason -- it is
+       mutable, so `b += data` has to be visible through every other name for
+       it. Falling through to `apy_add` built a NEW bytearray and rebound the
+       one name that was written, which is the aliasing bug this whole
+       function exists to avoid, arrived at from the bytes side.
+
+       ONLY FROM SOMETHING BYTES-LIKE. `apy_extend` would happily walk a list
+       of ints, and CPython refuses: `can't concat list to bytearray`. */
+    if (apy_is_bytearray(a)) {
+        apy_value src = O(b)->kind == APY_MVIEW_K ? apy_mview_bytes(b) : b;
+        if (O(src)->kind != APY_BYTES_K)
+            return apy_fail2("TypeError", "can't concat %s to bytearray%s",
+                             apy_kind_name(b), "");
+        if (!apy_extend(a, src)) return 0;
+        return a;
+    }
     return apy_add(a, b);
 }
 
@@ -387,6 +451,30 @@ APY_API apy_value apy_iop(apy_value a, apy_value b, apy_value op) {
     }
     if (O(a)->kind == APY_DICT_K && what[0] == '|') {
         if (!apy_update(a, b)) return 0;
+        return a;
+    }
+    /* `xs *= k` REPEATS IN PLACE for the two mutable sequences, which is the
+       `*=` half of the rule `+=` follows: every other name for the list has
+       to see the repetition, and rebinding made `ys` -- bound to the same
+       list a line earlier -- keep the old contents while `xs` held the new.
+
+       COMPUTED THEN COPIED BACK, like the set arm below and for the same
+       reason: `apy_mul` reads the operand this is about to rewrite. */
+    if (what[0] == '*'
+            && (O(a)->kind == APY_LIST_K || apy_is_bytearray(a))) {
+        apy_value out = apy_mul(a, b);
+        int64_t i;
+        if (!out) return 0;
+        if (O(a)->kind == APY_LIST_K) {
+            O(a)->v.q.n = 0;
+            for (i = 0; i < O(out)->v.q.n; i++)
+                apy_q_append(a, O(out)->v.q.items[i]);
+        } else {
+            /* The fresh cell's buffer is nobody else's, so it is taken
+               rather than copied a second time. */
+            O(a)->v.s.p = O(out)->v.s.p;
+            O(a)->v.s.n = O(out)->v.s.n;
+        }
         return a;
     }
     if (O(a)->kind == APY_SET_K) {
@@ -417,6 +505,29 @@ APY_API apy_value apy_iop(apy_value a, apy_value b, apy_value op) {
 APY_API apy_value apy_list_insert(apy_value seq, apy_value where,
                                   apy_value item) {
     int64_t n, i, at;
+    if (apy_is_bytearray(seq)) {
+        int64_t byte;
+        char *p;
+        if (!apy_is_int_like(where))
+            return apy_fail2("TypeError",
+                             "'%s' object cannot be interpreted as an "
+                             "integer%s", apy_kind_name(where), "");
+        byte = apy_byte_arg(item);
+        if (byte < 0) return 0;
+        n = O(seq)->v.s.n;
+        at = O(where)->v.i;
+        if (at < 0) at += n;
+        if (at < 0) at = 0;
+        if (at > n) at = n;
+        /* GROWN BY ONE THROUGH THE ORDINARY APPEND, so the reallocation and
+           the terminator are somebody else's problem, then slid up. */
+        if (!apy_bytes_push(seq, 0))
+            return apy_fail("MemoryError", "out of memory");
+        p = (char *)O(seq)->v.s.p;
+        for (i = n; i > at; i--) p[i] = p[i - 1];
+        p[at] = (char)byte;
+        return apy_none();
+    }
     if (O(seq)->kind != APY_LIST_K)
         return apy_fail2("AttributeError",
                          "'%s' object has no attribute 'insert'%s",
@@ -459,6 +570,16 @@ APY_API apy_value apy_list_sort(apy_value seq, apy_value keyfn,
 /* `xs.reverse()` -- in place, and None. `reversed(xs)` is the other one. */
 APY_API apy_value apy_list_reverse(apy_value seq) {
     int64_t i, n;
+    if (apy_is_bytearray(seq)) {
+        char *p = (char *)O(seq)->v.s.p;
+        n = O(seq)->v.s.n;
+        for (i = 0; i < n / 2; i++) {
+            char t = p[i];
+            p[i] = p[n - 1 - i];
+            p[n - 1 - i] = t;
+        }
+        return apy_none();
+    }
     if (O(seq)->kind != APY_LIST_K)
         return apy_fail2("AttributeError",
                          "'%s' object has no attribute 'reverse'%s",

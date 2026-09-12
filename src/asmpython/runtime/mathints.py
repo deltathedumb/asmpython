@@ -735,6 +735,26 @@ def apy_iadd(a: ptr, b: ptr) -> ptr:
         if not apy_extend(a, b):
             return ptr(0)
         return a
+    # A BYTEARRAY EXTENDS ITSELF TOO, and for the same reason -- it is
+    # mutable, so `b += data` has to be visible through every other name for
+    # it. Falling through to `apy_add` built a NEW bytearray and rebound the
+    # one name that was written, which is the aliasing bug this function
+    # exists to avoid, arrived at from the bytes side.
+    #
+    # ONLY FROM SOMETHING BYTES-LIKE. `apy_extend` would happily walk a list
+    # of ints, and CPython refuses: `can't concat list to bytearray`.
+    if apy_is_bytearray_of(a):
+        src: ptr = b
+        if i64(load(i32, offset(b, 0))) == apy_mview_kind():
+            src = apy_mview_bytes(b)
+        if i64(load(i32, offset(src, 0))) != apy_bytes_kind():
+            return apy_raise_fmt(
+                rodata(b"TypeError\0"),
+                rodata(b"can't concat %s to bytearray%s\0"),
+                apy_kind_name_of(b), rodata(b"\0"))
+        if not apy_extend(a, src):
+            return ptr(0)
+        return a
     return apy_add(a, b)
 
 

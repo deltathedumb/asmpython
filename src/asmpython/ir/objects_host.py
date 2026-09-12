@@ -3026,12 +3026,10 @@ def _apy_seq_push(h, a):
         # `bundled/subprocess.py` found and had to work around. NOT
         # REFERENCE COUNTED, because an `int` is not a tracked handle: see
         # `_refcount`'s own comment on why plain scalars are out of scope.
-        if not isinstance(item, int) or isinstance(item, bool):
-            return h._fail("TypeError",
-                           "an integer is required")
-        if not 0 <= item <= 255:
-            return h._fail("ValueError", "byte must be in range(0, 256)")
-        seq.append(item)
+        byte = _byte_arg(h, item)
+        if byte is None:
+            return 0
+        seq.append(byte)
         return h._none
     if not isinstance(seq, list):
         return h._fail(
@@ -3337,6 +3335,9 @@ def _attr_store(h, d: dict, name: str, value) -> None:
 def _apy_clear(h, a):
     """`.clear()` -- empties in place and answers None."""
     v = h._get(a[0], "apy_clear")
+    if isinstance(v, bytearray):
+        v.clear()
+        return h._none
     if not isinstance(v, (list, dict, set)):
         return h._fail("AttributeError",
                        f"'{h.kind_name(v)}' object has no attribute 'clear'")
@@ -3381,6 +3382,26 @@ def _apy_hash(h, a):
         return h._fail_like(exc)
 
 
+def _byte_arg(h, v):
+    """The octet a bytearray method's argument stands for, or None raising.
+
+    A BYTEARRAY HOLDS NUMBERS AND NOT ONE-BYTE STRINGS -- `b.append(b"z")` is
+    a TypeError and `b.append(300)` a ValueError -- and `append`, `insert`
+    and `remove` all say it the same way.
+    """
+    # A BOOL IS AN INT, in Python and in both compiled runtimes:
+    # `b.append(True)` appends 1 rather than refusing. Excluding it made this
+    # the one path of the three that said no.
+    if not isinstance(v, int):
+        h._fail("TypeError", f"'{h.kind_name(v)}' object cannot be "
+                             f"interpreted as an integer")
+        return None
+    if v < 0 or v > 255:
+        h._fail("ValueError", "byte must be in range(0, 256)")
+        return None
+    return v
+
+
 def _apy_iadd(h, a):
     """`x += y` -- NOT sugar for `x = x + y`.
 
@@ -3401,6 +3422,17 @@ def _apy_iadd(h, a):
     if isinstance(x, list):
         got = _apy_extend(h, [a[0], a[1]])
         return a[0] if got else 0
+    # A BYTEARRAY EXTENDS ITSELF TOO, and for the same reason -- it is
+    # mutable, so `b += data` has to be visible through every other name for
+    # it. Falling through to `apy_add` built a NEW bytearray and rebound the
+    # one name that was written. ONLY FROM SOMETHING BYTES-LIKE: CPython
+    # refuses a list of ints with `can't concat list to bytearray`.
+    if isinstance(x, bytearray):
+        if not isinstance(y, (bytes, bytearray, memoryview)):
+            return h._fail("TypeError",
+                           f"can't concat {h.kind_name(y)} to bytearray")
+        x.extend(bytes(y))
+        return a[0]
     return _TABLE["apy_add"](h, a)
 
 
@@ -3425,6 +3457,17 @@ def _apy_iop(h, a):
     if isinstance(x, dict) and op == "|":
         got = _apy_update(h, [a[0], a[1]])
         return a[0] if got else 0
+    # `xs *= k` REPEATS IN PLACE for the two mutable sequences -- the `*=`
+    # half of the rule `+=` follows. Rebinding left every other name for the
+    # list holding the old contents.
+    if op == "*" and isinstance(x, (list, bytearray)):
+        made = _TABLE["apy_mul"](h, [a[0], a[1]])
+        if not made:
+            return 0
+        got = h._get(made, "apy_iop")
+        x.clear()
+        x.extend(got)
+        return a[0]
     if isinstance(x, set):
         if not isinstance(y, (set, frozenset)):
             return h._binop_error(op, x, y)
@@ -3445,10 +3488,23 @@ def _apy_list_insert(h, a):
     `insert` never raises where `xs[i] = v` does."""
     seq = h._get(a[0], "apy_list_insert")
     where = h._get(a[1], "apy_list_insert")
+    if isinstance(seq, bytearray):
+        # A BYTEARRAY INSERTS AN OCTET, and the position clamps the same way.
+        if not isinstance(where, int):
+            return h._fail("TypeError",
+                           f"'{h.kind_name(where)}' object cannot be "
+                           f"interpreted as an integer")
+        byte = _byte_arg(h, h._get(a[2], "apy_list_insert"))
+        if byte is None:
+            return 0
+        seq.insert(where, byte)
+        return h._none
     if not isinstance(seq, list):
         return h._fail("AttributeError",
                        f"'{h.kind_name(seq)}' object has no attribute 'insert'")
-    if isinstance(where, bool) or not isinstance(where, int):
+    # A BOOL IS AN INT: `xs.insert(True, 9)` inserts at 1 in Python and in
+    # both compiled runtimes, and refusing it here was a three-way split.
+    if not isinstance(where, int):
         return h._fail("TypeError", f"'{h.kind_name(where)}' object cannot be "
                                     f"interpreted as an integer")
     seq.insert(where, h._get(a[2], "apy_list_insert"))
@@ -3478,6 +3534,9 @@ def _apy_list_sort(h, a):
 
 def _apy_list_reverse(h, a):
     seq = h._get(a[0], "apy_list_reverse")
+    if isinstance(seq, bytearray):
+        seq.reverse()
+        return h._none
     if not isinstance(seq, list):
         return h._fail("AttributeError", f"'{h.kind_name(seq)}' object has no "
                                          f"attribute 'reverse'")
@@ -6554,6 +6613,18 @@ def _kind_attr(h, obj, want: str):
         return made(want, lambda *r, _w=want: getattr(obj, _w)(*r))
     if rng and want == "__bool__":
         return made("__bool__", lambda: bool(obj))
+    # THE IN-PLACE OPERATORS, which belong to the MUTABLE kinds and to no
+    # other: `(1,).__iadd__` is an AttributeError in Python and `[1].__iadd__`
+    # is the method that makes `xs += ys` change the list every other name for
+    # it also sees. A FROZENSET HAS NONE of them, which is why the set arm
+    # asks for `set` rather than `set_`.
+    if isinstance(obj, (list, bytearray)) and want in ("__iadd__",
+                                                       "__imul__"):
+        return made(want, lambda o, _w=want: getattr(obj, _w)(o))
+    if isinstance(obj, (dict, set)) and want == "__ior__":
+        return made("__ior__", lambda o: obj.__ior__(o))
+    if isinstance(obj, set) and want in ("__iand__", "__isub__", "__ixor__"):
+        return made(want, lambda o, _w=want: getattr(obj, _w)(o))
     # `%` ON TEXT IS FORMATTING, not arithmetic -- which is why it belongs to
     # str and bytes and to no other sequence.
     if isinstance(obj, (str, bytes, bytearray)) and want == "__mod__":
@@ -9347,6 +9418,16 @@ def _apy_list_pop(h, a):
         if not v:
             return h._fail("KeyError", "'pop from an empty set'")
         return h._value(next(iter(v)) if isinstance(v, frozenset) else v.pop())
+    # A BYTEARRAY POPS AN INT, because that is what indexing one answers,
+    # and the empty message names the kind.
+    if isinstance(v, bytearray):
+        if not v:
+            return h._fail("IndexError", "pop from empty bytearray")
+        at = int(h._get(a[1], "apy_list_pop")) if int(a[2]) else -1
+        try:
+            return h._value(v.pop(at))
+        except IndexError:
+            return h._fail("IndexError", "pop index out of range")
     if not isinstance(v, list):
         return h._fail("AttributeError",
                        f"'{h.kind_name(v)}' object has no attribute 'pop'")
@@ -9446,6 +9527,16 @@ def _apy_count_of(h, a):
 def _apy_list_remove(h, a):
     v = h._get(a[0], "apy_list_remove")
     item = h._get(a[1], "apy_list_remove")
+    # A BYTEARRAY REMOVES AN OCTET BY VALUE: `remove(98)`, not `remove(b"b")`.
+    if isinstance(v, bytearray):
+        byte = _byte_arg(h, item)
+        if byte is None:
+            return 0
+        try:
+            v.remove(byte)
+        except ValueError:
+            return h._fail("ValueError", "value not found in bytearray")
+        return h._none
     if not isinstance(v, list):
         return h._fail("AttributeError",
                        f"'{h.kind_name(v)}' object has no attribute 'remove'")

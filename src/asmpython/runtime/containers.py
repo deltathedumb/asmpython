@@ -108,6 +108,16 @@ def apy_clear(v: ptr) -> ptr:
     if k == apy_list_kind() or k == apy_set_kind():
         store(i64, 0, offset(v, apy_q_n_offset()))
         return apy_none()
+    if apy_is_bytearray_of(v):
+        # THE TERMINATOR IS WRITTEN and the count is not merely dropped: two
+        # hundred places read these bytes as a C string, so an emptied
+        # bytearray whose first byte still said `a` would print as `a` to
+        # every one of them. Only when there is a byte to write -- an
+        # already-empty one may be pointing at a literal.
+        if load(i64, offset(v, apy_str_len_offset())):
+            store(u8, u8(0), apy_str_data(v))
+        store(i64, 0, offset(v, apy_str_len_offset()))
+        return apy_none()
     return apy_raise_fmt(
         rodata(b"AttributeError\0"),
         rodata(b"'%s' object has no attribute 'clear'%s\0"),
@@ -1525,6 +1535,36 @@ def apy_list_insert(seq: ptr, where: ptr, item: ptr) -> ptr:
     APPENDED FIRST, THEN SLID INTO PLACE, so the growth and the shift are one
     pass each and neither needs to know about the other.
     """
+    if apy_is_bytearray_of(seq):
+        # A BYTEARRAY INSERTS AN OCTET, and the position clamps the same way.
+        if not apy_is_int_like_of(where):
+            return apy_raise_fmt(
+                rodata(b"TypeError\0"),
+                rodata(b"'%s' object cannot be interpreted as "
+                       b"an integer%s\0"),
+                apy_kind_name_of(where), rodata(b"\0"))
+        byte: i64 = apy_byte_arg_of(item)
+        if byte < 0:
+            return ptr(0)
+        bn: i64 = load(i64, offset(seq, apy_str_len_offset()))
+        bat: i64 = apy_int_payload(where)
+        if bat < 0:
+            bat = bat + bn
+        if bat < 0:
+            bat = 0
+        if bat > bn:
+            bat = bn
+        # GROWN BY ONE THROUGH THE ORDINARY APPEND, so the reallocation and
+        # the terminator are somebody else's problem, then slid up.
+        if not apy_seq_push(seq, apy_from_int(0)):
+            return ptr(0)
+        bp: ptr = apy_str_data(seq)
+        j: i64 = bn
+        while j > bat:
+            store(u8, load(u8, offset(bp, j - 1)), offset(bp, j))
+            j = j - 1
+        store(u8, u8(byte), offset(bp, bat))
+        return apy_none()
     if i64(load(i32, offset(seq, 0))) != apy_list_kind():
         return apy_raise_fmt(
             rodata(b"AttributeError\0"),
