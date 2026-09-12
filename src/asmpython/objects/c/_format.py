@@ -758,4 +758,28 @@ APY_API apy_value apy_str_format(apy_value fmt, apy_value args, apy_value kw) {
     return apy_format_at(fmt, args, kw, &auto_at, &auto_used, &explicit_used);
 }
 
+/* `s.format_map(m)` -- `format` with the mapping handed over WHOLE rather
+   than built from keywords. The difference CPython draws is that the mapping
+   is not copied and may be any mapping, so `{k}` reaches `m[k]` and a missing
+   key is the mapping's KeyError rather than a formatting error of its own. */
+APY_API apy_value apy_str_format_map(apy_value fmt, apy_value mapping) {
+    apy_value empty;
+    if (O(fmt)->kind != APY_STR_K)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'format_map'%s",
+                         apy_kind_name(fmt), "");
+    if (O(mapping)->kind != APY_DICT_K)
+        /* CPython does not check: it SUBSCRIPTS, and whatever that refuses
+           is what a program sees. These are those two messages. */
+        return O(mapping)->kind == APY_LIST_K
+                   || O(mapping)->kind == APY_TUPLE_K
+               ? apy_fail2("TypeError", "%s indices must be integers or "
+                           "slices, not str%s", apy_kind_name(mapping), "")
+               : apy_fail2("TypeError", "'%s' object is not subscriptable%s",
+                           apy_kind_name(mapping), "");
+    empty = apy_list_new(1);
+    if (!empty) return 0;
+    return apy_str_format(fmt, empty, mapping);
+}
+
 """

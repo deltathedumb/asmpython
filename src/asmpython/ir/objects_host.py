@@ -4186,6 +4186,18 @@ def _apy_bytes_fromhex(h, a):
         return h._fail_like(exc)
 
 
+def _apy_bytearray_fromhex(h, a):
+    """`bytearray.fromhex(text)` -- the same reading, a MUTABLE answer.
+
+    CPython gives back the kind the method was reached through, so this is a
+    bytearray where the shared body above hands out bytes.
+    """
+    got = _apy_bytes_fromhex(h, a)
+    if not got:
+        return 0
+    return h._new(bytearray(h._get(got, "apy_bytearray_fromhex")))
+
+
 def _apy_to_bytes_n(h, a):
     v = h._get(a[0], "apy_to_bytes_n")
     length = h._get(a[1], "apy_to_bytes_n")
@@ -7326,6 +7338,10 @@ def _kind_attr(h, obj, want: str):
         return made(want, lambda *r, _w=want: getattr(obj, _w)(*r))
     if rng and want == "__bool__":
         return made("__bool__", lambda: bool(obj))
+    # AND None SAYS SO TOO, which is the only other kind here that writes the
+    # method out rather than being read through `__len__`.
+    if obj is None and want == "__bool__":
+        return made("__bool__", lambda: False)
     # THE IN-PLACE OPERATORS, which belong to the MUTABLE kinds and to no
     # other: `(1,).__iadd__` is an AttributeError in Python and `[1].__iadd__`
     # is the method that makes `xs += ys` change the list every other name for
@@ -8418,6 +8434,11 @@ def _apy_default_getattr(h, a):
         # the INT zero, not the float, which `type()` on it can tell apart, so
         # Python's own attribute is used rather than a literal 0.
         if name in ("real", "imag"):
+            return h._value(getattr(obj, name))
+        # AND A RATIONAL'S TWO HALVES, which an int carries because it IS one
+        # in lowest terms -- `numbers.Rational` is the rung of the tower that
+        # names them, and a float is not on it.
+        if isinstance(obj, int) and name in ("numerator", "denominator"):
             return h._value(getattr(obj, name))
     if isinstance(obj, Func):
         # WHAT A PROGRAM PUT THERE WINS over the built-in attributes below,
@@ -10719,6 +10740,55 @@ for _sym, _method, _argc in _STR_METHOD_SPEC:
     _TABLE[_sym] = _make_str_method(_sym, _method, _argc)
 
 
+def _apy_str_format_map(h, a):
+    """`s.format_map(m)` -- `format` with the mapping handed over WHOLE.
+
+    CPython does not CHECK the argument, it SUBSCRIPTS it, so what a program
+    sees for a non-mapping is whatever the subscript refused with -- which is
+    why the two messages here are a subscript's and not a signature's.
+    """
+    fmt = h._get(a[0], "apy_str_format_map")
+    mapping = h._get(a[1], "apy_str_format_map")
+    if not isinstance(fmt, str):
+        return h._fail("AttributeError",
+                       f"'{h.kind_name(fmt)}' object has no attribute "
+                       f"'format_map'")
+    if not isinstance(mapping, dict):
+        if isinstance(mapping, (list, tuple)):
+            return h._fail("TypeError",
+                           f"{h.kind_name(mapping)} indices must be integers "
+                           f"or slices, not str")
+        return h._fail("TypeError",
+                       f"'{h.kind_name(mapping)}' object is not subscriptable")
+    return _apy_str_format(h, [a[0], h._new([]), a[1]])
+
+
+def _apy_bytearray_resize(h, a):
+    """`ba.resize(n)` -- 3.14's way of saying how long a bytearray is to be.
+
+    GROWING FILLS WITH NUL and shrinking truncates, which is what makes it a
+    buffer a program can hand out and then fill.
+    """
+    held = h._get(a[0], "apy_bytearray_resize")
+    want = h._get(a[1], "apy_bytearray_resize")
+    if not isinstance(held, bytearray):
+        return h._fail("AttributeError",
+                       f"'{h.kind_name(held)}' object has no attribute "
+                       f"'resize'")
+    if not isinstance(want, int) or isinstance(want, bool):
+        return h._fail("TypeError",
+                       f"'{h.kind_name(want)}' object cannot be interpreted "
+                       f"as an integer")
+    if want < 0:
+        return h._fail("ValueError",
+                       f"Can only resize to positive sizes, got {want}")
+    if want > len(held):
+        held.extend(b"\0" * (want - len(held)))
+    else:
+        del held[want:]
+    return h._none
+
+
 # Set algebra. The pair operations reject a non-set operand the way Python's
 # METHODS do not -- `{1}.union([2])` accepts an iterable while `{1} | [2]` does
 # not -- so these follow the C, which is operator-shaped throughout.
@@ -10756,6 +10826,42 @@ def _make_set_op(symbol: str, method: str):
 
 for _sym, _method in _SET_OP_SPEC:
     _TABLE[_sym] = _make_set_op(_sym, _method)
+
+
+# The same three IN PLACE, and they are NOT `_make_set_op`: each mutates and
+# answers None, a FROZENSET HAS NONE OF THEM -- there is nothing to update --
+# and each takes any iterable, which is the split the algebra above already
+# draws between a method and the operator behind it.
+_SET_UPDATE_SPEC = (
+    ("apy_set_inter_update", "intersection_update"),
+    ("apy_set_diff_update", "difference_update"),
+    ("apy_set_symdiff_update", "symmetric_difference_update"),
+)
+
+
+def _make_set_update(symbol: str, method: str):
+    def binding(h, a, _m=method, _sym=symbol):
+        left = h._get(a[0], _sym)
+        if not isinstance(left, set):
+            return h._fail(
+                "AttributeError",
+                f"'{h.kind_name(left)}' object has no attribute '{_m}'")
+        right = h._get(a[1], _sym)
+        if not isinstance(right, (set, frozenset)):
+            items = _seq_items(h, right, _sym)
+            if items is None:
+                return 0
+            try:
+                right = set(items)
+            except TypeError as exc:
+                return h._fail_like(exc)
+        getattr(left, _m)(right)
+        return h._none
+    return binding
+
+
+for _sym, _method in _SET_UPDATE_SPEC:
+    _TABLE[_sym] = _make_set_update(_sym, _method)
 
 
 def _apy_set_new(h, a):

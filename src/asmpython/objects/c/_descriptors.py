@@ -739,8 +739,23 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
            against it reads `.real` off whatever it was handed. An int's
            imaginary part is the INT zero, not the float, which `type()` on it
            can tell apart. */
-        if (strcmp(want, "real") == 0) return obj;
+        /* A BOOL ANSWERS WITH THE INT, on every one of the four: `True.real`
+           is `1` and not `True`, which `type()` on it can tell apart and a
+           program printing it plainly can. Handing back the receiver was
+           right for an int and wrong for the kind that is one. */
+        if (strcmp(want, "real") == 0)
+            return O(obj)->kind == APY_BOOL_K
+                   ? apy_from_int(O(obj)->v.i) : obj;
         if (strcmp(want, "imag") == 0) return apy_from_int(0);
+        /* AND A RATIONAL'S TWO HALVES, which an int carries because it IS
+           one in lowest terms. `Fraction(x)` reads them off whatever it was
+           handed, and `numbers.Rational` is the rung of the tower that names
+           them -- so a program written against the tower asks an int for
+           them as readily as it asks a Fraction. */
+        if (strcmp(want, "numerator") == 0)
+            return O(obj)->kind == APY_BOOL_K
+                   ? apy_from_int(O(obj)->v.i) : obj;
+        if (strcmp(want, "denominator") == 0) return apy_from_int(1);
         return apy_no_attribute(obj, name);
     case APY_FLOAT_K:
         if (strcmp(want, "real") == 0) return obj;

@@ -183,6 +183,10 @@ _TYPE_STATICS = {
     ("dict", "fromkeys"): ("apy_dict_fromkeys", 2, ("apy_none",)),
     ("int", "from_bytes"): ("apy_from_bytes_n", 2, ()),
     ("bytes", "fromhex"): ("apy_bytes_fromhex", 1, ()),
+    # NOT the same entry point: `bytearray.fromhex` answers the kind it was
+    # reached through, so it is a bytearray and not the bytes the shared
+    # reading gives.
+    ("bytearray", "fromhex"): ("apy_bytearray_fromhex", 1, ()),
     # Three arguments always: the two- and three-argument forms differ only
     # in whether anything is deleted, and None says "nothing" without the
     # table needing to carry two arities.
@@ -2025,7 +2029,7 @@ class DynamicLowering:
                 filler = defaults[len(args) - len(node.args)] \
                     if len(args) - len(node.args) < len(defaults) else "apy_none"
                 args.append(self.b.call(T.PTR, filler, []))
-            if symbol == "apy_bytes_fromhex":
+            if symbol in ("apy_bytes_fromhex", "apy_bytearray_fromhex"):
                 # Its runtime shape is (receiver, text), shared with the
                 # method form; the type has no receiver to give.
                 args = [self.b.call(T.PTR, "apy_none", [])] + args

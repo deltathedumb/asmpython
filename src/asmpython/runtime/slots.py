@@ -1186,6 +1186,11 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
     # the other walkable kinds.
     if is_range and apy_name_is(want, rodata(b"__bool__\0")):
         return apy_kind_method_of(obj, 1, rodata(b"__bool__\0"), bind)
+    # AND None SAYS SO TOO, which is the only other kind here that writes the
+    # method out rather than being read through `__len__`.
+    if apy_kind_is(obj, apy_none_kind()):
+        if apy_name_is(want, rodata(b"__bool__\0")):
+            return apy_kind_method_of(obj, 1, rodata(b"__bool__\0"), bind)
     # THE IN-PLACE OPERATORS, which belong to the MUTABLE kinds and to no
     # other: `(1,).__iadd__` is an AttributeError in Python and `[1].__iadd__`
     # is the method that makes `xs += ys` change the list every other name for

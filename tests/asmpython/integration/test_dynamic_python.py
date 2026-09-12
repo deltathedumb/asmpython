@@ -1658,6 +1658,63 @@ PROGRAMS = {
              lambda: held.__release_buffer__(memoryview(bytearray(b"x"))))
         print(hasattr(b"", "__release_buffer__"))
     """,
+    "a_builtin_method_cpython_has_is_here_too": """
+        def show(label, f):
+            try:
+                print(label, f())
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        # THE THREE IN-PLACE SET UPDATES, which a frozenset does not have. Each takes
+        # any iterable where the operator behind it demands a set, and each answers
+        # None because it changed the set every other name for it also sees.
+        def ran(op, arg):
+            s = {1, 2, 3}
+            got = getattr(s, op)(arg)
+            return got, sorted(s)
+        show("difference_update", lambda: ran("difference_update", {2}))
+        show("difference_update list", lambda: ran("difference_update", [2, 3]))
+        show("intersection_update", lambda: ran("intersection_update", {2, 3, 9}))
+        show("intersection_update list", lambda: ran("intersection_update", [1]))
+        show("symmetric_difference_update", lambda: ran("symmetric_difference_update", {3, 4}))
+        show("emptied by itself", lambda: ran("difference_update", {1, 2, 3}))
+        show("unhashable", lambda: ran("difference_update", [[1]]))
+        print([hasattr(frozenset(), n) for n in ("difference_update",
+                                                 "intersection_update",
+                                                 "symmetric_difference_update")])
+        # `s.format_map(m)` -- `format` with the mapping handed over whole. CPython
+        # does not check the argument, it SUBSCRIPTS it, so a non-mapping is refused
+        # in a subscript's words and not a signature's.
+        show("format_map", lambda: "{a}-{b}".format_map({"a": 1, "b": 2}))
+        show("format_map missing", lambda: "{a}".format_map({}))
+        show("format_map int", lambda: "{a}".format_map(5))
+        show("format_map list", lambda: "{a}".format_map([1]))
+        # 3.14's `resize`: growing fills with NUL and shrinking truncates.
+        def resized(start, n):
+            b = bytearray(start)
+            got = b.resize(n)
+            return got, bytes(b)
+        show("resize grow", lambda: resized(b"ab", 4))
+        show("resize shrink", lambda: resized(b"abcd", 2))
+        show("resize to nothing", lambda: resized(b"ab", 0))
+        show("resize negative", lambda: resized(b"ab", -1))
+        show("resize str", lambda: resized(b"ab", "x"))
+        # `bytearray.fromhex` ANSWERS THE KIND IT WAS REACHED THROUGH, which is not
+        # the bytes the shared reading gives.
+        show("bytearray.fromhex", lambda: bytearray.fromhex("41 42"))
+        show("bytes.fromhex", lambda: bytes.fromhex("41 42"))
+        # A RATIONAL'S TWO HALVES, which an int carries because it IS one. `True`
+        # converts on these and not on `real`, which CPython does too.
+        show("int", lambda: ((5).numerator, (5).denominator))
+        show("bool", lambda: (True.numerator, True.denominator, True.real))
+        show("big", lambda: (2 ** 100).numerator == 2 ** 100)
+        print([hasattr(1.5, "numerator"), hasattr(1j, "numerator")])
+        # And None writes `__bool__` out rather than being read through `__len__`.
+        show("None", lambda: (None.__bool__(), type(None.__bool__()).__name__))
+        print([type(getattr(v, n)).__name__ for v, n in
+               (({1}, "difference_update"), ("", "format_map"),
+                (bytearray(), "resize"), (None, "__bool__"))])
+    """,
     "traceback_positions": """
         try:
             (1).missing

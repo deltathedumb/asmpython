@@ -678,7 +678,10 @@ APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
     /* A RANGE IS FALSE WHEN IT IS EMPTY and says so with `__bool__` rather
        than through `__len__`, which is the one place it parts company with
        the other walkable kinds. */
-    if (k == APY_RANGE_K && strcmp(want, "__bool__") == 0)
+    /* AND None SAYS SO TOO, which is the only other kind here that writes
+       the method out rather than being read through `__len__`. */
+    if ((k == APY_RANGE_K || k == APY_NONE_K)
+            && strcmp(want, "__bool__") == 0)
         return apy_kind_method(obj, 1, "__bool__", bind);
     /* THE IN-PLACE OPERATORS, which belong to the MUTABLE kinds and to no
        other: `(1,).__iadd__` is an AttributeError in Python and `[1].__iadd__`

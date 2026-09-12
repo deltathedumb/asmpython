@@ -699,6 +699,16 @@ APY_API apy_value apy_bytes_fromhex(apy_value self, apy_value text) {
     }
 }
 
+/* `bytearray.fromhex(text)` -- the same reading, a MUTABLE answer. CPython
+   gives back the kind the method was reached through, so this one is a
+   bytearray where the shared body above would hand out bytes. */
+APY_API apy_value apy_bytearray_fromhex(apy_value self, apy_value text) {
+    apy_value got = apy_bytes_fromhex(self, text);
+    if (!got) return 0;
+    O(got)->v.s.mut = 1;
+    return got;
+}
+
 /* The `k`-th byte of an integer's MAGNITUDE, least significant first, and
    zero beyond the end -- which is what asking for a wider byte means.
 

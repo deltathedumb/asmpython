@@ -66,6 +66,10 @@ def apy_kind_meth_arity_of(w: ptr, bit: i64) -> i64:
         if bit & 192:
             return 512
         return 0
+    if apy_cstr_eq(w, rodata(b"difference_update\0")):
+        if bit & 64:
+            return 512
+        return 0
     if apy_cstr_eq(w, rodata(b"discard\0")):
         if bit & 64:
             return 512
@@ -90,6 +94,10 @@ def apy_kind_meth_arity_of(w: ptr, bit: i64) -> i64:
         if bit & 7:
             return 1026
         return 0
+    if apy_cstr_eq(w, rodata(b"format_map\0")):
+        if bit & 1:
+            return 512
+        return 0
     if apy_cstr_eq(w, rodata(b"get\0")):
         if bit & 32:
             return 769
@@ -108,6 +116,10 @@ def apy_kind_meth_arity_of(w: ptr, bit: i64) -> i64:
         return 0
     if apy_cstr_eq(w, rodata(b"intersection\0")):
         if bit & 192:
+            return 512
+        return 0
+    if apy_cstr_eq(w, rodata(b"intersection_update\0")):
+        if bit & 64:
             return 512
         return 0
     if apy_cstr_eq(w, rodata(b"is_integer\0")):
@@ -226,6 +238,10 @@ def apy_kind_meth_arity_of(w: ptr, bit: i64) -> i64:
         if bit & 7:
             return 1025
         return 0
+    if apy_cstr_eq(w, rodata(b"resize\0")):
+        if bit & 4:
+            return 512
+        return 0
     if apy_cstr_eq(w, rodata(b"reverse\0")):
         if bit & 12:
             return 256
@@ -284,6 +300,10 @@ def apy_kind_meth_arity_of(w: ptr, bit: i64) -> i64:
         return 0
     if apy_cstr_eq(w, rodata(b"symmetric_difference\0")):
         if bit & 192:
+            return 512
+        return 0
+    if apy_cstr_eq(w, rodata(b"symmetric_difference_update\0")):
+        if bit & 64:
             return 512
         return 0
     if apy_cstr_eq(w, rodata(b"title\0")):

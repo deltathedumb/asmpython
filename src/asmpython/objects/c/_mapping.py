@@ -582,6 +582,42 @@ APY_API apy_value apy_set_symdiff(apy_value a, apy_value b) {
     return apy_set_method("symmetric_difference", a, b, APY_SYMDIFF);
 }
 
+/* THE THREE IN-PLACE UPDATES. `s.difference_update(t)` is `s -= t` under
+   another name, and the difference between the two spellings is the one the
+   algebra above already draws: a METHOD takes any iterable where the
+   OPERATOR demands a set. A FROZENSET HAS NONE of them -- there is nothing
+   to update -- which is why this asks for the kind rather than `apy_is_set`.
+
+   COMPUTED WHOLE, THEN MOVED IN. `s.difference_update(s)` is legal and
+   empties the set, so writing the answer out element by element as it was
+   worked out would read cells that had already been overwritten. */
+static apy_value apy_set_in_place(const char *name, apy_value a, apy_value b,
+                                  int which) {
+    apy_value made;
+    int64_t i;
+    if (O(a)->kind != APY_SET_K)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute '%s'",
+                         apy_kind_name(a), name);
+    made = apy_set_algebra(name, a, b, which, 0);
+    if (!made) return 0;
+    O(a)->v.q.n = 0;
+    for (i = 0; i < O(made)->v.q.n; i++)
+        if (!apy_set_push(a, O(made)->v.q.items[i])) return 0;
+    return apy_none();
+}
+
+APY_API apy_value apy_set_inter_update(apy_value a, apy_value b) {
+    return apy_set_in_place("intersection_update", a, b, APY_INTER);
+}
+APY_API apy_value apy_set_diff_update(apy_value a, apy_value b) {
+    return apy_set_in_place("difference_update", a, b, APY_DIFF);
+}
+APY_API apy_value apy_set_symdiff_update(apy_value a, apy_value b) {
+    return apy_set_in_place("symmetric_difference_update", a, b,
+                            APY_SYMDIFF);
+}
+
 /* `issubset` / `issuperset` / `isdisjoint`, which take any iterable where the
    operators `<=` / `>=` demand a set -- the same split as the algebra. */
 /* Declared here because the exported half calls it. */

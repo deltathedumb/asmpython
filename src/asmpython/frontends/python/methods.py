@@ -44,6 +44,10 @@ DYN_METHOD_TABLE = {
     "insert":       [None, None, "apy_list_insert"],
     "extend":       [None, "apy_extend"],
     "reverse":      ["apy_list_reverse"],
+    # 3.14's way of saying how long a bytearray is to be. Growing fills with
+    # NUL and shrinking truncates, which is what makes it a buffer a program
+    # can hand out and then fill.
+    "resize":       [None, "apy_bytearray_resize"],
     "clear":        ["apy_clear"],
     "copy":         ["apy_copy"],
     # `sort` is IN PLACE and answers None; `sorted` is the other one. Both
@@ -72,6 +76,12 @@ DYN_METHOD_TABLE = {
     "intersection":     [None, "apy_set_intersection"],
     "difference":       [None, "apy_set_difference"],
     "symmetric_difference": [None, "apy_set_symdiff"],
+    # The same three IN PLACE, which a frozenset does not have: there is
+    # nothing to update. `s.difference_update(t)` is `s -= t` by another
+    # name, and like the algebra above it takes any iterable.
+    "intersection_update": [None, "apy_set_inter_update"],
+    "difference_update":   [None, "apy_set_diff_update"],
+    "symmetric_difference_update": [None, "apy_set_symdiff_update"],
     "issubset":     [None, "apy_set_issubset"],
     "issuperset":   [None, "apy_set_issuperset"],
     "isdisjoint":   [None, "apy_set_isdisjoint"],
@@ -100,6 +110,10 @@ DYN_METHOD_TABLE = {
     "partition":    [None, "apy_str_partition"],
     "rpartition":   [None, "apy_str_rpartition"],
     "join":         [None, "apy_str_join"],
+    # `s.format_map(m)` is `format` with the mapping handed over whole. It
+    # is in the table and `format` is not, because `format` takes keywords
+    # and a variable count and is lowered at the call site instead.
+    "format_map":   [None, "apy_str_format_map"],
     "replace":      [None, None, "apy_str_replace", "apy_str_replace_n"],
     # str: searching
     "find":         [None, "apy_str_find", "apy_str_find2", "apy_str_find3"],

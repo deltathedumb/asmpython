@@ -179,6 +179,10 @@ OBJECT_NAMES = (
     "apy_set_add", "apy_set_discard",
     "apy_set_union", "apy_set_intersection", "apy_set_difference",
     "apy_set_symdiff",
+    "apy_set_inter_update", "apy_set_diff_update",
+    "apy_set_symdiff_update",
+    "apy_str_format_map", "apy_bytearray_resize",
+    "apy_bytearray_fromhex",
     "apy_set_issubset", "apy_set_issuperset", "apy_set_isdisjoint",
     "apy_update", "apy_clear", "apy_copy", "apy_hash",
     # str methods

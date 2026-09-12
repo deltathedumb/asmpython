@@ -548,6 +548,39 @@ APY_API apy_value apy_iop(apy_value a, apy_value b, apy_value op) {
 /* `xs.insert(i, v)`. The index is CLAMPED, not checked -- `insert(99, v)` on a
    two-element list appends, and `insert(-99, v)` prepends. That is Python's
    rule and it is why `insert` never raises IndexError where `xs[i] = v` does. */
+/* `ba.resize(n)` -- 3.14's way of saying how long a bytearray is to be.
+   GROWING FILLS WITH NUL and shrinking truncates, which is what makes it a
+   buffer a program can hand out and then fill. */
+APY_API apy_value apy_bytearray_resize(apy_value seq, apy_value want) {
+    int64_t n, i;
+    if (!apy_is_bytearray(seq))
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'resize'%s",
+                         apy_kind_name(seq), "");
+    if (!apy_is_int_like(want))
+        return apy_fail2("TypeError",
+                         "'%s' object cannot be interpreted as an integer%s",
+                         apy_kind_name(want), "");
+    n = O(want)->v.i;
+    if (n < 0) {
+        char buf[96];
+        snprintf(buf, sizeof buf,
+                 "Can only resize to positive sizes, got %lld",
+                 (long long)n);
+        return apy_fail("ValueError", buf);
+    }
+    /* GROWN THROUGH THE ORDINARY APPEND, so the reallocation and the
+       terminator are somebody else's problem. */
+    for (i = O(seq)->v.s.n; i < n; i++)
+        if (!apy_bytes_push(seq, 0))
+            return apy_fail("MemoryError", "out of memory");
+    if (O(seq)->v.s.n > n) {
+        O(seq)->v.s.n = n;
+        ((char *)O(seq)->v.s.p)[n] = 0;
+    }
+    return apy_none();
+}
+
 APY_API apy_value apy_list_insert(apy_value seq, apy_value where,
                                   apy_value item) {
     int64_t n, i, at;
