@@ -331,6 +331,50 @@ def apy_arg_must_be_str_of(meth: ptr, argno: i64, v: ptr) -> ptr:
         rodata(b"%s() argument must be str, not %s\0"), meth, k)
 
 
+def apy_text_arg_of(meth: ptr, argno: i64, indexy: i64, self: ptr,
+                    v: ptr) -> ptr:
+    """A text argument against its RECEIVER: the value to use, or null.
+
+    `apy_str_other_of` below asks only "is this str or bytes", which let
+    either kind through for either receiver -- so `"abc".find(b"a")` answered
+    0 and `b"abc".find("a")` answered 0, two WRONG ANSWERS where CPython
+    refuses and the interpreter already did.
+
+    A MEMORYVIEW STANDS FOR THE BYTES IT VIEWS, but only for a bytes
+    receiver: `b"xabcx".find(memoryview(b"abc"))` is 1 in CPython and
+    `"abc".find(memoryview(b"a"))` is a TypeError. That is the whole of what
+    "bytes-like" means here, and it is why the conversion belongs with the
+    check rather than beside it.
+
+    TWO WORDINGS FOR A BYTES RECEIVER, which is CPython's own split: the
+    searches say `argument should be integer or bytes-like object` because an
+    INTEGER is a legal needle for them, and everything else says `a bytes-like
+    object is required`.
+    """
+    want: i64 = apy_str_kind()
+    if i64(load(i32, offset(self, 0))) == apy_bytes_kind():
+        want = apy_bytes_kind()
+        if i64(load(i32, offset(v, 0))) == apy_mview_kind():
+            v = apy_mview_bytes(v)
+    if i64(load(i32, offset(v, 0))) == want:
+        return v
+    if want == apy_str_kind():
+        apy_arg_must_be_str_of(meth, argno, v)
+        return ptr(0)
+    if indexy:
+        apy_raise_fmt(
+            rodata(b"TypeError\0"),
+            rodata(b"argument should be integer or bytes-like object, "
+                   b"not '%s'%s\0"),
+            apy_kind_name_of(v), rodata(b"\0"))
+        return ptr(0)
+    apy_raise_fmt(
+        rodata(b"TypeError\0"),
+        rodata(b"a bytes-like object is required, not '%s'%s\0"),
+        apy_kind_name_of(v), rodata(b"\0"))
+    return ptr(0)
+
+
 def apy_str_other_of(meth: ptr, argno: i64, v: ptr) -> i64:
     """Is `v` a string this method may work on?
 
@@ -366,7 +410,8 @@ def apy_str_count_in_of(s: ptr, sub: ptr, start: ptr, end: ptr) -> ptr:
     put a position inside the two bytes of the `é`, which is a place Python
     says nothing can go.
     """
-    if not apy_str_other_of(rodata(b"count\0"), 1, sub):
+    sub = apy_text_arg_of(rodata(b"count\0"), 1, 1, s, sub)
+    if not sub:
         return ptr(0)
     # BYTES COUNTS OCTETS AND STR COUNTS CHARACTERS. One function serves both
     # receivers, so the unit is a fact about `s` rather than about the code.

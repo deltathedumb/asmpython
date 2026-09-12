@@ -1446,6 +1446,83 @@ PROGRAMS = {
         print("issubclass", issubclass(M, type), issubclass(C, object))
         print("base", M.__base__ is type)
     """,
+    # THE TEXT GATE ASKED "IS THIS STR OR BYTES" AND NOT "against WHAT". So
+    # either kind passed for either receiver: `"abc".find(b"a")` answered 0
+    # and `b"abc".find("a")` answered 0, two WRONG ANSWERS where CPython
+    # refuses and the interpreter already did. And a MEMORYVIEW -- which is
+    # bytes-like, and the reason the gate has to see the receiver at all --
+    # was refused by every one of them.
+    #
+    # THE REFUSALS ARE RECEIVER-DEPENDENT, in CPython's own words: the
+    # searches say `argument should be integer or bytes-like object` because
+    # an INTEGER is a legal needle for them, everything else says `a
+    # bytes-like object is required`, and `startswith` names the kind of
+    # tuple it wanted.
+    #
+    # A VIEW ALSO HANDS ITS CONTENTS OVER, which is the reason a program
+    # makes one: `tobytes` and `tolist` did not exist, so a view could be
+    # indexed and sliced and never emptied. And it hashes as the bytes it
+    # views -- as, it turns out, BYTES THEMSELVES did not in the C runtime,
+    # which hashed every one of them by ADDRESS.
+    "a_memoryview_is_bytes_like_and_a_str_is_not": """
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except TypeError as e:
+                print(label, "TypeError:", e)
+
+        m = memoryview(b"abc")
+        one = memoryview(b"a")
+        # A BYTES RECEIVER TAKES A VIEW wherever it takes bytes.
+        show("find", lambda: b"xabcx".find(m))
+        show("rfind", lambda: b"xabcx".rfind(m))
+        show("index", lambda: b"xabcx".index(m))
+        show("count", lambda: b"xabcx".count(m))
+        show("startswith", lambda: b"abcx".startswith(m))
+        show("endswith", lambda: b"xabc".endswith(m))
+        show("startswith tuple", lambda: b"abcx".startswith((m, b"z")))
+        show("split", lambda: b"1abc2".split(m))
+        show("rsplit", lambda: b"1abc2".rsplit(m))
+        show("replace", lambda: b"xabcx".replace(m, b"Z"))
+        show("removeprefix", lambda: b"abcx".removeprefix(m))
+        show("removesuffix", lambda: b"xabc".removesuffix(m))
+        show("join", lambda: b",".join([m, m]))
+        show("contains", lambda: m in b"xabcx")
+        show("constructors", lambda: (bytes(m), bytearray(m)))
+        # A STR RECEIVER TAKES NONE OF IT, and says so as CPython does.
+        show("str find", lambda: "abc".find(m))
+        show("str replace", lambda: "abc".replace(m, "z"))
+        show("str startswith", lambda: "abc".startswith(m))
+        # AND NEITHER KIND MAY STAND IN FOR THE OTHER.
+        show("str find bytes", lambda: "abc".find(b"a"))
+        show("bytes find str", lambda: b"abc".find("a"))
+        show("str startswith bytes", lambda: "abc".startswith(b"a"))
+        show("bytes startswith str", lambda: b"abc".startswith("a"))
+        show("str tuple bytes", lambda: "abc".startswith((b"a",)))
+        show("bytes tuple str", lambda: b"abc".startswith(("a",)))
+        show("str replace bytes", lambda: "abc".replace(b"a", b"z"))
+        show("bytes replace str", lambda: b"abc".replace("a", "z"))
+        show("str split bytes", lambda: "a,b".split(b","))
+        show("bytes split str", lambda: b"a,b".split(","))
+        show("str prefix bytes", lambda: "abc".removeprefix(b"a"))
+        show("bytes prefix str", lambda: b"abc".removeprefix("a"))
+        show("str join bytes", lambda: ",".join([b"a"]))
+        show("bytes join str", lambda: b",".join(["a"]))
+        show("str in bytes", lambda: "a" in b"abc")
+        show("bytes in str", lambda: b"a" in "abc")
+        # A BYTEARRAY IS BYTES-LIKE TOO and always was.
+        show("bytearray arg", lambda: b"xabc".find(bytearray(b"abc")))
+        show("bytearray join", lambda: b",".join([bytearray(b"a"), b"b"]))
+        # WHAT A VIEW ANSWERS ABOUT ITSELF.
+        print("view", len(m), m[1], bytes(m[1:]), m.tobytes(), m.tolist())
+        print("same", m == b"abc", hash(m) == hash(b"abc"))
+        print("one", one.tobytes(), one.tolist(), bytes(one))
+        # AND EQUAL BYTES HASH EQUAL, which the C half did not do at all:
+        # every bytes value fell through to its ADDRESS.
+        made = b"ab" + b"c"
+        print("content", b"abc" == made, hash(b"abc") == hash(made),
+              hash("abc") == hash("ab" + "c"))
+    """,
     "traceback_positions": """
         try:
             (1).missing

@@ -146,7 +146,16 @@ def apy_affix_of(s: ptr, fix: ptr, start: ptr, end: ptr,
         i: i64 = 0
         while i < count:
             one: ptr = ptr(load(u64, offset(items, i * apy_value_size())))
-            if i64(load(i32, offset(one, 0))) != apy_str_kind():
+            # A TUPLE ELEMENT IS HELD TO THE RECEIVER'S KIND TOO, and CPython
+            # words that one differently from the whole-argument refusal
+            # above it: `a bytes-like object is required` for a bytes
+            # receiver, and `tuple for startswith must only contain str` for
+            # a str one.
+            if i64(load(i32, offset(s, 0))) == apy_bytes_kind():
+                one = apy_text_arg_of(meth, 0, 0, s, one)
+                if not one:
+                    return ptr(0)
+            elif i64(load(i32, offset(one, 0))) != apy_str_kind():
                 return apy_raise_fmt(
                     rodata(b"TypeError\0"),
                     rodata(b"tuple for %s must only contain str, "
@@ -156,8 +165,19 @@ def apy_affix_of(s: ptr, fix: ptr, start: ptr, end: ptr,
                 return apy_from_bool(1)
             i = i + 1
         return apy_from_bool(0)
-    k: i64 = i64(load(i32, offset(fix, 0)))
-    if k != apy_str_kind() and k != apy_bytes_kind():
+    # THE RECEIVER DECIDES, and so does the wording: a bytes receiver says
+    # `must be bytes or a tuple of bytes`. Either kind used to pass for
+    # either receiver, so `b"abc".startswith("a")` answered True.
+    if i64(load(i32, offset(s, 0))) == apy_bytes_kind():
+        if i64(load(i32, offset(fix, 0))) == apy_mview_kind():
+            fix = apy_mview_bytes(fix)
+        if i64(load(i32, offset(fix, 0))) != apy_bytes_kind():
+            return apy_raise_fmt(
+                rodata(b"TypeError\0"),
+                rodata(b"%s first arg must be bytes or a tuple of bytes, "
+                       b"not %s\0"),
+                meth, apy_kind_name_of(fix))
+    elif i64(load(i32, offset(fix, 0))) != apy_str_kind():
         return apy_raise_fmt(
             rodata(b"TypeError\0"),
             rodata(b"%s first arg must be str or a tuple of str, "

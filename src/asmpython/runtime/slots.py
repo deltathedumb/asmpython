@@ -1236,6 +1236,15 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
         if is_bytes or is_mview:
             return apy_kind_method_of(obj, 2, rodata(b"__buffer__\0"),
                                       bind)
+    # THE TWO WAYS A VIEW HANDS ITS CONTENTS OVER, and the reason a program
+    # makes one at all: `mv.tobytes()` copies them out and `mv.tolist()`
+    # reads them as numbers. Neither existed, so a view could be indexed and
+    # sliced and never emptied.
+    if is_mview:
+        if apy_name_is(want, rodata(b"tobytes\0")):
+            return apy_kind_method_of(obj, 1, rodata(b"tobytes\0"), bind)
+        if apy_name_is(want, rodata(b"tolist\0")):
+            return apy_kind_method_of(obj, 1, rodata(b"tolist\0"), bind)
     if is_range:
         if apy_name_is(want, rodata(b"start\0")):
             return apy_from_int(load(i64, offset(obj,

@@ -720,6 +720,13 @@ APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
     if (strcmp(want, "__buffer__") == 0
             && (k == APY_BYTES_K || k == APY_MVIEW_K))
         return apy_kind_method(obj, 2, "__buffer__", bind);
+    /* THE TWO WAYS A VIEW HANDS ITS CONTENTS OVER, and the reason a program
+       makes one at all: `mv.tobytes()` copies them out and `mv.tolist()`
+       reads them as numbers. Neither existed, so a view could be indexed and
+       sliced and never emptied. */
+    if (k == APY_MVIEW_K
+            && (strcmp(want, "tobytes") == 0 || strcmp(want, "tolist") == 0))
+        return apy_kind_method(obj, 1, want, bind);
     if (k == APY_RANGE_K) {
         /* THE THREE NUMBERS A RANGE IS, read back. */
         if (strcmp(want, "start") == 0)
@@ -1006,6 +1013,19 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
            none to give. A name the table knows means the same thing on every
            arm they share, because both read `DYN_METHOD_TABLE`. */
         if (apy_kind_meth_arity(w, 0xFFFFu)) return apy_kind_meth_call(w, a, n);
+        if (strcmp(w, "tobytes") == 0) return apy_mview_bytes(a[0]);
+        if (strcmp(w, "tolist") == 0) {
+            apy_value bytes = apy_mview_bytes(a[0]);
+            apy_value out;
+            int64_t i;
+            if (!bytes) return 0;
+            out = apy_list_new(O(bytes)->v.s.n + 1);
+            for (i = 0; i < O(bytes)->v.s.n; i++)
+                if (!apy_seq_push(out, apy_from_int(
+                        (int64_t)(unsigned char)O(bytes)->v.s.p[i])))
+                    return 0;
+            return out;
+        }
         if (strcmp(w, "__hash__") == 0) return apy_hash(a[0]);
         if (strcmp(w, "__len__") == 0) return apy_len(a[0]);
         if (strcmp(w, "__iter__") == 0) return apy_iter(a[0]);

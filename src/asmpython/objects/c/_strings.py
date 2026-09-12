@@ -97,6 +97,44 @@ static int apy_str_other(const char *meth, int argno, apy_value v) {
                                  (int64_t)argno, v);
 }
 
+APY_API apy_value apy_mview_bytes(apy_value v);
+
+/* A TEXT ARGUMENT AGAINST ITS RECEIVER: the value to use, or 0 having
+   refused. The gate above asks only "is this str or bytes", which let either
+   kind through for either receiver -- so `"abc".find(b"a")` answered 0 and
+   `b"abc".find("a")` answered 0, two WRONG ANSWERS where CPython refuses and
+   the interpreter already did.
+
+   A MEMORYVIEW STANDS FOR THE BYTES IT VIEWS, but only for a bytes receiver:
+   `b"xabcx".find(memoryview(b"abc"))` is 1 in CPython and
+   `"abc".find(memoryview(b"a"))` is a TypeError. That is the whole of what
+   "bytes-like" means here, and it is why the conversion belongs with the
+   check rather than beside it.
+
+   TWO WORDINGS FOR A BYTES RECEIVER, which is CPython's own split: the
+   searches say `argument should be integer or bytes-like object` because an
+   INTEGER is a legal needle for them, and everything else says `a bytes-like
+   object is required`. */
+static apy_value apy_text_arg(const char *meth, int argno, int indexy,
+                              apy_value self, apy_value v) {
+    int want_bytes = O(self)->kind == APY_BYTES_K;
+    char buf[160];
+    if (want_bytes && O(v)->kind == APY_MVIEW_K) v = apy_mview_bytes(v);
+    if (O(v)->kind == (want_bytes ? APY_BYTES_K : APY_STR_K)) return v;
+    if (!want_bytes) {
+        apy_arg_must_be_str(meth, argno, v);
+        return 0;
+    }
+    if (indexy)
+        snprintf(buf, sizeof buf, "argument should be integer or bytes-like "
+                 "object, not '%s'", apy_kind_name(v));
+    else
+        snprintf(buf, sizeof buf, "a bytes-like object is required, not '%s'",
+                 apy_kind_name(v));
+    apy_fail("TypeError", buf);
+    return 0;
+}
+
 APY_API int64_t apy_int_arg_of(apy_value v, apy_value out) {
     if (!apy_is_int_like(v)) {
         apy_fail2("TypeError",
@@ -223,7 +261,8 @@ static apy_value apy_str_search(apy_value s, apy_value sub, apy_value start,
     const char *meth = want_index ? (from_right ? "rindex" : "index")
                                   : (from_right ? "rfind" : "find");
     if (!apy_str_self(meth, s)) return 0;
-    if (!apy_str_other(meth, 1, sub)) return 0;
+    sub = apy_text_arg(meth, 1, 1, s, sub);
+    if (!sub) return 0;
     hi = apy_str_chars(s);
     if (start && !apy_slice_arg(start, &lo)) return 0;
     if (end && !apy_slice_arg(end, &hi)) return 0;
@@ -305,7 +344,8 @@ APY_API apy_value apy_str_count_in_of(apy_value s, apy_value sub,
        code: `"éàbcé".count("é", 1, 5)` names characters, and answering it
        over bytes found nothing. */
     int wide = O(s)->kind == APY_STR_K;
-    if (!apy_str_other("count", 1, sub)) return 0;
+    sub = apy_text_arg("count", 1, 1, s, sub);
+    if (!sub) return 0;
     n = wide ? apy_str_chars(s) : O(s)->v.s.n;
     hi = n;
     if (start && !apy_slice_arg(start, &lo)) return 0;
@@ -874,7 +914,8 @@ APY_API apy_value apy_str_rstrip_chars(apy_value s, apy_value chars) {
 
 APY_API apy_value apy_str_removeprefix(apy_value s, apy_value p) {
     if (!apy_str_self("removeprefix", s)) return 0;
-    if (!apy_str_other("removeprefix", 0, p)) return 0;
+    p = apy_text_arg("removeprefix", 0, 0, s, p);
+    if (!p) return 0;
     if (O(p)->v.s.n && O(p)->v.s.n <= O(s)->v.s.n
         && memcmp(O(s)->v.s.p, O(p)->v.s.p, (size_t)O(p)->v.s.n) == 0)
         return apy_str_slice_of(s, O(p)->v.s.n, O(s)->v.s.n);
@@ -883,7 +924,8 @@ APY_API apy_value apy_str_removeprefix(apy_value s, apy_value p) {
 
 APY_API apy_value apy_str_removesuffix(apy_value s, apy_value p) {
     if (!apy_str_self("removesuffix", s)) return 0;
-    if (!apy_str_other("removesuffix", 0, p)) return 0;
+    p = apy_text_arg("removesuffix", 0, 0, s, p);
+    if (!p) return 0;
     if (O(p)->v.s.n && O(p)->v.s.n <= O(s)->v.s.n
         && memcmp(O(s)->v.s.p + O(s)->v.s.n - O(p)->v.s.n,
                   O(p)->v.s.p, (size_t)O(p)->v.s.n) == 0)
@@ -1031,11 +1073,18 @@ APY_API apy_value apy_str_split_impl_of(apy_value s, apy_value sep,
     if (maxsplit < 0) maxsplit = -1;      /* any negative means "no limit" */
     if (!sep || O(sep)->kind == APY_NONE_K)
         return apy_split_ws_of(s, maxsplit, from_right);
-    /* BYTES TOO -- `b"a,b".split(b",")` is the same operation. The receiver
-       decides the result's kind; see `apy_str_like`. */
-    if (O(sep)->kind != APY_STR_K && O(sep)->kind != APY_BYTES_K)
+    /* THE RECEIVER DECIDES. A bytes separator used to pass for a str
+       receiver and back, so `b"a,b".split(",")` answered `[b'a', b'b']` -- a
+       wrong answer where CPython refuses. */
+    if (O(s)->kind == APY_BYTES_K) {
+        sep = apy_text_arg("split", 0, 0, s, sep);
+        if (!sep) return 0;
+    } else if (O(sep)->kind != APY_STR_K) {
+        /* A STR RECEIVER HAS ITS OWN WORDING, and it mentions None because
+           None is what a separator may also be. */
         return apy_fail2("TypeError", "must be str or None, not %s%s",
                          apy_kind_name(sep), "");
+    }
     return apy_split_sep_of(s, sep, maxsplit, from_right);
 }
 
@@ -1173,14 +1222,22 @@ APY_API apy_value apy_str_join(apy_value sep, apy_value parts) {
     for (i = 0; i < n; i++) {
         got[i] = apy_key_at(parts, i);
         if (!got[i]) { free(got); return 0; }
-        /* BYTES TOO -- `b"-".join([b"a", b"b"])` joins bytes. The receiver
-           decides the result's kind; see `apy_str_like`. */
-        if (O(got[i])->kind != APY_STR_K
-                && O(got[i])->kind != APY_BYTES_K) {
+        /* THE RECEIVER DECIDES what the parts must be, and CPython words the
+           two refusals differently: `expected str instance` for a str
+           separator and `expected a bytes-like object` for a bytes one --
+           which a MEMORYVIEW satisfies, and used to be refused. */
+        if (O(sep)->kind == APY_BYTES_K && O(got[i])->kind == APY_MVIEW_K)
+            got[i] = apy_mview_bytes(got[i]);
+        if (O(got[i])->kind != O(sep)->kind) {
             char msg[128];
-            snprintf(msg, sizeof msg,
-                     "sequence item %lld: expected str instance, %s found",
-                     (long long)i, apy_kind_name(got[i]));
+            if (O(sep)->kind == APY_BYTES_K)
+                snprintf(msg, sizeof msg,
+                         "sequence item %lld: expected a bytes-like object, "
+                         "%s found", (long long)i, apy_kind_name(got[i]));
+            else
+                snprintf(msg, sizeof msg,
+                         "sequence item %lld: expected str instance, %s found",
+                         (long long)i, apy_kind_name(got[i]));
             free(got);
             return apy_fail("TypeError", msg);
         }
@@ -1247,8 +1304,10 @@ static apy_value apy_replace_impl(apy_value s, apy_value old, apy_value new_,
 
 APY_API apy_value apy_str_replace(apy_value s, apy_value old, apy_value new_) {
     if (!apy_str_self("replace", s)) return 0;
-    if (!apy_str_other("replace", 1, old)) return 0;
-    if (!apy_str_other("replace", 2, new_)) return 0;
+    old = apy_text_arg("replace", 1, 0, s, old);
+    if (!old) return 0;
+    new_ = apy_text_arg("replace", 2, 0, s, new_);
+    if (!new_) return 0;
     return apy_replace_impl(s, old, new_, -1);
 }
 
@@ -1256,8 +1315,10 @@ APY_API apy_value apy_str_replace_n(apy_value s, apy_value old, apy_value new_,
                                     apy_value count) {
     int64_t limit;
     if (!apy_str_self("replace", s)) return 0;
-    if (!apy_str_other("replace", 1, old)) return 0;
-    if (!apy_str_other("replace", 2, new_)) return 0;
+    old = apy_text_arg("replace", 1, 0, s, old);
+    if (!old) return 0;
+    new_ = apy_text_arg("replace", 2, 0, s, new_);
+    if (!new_) return 0;
     if (!apy_int_arg(count, &limit)) return 0;
     /* A NEGATIVE count means "all", not "none": `replace(a, b, -1)` replaces
        everything and `replace(a, b, 0)` replaces nothing. */
@@ -1293,20 +1354,35 @@ APY_API apy_value apy_affix_of(apy_value s, apy_value fix, apy_value start,
     if (O(fix)->kind == APY_TUPLE_K) {
         for (i = 0; i < O(fix)->v.q.n; i++) {
             apy_value one = O(fix)->v.q.items[i];
-            if (O(one)->kind != APY_STR_K)
+            /* A TUPLE ELEMENT IS HELD TO THE RECEIVER'S KIND TOO, and
+               CPython words that one differently from the whole-argument
+               refusal below it. */
+            if (O(s)->kind == APY_BYTES_K) {
+                one = apy_text_arg(meth, 0, 0, s, one);
+                if (!one) return 0;
+            } else if (O(one)->kind != APY_STR_K) {
                 return apy_fail2("TypeError",
                                  "tuple for %s must only contain str, not %s",
                                  meth, apy_kind_name(one));
+            }
             if (apy_affix1(s, one, lo, hi, at_end)) return apy_from_bool(1);
         }
         return apy_from_bool(0);
     }
-    /* BYTES TOO -- `b"ab".startswith(b"a")` is the same
-       operation on the same layout. */
-    if (O(fix)->kind != APY_STR_K && O(fix)->kind != APY_BYTES_K)
+    /* THE RECEIVER DECIDES, and so does the wording: a bytes receiver says
+       `must be bytes or a tuple of bytes`. Either kind used to pass for
+       either receiver, so `b"abc".startswith("a")` answered True. */
+    if (O(s)->kind == APY_BYTES_K) {
+        if (O(fix)->kind == APY_MVIEW_K) fix = apy_mview_bytes(fix);
+        if (O(fix)->kind != APY_BYTES_K)
+            return apy_fail2("TypeError",
+                             "%s first arg must be bytes or a tuple of "
+                             "bytes, not %s", meth, apy_kind_name(fix));
+    } else if (O(fix)->kind != APY_STR_K) {
         return apy_fail2("TypeError",
                          "%s first arg must be str or a tuple of str, not %s",
                          meth, apy_kind_name(fix));
+    }
     return apy_from_bool(apy_affix1(s, fix, lo, hi, at_end));
 }
 

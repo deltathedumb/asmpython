@@ -1453,6 +1453,10 @@ APY_API apy_value apy_contains(apy_value needle, apy_value hay) {
             for (i = 0; i < hn; i++) if (hp[i] == want) return apy_from_bool(1);
             return apy_from_bool(0);
         }
+        /* A MEMORYVIEW IS BYTES-LIKE, and `memoryview(b"a") in b"abc"` is
+           True in CPython -- it was refused with the message that says so
+           about everything else. */
+        if (O(needle)->kind == APY_MVIEW_K) needle = apy_mview_bytes(needle);
         if (O(needle)->kind != APY_BYTES_K)
             return apy_fail2("TypeError",
                              "a bytes-like object is required, not '%s'%s",

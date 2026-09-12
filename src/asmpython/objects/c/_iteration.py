@@ -317,6 +317,18 @@ static int64_t apy_hash_raw(apy_value v) {
         for (i = 0; i < O(v)->v.big.n; i++)
             h = (int64_t)((uint64_t)h * 1000003ULL) ^ O(v)->v.big.limb[i];
         return O(v)->v.big.neg ? -h : h;
+    case APY_MVIEW_K:
+        /* A VIEW HASHES AS THE BYTES IT VIEWS, which is what makes
+           `hash(memoryview(b"a")) == hash(b"a")` -- the equality between
+           them already holds, and a hash that disagreed would put the two in
+           different buckets of the same dict. */
+        return apy_hash_raw(apy_mview_bytes(v));
+    case APY_BYTES_K:
+        /* BYTES HASH AS THEIR OCTETS, and the arm was simply missing: every
+           bytes value fell to the ADDRESS below, so `b"abc"` and
+           `b"ab" + b"c"` -- equal values -- hashed differently. The ported
+           runtime has hashed them by content since it was written, so this
+           was the C half disagreeing with its own twin. */
     case APY_STR_K:
         h = (int64_t)0xcbf29ce484222325ULL;      /* FNV-1a */
         for (i = 0; i < O(v)->v.s.n; i++) {

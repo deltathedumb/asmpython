@@ -8228,6 +8228,14 @@ def _apy_default_getattr(h, a):
         # written out.
         if name in ("readonly", "nbytes", "itemsize", "format", "obj"):
             return h._value(getattr(obj, name))
+        # THE TWO WAYS A VIEW HANDS ITS CONTENTS OVER, and the reason a
+        # program makes one at all: `mv.tobytes()` copies them out and
+        # `mv.tolist()` reads them as numbers. Neither existed, so a view
+        # could be indexed and sliced and never emptied.
+        if name in ("tobytes", "tolist"):
+            return h._new(Native(name,
+                                 lambda _n=name, _o=obj: getattr(_o, _n)(),
+                                 owner=obj))
         return h._no_attr(obj, name)
     if isinstance(obj, complex):
         # `.real` and `.imag` are floats, not complexes -- `(1+2j).real` is

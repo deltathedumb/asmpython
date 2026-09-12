@@ -358,8 +358,16 @@ def apy_str_split_impl_of(s: ptr, sep: ptr, limit: ptr,
         return apy_split_ws_of(s, maxsplit, from_right)
     if i64(load(i32, offset(sep, 0))) == apy_none_kind():
         return apy_split_ws_of(s, maxsplit, from_right)
-    k: i64 = i64(load(i32, offset(sep, 0)))
-    if k != apy_str_kind() and k != apy_bytes_kind():
+    # THE RECEIVER DECIDES. A bytes separator used to pass for a str receiver
+    # and back, so `b"a,b".split(",")` answered `[b'a', b'b']` -- a wrong
+    # answer where CPython refuses.
+    if i64(load(i32, offset(s, 0))) == apy_bytes_kind():
+        sep = apy_text_arg_of(rodata(b"split\0"), 0, 0, s, sep)
+        if not sep:
+            return ptr(0)
+    elif i64(load(i32, offset(sep, 0))) != apy_str_kind():
+        # A STR RECEIVER HAS ITS OWN WORDING, and it mentions None because
+        # None is what a separator may also be.
         return apy_raise_fmt(rodata(b"TypeError\0"),
                              rodata(b"must be str or None, not %s%s\0"),
                              apy_kind_name_of(sep), rodata(b"\0"))

@@ -1151,6 +1151,12 @@ def apy_hash_raw_of(v: ptr) -> i64:
         return apy_hash_bytes(v)
     if k == apy_bytes_kind():
         return apy_hash_bytes(v)
+    if k == apy_mview_kind():
+        # A VIEW HASHES AS THE BYTES IT VIEWS, which is what makes
+        # `hash(memoryview(b"a")) == hash(b"a")` -- the equality between them
+        # already holds, and a hash that disagreed would put the two in
+        # different buckets of the same dict.
+        return apy_hash_bytes(apy_mview_bytes(v))
     if k == apy_tuple_kind():
         n: i64 = load(i64, offset(v, apy_q_n_offset()))
         items: ptr = ptr(load(u64, offset(v, apy_q_items_offset())))
