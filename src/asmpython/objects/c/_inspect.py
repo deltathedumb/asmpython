@@ -1026,6 +1026,15 @@ APY_API apy_value apy_delitem(apy_value seq, apy_value key) {
         O(seq)->v.q.n = to;
         return apy_none();
     }
+    /* THE SUBSCRIPT'S OWN WORDING. `del xs[1.0]` is a complaint about the
+       subscript, and CPython words it as one: `list indices must be integers
+       or slices, not float`, and not the index conversion's `'float' object
+       cannot be interpreted as an integer`. AN INSTANCE IS LEFT ALONE, since
+       one with `__index__` is a valid subscript and the conversion asks. */
+    if (!apy_is_int_like(key) && O(key)->kind != APY_INST_K)
+        return apy_fail2("TypeError",
+                         "list indices must be integers or slices, not %s%s",
+                         apy_kind_name(key), "");
     if (!apy_index_arg(key, &i, APY_IDX_SUB)) return 0;
     if (i < 0) i += O(seq)->v.q.n;
     if (i < 0 || i >= O(seq)->v.q.n)

@@ -105,6 +105,13 @@ static int apy_is_big(apy_value v) {
      APY_IDX_SIZE    `'ab'.ljust(2 ** 100)` OverflowError, "C ssize_t" */
 enum { APY_IDX_SUB, APY_IDX_REPEAT, APY_IDX_SIZE };
 
+/* DECLARED AHEAD, because this part is second and both live far below it:
+   `apy_index` is the one place a non-integer index is refused and a user
+   object is asked for its `__index__`, and `apy_is_int_like` is what says
+   whether either is needed. */
+static int apy_is_int_like(apy_value v);
+APY_API int64_t apy_index(apy_value v);
+
 APY_API int64_t apy_index_arg_of(apy_value v, apy_value out, int64_t form) {
     if (apy_is_big(v)) {
         apy_fail(form == APY_IDX_SUB ? "IndexError" : "OverflowError",
@@ -112,6 +119,16 @@ APY_API int64_t apy_index_arg_of(apy_value v, apy_value out, int64_t form) {
                    ? "Python int too large to convert to C ssize_t"
                    : "cannot fit 'int' into an index-sized integer");
         return 0;
+    }
+    /* A NON-INTEGER IS REFUSED AND NOT READ. This used to take the payload of
+       whatever it was handed, so `[1, 2].pop(1.0)` read the BITS OF A DOUBLE
+       as an index. `apy_index` is what words the refusal and what asks a user
+       object for its `__index__`, so the two are one implementation. */
+    if (!apy_is_int_like(v)) {
+        int64_t got = apy_index(v);
+        if (apy_error_occurred()) return 0;
+        *(int64_t *)(uintptr_t)out = got;
+        return 1;
     }
     *(int64_t *)(uintptr_t)out = O(v)->v.i;
     return 1;

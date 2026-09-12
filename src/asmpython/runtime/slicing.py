@@ -51,6 +51,14 @@ def apy_index_arg_of(v: ptr, out: ptr, form: i64) -> i64:
     THREE REPORTS, AND THE PAIRING IS NOT DERIVABLE from anything: it is what
     CPython happens to raise at each of the three places it converts, so it is
     written out rather than reasoned about. See the `apy_idx_*` constants.
+
+    A NON-INTEGER IS REFUSED AND NOT READ. This used to take the payload of
+    whatever it was handed, so `[1, 2].pop(1.0)` read the BITS OF A DOUBLE as
+    an index -- answering 2 in the interpreter and `pop index out of range`
+    when compiled, where CPython says `'float' object cannot be interpreted
+    as an integer`. `apy_index` is what says that, and it is also what asks a
+    user object for its `__index__`, so the refusal and the protocol are one
+    implementation rather than two.
     """
     if apy_is_big_of(v):
         kind: ptr = rodata(b"OverflowError\0")
@@ -61,6 +69,12 @@ def apy_index_arg_of(v: ptr, out: ptr, form: i64) -> i64:
             msg = rodata(b"Python int too large to convert to C ssize_t\0")
         apy_raise_at(kind, msg)
         return 0
+    if apy_is_int_like_of(v) == 0:
+        got: i64 = apy_index(v)
+        if apy_error_occurred():
+            return 0
+        store(i64, got, out)
+        return 1
     store(i64, apy_int_payload(v), out)
     return 1
 

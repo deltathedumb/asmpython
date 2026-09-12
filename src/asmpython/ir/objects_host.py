@@ -2158,6 +2158,25 @@ def _apy_index(h, a):
     return 0
 
 
+def _as_index(h, v):
+    """A value as an index, or `_UserFailed` with the refusal already set.
+
+    `[1, 2].pop(1.0)` IS A TypeError AND NOT A POSITION. The conversion used
+    to be a bare `int()`, which truncated -- the compiled halves read the
+    bits of the double instead, which is the same bug from the other side.
+    See `apy_index_arg_of`, which the C and the subset share.
+    """
+    if _is_int_like(v):
+        return int(v)
+    if isinstance(v, Instance) and v.cls.find("__index__") is not None:
+        got = v._send("__index__")
+        if _is_int_like(got):
+            return int(got)
+    h._fail("TypeError",
+            f"'{h.kind_name(v)}' object cannot be interpreted as an integer")
+    raise _UserFailed
+
+
 def _apy_as_int(h, a):
     """The MACHINE WORD behind a value, for the frontend's own arithmetic.
 
@@ -3489,20 +3508,37 @@ def _apy_getitem(h, a):
         if _is_int_like(got):
             index = got
     if not _is_int_like(index):
-        # C DECIDES: CPython says "integers or slices"; the C has no slices
-        # and says just "integers", so this does too.
-        return h._fail(
-            "TypeError",
-            f"{h.kind_name(seq)} indices must be integers, "
-            f"not '{h.kind_name(index)}'")
+        # TWO TEXTS, NOT ONE with a substituted noun, and the C has the same
+        # pair: CPython says `list indices must be integers or slices, not
+        # float` for a list or a tuple -- both of which DO accept a slice --
+        # and `string indices must be integers, not 'float'` for a str, with
+        # the kind quoted and no mention of slices. `byte`, SINGULAR, is what
+        # it calls a bytes.
+        if isinstance(seq, str):
+            return h._fail("TypeError",
+                           f"string indices must be integers, "
+                           f"not '{h.kind_name(index)}'")
+        named = ("byte" if isinstance(seq, bytes) and
+                 not isinstance(seq, bytearray) else h.kind_name(seq))
+        return h._fail("TypeError",
+                       f"{named} indices must be integers or slices, "
+                       f"not {h.kind_name(index)}")
+    if not -_INDEX_LIMIT <= index < _INDEX_LIMIT:
+        # AN INDEX THAT DOES NOT FIT A MACHINE WORD. The compiled halves
+        # cannot hold one and say so; answering `list index out of range`
+        # here made the interpreter disagree about a program neither can
+        # serve. See `apy_index_arg_of`.
+        return h._fail("IndexError",
+                       "cannot fit 'int' into an index-sized integer")
     i = int(index)
     if isinstance(seq, (list, tuple)):
         if i < 0:
             i += len(seq)
         if not 0 <= i < len(seq):
-            # C DECIDES: "list", even for a tuple. CPython says "tuple index
-            # out of range" for one.
-            return h._fail("IndexError", "list index out of range")
+            # NAMES THE KIND IT WAS GIVEN, as the C does: `(1,)[9]` is a
+            # complaint about a tuple and not about a list.
+            return h._fail("IndexError",
+                           f"{h.kind_name(seq)} index out of range")
         return h._value(seq[i])
     if isinstance(seq, (bytes, bytearray)):
         # An INT, not a one-byte bytes. Slicing gives bytes back and indexing
@@ -5561,6 +5597,12 @@ def _apy_fatal_if_error(h, a):
 
 
 # ── the numeric tower ───────────────────────────────────────────────────────
+
+#: WHAT A MACHINE INDEX HOLDS. The compiled halves convert a subscript to an
+#: `int64_t` and refuse anything wider; the interpreter has no such limit and
+#: would happily index with a number no compiled program can hold.
+_INDEX_LIMIT = 1 << 63
+
 
 def _is_int_like(v) -> bool:
     return isinstance(v, int) and not isinstance(v, float)
@@ -10045,7 +10087,11 @@ def _apy_list_pop(h, a):
     if isinstance(v, bytearray):
         if not v:
             return h._fail("IndexError", "pop from empty bytearray")
-        at = int(h._get(a[1], "apy_list_pop")) if int(a[2]) else -1
+        try:
+            at = (_as_index(h, h._get(a[1], "apy_list_pop"))
+                  if int(a[2]) else -1)
+        except _UserFailed:
+            return 0
         try:
             return h._value(v.pop(at))
         except IndexError:
@@ -10055,7 +10101,11 @@ def _apy_list_pop(h, a):
                        f"'{h.kind_name(v)}' object has no attribute 'pop'")
     if not v:
         return h._fail("IndexError", "pop from empty list")
-    index = int(h._get(a[1], "apy_list_pop")) if int(a[2]) else -1
+    try:
+        index = (_as_index(h, h._get(a[1], "apy_list_pop"))
+                 if int(a[2]) else -1)
+    except _UserFailed:
+        return 0
     try:
         return h._value(v.pop(index))
     except IndexError:

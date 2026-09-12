@@ -191,6 +191,13 @@ static apy_value apy_index_bounded(apy_value seq, apy_value item,
                          apy_kind_name(seq), "");
     n = O(seq)->v.q.n;
     hi = n;
+    /* A SEQUENCE'S `index` TAKES NO None AT ALL, where a string's does --
+       CPython leaves the `or None` out of this one and it is the only thing
+       that tells the two messages apart. */
+    if ((start && !apy_is_int_like(start) && O(start)->kind != APY_INST_K)
+            || (end && !apy_is_int_like(end) && O(end)->kind != APY_INST_K))
+        return apy_fail("TypeError", "slice indices must be integers or have "
+                                     "an __index__ method");
     if (start && !apy_slice_arg(start, &lo)) return 0;
     if (end && !apy_slice_arg(end, &hi)) return 0;
     apy_clamp_range(n, &lo, &hi);

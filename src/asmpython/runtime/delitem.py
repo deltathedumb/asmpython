@@ -81,6 +81,18 @@ def apy_delitem(seq: ptr, key: ptr) -> ptr:
     if key:
         if i64(load(i32, offset(key, 0))) == apy_slice_kind():
             return apy_del_span(seq, key)
+    # THE SUBSCRIPT'S OWN WORDING. `del xs[1.0]` is a complaint about the
+    # subscript, and CPython words it as one: `list indices must be integers
+    # or slices, not float`, and not the index conversion's `'float' object
+    # cannot be interpreted as an integer`. AN INSTANCE IS LEFT ALONE, since
+    # one with `__index__` is a valid subscript and the conversion asks.
+    if apy_is_int_like_of(key) == 0:
+        if i64(load(i32, offset(key, 0))) != apy_inst_kind():
+            return apy_raise_fmt(
+                rodata(b"TypeError\0"),
+                rodata(b"list indices must be integers or slices, "
+                       b"not %s%s\0"),
+                apy_kind_name_of(key), rodata(b"\0"))
     slot: ptr = apy_delitem_slot()
     if not apy_index_arg_of(key, slot, apy_idx_sub()):
         return ptr(0)

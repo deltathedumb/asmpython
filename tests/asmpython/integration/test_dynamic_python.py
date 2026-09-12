@@ -1243,6 +1243,82 @@ PROGRAMS = {
         show("find", lambda: (lambda f: f("b"))("abcabc".find))
         show("find window", lambda: (lambda f: f("b", 2, 6))("abcabc".find))
     """,
+    # A FLOAT INDEX WAS ACCEPTED WHERE CPYTHON REFUSES IT. `[1, 2].pop(1.0)`
+    # answered 2 in the interpreter and `pop index out of range` when
+    # compiled: the conversion behind it read the PAYLOAD of whatever it was
+    # handed, so the bits of a double became a position. One check, in the
+    # one place the C and the machine subset share, refuses it and asks a
+    # user object for its `__index__` instead.
+    #
+    # AND THE MESSAGES ARE THREE, not one with a substituted noun. CPython
+    # says `list indices must be integers or slices, not float` for a list or
+    # a tuple, `string indices must be integers, not 'float'` for a str with
+    # the kind quoted and no mention of slices, and `byte` -- singular -- for
+    # a bytes. The C had the pair and the interpreter did not; a bytes
+    # subscript reached neither and answered `'bytes' object is not
+    # subscriptable`, a sentence about the receiver for a complaint about the
+    # subscript.
+    #
+    # A BOUND IS A SLICE INDEX AND SAYS SO: `"abc".find("b", 1.0)` names
+    # `__index__` and mentions None, and a sequence's `index` names
+    # `__index__` and does not -- which is the only thing telling the two
+    # apart.
+    "a_float_is_not_an_index": """
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except (TypeError, IndexError, OverflowError) as e:
+                print(label, type(e).__name__ + ":", e)
+
+        # NAMED, so the literal forms do not become a SyntaxWarning CPython
+        # emits and this compiler does not.
+        h = 1.0
+        word = "x"
+        nothing = None
+        huge = 2 ** 100
+
+        class Two:
+            def __index__(self):
+                return 1
+
+        show("list pop", lambda: [1, 2].pop(h))
+        show("bytearray pop", lambda: bytearray(b"ab").pop(h))
+        show("list subscript", lambda: [1, 2][h])
+        show("tuple subscript", lambda: (1, 2)[h])
+        show("str subscript", lambda: "ab"[h])
+        show("bytes subscript", lambda: b"ab"[h])
+        show("bytearray subscript", lambda: bytearray(b"ab")[h])
+        show("by a str", lambda: [1, 2][word])
+        show("by None", lambda: [1, 2][nothing])
+        show("str by a str", lambda: "ab"[word])
+        show("insert", lambda: (lambda v: (v.insert(h, 9), v)[1])([1, 2]))
+        show("setitem",
+             lambda: (lambda v: (v.__setitem__(h, 9), v)[1])([1, 2]))
+        show("delitem", lambda: (lambda v: (v.__delitem__(h), v)[1])([1, 2]))
+        show("index bound", lambda: [1, 2].index(1, h))
+        show("find bound", lambda: "abc".find("b", h))
+        show("slice bound", lambda: [1, 2, 3][h:2])
+        show("range", lambda: range(h))
+        show("repeat", lambda: [1] * h)
+        show("ljust", lambda: "a".ljust(h))
+        # A DICT IS KEYED AND NOT INDEXED, so 1.0 finds the key 1.
+        show("dict subscript", lambda: {1: "a"}[h])
+        # AN INDEX TOO WIDE FOR A MACHINE WORD is refused rather than
+        # answered: the compiled halves cannot hold one, and the interpreter
+        # used to disagree by reporting the range instead.
+        show("huge", lambda: [1, 2][huge])
+        show("huge pop", lambda: [1, 2].pop(huge))
+        # AND WHAT IS STILL AN INDEX stays one. A bool is an integer, and a
+        # class saying `__index__` is saying it IS one.
+        show("bool", lambda: [1, 2][True])
+        show("__index__", lambda: [1, 2][Two()])
+        show("__index__ pop", lambda: [1, 2].pop(Two()))
+        show("ordinary", lambda: ([1, 2][1], "ab"[1], b"ab"[1],
+                                  bytearray(b"ab")[1], (1, 2)[0]))
+        show("out of range", lambda: [1, 2][9])
+        show("tuple out of range", lambda: (1, 2)[9])
+        show("str out of range", lambda: "ab"[9])
+    """,
     "traceback_positions": """
         try:
             (1).missing

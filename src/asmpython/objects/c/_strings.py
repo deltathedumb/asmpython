@@ -121,6 +121,17 @@ static int apy_int_arg(apy_value v, int64_t *out) {
 
 APY_API int64_t apy_slice_arg_of(apy_value v, apy_value out) {
     if (O(v)->kind == APY_NONE_K) return 1;
+    /* A BOUND IS A SLICE INDEX AND SAYS SO. `"abc".find("b", 1.0)` is
+       `slice indices must be integers or None or have an __index__ method`
+       in CPython, not the general `'float' object cannot be interpreted as
+       an integer` that `apy_int_arg_of` gives every other integer argument.
+       AN INSTANCE FALLS THROUGH, since one with `__index__` is a valid
+       bound and the conversion below is what asks. */
+    if (!apy_is_int_like(v) && O(v)->kind != APY_INST_K) {
+        apy_fail("TypeError", "slice indices must be integers or None or "
+                              "have an __index__ method");
+        return 0;
+    }
     if (apy_is_big(v)) {
         *(int64_t *)out = O(v)->v.big.neg
             ? -((int64_t)1 << 62) : ((int64_t)1 << 62);

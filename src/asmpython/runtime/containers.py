@@ -1073,6 +1073,18 @@ def apy_slice_arg_of(v: ptr, out: ptr) -> i64:
     """
     if i64(load(i32, offset(v, 0))) == apy_none_kind():
         return 1
+    # A BOUND IS A SLICE INDEX AND SAYS SO. `"abc".find("b", 1.0)` is
+    # `slice indices must be integers or None or have an __index__ method` in
+    # CPython, not the general wording `apy_int_arg_of` gives every other
+    # integer argument. AN INSTANCE FALLS THROUGH, since one with `__index__`
+    # is a valid bound and the conversion below is what asks.
+    if apy_is_int_like_of(v) == 0:
+        if i64(load(i32, offset(v, 0))) != apy_inst_kind():
+            apy_raise_at(
+                rodata(b"TypeError\0"),
+                rodata(b"slice indices must be integers or None or have an "
+                       b"__index__ method\0"))
+            return 0
     if apy_is_big_of(v):
         big: i64 = 4611686018427387904
         if load(i32, offset(v, apy_big_neg_offset())):

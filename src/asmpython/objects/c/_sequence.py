@@ -561,7 +561,23 @@ APY_API apy_value apy_getitem(apy_value seq, apy_value index) {
         return apy_fail2("TypeError",
                          "memoryview indices must be integers%s%s", "", "");
     }
-    if (O(seq)->kind == APY_BYTES_K && apy_is_int_like(index)) {
+    if (O(seq)->kind == APY_BYTES_K) {
+        /* NOT GATED ON THE INDEX BEING AN INT. It was, so `b"ab"[1.0]` fell
+           past every arm to the guard below and answered `'bytes' object is
+           not subscriptable` -- a sentence about the receiver, for a
+           complaint about the subscript. */
+        if (!apy_is_int_like(index) && O(index)->kind == APY_INST_K) {
+            apy_value got = apy_unary_dunder(index, "__index__");
+            if (apy_error_occurred()) return 0;
+            if (got && apy_is_int_like(got)) index = got;
+        }
+        if (!apy_is_int_like(index))
+            /* `byte`, SINGULAR, for a bytes -- CPython's own wording, and
+               not the plural its type name would suggest. */
+            return apy_fail2("TypeError",
+                             "%s indices must be integers or slices, not %s",
+                             apy_is_bytearray(seq) ? "bytearray" : "byte",
+                             apy_kind_name(index));
         if (!apy_index_arg(index, &i, APY_IDX_SUB)) return 0;
         return apy_bytes_getitem(seq, i);
     }
