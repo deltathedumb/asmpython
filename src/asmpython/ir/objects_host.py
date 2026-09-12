@@ -1007,10 +1007,11 @@ class ObjectHost:
         if isinstance(v, Iterator):
             # A CURSOR names what MADE it: `map(str, xs)` is a `map`, which is
             # what `type(...).__name__` answers and what tells a reader why it
-            # is lazy. A plain `iter(x)` is an `iterator`.
+            # is lazy. A plain or reversed one is named after what it WALKS --
+            # see `_cursor_named`.
             return {Iterator.MAP: "map", Iterator.FILTER: "filter",
                     Iterator.ENUMERATE: "enumerate",
-                    Iterator.ZIP: "zip"}.get(v.mode, "iterator")
+                    Iterator.ZIP: "zip"}.get(v.mode, v.named)
         return type(v).__name__
 
     # ── text ────────────────────────────────────────────────────────────────
@@ -1035,6 +1036,7 @@ class ObjectHost:
         return False
 
     def _text(self, v, quoted: bool) -> str:
+        # See `_class_module` for why the two reprs below qualify a name.
         if isinstance(v, Class):
             # PRINTING A CLASS IS THE METACLASS'S BUSINESS when it says so.
             # `repr(Colour)` is `type(Colour).__repr__(Colour)`, which is how
@@ -1047,7 +1049,9 @@ class ObjectHost:
                     got = self._invoke(hook, [v])
                     if self.err is None and isinstance(got, str):
                         return got
-            return f"<class '{v.name}'>"
+            where = _class_module(v)
+            return (f"<class '{where}.{v.name}'>" if where
+                    else f"<class '{v.name}'>")
         if isinstance(v, Alias):
             return _alias_text(v)
         if isinstance(v, Func):
@@ -1226,6 +1230,18 @@ class ObjectHost:
                 return f"<built-in function {v.name}>"
             return (f"<built-in method {v.name} of "
                     f"{self.kind_name(held)} object at 0x{id(held):x}>")
+        if isinstance(v, Gen):
+            # A GENERATOR NAMES THE `def` IT CAME FROM: `<generator object
+            # gen at 0x...>`, and a generator expression the qualified name
+            # of the scope it was written in. A coroutine and an async
+            # generator take the same shape under their own kind names. The
+            # four the async machinery builds have no step and fall back to
+            # the bare object shape below.
+            step = v.step
+            if isinstance(step, Func):
+                who = step.qualname if step.qualname is not None else step.name
+                return (f"<{self.kind_name(v)} object {who} "
+                        f"at 0x{id(v):x}>")
         if isinstance(v, (Iterator, Gen, Cell, Super)):
             # THE KIND, NOT THIS FILE'S CLASS NAME. Python's own `repr` of an
             # internal object here answered
@@ -2125,7 +2141,7 @@ def _apy_obj_alloc(h, a):
     """`apy_obj_alloc(kind)` -- the C runtime's allocation hook.
 
     IT HAS NO HONEST ANSWER HERE, and refusing is the honest answer. The C
-    hands back a 152-byte cell whose payload the caller then writes through a
+    hands back a 160-byte cell whose payload the caller then writes through a
     pointer; this host has no cells and no pointers, only handles into a Python
     list, so there is nothing to return that the caller could write into.
 
@@ -3214,8 +3230,16 @@ def _apy_set_from_of(h, a):
     """A set or frozenset holding everything in the source."""
     kind = int(a[0])
     src = h._get(a[1], "apy_set_from_of")
+    # THROUGH `_seq_items` AND NOT PYTHON'S OWN `for`. A cursor and a
+    # generator are classes of this file's and Python can walk neither, so
+    # `set(map(f, xs))` reported `'Iterator' object is not iterable` -- a name
+    # from inside the compiler, about a thing that is plainly iterable. That
+    # function is the one place that knows the whole protocol.
+    items = _seq_items(h, src, "apy_set_from_of")
+    if items is None:
+        return 0
     try:
-        made = {v for v in src}
+        made = set(items)
     except TypeError:
         return _apy_unhashable_elem_of(h, (a[1], h._new("list"))) or 0
     return h._new(frozenset(made) if kind == 10 else made)
@@ -4602,6 +4626,13 @@ def _type_from_ns(h, mcls, name, bases, ns):
     # program goes on using, and a class sharing it would see later writes.
     if isinstance(ns, dict):
         cls.dict.update(ns)
+    # SUPPLIED HERE when the namespace carried none, as CPython's `type_new`
+    # supplies it from the caller's globals: a class written out brings one
+    # from its body, and one built by `type(name, bases, {})` -- `enum`,
+    # `dataclasses` and `namedtuple` all do -- had none at all, so it printed
+    # unqualified. There is no frame to ask and only a program's own module
+    # can reach this. See `apy_type_from_ns`.
+    cls.dict.setdefault("__module__", "__main__")
     return cls
 
 
@@ -6483,6 +6514,22 @@ def _apy_contains(h, a):
                 return h._new(False)
             if item == needle or item is needle:
                 return h._new(True)
+    # `x in it` CONSUMES the cursor up to the match and leaves the rest, for
+    # the same reason `x in gen` does. Without this arm the fallback asked
+    # PYTHON's `in` about a class of this file's, and Python said so:
+    # `argument of type 'Iterator' is not a container or iterable`, about
+    # every `map`, `filter`, `zip`, `enumerate`, `reversed` and `iter(x)`
+    # there is.
+    if isinstance(hay, Iterator):
+        while True:
+            got = _apy_step(h, [h._value(hay)])
+            if not got:
+                return 0
+            item = h._get(got, "apy_contains")
+            if item is _STOP:
+                return h._new(False)
+            if item == needle or item is needle:
+                return h._new(True)
     if isinstance(hay, Class) and hay.meta is not None:
         # MEMBERSHIP IN A CLASS IS THE METACLASS'S BUSINESS, as iterating and
         # measuring one are: `Colour.RED in Colour` is
@@ -6499,7 +6546,16 @@ def _apy_contains(h, a):
         # rule and the reason a class with only `__getitem__` supports it.
         walked = _apy_iterable(h, [a[1]])
         if not walked:
-            return 0
+            # `in` REPORTS ITS OWN REFUSAL and not the iteration's, as
+            # CPython does: what was asked is a membership question, so a
+            # class with none of the three is `argument of type 'C' is not a
+            # container or iterable` rather than `'C' object is not
+            # iterable`, which is a claim about something else.
+            h.err = None
+            h.err_value = None
+            return h._fail("TypeError",
+                           f"argument of type '{h.kind_name(hay)}' is not "
+                           f"a container or iterable")
         if walked != a[1]:
             return _apy_contains(h, [a[0], walked])
         # `_apy_iterable` left it alone, which means `__len__` plus
@@ -6517,12 +6573,23 @@ def _apy_contains(h, a):
             if item == needle:
                 return h._bool(True)
         return h._bool(False)
-    try:
-        return h._bool(needle in hay)
-    except _UserFailed:
-        return 0
-    except TypeError as e:
-        return h._fail_like(e)
+    # PYTHON'S OWN `in` FOR THE KINDS IT SHARES, which is what keeps the
+    # unhashable-key rule and the str/bytes substring searches from being
+    # restated here -- and for an Instance, which reaches its `__contains__`.
+    if isinstance(hay, (list, tuple, set, frozenset, dict, str, bytes,
+                        bytearray, range, memoryview, Instance)) \
+            or isinstance(hay, _VIEW_TYPES):
+        try:
+            return h._bool(needle in hay)
+        except _UserFailed:
+            return 0
+        except TypeError as e:
+            return h._fail_like(e)
+    # EVERYTHING ELSE IS REFUSED HERE AND NOT BY PYTHON, which would name a
+    # class of this file's: `1 in f` for a function said `argument of type
+    # 'Func' is not a container or iterable`.
+    return h._fail("TypeError", f"argument of type '{h.kind_name(hay)}' "
+                                f"is not a container or iterable")
 
 
 # ── conversions ─────────────────────────────────────────────────────────────
@@ -6757,6 +6824,38 @@ class _UserFailed(Exception):
     """
 
 
+def _class_module(cls) -> str | None:
+    """The module a class was written in, for the two reprs that qualify a
+    name: `<class '__main__.C'>` and `<__main__.C object at 0x...>`.
+
+    Answers None for a class with none -- and for `builtins`, which CPython
+    leaves OUT: `int` is `<class 'int'>` and not `<class 'builtins.int'>`.
+    The class body puts it in the dict, which is where CPython keeps it too;
+    see `_dyn_class`. The C twin is `apy_class_module`.
+    """
+    if not isinstance(cls, Class):
+        return None
+    where = cls.dict.get("__module__")
+    if not isinstance(where, str) or where == "builtins":
+        return None
+    return where
+
+
+def _inst_repr(v) -> str:
+    """`<__main__.C object at 0x...>` -- the repr an instance gets when its
+    class wrote none.
+
+    The module qualifies the name here exactly as it does in `<class
+    '__main__.C'>`; the C twin is the APY_INST_K arm of `apy_text_of`. Three
+    call sites need it: `Instance.__repr__`, the `object.__repr__` default a
+    class inherits, and `apy_default_repr` reached by name.
+    """
+    where = _class_module(v.cls)
+    at = f"0x{id(v):x}"
+    return (f"<{where}.{v.cls.name} object at {at}>" if where
+            else f"<{v.cls.name} object at {at}>")
+
+
 class Cell:
     """A captured variable's box.
 
@@ -6949,7 +7048,7 @@ class Instance:
         # its name in the repr writes one, as `Counter` and `deque` do.
         if self.held is not None:
             return repr(self.held)
-        return f"<{self.cls.name} object at 0x{id(self):x}>"
+        return _inst_repr(self)
 
     def __str__(self):
         out = self._send("__str__")
@@ -7065,7 +7164,7 @@ class Instance:
         out = self._send("__contains__", needle)
         if out is NotImplemented:
             raise TypeError(f"argument of type '{self.cls.name}' is not "
-                            f"iterable")
+                            f"a container or iterable")
         return bool(out)
 
     def __neg__(self):
@@ -7111,7 +7210,8 @@ class Func:
     never saw, and every method call is one of those.
     """
 
-    __slots__ = ("annotate", "qualname", "code", "arity", "name", "cells",
+    __slots__ = ("annotate", "qualname", "module", "code", "arity", "name",
+                 "cells",
                  "bound",
                  "defaults",
                  "vararg", "pnames", "kwarg", "kwonly", "posonly", "doc",
@@ -7156,6 +7256,10 @@ class Func:
         self.annotate = None
         #: PEP 3155: the QUALIFIED name -- `C.m` -- or None for the plain one.
         self.qualname = None
+        #: WHERE THE `def` WAS WRITTEN -- `fractions` for a spliced one -- or
+        #: None, which reads as `__main__`. Only a spliced `def` is told; see
+        #: `_apy_func_module`.
+        self.module = None
         #: WHETHER THIS IS A BUILTIN reached as a value -- `print`, `len`.
         self.builtin = False
 
@@ -7645,7 +7749,7 @@ def _made_table_method(h, obj, want: str):
 #: NUMBER: CPython's own answer differs between builds, and what a program can
 #: rely on is that it is an int and that it grows with what the value holds.
 #: Written here so the three runtimes agree with EACH OTHER.
-_CELL_BYTES = 152
+_CELL_BYTES = 160
 
 
 def _cell_bytes(v) -> int:
@@ -7999,8 +8103,8 @@ def _object_default(h, name: str):
         # An implicit STATICMETHOD: the argument is the class.
         body = lambda cls, *a: Instance(cls, h)
     elif name in ("__repr__", "__str__"):
-        body = lambda v, *a: (f"<{v.cls.name} object at 0x{id(v):x}>"
-                              if isinstance(v, Instance) else h._text(v, True))
+        body = lambda v, *a: (_inst_repr(v) if isinstance(v, Instance)
+                              else h._text(v, True))
     elif name == "__eq__":
         body = lambda a, b, *r: a is b
     elif name == "__ne__":
@@ -8910,6 +9014,18 @@ def _apy_default_getattr(h, a):
         return h._new(found.bind(obj.recv)) \
             if isinstance(found, (Func, Native)) else h._value(found)
     if isinstance(obj, Gen):
+        # WHICH `def` IT CAME FROM. `g.__name__` is the plain name and
+        # `g.__qualname__` the dotted one -- `C.m` for a method's generator,
+        # `f.<locals>.<genexpr>` for an expression's -- which is also what
+        # the repr prints. Recorded on the STEP function, because the
+        # generator cell is a frame and the frame's code is the step.
+        if name in ("__name__", "__qualname__"):
+            step = obj.step
+            if not isinstance(step, Func):
+                return h._no_attr(obj, name)
+            if name == "__qualname__" and step.qualname is not None:
+                return h._new(step.qualname)
+            return h._new(step.name)
         # THE THREE METHODS, AS VALUES. They are dispatched by name at the
         # call site, so nothing needed a value for them -- until a program
         # asked `hasattr(g, "close")`, which every duck-typed consumer does,
@@ -9074,6 +9190,17 @@ def _apy_default_getattr(h, a):
             # PEP 3155. The frontend's key is already the qualified name.
             return h._value(obj.qualname if obj.qualname is not None
                             else obj.name)
+        if name == "__module__":
+            # WHERE THE `def` WAS WRITTEN. `builtins` for a builtin thunk or
+            # a builtin type name, the recorded module for a spliced `def`,
+            # and `__main__` for a program's own -- which is the default
+            # rather than an absence, because every `def` a program writes is
+            # in a module and there is only one it can be in. The C twin is
+            # the `__module__` arm of `apy_kind_attr`.
+            if obj.builtin or obj.is_type:
+                return h._new("builtins")
+            return h._new(obj.module if obj.module is not None
+                          else "__main__")
         if name in ("__name__", "__qualname__"):
             # No qualified name is recorded -- a nested `def` knows its own
             # name and not its enclosing scope's -- so the plain one is what
@@ -9118,6 +9245,29 @@ def _apy_default_getattr(h, a):
                 return h._new({})
             return _user(h, lambda: h._value(h._invoke(obj.annotate, [])))
         return h._no_attr(obj, name)
+    if isinstance(obj, Native) and name in ("__name__", "__qualname__",
+                                            "__self__", "__module__"):
+        # A BUILTIN METHOD REACHED AS A VALUE, which had none of these here
+        # while both compiled runtimes answered them from the FUNC arm.
+        # CPython splits the four by whether there is a receiver:
+        # `list.append` is a method_descriptor with no `__module__` at all,
+        # `[].append` a builtin_function_or_method whose `__module__` is
+        # None. The name is the method's own either way.
+        #
+        # NOT A FULL ARM: anything else about a Native -- `__class__` above
+        # all -- is answered by the generic paths below, and swallowing the
+        # rest here would cut this kind off from them.
+        if name in ("__name__", "__qualname__"):
+            return h._new(obj.name)
+        # THE RECEIVER TRAVELS IN `owner` for a method built from the kind
+        # table -- its body closes over the value, so `bound` is empty -- and
+        # in `bound` for one `apy_bind` made. Either is a receiver.
+        held = obj.bound if obj.bound is not None else (
+            None if obj.owner is _NO_OWNER else obj.owner)
+        if name == "__self__":
+            return h._value(held) if held is not None \
+                else h._no_attr(obj, name)
+        return h._none if held is not None else h._no_attr(obj, name)
     if isinstance(obj, Exc):
         # WHAT THE PROGRAM STORED WINS over what the kind offers.
         # `value`, `message` and `exceptions` are answered for every
@@ -9229,7 +9379,7 @@ def _apy_default_repr(h, a):
     v = h._get(a[0], "apy_default_repr")
     if not isinstance(v, Instance):
         return h._new(h._text(v, True))
-    return h._new(f"<{v.cls.name} object at 0x{id(v):x}>")
+    return h._new(_inst_repr(v))
 
 
 def _apy_default_eq(h, a):
@@ -9644,7 +9794,9 @@ def _seq_items(h, v, where: str):
     if isinstance(v, dict):
         return list(v)
     if isinstance(v, (list, tuple, set, frozenset, str, bytes, bytearray,
-                      range)):
+                      range, memoryview)):
+        # A MEMORYVIEW IS ITERABLE and yields ints, which every eager consumer
+        # here expects and this funnel did not list.
         return list(v)
     if isinstance(v, _VIEW_TYPES):
         # READ WHEN WALKED, which is what makes a view live: the keys are the
@@ -9673,7 +9825,14 @@ def _seq_items(h, v, where: str):
                     return None
                 out.append(h._get(item, where))
             return out
-        return list(got) if isinstance(got, (list, tuple)) else got
+        # WHATEVER `__iter__` GAVE, ASKED AGAIN. It may be a cursor or a
+        # generator, and handing one back as if it were the elements left
+        # every caller holding a class of this file's -- which Python's own
+        # `for` cannot walk, so `bytearray().extend(obj)` reported
+        # `'Iterator' object is not iterable` about a class that plainly is.
+        if isinstance(got, (list, tuple)):
+            return list(got)
+        return _seq_items(h, got, where)
     h._fail("TypeError", f"'{h.kind_name(v)}' object is not iterable")
     return None
 
@@ -9786,9 +9945,19 @@ def _apy_enumerate(h, a):
 
 
 def _apy_reversed(h, a):
-    """`reversed(xs)` -- a LIST, not a cursor, because reversing needs the
-    length: there is nothing to reverse until the source has been walked, so
-    the laziness the other four have is not available here."""
+    """`reversed(xs)` -- a CURSOR counting down, not a list built backwards.
+
+    LAZY, because CPython's is: `reversed(xs)` is an iterator with no length,
+    no indexing and one walk in it, and a list answered all three wrongly
+    while copying the whole sequence before the first element was wanted.
+
+    REVERSING NEEDS A SEQUENCE: a length and indexing, or a `__reversed__`. A
+    set has no order, and a cursor or a generator has a POSITION rather than a
+    length -- CPython refuses all three by name. The refusal is explicit
+    because the walk would otherwise answer confidently: a set in an
+    arbitrary order, and an iterator drained FORWARDS by a walk that believes
+    it is going backwards.
+    """
     v = h._get(a[0], "apy_reversed")
     # `__reversed__` WINS OVER THE INDEX WALK. A class may define both it and
     # `__getitem__`, and they need not agree -- the hook is the answer the
@@ -9796,18 +9965,31 @@ def _apy_reversed(h, a):
     if isinstance(v, Instance) and v.cls.find("__reversed__") is not None:
         got = _user(h, lambda: v._send("__reversed__"), fail=_FAILED)
         if got is _FAILED:
-            return None if False else 0
-        items = _seq_items(h, got, "apy_reversed")
-        return 0 if items is None else h._new(list(items))
-    # A SET HAS NO ORDER TO REVERSE. It has a length and could be walked, which
-    # is exactly why this refuses explicitly rather than answering confidently.
-    if isinstance(v, (set, frozenset)):
+            return 0
+        return _apy_iterable(h, [h._value(got)])
+    if isinstance(v, _VIEW_TYPES):
+        # A VIEW IS READ NOW, as it is for a forward walk, and the copy is the
+        # cursor's source from here on -- so which view it was is recorded
+        # before it is gone.
+        part = ("keys" if "keys" in type(v).__name__
+                else "values" if "values" in type(v).__name__ else "items")
+        items = list(v)
+        made = Iterator(items, None, Iterator.REV, len(items) - 1)
+        made.named = _CURSOR_NAMES[part][1]
+        return h._new(made)
+    ok = isinstance(v, (list, tuple, str, bytes, bytearray, dict, range,
+                        memoryview)) or (
+        # An instance with the older protocol -- or one extending a builtin,
+        # whose length and indexing are the builtin's.
+        isinstance(v, Instance)
+        and (v.held is not None or v.cls.find("__getitem__") is not None))
+    if not ok:
         return h._fail("TypeError",
                        f"'{h.kind_name(v)}' object is not reversible")
-    items = _seq_items(h, v, "apy_reversed")
-    if items is None:
+    n = _apy_raw_len(h, [a[0]])
+    if h.err is not None:
         return 0
-    return h._new(list(reversed(items)))
+    return h._new(Iterator(v, None, Iterator.REV, int(n) - 1))
 
 
 def _apy_zip_n(h, a):
@@ -10151,7 +10333,12 @@ def _apy_iter_until(h, a):
             out.append(v)
     except _UserFailed:
         return 0
-    return h._new(Iterator(out))
+    # NAMED AFTER THE FORM AND NOT AFTER THE LIST: CPython calls this a
+    # `callable_iterator`, and the list the calls drained into is an
+    # implementation detail of this runtime's eagerness.
+    made = Iterator(out)
+    made.named = _CURSOR_NAMES["callable"][0]
+    return h._new(made)
 
 
 # ── match ───────────────────────────────────────────────────────────────────
@@ -10688,6 +10875,18 @@ def _alias_part(x) -> str:
 def _apy_alias_new(h, a):
     return h._new(Alias(h._get(a[0], "apy_alias_new"),
                         h._get(a[1], "apy_alias_new")))
+
+
+def _apy_func_module(h, a):
+    """`__module__` -- where a SPLICED `def` was written.
+
+    Emitted for those only, because a program's own `def` is in `__main__`
+    and the read defaults to it. The C twin writes `v.fn.module`.
+    """
+    f = h._get(a[0], "apy_func_module")
+    if isinstance(f, Func):
+        f.module = str(h._get(a[1], "apy_func_module"))
+    return a[0]
 
 
 def _apy_func_qualname(h, a):
@@ -11616,10 +11815,17 @@ def _to_set(h, a, frozen: bool):
         # Same funnel as `_apy_iterable`'s own class-extending-a-builtin
         # comment describes: patching one caller and not this one just moves
         # which builtin call reports the object as not iterable.
-        handle = _apy_iterable(h, a)
-        if h.err is not None:
+        #
+        # THROUGH `_seq_items`, WHICH CONSUMES A CURSOR. `_apy_iterable`
+        # hands one straight back -- only a generator is drained there -- so
+        # this still reached Python's own `set()` holding a class of this
+        # file's, and `set(map(f, xs))` reported `'Iterator' object is not
+        # iterable`. `_seq_items` routes an instance through `_apy_iterable`
+        # itself, so nothing is lost by asking it instead.
+        items = _seq_items(h, v, "apy_to_set")
+        if items is None:
             return 0
-        v = h._get(handle, "apy_to_set")
+        v = items
     try:
         return h._new(frozenset(v) if frozen else set(v))
     except TypeError as exc:
@@ -12375,12 +12581,32 @@ def _apy_extend(h, a):
             return h._fail("TypeError",
                            f"expected iterable of integers; got: "
                            f"'{h.kind_name(other)}'")
-        if isinstance(other, (list, tuple)):
-            for one in other:
-                if not isinstance(one, int) or not 0 <= one <= 255:
+        # ANY ITERABLE OF INTEGERS, which is what CPython accepts: a range, a
+        # cursor, a generator, a dict, a class with `__iter__` or with
+        # `__len__` plus `__getitem__`. Only a list and a tuple were walked
+        # here, so `ba.extend(map(int, xs))` reported that a `map` cannot
+        # extend a bytearray while the compiled program extended happily.
+        if isinstance(other, (list, tuple, set, frozenset, dict, range,
+                              Iterator, Gen, Instance)) \
+                or isinstance(other, _VIEW_TYPES):
+            items = _seq_items(h, other, "apy_extend")
+            if items is None:
+                return 0
+            for one in items:
+                # THE TWO REFUSALS ARE DIFFERENT QUESTIONS, and CPython words
+                # them differently: something that is not a number at all is a
+                # TypeError, and a number outside a byte is a ValueError. Both
+                # used to answer the second, which named the wrong problem.
+                # A BOOL IS AN INT AND CPYTHON TAKES IT: `bytearray([True])`
+                # is `b"\x01"`, because bool is a subclass of int.
+                if not isinstance(one, int):
+                    return h._fail("TypeError",
+                                   f"'{h.kind_name(one)}' object cannot be "
+                                   f"interpreted as an integer")
+                if not 0 <= one <= 255:
                     return h._fail("ValueError",
                                    "byte must be in range(0, 256)")
-            seq.extend(bytes(other))
+            seq.extend(bytes(items))
             return h._none
         return h._fail("TypeError",
                        f"can't extend bytearray with "
@@ -12393,9 +12619,15 @@ def _apy_extend(h, a):
     # not iterable while the compiled program extended happily. The C reaches
     # `apy_iterable` first, which drains it; this is where the interpreter
     # does the same thing.
+    # AN INSTANCE IS ONE TOO, through `__iter__` or through the older
+    # `__len__` plus `__getitem__` -- `_seq_items` below knows both, and only
+    # this gate did not, so `[*obj]` and `xs.extend(obj)` reported that a
+    # class is not iterable about the very protocol that makes it so. A
+    # memoryview for the same reason.
     if not isinstance(other, (list, tuple, set, frozenset, str, bytes,
-                              bytearray, dict,
-                              Iterator, Gen, range))             and not isinstance(other, _VIEW_TYPES):
+                              bytearray, dict, memoryview,
+                              Iterator, Gen, range, Instance)) \
+            and not isinstance(other, _VIEW_TYPES):
         return h._fail("TypeError",
                        f"'{h.kind_name(other)}' object is not iterable")
     items = _seq_items(h, other, "apy_extend")
@@ -12647,6 +12879,51 @@ _TABLE.update({
 })
 
 
+#: What CPython calls the iterator over each kind of source, forward and
+#: reversed. A source not in it is an `iterator` -- or a `reversed`, which is
+#: the name CPython's generic reverse wrapper carries.
+#:
+#: A RANGE REVERSED IS STILL A RANGE ITERATOR, because `reversed(r)` in
+#: CPython hands back a walk over the range with its step negated rather than
+#: a wrapper around it.
+_CURSOR_NAMES = {
+    "list": ("list_iterator", "list_reverseiterator"),
+    "tuple": ("tuple_iterator", "reversed"),
+    "dict": ("dict_keyiterator", "dict_reversekeyiterator"),
+    "range": ("range_iterator", "range_iterator"),
+    "set": ("set_iterator", "reversed"),
+    "frozenset": ("set_iterator", "reversed"),
+    "bytes": ("bytes_iterator", "reversed"),
+    "bytearray": ("bytearray_iterator", "reversed"),
+    "memoryview": ("memory_iterator", "reversed"),
+    "keys": ("dict_keyiterator", "dict_reversekeyiterator"),
+    "values": ("dict_valueiterator", "dict_reversevalueiterator"),
+    "items": ("dict_itemiterator", "dict_reverseitemiterator"),
+    "callable": ("callable_iterator", "callable_iterator"),
+}
+
+
+def _cursor_named(src, mode: int) -> str:
+    """What a cursor over `src` is called, which CPython takes from what it
+    walks: `iter([1])` is a `list_iterator` and `reversed([1])` a
+    `list_reverseiterator`.
+
+    `str_ascii_iterator` IS A NAME OF ITS OWN IN CPYTHON, which records the
+    width on the string; a str is UTF-8 bytes in the compiled runtimes, so
+    the same question there is whether any byte has its high bit set. The C
+    twin is `apy_cursor_name`.
+    """
+    rev = 1 if mode == Iterator.REV else 0
+    if isinstance(src, str):
+        if rev:
+            return "reversed"
+        return "str_ascii_iterator" if src.isascii() else "str_iterator"
+    found = _CURSOR_NAMES.get(type(src).__name__)
+    if found is None:
+        return "reversed" if rev else "iterator"
+    return found[rev]
+
+
 class Iterator:
     """A cursor over something indexable -- what `iter(x)` returns.
 
@@ -12655,18 +12932,26 @@ class Iterator:
     keeps the two paths agreeing about a half-consumed one.
     """
 
-    __slots__ = ("src", "i", "fn", "mode", "n0")
+    __slots__ = ("src", "i", "fn", "mode", "n0", "named")
 
     #: WHAT A CURSOR DOES on the way. A plain one walks; the rest apply
     #: something as they go, which is what makes `map(f, xs)` lazy -- `f` runs
-    #: when the result is walked, not when it is made.
-    PLAIN, MAP, FILTER, ENUMERATE, ZIP = range(5)
+    #: when the result is walked, not when it is made. `REV` walks the same
+    #: source by index, counting DOWN -- see `_apy_reversed`.
+    PLAIN, MAP, FILTER, ENUMERATE, ZIP, REV = range(6)
 
     def __init__(self, src, fn=None, mode: int = 0, start: int = 0) -> None:
         self.src = src
         self.fn = fn
         self.mode = mode
         self.i = start
+        #: WHAT THIS CURSOR IS CALLED -- `list_iterator`,
+        #: `dict_valueiterator`, `list_reverseiterator`. Decided here and
+        #: never again, because the source does not always survive: a view's
+        #: items are copied out at construction and a drained `map` becomes a
+        #: plain cursor over the list it produced. A caller whose source is
+        #: already gone overwrites this; see `_cursor_named`.
+        self.named = _cursor_named(src, mode)
         # THE SIZE THE WALK STARTED WITH, for a dict. Growing or shrinking
         # one while iterating it rehashes the table and the walk would
         # silently skip or repeat entries, so CPython refuses. Only a dict:
@@ -13955,6 +14240,23 @@ def _apy_getiter(h, a):
 
 def _apy_step(h, a):
     it = h._get(a[0], "apy_step")
+    if isinstance(it, Iterator) and it.mode == Iterator.REV:
+        # BACKWARDS, from the index `reversed` started it at. The position
+        # counts DOWN and -1 is exhaustion, so the forward walk's own slot
+        # serves without a second one for the length. A SOURCE THAT SHRANK
+        # ends the walk rather than reading past the end, which is what
+        # CPython's reverse iterator does.
+        if it.i < 0:
+            return h._stop
+        have = _apy_raw_len(h, [h._value(it.src)])
+        if h.err is not None:
+            return 0
+        if it.i >= have:
+            it.i = -1
+            return h._stop
+        at = it.i
+        it.i -= 1
+        return _apy_key_at(h, [h._value(it.src), at])
     if isinstance(it, Iterator) and it.mode != Iterator.PLAIN:
         return _step_cursor(h, it)
     if isinstance(it, Gen):
@@ -14135,7 +14437,11 @@ def _apy_iter(h, a):
     # `apy_iterable` both already do -- `iter(d.items())` refused a thing
     # `list(d.items())` accepts, on this path and on the compiled one.
     if isinstance(v, _VIEW_TYPES):
-        return h._new(Iterator(list(v)))
+        made = Iterator(list(v))
+        part = ("keys" if "keys" in type(v).__name__
+                else "values" if "values" in type(v).__name__ else "items")
+        made.named = _CURSOR_NAMES[part][0]
+        return h._new(made)
     if not isinstance(v, (list, tuple, set, frozenset, dict, str, bytes,
                           bytearray, range)):
         return h._fail("TypeError",
@@ -14310,19 +14616,62 @@ def _apy_unpack_check(h, a):
     """
     v = h._get(a[0], "apy_unpack_check")
     want, at_least = int(a[1]), int(a[2])
-    # THROUGH `_apy_raw_len`, which drains a generator into its cache the way
-    # the C's does -- so unpacking one sees the same elements the reads below
-    # will, rather than a second traversal of something already consumed.
-    n = _apy_raw_len(h, [a[0]])
+    # WHETHER THE SURPLUS IS COUNTED, decided by the SOURCE as CPython decides
+    # it: an exact list, tuple or dict knows its own length, and everything
+    # else is unpacked through the iterator protocol, which can only say that
+    # there was one element too many. So `a, b = [1, 2, 3]` is `(expected 2,
+    # got 3)` and `a, b = "abc"`, `range(3)` or `map(f, xs)` is `(expected
+    # 2)`. Asked before the drain below replaces `v`. The shortfall is counted
+    # whatever the source, because the unpack took what there was.
+    counted = type(v) in (list, tuple, dict)
+    # WHAT CAN BE READ BY INDEX, which is what the unpack does: `a, *b, c =
+    # xs` takes `c` from `xs[-1]` without ever computing a length. A generator
+    # and a cursor hold a POSITION instead, so they are drained here -- and
+    # answered, because the caller indexes what this hands back. See the C's
+    # `apy_unpack_check`.
+    handle = _apy_iterable(h, a)
+    if not handle:
+        return 0
+    v = h._get(handle, "apy_unpack_check")
+    # THE UNPACK WORDS ITS OWN REFUSAL. `_apy_iterable` answers a value it
+    # does not recognise UNCHANGED -- only a user object can fail there -- so
+    # the kinds that can be walked are tested here, and CPython's wording for
+    # this operation names it: `cannot unpack non-iterable int object`, not
+    # `'int' object is not iterable`.
+    if not isinstance(v, (list, tuple, set, frozenset, dict, str, bytes,
+                          bytearray, range, memoryview, Iterator, Gen,
+                          Instance)) \
+            and not isinstance(v, _VIEW_TYPES):
+        return h._fail("TypeError", f"cannot unpack non-iterable "
+                                    f"{h.kind_name(v)} object")
+    # ANYTHING NOT READ BY POSITION IS COPIED INTO A LIST. A dict subscripts
+    # by KEY, so `a, b = {1: 0, 2: 0}` asked for key 0; a set cannot be
+    # subscripted at all; a cursor holds a position instead of indices. AN
+    # INSTANCE IS WALKED TOO, even the `__len__` plus `__getitem__` kind whose
+    # subscript is its protocol: the `*rest` branch reads a SLICE, and
+    # `a, *rest = obj` handed one to a `__getitem__` written for integers.
+    if not isinstance(v, (list, tuple, str, bytes, bytearray, range,
+                          memoryview)):
+        rest = _seq_items(h, v, "apy_unpack_check")
+        if rest is None:
+            return 0
+        handle = h._new(list(rest))
+        v = h._get(handle, "apy_unpack_check")
+    n = _apy_raw_len(h, [handle])
+    if h.err is not None:
+        return 0
     if n < want:
         return h._fail("ValueError",
                        f"not enough values to unpack (expected "
                        f"{'at least ' if at_least else ''}{want}, got {n})")
     if not at_least and n > want:
+        if counted:
+            return h._fail("ValueError",
+                           f"too many values to unpack (expected {want}, "
+                           f"got {n})")
         return h._fail("ValueError",
-                       f"too many values to unpack (expected {want}, "
-                       f"got {n})")
-    return h._none
+                       f"too many values to unpack (expected {want})")
+    return handle
 
 
 def _apy_name_or(h, a):
@@ -14519,6 +14868,7 @@ _TABLE.update({
     "apy_prop_deleter": _apy_prop_deleter,
     "apy_func_annotate": _apy_func_annotate,
     "apy_func_qualname": _apy_func_qualname,
+    "apy_func_module": _apy_func_module,
     "apy_func_builtin": _apy_func_builtin,
     "apy_call_spread_kw": _apy_call_spread_kw,
     "apy_str_like": _apy_str_like,

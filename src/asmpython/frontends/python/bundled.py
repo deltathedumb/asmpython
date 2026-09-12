@@ -85,6 +85,79 @@ _RUNTIME_COMPILER = {"compile": "_pycompile",
                      "eval": "_pyrun", "exec": "_pyrun"}
 
 
+def module_of(mangled: str) -> str | None:
+    """The bundled module a spliced name came from, or None for a program's
+    own name.
+
+    THE ONE PLACE THAT TAKES A MANGLED NAME APART, and it exists because
+    `__module__` is a fact about WHERE a class was written and nothing else
+    records it: a spliced class is an ordinary module-level definition by the
+    time lowering sees it, and only its name still says it came from
+    `fractions`. The length prefix is what makes the parse possible at all --
+    see `_mangled` for the two collisions it is there to stop.
+    """
+    split = _split_mangled(mangled)
+    if split is None:
+        return None
+    escaped, _bare = split
+    # THE ESCAPE READ BACKWARDS: a doubled underscore was one in the module's
+    # name and a single one was a dot. Walked rather than replaced, because
+    # `a__b` and `a.b` both hold `__` after escaping and a blind replace
+    # cannot tell which of the two it is looking at.
+    out, i = "", 0
+    while i < len(escaped):
+        if escaped[i] == "_":
+            if escaped[i:i + 2] == "__":
+                out += "_"
+                i += 2
+            else:
+                out += "."
+                i += 1
+            continue
+        out += escaped[i]
+        i += 1
+    return out
+
+
+def _split_mangled(mangled: str):
+    """A spliced name as (escaped module, bare name), or None if it is not one.
+
+    The length prefix is read once here so that `module_of` and `bare_of`
+    cannot disagree about where the module ends and the name begins.
+    """
+    if not mangled.startswith(_MANGLE):
+        return None
+    rest = mangled[len(_MANGLE):]
+    at = rest.find("_")
+    if at <= 0 or not rest[:at].isdigit():
+        return None
+    width = int(rest[:at])
+    escaped = rest[at + 1:at + 1 + width]
+    if len(escaped) != width:
+        return None
+    after = rest[at + 1 + width:]
+    if not after.startswith("_"):
+        return None
+    return escaped, after[1:]
+
+
+def bare_of(mangled: str) -> str | None:
+    """The name a spliced definition was WRITTEN under, or None for a
+    program's own name.
+
+    `fractions.Fraction` is spliced as one module-level class whose statement
+    name carries the module, and a method of it takes its `__qualname__` from
+    that statement -- so `Fraction.limit_denominator.__qualname__` read
+    `_asmpy_bundled_9_fractions_Fraction.limit_denominator`, the mangling in
+    plain sight. The splice restores `__name__` and `__qualname__` on the
+    class itself (see the `_MANGLE` fixup below); this is the half a method
+    needs, because its qualname was built from the class's key before any
+    fixup runs.
+    """
+    split = _split_mangled(mangled)
+    return None if split is None else split[1]
+
+
 def _module_bindings(tree) -> set:
     """Every name the program itself binds at module level.
 

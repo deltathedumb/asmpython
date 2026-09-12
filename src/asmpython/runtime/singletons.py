@@ -61,7 +61,7 @@ def apy_notimpl_kind() -> i64:
 # refused with E0018 -- "reserve() needs a positive size the compiler can work
 # out" -- because a reservation becomes a module-level global whose size is
 # fixed before any code runs, and a call is not a constant to the pass that
-# lays them out. So 152 appears here and in `int_cell.apy_obj_size`, and the
+# lays them out. So 160 appears here and in `int_cell.apy_obj_size`, and the
 # two could drift.
 #
 # WHAT MAKES THAT SAFE IS THE PROBE, not care: `test_ported_int.py` asks the C
@@ -73,7 +73,7 @@ def apy_notimpl_kind() -> i64:
 
 def apy_none() -> ptr:
     """The one None. `x is None` is a pointer comparison against this."""
-    cell: ptr = reserve("apy_none_cell_ir", 152)
+    cell: ptr = reserve("apy_none_cell_ir", 160)
     store(i32, i32(apy_none_kind()), offset(cell, 0))
     return cell
 
@@ -87,11 +87,11 @@ def apy_from_bool(b: i64) -> ptr:
     `True + 1` is 2.
     """
     if b:
-        cell: ptr = reserve("apy_true_cell_ir", 152)
+        cell: ptr = reserve("apy_true_cell_ir", 160)
         store(i32, i32(apy_bool_kind()), offset(cell, 0))
         store(i64, 1, offset(cell, 8))
         return cell
-    other: ptr = reserve("apy_false_cell_ir", 152)
+    other: ptr = reserve("apy_false_cell_ir", 160)
     store(i32, i32(apy_bool_kind()), offset(other, 0))
     store(i64, 0, offset(other, 8))
     return other
@@ -104,7 +104,7 @@ def apy_ellipsis() -> ptr:
     the C's comment says in the same words. A fresh cell per literal would
     answer False and nothing else would look wrong.
     """
-    cell: ptr = reserve("apy_ellipsis_cell_ir", 152)
+    cell: ptr = reserve("apy_ellipsis_cell_ir", 160)
     store(i32, i32(apy_ellipsis_kind()), offset(cell, 0))
     return cell
 
@@ -116,7 +116,7 @@ def apy_notimplemented() -> ptr:
     has the same one-cell requirement None does, for a reason that is about
     dispatch rather than about identity being nice to have.
     """
-    cell: ptr = reserve("apy_notimpl_cell_ir", 152)
+    cell: ptr = reserve("apy_notimpl_cell_ir", 160)
     store(i32, i32(apy_notimpl_kind()), offset(cell, 0))
     return cell
 
@@ -140,7 +140,7 @@ def apy_stop() -> ptr:
     property to rely on, and a reader should not have to know that
     `APY_NONE_K` is zero to see that this cell is built.
     """
-    cell: ptr = reserve("apy_stop_cell_ir", 152)
+    cell: ptr = reserve("apy_stop_cell_ir", 160)
     store(i32, i32(apy_none_kind()), offset(cell, 0))
     return cell
 

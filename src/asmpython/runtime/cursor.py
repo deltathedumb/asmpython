@@ -88,6 +88,10 @@ def apy_cursor_of(src: ptr, fn: ptr, mode: i64, start: i64) -> ptr:
         if i64(load(i32, offset(src, 0))) == apy_dict_kind():
             n0 = load(i64, offset(src, apy_d_n_offset()))
     store(i64, n0, offset(o, apy_it_n0_offset()))
+    named: i64 = 0
+    if src:
+        named = i64(load(i32, offset(src, 0)))
+    store(i32, i32(named), offset(o, apy_it_named_offset()))
     return o
 
 
@@ -360,6 +364,23 @@ def apy_step(it: ptr) -> ptr:
             apy_seq_push(row, v)
             i = i + 1
         return row
+    if mode == apy_it_rev():
+        # BACKWARDS, from the index `reversed` started it at. The position
+        # counts DOWN and -1 is exhaustion, so the forward walk's own slot
+        # serves without a second one for the length. A SOURCE THAT SHRANK
+        # ends the walk rather than reading past the end, which is what
+        # CPython's reverse iterator does.
+        back: i64 = load(i64, offset(it, apy_it_i_offset()))
+        if back < 0:
+            return apy_stop()
+        have: i64 = apy_raw_len(src)
+        if apy_error_occurred():
+            return ptr(0)
+        if back >= have:
+            store(i64, -1, offset(it, apy_it_i_offset()))
+            return apy_stop()
+        store(i64, back - 1, offset(it, apy_it_i_offset()))
+        return apy_key_at(src, back)
     at: i64 = load(i64, offset(it, apy_it_i_offset()))
     if i64(load(i32, offset(src, 0))) == apy_inst_kind():
         got: ptr = apy_getitem(src, apy_from_int(at))
@@ -547,7 +568,15 @@ def apy_iter(v: ptr) -> ptr:
     if k == apy_iter_kind():
         return v
     if k == apy_view_kind():
-        return apy_iter(apy_view_items(v))
+        # THE ITEMS ARE COPIED OUT HERE, so only this call still knows it was
+        # a view -- and CPython names the three apart. See `apy_it_viewed`.
+        walk: ptr = apy_iter(apy_view_items(v))
+        if walk:
+            if i64(load(i32, offset(walk, 0))) == apy_iter_kind():
+                part: i64 = i64(load(i32, offset(v, apy_vw_part_offset())))
+                store(i32, i32(apy_it_viewed() + part),
+                      offset(walk, apy_it_named_offset()))
+        return walk
     if k == apy_type_kind():
         meta: ptr = ptr(load(u64, offset(v, apy_t_meta_offset())))
         if meta:
@@ -587,44 +616,91 @@ def apy_iter(v: ptr) -> ptr:
     if k == apy_dict_kind():
         latched = load(i64, offset(v, apy_d_n_offset()))
     store(i64, latched, offset(o, apy_it_n0_offset()))
+    store(i32, i32(k), offset(o, apy_it_named_offset()))
     return o
 
 
 def apy_reversed(seq: ptr) -> ptr:
-    """`reversed(seq)`.
+    """`reversed(seq)` -- a CURSOR counting down, not a list built backwards.
 
     A CLASS MAY SAY WHAT ITS REVERSE IS, and `__reversed__` is asked first --
     which is the only way `reversed` can mean anything for an object that is
     not indexable.
 
-    A SET IS REFUSED, because it has no order to reverse: Python calls it not
-    reversible rather than answering an arbitrary order.
+    REVERSING NEEDS A SEQUENCE: a length and indexing, or a `__reversed__`. A
+    set has no order, and a cursor or a generator has a POSITION rather than a
+    length -- CPython refuses all three by name. The refusal has to be
+    explicit because the walk below would otherwise answer confidently: a set
+    in an arbitrary order, and an iterator drained FORWARDS by a walk that
+    believes it is going backwards.
 
-    EAGER, NOT LAZY: a list is built rather than a cursor walked backwards,
-    which is what makes the result readable more than once.
+    LAZY, NOT EAGER: CPython's `reversed(xs)` is an iterator with no length,
+    no indexing and one walk in it. A list answered all three wrongly and
+    copied the whole sequence before the first element was wanted. See
+    `apy_it_rev`.
     """
-    if i64(load(i32, offset(seq, 0))) == apy_inst_kind():
+    k: i64 = i64(load(i32, offset(seq, 0)))
+    if k == apy_inst_kind():
         hook: ptr = apy_unary_dunder_of(seq, rodata(b"__reversed__\0"))
         if apy_error_occurred():
             return ptr(0)
         if hook:
             return apy_iterable(hook)
-    if apy_is_set_of(seq):
+    ok: i64 = 0
+    if k == apy_list_kind():
+        ok = 1
+    if k == apy_tuple_kind():
+        ok = 1
+    if k == apy_str_kind():
+        ok = 1
+    if k == apy_bytes_kind():
+        ok = 1
+    if k == apy_dict_kind():
+        ok = 1
+    if k == apy_range_kind():
+        ok = 1
+    if k == apy_mview_kind():
+        ok = 1
+    if k == apy_view_kind():
+        ok = 1
+    if k == apy_inst_kind():
+        # An instance with the older protocol -- or one extending a builtin,
+        # whose length and indexing are the builtin's.
+        held: ptr = ptr(load(u64, offset(seq, apy_o_held_offset())))
+        if held:
+            ok = 1
+        else:
+            cls: ptr = ptr(load(u64, offset(seq, apy_o_cls_offset())))
+            if apy_class_find_of(cls, apy_name_of(rodata(b"__getitem__\0"))):
+                ok = 1
+    if not ok:
         return apy_raise_fmt(
             rodata(b"TypeError\0"),
             rodata(b"'%s' object is not reversible%s\0"),
             apy_kind_name_of(seq), rodata(b"\0"))
+    if k == apy_view_kind():
+        # A VIEW IS READ NOW, as it is for a forward walk: `reversed(d.keys())`
+        # reverses the keys the dict has at this point, and the cursor's source
+        # is the copy from here on -- so which view it was is recorded before
+        # it is gone.
+        items: ptr = apy_view_items(seq)
+        if not items:
+            return ptr(0)
+        vn: i64 = load(i64, offset(items, apy_q_n_offset()))
+        made: ptr = apy_cursor_of(items, ptr(0), apy_it_rev(), vn - 1)
+        if made:
+            part: i64 = i64(load(i32, offset(seq, apy_vw_part_offset())))
+            store(i32, i32(apy_it_revof() + apy_it_viewed() + part),
+                  offset(made, apy_it_named_offset()))
+        return made
     n: i64 = apy_raw_len(seq)
     if apy_error_occurred():
         return ptr(0)
-    out: ptr = apy_seq_new_of(apy_list_kind(), n + 1)
-    if not out:
-        return out
-    i: i64 = n - 1
-    while i >= 0:
-        apy_seq_push(out, apy_key_at(seq, i))
-        i = i - 1
-    return out
+    back: ptr = apy_cursor_of(seq, ptr(0), apy_it_rev(), n - 1)
+    if back:
+        store(i32, i32(apy_it_revof() + k),
+              offset(back, apy_it_named_offset()))
+    return back
 
 
 def apy_extend(seq: ptr, other: ptr) -> ptr:
@@ -663,8 +739,46 @@ def apy_extend(seq: ptr, other: ptr) -> ptr:
                 apy_kind_name_of(other), rodata(b"\0"))
         return ptr(0)
     k: i64 = i64(load(i32, offset(src, 0)))
+    if k == apy_inst_kind():
+        # AN INSTANCE `apy_iterable` LEFT ALONE is `__len__` plus
+        # `__getitem__` -- the older protocol, whose walk IS the index walk
+        # and the one `apy_key_at` reads. Without this arm `[*obj]` and
+        # `a, b = obj` for such a class reported that it is not iterable,
+        # about the very protocol that makes it so.
+        have: i64 = apy_raw_len(src)
+        if apy_error_occurred():
+            return ptr(0)
+        at: i64 = 0
+        while at < have:
+            got: ptr = apy_key_at(src, at)
+            if not got:
+                return ptr(0)
+            if not apy_seq_push(seq, got):
+                return ptr(0)
+            at = at + 1
+        return apy_none()
+    if k == apy_iter_kind():
+        # A CURSOR IS STEPPED, NOT INDEXED. `apy_iterable` hands one straight
+        # back -- only a generator is drained there -- so both walks below saw
+        # a kind neither could read and `[*map(f, xs)]`, `f(*it)` and
+        # `(*reversed(xs),)` all reported a `map` as not iterable at all.
+        # Stepping is also what leaves a partly consumed cursor where it is.
+        going: i64 = 1
+        while going:
+            one: ptr = apy_step(src)
+            if not one:
+                return ptr(0)
+            if one == apy_stop():
+                going = 0
+            else:
+                if not apy_seq_push(seq, one):
+                    return ptr(0)
+        return apy_none()
+    # A MEMORYVIEW IS ITERABLE and yields ints, which is what `[*mv]` and
+    # `xs.extend(mv)` expect.
     if (k == apy_str_kind() or k == apy_bytes_kind()
-            or k == apy_dict_kind() or k == apy_range_kind()):
+            or k == apy_dict_kind() or k == apy_range_kind()
+            or k == apy_mview_kind()):
         n: i64 = apy_raw_len(src)
         i: i64 = 0
         while i < n:
@@ -810,7 +924,11 @@ def apy_iter_until(fn: ptr, sentinel: ptr) -> ptr:
             else:
                 apy_seq_push(out, v)
                 guard = guard + 1
-    return apy_iter(out)
+    walk: ptr = apy_iter(out)
+    if walk:
+        store(i32, i32(apy_it_callable()),
+              offset(walk, apy_it_named_offset()))
+    return walk
 
 
 def apy_next(it: ptr, fallback: ptr, has_default: i64) -> ptr:

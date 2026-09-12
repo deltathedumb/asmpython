@@ -674,6 +674,29 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
         if (strcmp(want, "__qualname__") == 0)
             return O(obj)->v.fn.qualname ? O(obj)->v.fn.qualname
                                          : O(obj)->v.fn.name;
+        /* `f.__module__` -- WHERE THE `def` WAS WRITTEN. Six shapes reach
+           here and CPython answers each of them differently:
+
+             `len.__module__`          `builtins`      a builtin thunk
+             `int.__module__`          `builtins`      a builtin type name
+             `[].append.__module__`    None            a BOUND native
+             `list.append.__module__`  AttributeError  a method_descriptor
+             `f.__module__`            `__main__`      a program's own `def`
+             `Fraction.m.__module__`   `fractions`     a spliced one
+
+           The last two are the reason the field exists; the rest are read
+           off the flags. A missing field is `__main__` rather than absent,
+           because every `def` a program writes is in a module and there is
+           only one it can be in. */
+        if (strcmp(want, "__module__") == 0) {
+            if (O(obj)->v.fn.native)
+                return O(obj)->v.fn.bound ? apy_none()
+                                          : apy_no_attribute(obj, name);
+            if (O(obj)->v.fn.builtin || O(obj)->v.fn.is_type)
+                return apy_lit("builtins");
+            return O(obj)->v.fn.module ? O(obj)->v.fn.module
+                                       : apy_lit("__main__");
+        }
         /* `m.__self__` is the RECEIVER of a bound method, and its absence is
            how a program tells a bound method from a plain function. */
         if (strcmp(want, "__self__") == 0) {
@@ -739,6 +762,20 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
         if (strcmp(want, "__class__") == 0) return apy_kind_class(obj);
         return apy_no_attribute(obj, name);
     case APY_GEN_K:
+        /* WHICH `def` IT CAME FROM. `g.__name__` is the plain name and
+           `g.__qualname__` the dotted one -- `C.m` for a method's generator,
+           `f.<locals>.<genexpr>` for an expression's -- which is also what
+           the repr prints. Recorded on the STEP function, because the
+           generator cell is a frame and the frame's code is the step. */
+        if (strcmp(want, "__name__") == 0
+                || strcmp(want, "__qualname__") == 0) {
+            apy_value step = O(obj)->v.g.step;
+            if (!step || O(step)->kind != APY_FUNC_K)
+                return apy_no_attribute(obj, name);
+            if (strcmp(want, "__qualname__") == 0 && O(step)->v.fn.qualname)
+                return O(step)->v.fn.qualname;
+            return O(step)->v.fn.name;
+        }
         /* THE THREE METHODS, AS VALUES. They are dispatched by name at the
            call site, so nothing needed a value for them -- until a program
            asked `hasattr(g, "close")`, which every duck-typed consumer does,

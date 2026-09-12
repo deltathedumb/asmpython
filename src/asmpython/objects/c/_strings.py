@@ -1237,7 +1237,17 @@ APY_API apy_value apy_str_join(apy_value sep, apy_value parts) {
        it would also mean clearing an already-set flag to replace the text,
        which is exactly what the sticky-first-error rule forbids. */
     if (O(parts)->kind != APY_STR_K && !apy_is_seq(parts)
-        && !apy_is_set(parts) && O(parts)->kind != APY_DICT_K)
+        && !apy_is_set(parts) && O(parts)->kind != APY_DICT_K
+        /* A CURSOR IS AN ITERABLE, and `apy_iterable` hands one straight
+           back rather than draining it -- so `"".join(map(str, xs))`, about
+           the commonest spelling of this whole function, was refused by the
+           check meant for `"".join(5)`. `apy_raw_len` below drains it. The
+           other three are iterable too and were refused for the same reason;
+           each of them yields an int, so what they get now is CPython's
+           per-item message about the element rather than a claim about the
+           argument. */
+        && O(parts)->kind != APY_ITER_K && O(parts)->kind != APY_RANGE_K
+        && O(parts)->kind != APY_BYTES_K && O(parts)->kind != APY_MVIEW_K)
         return apy_fail("TypeError", "can only join an iterable");
     n = apy_raw_len(parts);
     if (apy_error_occurred()) return 0;

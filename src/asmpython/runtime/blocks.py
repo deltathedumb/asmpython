@@ -9,7 +9,7 @@
 # so `list` and `dict` need this file before they need anything else.
 #
 # WHY NOT ONE ALLOCATOR FOR BOTH. Rounding every allocation up to a size class
-# costs a cell 40% -- 152 bytes into a 256-byte class -- to serve the one kind
+# costs a cell 38% -- 160 bytes into a 256-byte class -- to serve the one kind
 # of allocation that is ever freed. So `apy_alloc_bytes` keeps its exact-fit
 # bump for immortal things and this file layers classes on top of it for the
 # things that come back. Both take their memory from the same arena, so the

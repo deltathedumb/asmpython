@@ -984,7 +984,7 @@ def apy_bind_of(f: ptr, self_: ptr) -> ptr:
     THE WHOLE `fn` ARM IS COPIED, not just the pointers a call needs. A bound
     method has to answer `__name__`, `__doc__` and its defaults exactly as
     the unbound one does -- and copying the arm is one memcpy where naming
-    the fields would be eighteen stores and a new place to forget one.
+    the fields would be nineteen stores and a new place to forget one.
 
     A FRESH CELL EVERY TIME, which is why `a.m is a.m` is False in Python:
     each attribute access binds again. Reusing one would make two methods of
@@ -1868,7 +1868,69 @@ def apy_unpack_check(v: ptr, want: i64, at_least: i64) -> ptr:
     TWO MESSAGES AND NOT ONE, because Python words the two directions
     differently -- "not enough values" and "too many values" -- and a program
     matching on the text would see the wrong one.
+
+    ANSWERS WHAT TO INDEX, because the unpack reads BY INDEX -- `a, *b, c =
+    xs` takes `c` from `xs[-1]` without ever computing a length -- and not
+    everything iterable has indices. A generator, a cursor and a user object
+    with `__iter__` are drained here. See the C's `apy_unpack_check`.
     """
+    # WHETHER THE SURPLUS IS COUNTED, decided by the SOURCE as CPython decides
+    # it: an exact list, tuple or dict knows its own length, and everything
+    # else is unpacked through the iterator protocol, which can only say there
+    # was one element too many. Asked before the drain replaces `v`.
+    k: i64 = i64(load(i32, offset(v, 0)))
+    counted: i64 = 0
+    if k == apy_list_kind():
+        counted = 1
+    if k == apy_tuple_kind():
+        counted = 1
+    if k == apy_dict_kind():
+        counted = 1
+    src: ptr = apy_iterable(v)
+    if not src:
+        return ptr(0)
+    # THE UNPACK WORDS ITS OWN REFUSAL. `apy_iterable` answers a value it does
+    # not recognise UNCHANGED -- only a user object can fail there -- so the
+    # kinds that can be walked are tested here, and CPython's wording for this
+    # operation names it: `cannot unpack non-iterable int object`.
+    sk: i64 = i64(load(i32, offset(src, 0)))
+    walks: i64 = apy_is_seq_of(src) or apy_is_set_of(src)
+    if sk == apy_str_kind() or sk == apy_bytes_kind():
+        walks = 1
+    if sk == apy_dict_kind() or sk == apy_range_kind():
+        walks = 1
+    if sk == apy_mview_kind() or sk == apy_iter_kind():
+        walks = 1
+    if sk == apy_gen_kind() or sk == apy_inst_kind():
+        walks = 1
+    if not walks:
+        return apy_raise_fmt(
+            rodata(b"TypeError\0"),
+            rodata(b"cannot unpack non-iterable %s object%s\0"),
+            apy_kind_name_of(v), rodata(b"\0"))
+    # ANYTHING NOT READ BY POSITION IS COPIED INTO A LIST. A dict subscripts
+    # by KEY, so `a, b = {1: 0, 2: 0}` asked for key 0 and raised KeyError; a
+    # set cannot be subscripted at all; a cursor holds a position instead of
+    # indices.
+    indexed: i64 = 0
+    if sk == apy_list_kind() or sk == apy_tuple_kind():
+        indexed = 1
+    if sk == apy_str_kind() or sk == apy_bytes_kind():
+        indexed = 1
+    if sk == apy_range_kind() or sk == apy_mview_kind():
+        indexed = 1
+    # AN INSTANCE IS WALKED AND NOT SUBSCRIPTED, even the `__len__` plus
+    # `__getitem__` kind whose subscript is its protocol: the `*rest` branch
+    # reads a SLICE, and `a, *rest = obj` handed one to a `__getitem__`
+    # written for integers.
+    if not indexed:
+        drained: ptr = apy_list_new(8)
+        if not drained:
+            return ptr(0)
+        if not apy_extend(drained, src):
+            return ptr(0)
+        src = drained
+    v = src
     n: i64 = apy_raw_len(v)
     if apy_error_occurred():
         return ptr(0)
@@ -1888,11 +1950,16 @@ def apy_unpack_check(v: ptr, want: i64, at_least: i64) -> ptr:
         store(u8, u8(0), offset(buf, at))
         return apy_raise_at(rodata(b"ValueError\0"), buf)
     if not at_least and n > want:
+        if counted:
+            return apy_raise_fmt(
+                rodata(b"ValueError\0"),
+                rodata(b"too many values to unpack (expected %s, got %s)\0"),
+                apy_decimal_of(want, 0), apy_decimal_of(n, 1))
         return apy_raise_fmt(
             rodata(b"ValueError\0"),
-            rodata(b"too many values to unpack (expected %s, got %s)\0"),
-            apy_decimal_of(want, 0), apy_decimal_of(n, 1))
-    return apy_none()
+            rodata(b"too many values to unpack (expected %s)%s\0"),
+            apy_decimal_of(want, 0), rodata(b"\0"))
+    return v
 
 
 def apy_check_slots(cls: ptr) -> ptr:

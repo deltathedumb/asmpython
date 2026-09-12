@@ -194,6 +194,17 @@ static apy_value apy_type_from_ns(apy_value mcls, apy_value name,
         for (i = 0; i < O(ns)->v.d.n; i++)
             apy_dict_set(O(cls)->v.t.dict, O(ns)->v.d.keys[i],
                          O(ns)->v.d.vals[i]);
+    /* `__module__` IS THE CONSTRUCTOR'S TO SUPPLY when the namespace carried
+       none, exactly as CPython's `type_new` supplies it from the caller's
+       globals. A class written out gets one from its body (see `_dyn_class`)
+       and reaches here with it already in `ns`; one built by `type(name,
+       bases, {})` -- which is what `enum`, `dataclasses` and `namedtuple`
+       all do -- had none at all, so it printed as `<class 'X'>` where
+       CPython says `<class '__main__.X'>`. There is no frame to ask, and a
+       program's own module is the only one that can reach this. */
+    if (!apy_dict_get_or(O(cls)->v.t.dict, apy_name("__module__"), 0))
+        apy_dict_set(O(cls)->v.t.dict, apy_name("__module__"),
+                     apy_lit("__main__"));
     return cls;
 }
 
@@ -3128,8 +3139,42 @@ APY_API apy_value apy_extend(apy_value seq, apy_value other) {
         }
         return 0;
     }
+    /* AN INSTANCE `apy_iterable` LEFT ALONE is `__len__` plus `__getitem__`
+       -- the older protocol, whose walk IS the index walk, and the one
+       `apy_key_at` reads. Without this arm `[*obj]` and `a, b = obj` for such
+       a class reported `'Seq' object is not iterable` about the very protocol
+       that makes it iterable. */
+    if (O(other)->kind == APY_INST_K) {
+        int64_t n = apy_raw_len(other);
+        if (apy_error_occurred()) return 0;
+        for (i = 0; i < n; i++) {
+            apy_value item = apy_key_at(other, i);
+            if (!item) return 0;
+            if (!apy_seq_push(seq, item)) return 0;
+        }
+        return apy_none();
+    }
+    /* A CURSOR IS STEPPED, NOT INDEXED. `apy_iterable` hands one straight
+       back -- only a generator is drained there -- so both walks below saw a
+       kind neither could read and `[*map(f, xs)]`, `f(*it)` and
+       `(*reversed(xs),)` all reported a `map` as not iterable at all.
+       Stepping is also what leaves a partly consumed cursor where it is,
+       which is what `[*it]` after two `next`s has to see. */
+    if (O(other)->kind == APY_ITER_K) {
+        for (;;) {
+            apy_value item = apy_step(other);
+            if (!item) return 0;
+            if (item == apy_stop()) break;
+            if (!apy_seq_push(seq, item)) return 0;
+        }
+        return apy_none();
+    }
+    /* A MEMORYVIEW IS ITERABLE and yields ints, which is what `[*mv]` and
+       `xs.extend(mv)` expect; it was refused here while `list(mv)` -- the
+       same walk by another road -- worked. */
     if (O(other)->kind == APY_STR_K || O(other)->kind == APY_BYTES_K
-        || O(other)->kind == APY_DICT_K || O(other)->kind == APY_RANGE_K) {
+        || O(other)->kind == APY_DICT_K || O(other)->kind == APY_RANGE_K
+        || O(other)->kind == APY_MVIEW_K) {
         int64_t n = apy_raw_len(other);
         for (i = 0; i < n; i++) {
             apy_value item = O(other)->kind == APY_DICT_K

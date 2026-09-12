@@ -11,8 +11,8 @@
 # scratch, a split's parts) and not one releases an `apy_obj`. Cells are
 # immortal, and an allocator for immortal objects is a pointer and a limit.
 #
-# So this replaces `malloc(152)` per object with a pointer increment, and asks
-# the platform for memory a megabyte at a time instead of 152 bytes at a time.
+# So this replaces `malloc(160)` per object with a pointer increment, and asks
+# the platform for memory a megabyte at a time instead of 160 bytes at a time.
 # The floor gets hit once per chunk rather than once per integer, which is what
 # stage 2's three-function claim needs to survive contact with real programs.
 #
@@ -50,7 +50,7 @@ def apy_alloc_bytes(n: i64) -> ptr:
     left: i64 = load(i64, offset(state, 8))
     if left < want:
         # A REQUEST LARGER THAN A CHUNK GETS ITS OWN CHUNK, rather than
-        # failing or looping. Nothing here asks for one today -- a cell is 152
+        # failing or looping. Nothing here asks for one today -- a cell is 160
         # bytes -- but an allocator whose behaviour depends on the caller
         # staying small is one that breaks the first time something does not.
         size: i64 = apy_arena_chunk()
@@ -77,7 +77,7 @@ def apy_obj_alloc(kind: i64) -> ptr:
     reads uninitialised memory as a value.
 
     The zeroing is by i64 rather than by byte because the payload starts at 8
-    and the cell is 152, so it divides exactly -- eighteen stores, no tail, and
+    and the cell is 160, so it divides exactly -- nineteen stores, no tail, and
     no byte loop for a backend to make slow.
     """
     cell: ptr = apy_alloc_bytes(apy_obj_size())

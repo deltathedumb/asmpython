@@ -31,6 +31,7 @@ from .analysis import (
     _EXC_NAMES, _handler_names, _target_names, int_literal,
     sem_type, span_of,
 )
+from .bundled import module_of as _bundled_module_of
 from .methods import (
     CTOR_ANY_KEYWORD, CTOR_PARAMS, DICT_PARTS, DYN_METHOD_TABLE,
     METHOD_ARITY_GUARD, METHOD_KW_SYMBOL, METHOD_PARAMS, REQUIRED, KeywordError,
@@ -657,7 +658,7 @@ class DynamicLowering:
                 # value and calls it with the outermost iterable, which is
                 # what makes only that one eager.
                 made = self._dyn_function_value(self.def_keys[id(node)],
-                                                "<genexp>")
+                                                "<genexpr>")
                 source = self._dyn_expr(node.generators[0].iter)
                 return self._dyn_indirect(made, [source])
             case ast.ListComp():
@@ -3760,12 +3761,21 @@ class DynamicLowering:
                             self.b.const(T.I64, len(info.freevars)),
                             self.b.const(T.I64, len(info.defaults)),
                             self.b.const(T.I64, 1 if info.vararg else 0)])
-        if key != name_text:
-            # PEP 3155: the QUALIFIED name. The frontend's key is already in
-            # exactly CPython's spelling -- `C.m`, `outer.<locals>.inner` --
-            # so a name that differs from the plain one IS the qualname.
+        qual = info.qualname or key
+        if qual != name_text:
+            # PEP 3155: the QUALIFIED name. Analysis records it in exactly
+            # CPython's spelling -- `C.m`, `outer.<locals>.inner`, and for a
+            # method of a spliced class the name the SOURCE wrote rather than
+            # the mangled key; see `_written_qual`.
             self.b.call(T.PTR, "apy_func_qualname",
-                        [func, self._dyn_str_literal(key)])
+                        [func, self._dyn_str_literal(qual)])
+        where = _bundled_module_of(key)
+        if where is not None:
+            # `__module__`, for a SPLICED `def` only -- a program's own is
+            # `__main__` and the read defaults to it, rather than paying a
+            # call per `def` to say what there is no alternative to.
+            self.b.call(T.PTR, "apy_func_module",
+                        [func, self._dyn_str_literal(where)])
         # PEP 649: the thunk that BUILDS `__annotations__`, recorded on the
         # function so that reading them is what evaluates them.
         annotate = self._dyn_annotate_thunk(key, info)
@@ -4287,6 +4297,15 @@ class DynamicLowering:
                             self.b.const(T.I64, 0),
                             self.b.const(T.I64, 0),
                             self.b.const(T.I64, 0)])
+        # A GENERATOR IS NAMED AFTER THE `def` IT CAME FROM:
+        # `<generator object gen at 0x...>`, and `g.__qualname__` is `C.m`
+        # for a method's. The name lives on the STEP function and nowhere
+        # else -- the generator cell is a frame, and the frame's code is the
+        # step -- so this is what both read.
+        qual = info.qualname or info.node.name
+        if qual != info.node.name:
+            self.b.call(T.PTR, "apy_func_qualname",
+                        [step, self._dyn_str_literal(qual)])
         gen = self.b.call(T.PTR, "apy_gen_new",
                           [step, self.b.const(T.I64, len(info.slots))])
         if info.is_async_generator:
@@ -4717,6 +4736,17 @@ class DynamicLowering:
                     [cls, self._dyn_str_literal("__doc__"),
                      self._dyn_str_literal(told) if told is not None
                      else self.b.call(T.PTR, "apy_none", [])])
+        self._dyn_check()
+        # `__module__` IS WHERE THE CLASS WAS WRITTEN, and CPython puts it in
+        # every class dict -- `repr(C)` is `<class '__main__.C'>` and pickling
+        # reads it to find the class again. A compiled program IS the script
+        # being run, so its own classes are `__main__`; a bundled module's are
+        # spliced here as ordinary definitions and only the mangled name still
+        # says which module they came from. See `bundled.module_of`.
+        self.b.call(T.PTR, setter,
+                    [cls, self._dyn_str_literal("__module__"),
+                     self._dyn_str_literal(
+                         _bundled_module_of(info.name) or "__main__")])
         self._dyn_check()
         # THE BODY'S OWN NAMESPACE while it runs. A class body is a scope
         # executed top to bottom, and a name it bound is readable further down
@@ -6571,24 +6601,27 @@ class DynamicLowering:
         elts = list(target.elts)
         star = next((i for i, e in enumerate(elts)
                      if isinstance(e, ast.Starred)), None)
-        # THROUGH `apy_iterable` FIRST, because the unpack below READS BY
-        # INDEX -- and a generator has no indices. `a, b = g()` is ordinary
-        # Python and reported that a generator is not subscriptable, which is
-        # true of the lowering and not of the language. Anything already a
-        # container comes back unchanged, so this costs nothing for the
-        # `a, b = xs` that every program writes.
-        value = self.b.call(T.PTR, "apy_iterable", [value])
-        self._dyn_check()
-        slot = self.b.alloca(8)
-        self.b.store(T.PTR, value, slot)
+        # THE CHECK ANSWERS WHAT TO INDEX, because the unpack below READS BY
+        # INDEX and not everything iterable has indices. `a, b = g()` and
+        # `a, b = map(f, xs)` are ordinary Python and reported that a
+        # generator, then an iterator, is not subscriptable -- true of the
+        # lowering and not of the language. Anything already a container comes
+        # back unchanged, so this costs nothing for the `a, b = xs` every
+        # program writes; see `apy_unpack_check`, which also words its
+        # refusals from the source it was handed.
+        #
         # A `*rest` turns the exact count into a FLOOR: `a, *b = xs` wants at
         # least one, and the message says so.
-        self.b.call(T.PTR, "apy_unpack_check",
-                    [value,
-                     self.b.const(T.I64,
-                                  len(elts) - (1 if star is not None else 0)),
-                     self.b.const(T.I64, 1 if star is not None else 0)])
+        slot = self.b.alloca(8)
+        value = self.b.call(T.PTR, "apy_unpack_check",
+                            [value,
+                             self.b.const(
+                                 T.I64,
+                                 len(elts) - (1 if star is not None else 0)),
+                             self.b.const(T.I64,
+                                          1 if star is not None else 0)])
         self._dyn_check()
+        self.b.store(T.PTR, value, slot)
 
         def at(index: int) -> int:
             # A NEGATIVE index for the elements after a `*rest`, so the tail

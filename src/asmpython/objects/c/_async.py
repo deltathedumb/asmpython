@@ -118,6 +118,13 @@ APY_API apy_value apy_func_qualname(apy_value f, apy_value name) {
     return f;
 }
 
+/* WHERE THE `def` WAS WRITTEN, for `__module__`. Emitted only for a spliced
+   definition: see the field. */
+APY_API apy_value apy_func_module(apy_value f, apy_value name) {
+    if (O(f)->kind == APY_FUNC_K) O(f)->v.fn.module = name;
+    return f;
+}
+
 APY_API apy_value apy_func_annotate(apy_value f, apy_value thunk) {
     if (O(f)->kind == APY_FUNC_K) O(f)->v.fn.annotate = thunk;
     return f;

@@ -59,6 +59,10 @@ APY_API apy_value apy_cursor_of(apy_value src, apy_value fn,
     o->v.it.mode = (int)mode;
     o->v.it.i = start;
     o->v.it.n0 = (src && O(src)->kind == APY_DICT_K) ? O(src)->v.d.n : -1;
+    /* WHAT IT IS NAMED AFTER: the source's kind, which is what CPython names
+       an iterator after. A caller whose source does not survive -- a view,
+       whose items are copied out here -- overwrites this afterwards. */
+    o->v.it.named = src ? O(src)->kind : 0;
     return V(o);
 }
 /* THE NAME ITS CALLERS USE, kept as a delegate: the body is IR's now, and
@@ -234,6 +238,26 @@ APY_API apy_value apy_step(apy_value it) {
             apy_seq_push(row, v);
         }
         return row;
+    }
+    /* BACKWARDS, from the index `reversed` started it at. The position
+       counts DOWN and -1 is exhaustion, so the forward walk's own `i` serves
+       without a second field for the length.
+
+       A SOURCE THAT SHRANK UNDER THE WALK ends it rather than reading past
+       the end, which is what CPython's reverse iterator does -- it gives up
+       and answers StopIteration from then on. */
+    case APY_IT_REV: {
+        apy_value src = O(it)->v.it.src;
+        int64_t at = O(it)->v.it.i, n;
+        if (at < 0) return apy_stop();
+        n = apy_raw_len(src);
+        if (apy_error_occurred()) return 0;
+        if (at >= n) {
+            O(it)->v.it.i = -1;
+            return apy_stop();
+        }
+        O(it)->v.it.i = at - 1;
+        return apy_key_at(src, at);
     }
     default: break;
     }

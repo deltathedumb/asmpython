@@ -628,7 +628,66 @@ APY_API apy_value apy_to_bytearray(apy_value src) {
 APY_API apy_value apy_unpack_check(apy_value v, int64_t want,
                                    int64_t at_least) {
     char buf[128];
-    int64_t n = apy_raw_len(v);
+    int64_t n;
+    /* WHETHER THE SURPLUS IS COUNTED, which CPython decides by the SOURCE: an
+       exact list, tuple or dict knows its own length, and everything else is
+       unpacked through the iterator protocol, which can only say that there
+       was one element too many. So `a, b = [1, 2, 3]` is `(expected 2, got
+       3)` and `a, b = "abc"`, `range(3)` or `map(f, xs)` is `(expected 2)`.
+       Asked of the value as it ARRIVES, before the drain below replaces it
+       with a list. The shortfall is counted whatever the source, because the
+       unpack took what there was and knows how many that was. */
+    int counted = O(v)->kind == APY_LIST_K || O(v)->kind == APY_TUPLE_K
+        || O(v)->kind == APY_DICT_K;
+    /* WHAT CAN BE READ BY INDEX, which is what the unpack does: `a, *b, c =
+       xs` takes `c` from `xs[-1]` without ever computing a length. So
+       anything holding a POSITION rather than indices is drained here -- a
+       generator, a cursor, a user object with `__iter__`.
+
+       THE FRONTEND USED TO EMIT `apy_iterable` FOR THIS, ahead of the call.
+       That drained a generator and handed a cursor straight back, so `a, b =
+       map(f, xs)` reported that an `iterator` is not subscriptable -- true of
+       the lowering and not of the language. Doing it here also keeps
+       `counted` above answering about the source rather than about the list a
+       drain produced. */
+    apy_value src = apy_iterable(v);
+    int k;
+    if (!src) return 0;
+    k = O(src)->kind;
+    /* THE UNPACK WORDS ITS OWN REFUSAL. `apy_iterable` answers a value it
+       does not recognise UNCHANGED -- only a user object can fail there --
+       so the kinds that can be walked are tested here, and CPython's wording
+       for this operation names it: `cannot unpack non-iterable int object`,
+       not `'int' object is not iterable`. */
+    if (!(apy_is_seq(src) || apy_is_set(src) || k == APY_STR_K
+          || k == APY_BYTES_K || k == APY_DICT_K || k == APY_RANGE_K
+          || k == APY_MVIEW_K || k == APY_ITER_K || k == APY_GEN_K
+          || k == APY_INST_K))
+        return apy_fail2("TypeError",
+                         "cannot unpack non-iterable %s object%s",
+                         apy_kind_name(v), "");
+    /* ANYTHING NOT READ BY POSITION IS COPIED INTO A LIST. A dict subscripts
+       by KEY, so `a, b = {1: 0, 2: 0}` asked for key 0 and raised KeyError; a
+       set and a frozenset cannot be subscripted at all; a cursor holds a
+       position instead of indices. All three are ordinary Python and all
+       three failed, each in its own way, while `for` over the same value
+       worked -- the same elements by another road. */
+    if (!(k == APY_LIST_K || k == APY_TUPLE_K || k == APY_STR_K
+          || k == APY_BYTES_K || k == APY_RANGE_K || k == APY_MVIEW_K)) {
+        /* AN INSTANCE IS WALKED AND NOT SUBSCRIPTED, even the `__len__` plus
+           `__getitem__` kind whose subscript is its protocol: the `*rest`
+           branch reads a SLICE, and `a, *rest = obj` handed one to a
+           `__getitem__` written for integers -- `unsupported operand type(s)
+           for +: 'slice' and 'int'` out of a program that does not mention
+           slices. CPython never asks, because it unpacks through the
+           iterator. */
+        apy_value into = apy_list_new(8);
+        if (!into) return 0;
+        if (!apy_extend(into, src)) return 0;
+        src = into;
+    }
+    v = src;
+    n = apy_raw_len(v);
     if (apy_error_occurred()) return 0;
     if (n < want) {
         snprintf(buf, sizeof buf,
@@ -637,12 +696,21 @@ APY_API apy_value apy_unpack_check(apy_value v, int64_t want,
         return apy_fail("ValueError", buf);
     }
     if (!at_least && n > want) {
-        snprintf(buf, sizeof buf,
-                 "too many values to unpack (expected %lld, got %lld)",
-                 (long long)want, (long long)n);
+        if (counted)
+            snprintf(buf, sizeof buf,
+                     "too many values to unpack (expected %lld, got %lld)",
+                     (long long)want, (long long)n);
+        else
+            snprintf(buf, sizeof buf,
+                     "too many values to unpack (expected %lld)",
+                     (long long)want);
         return apy_fail("ValueError", buf);
     }
-    return apy_none();
+    /* THE SEQUENCE TO INDEX, not None: this is already the call that
+       establishes the length, so it is where "what can be indexed" is
+       answered -- and a second entry point for it would be one more thing
+       three runtimes have to agree about. */
+    return v;
 }
 
 APY_API apy_value apy_name_or(apy_value got, apy_value fallback) {
@@ -660,7 +728,17 @@ APY_API apy_value apy_iter(apy_value v) {
     /* A VIEW WALKS WHAT IT IS A VIEW OF, which `apy_getiter` and
        `apy_iterable` both already do -- this one did not, so
        `iter(d.items())` refused a thing `list(d.items())` accepts. */
-    if (O(v)->kind == APY_VIEW_K) return apy_iter(apy_view_items(v));
+    if (O(v)->kind == APY_VIEW_K) {
+        /* THE ITEMS ARE COPIED OUT HERE, so the cursor's source is a list
+           from now on and only this call still knows it was a view. CPython
+           names the three apart -- `dict_keyiterator`,
+           `dict_valueiterator`, `dict_itemiterator` -- so which one is
+           recorded before the view is gone. */
+        apy_value out = apy_iter(apy_view_items(v));
+        if (out && O(out)->kind == APY_ITER_K)
+            O(out)->v.it.named = APY_IT_VIEWED + O(v)->v.vw.part;
+        return out;
+    }
     /* ITERATING A CLASS IS THE METACLASS'S BUSINESS: `for c in Color` is
        `type(Color).__iter__(Color)`, which is how an enum lists its members.
        A class with no metaclass cannot be iterated, and the refusal further
@@ -707,6 +785,8 @@ APY_API apy_value apy_iter(apy_value v) {
     o->v.it.fn = 0;
     o->v.it.mode = APY_IT_PLAIN;
     o->v.it.n0 = (O(v)->kind == APY_DICT_K) ? O(v)->v.d.n : -1;
+    /* WHAT IT IS NAMED AFTER -- see `apy_cursor_name`. */
+    o->v.it.named = O(v)->kind;
     return V(o);
 }
 
@@ -991,28 +1071,58 @@ APY_API apy_value apy_extreme_or(apy_value seq, apy_value keyfn,
 }
 
 APY_API apy_value apy_reversed(apy_value seq) {
-    int64_t n, i;
+    int64_t n;
     apy_value out;
+    int kind = O(seq)->kind;
     /* `__reversed__` WINS OVER THE INDEX WALK. A class may define both it and
        `__getitem__`, and they need not agree -- the hook is the answer the
        class chose, and walking indices backwards instead silently produced a
        different sequence from the one it asked for. */
-    if (O(seq)->kind == APY_INST_K) {
+    if (kind == APY_INST_K) {
         apy_value hook = apy_unary_dunder(seq, "__reversed__");
         if (apy_error_occurred()) return 0;
         if (hook) return apy_iterable(hook);
     }
-    /* A SET HAS NO ORDER TO REVERSE. It has a length and it can be walked by
-       index here, which is exactly why this has to refuse explicitly: the
-       index walk would have produced a confident answer to a question the
-       type cannot be asked. CPython says so too. */
-    if (apy_is_set(seq))
+    /* REVERSING NEEDS A SEQUENCE: a length and indexing, or a `__reversed__`.
+       A set has no order, and a cursor or a generator has a POSITION rather
+       than a length -- CPython refuses all three by name, in these words.
+       The refusal has to be explicit because the walk below would otherwise
+       have produced a confident answer to a question the type cannot be
+       asked: a set in an arbitrary order, and an iterator drained FORWARDS
+       by a walk that thinks it is going backwards. */
+    if (!(kind == APY_LIST_K || kind == APY_TUPLE_K || kind == APY_STR_K
+          || kind == APY_BYTES_K || kind == APY_DICT_K || kind == APY_RANGE_K
+          || kind == APY_MVIEW_K || kind == APY_VIEW_K
+          /* An instance with the older protocol -- or one extending a
+             builtin, whose length and indexing are the builtin's. */
+          || (kind == APY_INST_K
+              && (O(seq)->v.o.held
+                  || apy_class_find(O(seq)->v.o.cls,
+                                    apy_name("__getitem__"))))))
         return apy_fail2("TypeError", "'%s' object is not reversible%s",
                          apy_kind_name(seq), "");
+    /* A VIEW IS READ NOW, as it is for a forward walk: `reversed(d.keys())`
+       reverses the keys the dict has at this point, and the cursor's source
+       is the copy from here on -- so which view it was is recorded before it
+       is gone. */
+    if (kind == APY_VIEW_K) {
+        apy_value items = apy_view_items(seq);
+        if (!items) return 0;
+        out = apy_cursor(items, 0, APY_IT_REV, O(items)->v.q.n - 1);
+        if (out)
+            O(out)->v.it.named =
+                APY_IT_REVOF + APY_IT_VIEWED + O(seq)->v.vw.part;
+        return out;
+    }
     n = apy_raw_len(seq);
     if (apy_error_occurred()) return 0;
-    out = apy_seq_new(APY_LIST_K, n + 1);
-    for (i = n - 1; i >= 0; i--) apy_seq_push(out, apy_key_at(seq, i));
+    /* A CURSOR COUNTING DOWN, not a list built backwards. `reversed(xs)` is
+       an ITERATOR in CPython: it has no length, cannot be indexed and cannot
+       be walked twice, and a list answered all three wrongly -- `type(...)`
+       said `list`, `isinstance(..., list)` was True, and the whole sequence
+       was copied before the first element was wanted. See `APY_IT_REV`. */
+    out = apy_cursor(seq, 0, APY_IT_REV, n - 1);
+    if (out) O(out)->v.it.named = APY_IT_REVOF + kind;
     return out;
 }
 
@@ -1665,7 +1775,15 @@ APY_API apy_value apy_iter_until(apy_value fn, apy_value sentinel) {
         if (apy_truth(apy_eq(v, sentinel))) break;
         apy_seq_push(out, v);
     }
-    return apy_iter(out);
+    {
+        /* NAMED AFTER THE FORM AND NOT AFTER THE LIST: CPython calls this a
+           `callable_iterator`, and the list the calls drained into is an
+           implementation detail of this runtime's eagerness. */
+        apy_value out2 = apy_iter(out);
+        if (out2 && O(out2)->kind == APY_ITER_K)
+            O(out2)->v.it.named = APY_IT_CALLABLE;
+        return out2;
+    }
 }
 
 /* `isinstance(v, T)` where T is named by a string the frontend supplies. A

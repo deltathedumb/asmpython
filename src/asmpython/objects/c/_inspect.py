@@ -216,6 +216,67 @@ APY_API apy_value apy_bytes_repr(apy_value v) {
 APY_API apy_value apy_kind_name_of(apy_value v) {
     return (apy_value)(uintptr_t)apy_kind_name(v);
 }
+/* WHAT A PLAIN OR REVERSED CURSOR IS CALLED, which CPython takes from what
+   it walks: `iter([1])` is a `list_iterator`, `iter(d.values())` a
+   `dict_valueiterator`, `reversed([1])` a `list_reverseiterator`. The name
+   is what `type(it).__name__` answers and what its repr prints, and a
+   program that logs either sees the difference.
+
+   READ FROM `named` AND NOT FROM `src`, because the source does not always
+   survive: a view's items are copied out at construction, and a drained
+   `map` becomes a plain cursor over the list it produced. See
+   `APY_IT_VIEWED`.
+
+   `str_ascii_iterator` IS A NAME OF ITS OWN IN CPYTHON, which records the
+   width on the string. A str here is UTF-8 bytes, so "every character is one
+   byte" is the same question as "no byte has its high bit set" -- asked here,
+   where nothing reads the answer in a loop, rather than paid for on every
+   `for c in s`. */
+static const char *apy_cursor_name(apy_value v) {
+    apy_value src = O(v)->v.it.src;
+    /* REVERSEDNESS IS IN `named` AND NOT IN THE MODE, because a length query
+       DRAINS a cursor and resets its mode to plain -- so
+       `len(reversed(xs))`, of all things, would have renamed it. */
+    int rev = O(v)->v.it.named >= APY_IT_REVOF;
+    switch (O(v)->v.it.named - (rev ? APY_IT_REVOF : 0)) {
+    case APY_IT_VIEWED + APY_PART_KEYS:
+        return rev ? "dict_reversekeyiterator" : "dict_keyiterator";
+    case APY_IT_VIEWED + APY_PART_VALUES:
+        return rev ? "dict_reversevalueiterator" : "dict_valueiterator";
+    case APY_IT_VIEWED + APY_PART_ITEMS:
+        return rev ? "dict_reverseitemiterator" : "dict_itemiterator";
+    case APY_IT_CALLABLE: return "callable_iterator";
+    case APY_LIST_K:  return rev ? "list_reverseiterator" : "list_iterator";
+    case APY_TUPLE_K: return rev ? "reversed" : "tuple_iterator";
+    case APY_DICT_K:
+        return rev ? "dict_reversekeyiterator" : "dict_keyiterator";
+    /* A RANGE REVERSED IS STILL A RANGE ITERATOR: CPython answers
+       `range_iterator` both ways, because `reversed(r)` hands back a walk
+       over the range with its step negated rather than a wrapper around it. */
+    case APY_RANGE_K: return "range_iterator";
+    case APY_SET_K:
+    case APY_FROZEN_K: return "set_iterator";
+    case APY_MVIEW_K: return rev ? "reversed" : "memory_iterator";
+    case APY_BYTES_K:
+        if (rev) return "reversed";
+        /* A bytearray and a bytes share the kind, so the mutable flag
+           decides -- read from the source while it is still there. */
+        return (src && O(src)->kind == APY_BYTES_K && O(src)->v.s.mut)
+            ? "bytearray_iterator" : "bytes_iterator";
+    case APY_STR_K:
+        if (rev) return "reversed";
+        if (src && O(src)->kind == APY_STR_K) {
+            int64_t i;
+            for (i = 0; i < O(src)->v.s.n; i++)
+                if ((unsigned char)O(src)->v.s.p[i] >= 0x80)
+                    return "str_iterator";
+        }
+        return "str_ascii_iterator";
+    default: break;
+    }
+    return rev ? "reversed" : "iterator";
+}
+
 static const char *apy_kind_name(apy_value v) {
     switch (O(v)->kind) {
     case APY_NONE_K:  return "NoneType";
@@ -279,15 +340,15 @@ static const char *apy_kind_name(apy_value v) {
     case APY_COMPLEX_K: return "complex";
     /* A CURSOR names what MADE it: `map(str, xs)` is a `map`, which is what
        `type(...).__name__` answers and what tells a reader why it is lazy.
-       A plain `iter(x)` is an `iterator` -- CPython names those after what
-       they walk (`list_iterator`), which is the one distinction not kept. */
+       A plain or reversed one is named after what it WALKS, as CPython names
+       those -- see `apy_cursor_name`. */
     case APY_ITER_K:
         switch (O(v)->v.it.mode) {
         case APY_IT_MAP:       return "map";
         case APY_IT_FILTER:    return "filter";
         case APY_IT_ENUMERATE: return "enumerate";
         case APY_IT_ZIP:       return "zip";
-        default:               return "iterator";
+        default:               return apy_cursor_name(v);
         }
     case APY_ELLIPSIS_K: return "ellipsis";
     case APY_NOTIMPL_K: return "NotImplementedType";
@@ -584,6 +645,22 @@ APY_API apy_value apy_seq_text_of(apy_value v) {
    the exported half above stands in when nothing is ported. */
 static apy_value apy_seq_text(apy_value v) { return apy_seq_text_of(v); }
 
+/* THE MODULE A CLASS WAS WRITTEN IN, for the two reprs that qualify a name:
+   `<class '__main__.C'>` and `<__main__.C object at 0x...>`. Answers 0 for a
+   class with none -- and for `builtins`, which CPython leaves OUT: `int` is
+   `<class 'int'>` and not `<class 'builtins.int'>`.
+
+   The class body puts it in the dict, which is where CPython keeps it too;
+   see `_dyn_class`. */
+static const char *apy_class_module(apy_value cls) {
+    apy_value held;
+    if (!cls || O(cls)->kind != APY_TYPE_K || !O(cls)->v.t.dict) return 0;
+    held = apy_dict_get_or(O(cls)->v.t.dict, apy_lit("__module__"), 0);
+    if (!held || O(held)->kind != APY_STR_K) return 0;
+    if (strcmp(APY_CSTR(held), "builtins") == 0) return 0;
+    return APY_CSTR(held);
+}
+
 APY_API apy_value apy_text_of(apy_value v, int64_t quoted) {
     /* WIDE ENOUGH FOR THE LONGEST SHAPE, which is a bound builtin method's
        `<built-in method tobytes of memoryview object at 0x...>` -- at 64 it
@@ -795,8 +872,15 @@ APY_API apy_value apy_text_of(apy_value v, int64_t quoted) {
            that prints a bare instance defines `__repr__`. The address is
            printed anyway rather than omitted, because a program that prints
            one is telling the reader it did not define one. */
-        snprintf(buf, sizeof buf, "<%s object at 0x%llx>",
-                 apy_kind_name(v), (unsigned long long)v);
+        {
+            const char *where = apy_class_module(O(v)->v.o.cls);
+            if (where)
+                snprintf(buf, sizeof buf, "<%s.%s object at 0x%llx>", where,
+                         apy_kind_name(v), (unsigned long long)v);
+            else
+                snprintf(buf, sizeof buf, "<%s object at 0x%llx>",
+                         apy_kind_name(v), (unsigned long long)v);
+        }
         return apy_str_copy(buf, (int64_t)strlen(buf));
     }
     case APY_TYPE_K:
@@ -811,8 +895,15 @@ APY_API apy_value apy_text_of(apy_value v, int64_t quoted) {
             if (hook)
                 return apy_call_n(apy_bind(hook, v), NULL, 0);
         }
-        snprintf(buf, sizeof buf, "<class '%s'>",
-                 APY_CSTR(O(v)->v.t.name));
+        {
+            const char *where = apy_class_module(v);
+            if (where)
+                snprintf(buf, sizeof buf, "<class '%s.%s'>", where,
+                         APY_CSTR(O(v)->v.t.name));
+            else
+                snprintf(buf, sizeof buf, "<class '%s'>",
+                         APY_CSTR(O(v)->v.t.name));
+        }
         return apy_str_copy(buf, (int64_t)strlen(buf));
     case APY_FUNC_K:
         /* A BUILTIN TYPE NAME PRINTS AS A CLASS. `print(int)` says
@@ -872,6 +963,31 @@ APY_API apy_value apy_text_of(apy_value v, int64_t quoted) {
         snprintf(buf, sizeof buf, "<memory at 0x%llx>",
                  (unsigned long long)v);
         return apy_str_copy(buf, (int64_t)strlen(buf));
+    }
+    case APY_GEN_K: {
+        /* A GENERATOR NAMES THE `def` IT CAME FROM: `<generator object gen
+           at 0x...>`, and a generator expression the qualified name of the
+           scope it was written in -- `<generator object f.<locals>.<genexpr>
+           at 0x...>`. A coroutine and an async generator take the same shape
+           under their own kind names.
+
+           THE NAME IS THE STEP FUNCTION'S, because the generator cell is a
+           frame and the frame's code is the step. The four built by the async
+           machinery have no step and fall back to the bare object shape. */
+        apy_value step = O(v)->v.g.step;
+        apy_value who = (step && O(step)->kind == APY_FUNC_K)
+            ? (O(step)->v.fn.qualname ? O(step)->v.fn.qualname
+                                      : O(step)->v.fn.name)
+            : 0;
+        char named[256];
+        if (who)
+            snprintf(named, sizeof named, "<%s object %s at 0x%llx>",
+                     apy_kind_name(v), APY_CSTR(who),
+                     (unsigned long long)v);
+        else
+            snprintf(named, sizeof named, "<%s object at 0x%llx>",
+                     apy_kind_name(v), (unsigned long long)v);
+        return apy_str_copy(named, (int64_t)strlen(named));
     }
     /* A CLASSMETHOD OR STATICMETHOD SHOWS WHAT IT WRAPS, which is what
        CPython writes: `<staticmethod(<function f at 0x...>)>`. A `property`

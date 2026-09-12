@@ -134,6 +134,7 @@ APY_API apy_value apy_func_new(apy_value code, int64_t arity, apy_value name,
     o->v.fn.coro = 0;
     o->v.fn.is_type = 0;
     o->v.fn.dict = 0;
+    o->v.fn.module = 0;
     return V(o);
 }
 

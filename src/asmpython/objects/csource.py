@@ -225,7 +225,7 @@ OBJECT_NAMES = (
     #: `slice` as an object, for a user `__getitem__` and for `c[1:2, 3]`.
     "apy_slice_new", "apy_slice_indices", "apy_matmul", "apy_alias_new",
     "apy_func_is_type", "apy_func_annotate", "apy_func_qualname",
-    "apy_func_builtin",
+    "apy_func_module", "apy_func_builtin",
     "apy_ascii", "apy_notimplemented", "apy_id",
     "apy_hex_of", "apy_float_fromhex",
     #: `d.keys()` and friends -- a window on the dict, not a copy.

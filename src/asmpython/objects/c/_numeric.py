@@ -1376,6 +1376,20 @@ APY_API apy_value apy_contains(apy_value needle, apy_value hay) {
             if (apy_eq_element(needle, item)) return apy_from_bool(1);
         }
     }
+    /* `x in it` CONSUMES THE CURSOR up to the match and leaves the rest,
+       for the same reason `x in gen` does: a cursor is walked once, and
+       `1 in map(f, xs)` must call `f` only as far as the match. Without this
+       arm the cursor fell past every case below to the refusal at the end,
+       which reported a `map` as not iterable at all -- and every plain
+       `iter(x)`, `filter`, `zip`, `enumerate` and `reversed` with it. */
+    if (O(hay)->kind == APY_ITER_K) {
+        for (;;) {
+            apy_value item = apy_step(hay);
+            if (!item) return 0;
+            if (item == apy_stop()) return apy_from_bool(0);
+            if (apy_eq_element(needle, item)) return apy_from_bool(1);
+        }
+    }
     int64_t i;
     if (O(hay)->kind == APY_INST_K) {
         /* `__contains__` first, then `__getitem__` walked from 0 until it
@@ -1392,7 +1406,19 @@ APY_API apy_value apy_contains(apy_value needle, apy_value hay) {
            supports it. `apy_iterable` is the walk, and it knows how to stop:
            on the IndexError the class raises, or on StopIteration. */
         r = apy_iterable(hay);
-        if (!r) return 0;
+        if (!r) {
+            /* `in` REPORTS ITS OWN REFUSAL and not the iteration's. CPython
+               replaces whatever `iter()` said with `argument of type 'C' is
+               not a container or iterable`, because what was asked is a
+               membership question -- so `1 in C()` on a class with none of
+               the three said `'C' object is not iterable`, which is a claim
+               about a different operation. Cleared and restated for the same
+               reason `bytearray.extend` restates its own. */
+            apy_error_clear();
+            return apy_fail2("TypeError",
+                             "argument of type '%s' is not a container or "
+                             "iterable%s", apy_kind_name(hay), "");
+        }
         if (r != hay) return apy_contains(needle, r);
         /* `apy_iterable` left it alone, which means `__len__` plus
            `__getitem__`: the index walk IS its protocol, so walk it. */
@@ -1441,6 +1467,20 @@ APY_API apy_value apy_contains(apy_value needle, apy_value hay) {
                 return apy_from_bool(1);
         return apy_from_bool(0);
     }
+    /* A MEMORYVIEW IS A SEQUENCE OF INTS, and `97 in memoryview(b"ab")` is
+       True in CPython -- it fell past every arm to the refusal at the end,
+       which claimed a memoryview is not iterable. Walked by index like the
+       older protocol, because `v.mv` is a window and not an items array. */
+    if (O(hay)->kind == APY_MVIEW_K) {
+        int64_t i, n = apy_raw_len(hay);
+        if (apy_error_occurred()) return 0;
+        for (i = 0; i < n; i++) {
+            apy_value item = apy_key_at(hay, i);
+            if (!item) return 0;
+            if (apy_eq_element(needle, item)) return apy_from_bool(1);
+        }
+        return apy_from_bool(0);
+    }
     if (O(hay)->kind == APY_BYTES_K) {
         int64_t i, hn = O(hay)->v.s.n;
         const unsigned char *hp = (const unsigned char *)O(hay)->v.s.p;
@@ -1481,7 +1521,11 @@ APY_API apy_value apy_contains(apy_value needle, apy_value hay) {
                 return apy_from_bool(1);
         return apy_from_bool(0);
     }
-    return apy_fail2("TypeError", "argument of type '%s' is not iterable%s",
+    /* CPYTHON'S OWN WORDING, which gained "or iterable" in 3.14: `in` falls
+       back to iteration when there is no `__contains__`, so what it reports
+       is that the right-hand side is neither. */
+    return apy_fail2("TypeError",
+                     "argument of type '%s' is not a container or iterable%s",
                      apy_kind_name(hay), "");
 }
 

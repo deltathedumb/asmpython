@@ -69,6 +69,10 @@ def apy_it_mode_offset() -> i64:
     return 40
 
 
+def apy_it_named_offset() -> i64:
+    return 44
+
+
 # `apy_ga_origin_offset` IS `runtime/alias.py`'S, not repeated here. Two
 # identical definitions of one name in the ported runtime are one definition
 # too many: the frontend reads a name defined twice as REBINDING, files the
@@ -93,7 +97,7 @@ def apy_big_neg_offset() -> i64:
 
 
 def apy_fn_span() -> i64:
-    return 144
+    return 152
 
 
 def apy_fn_is_type_offset() -> i64:
@@ -128,12 +132,43 @@ def apy_it_zip() -> i64:
     return 4
 
 
+# `reversed(x)`: the same index walk, counting DOWN from where the cursor was
+# started. A mode and not an eagerly built list, because CPython's `reversed`
+# is an ITERATOR -- no length, no indexing, walkable once.
+def apy_it_rev() -> i64:
+    return 5
+
+
+# WHAT A CURSOR IS NAMED AFTER, in its `named` slot: the KIND of what it was
+# made from, or `apy_it_viewed() + part` for a dict view, or
+# `apy_it_callable()` for `iter(f, sentinel)`. Both are past every kind, so
+# one slot carries all three. See `apy_cursor_name` in the C.
+def apy_it_viewed() -> i64:
+    return 64
+
+
+def apy_it_callable() -> i64:
+    return 68
+
+
+# A REVERSED cursor's tag, added to whichever of the above applies. IN THE TAG
+# AND NOT IN THE MODE, because a length query DRAINS a cursor and resets its
+# mode to plain -- so `len(reversed(xs))`, of all things, would have renamed
+# it.
+def apy_it_revof() -> i64:
+    return 128
+
+
 def apy_part_keys() -> i64:
     return 0
 
 
 def apy_part_values() -> i64:
     return 1
+
+
+def apy_part_items() -> i64:
+    return 2
 
 
 def apy_prop_classmethod() -> i64:
@@ -274,9 +309,10 @@ def apy_kind_name_of(v: ptr) -> ptr:
     if k == apy_iter_kind():
         # A CURSOR NAMES WHAT MADE IT: `map(str, xs)` is a `map`, which is
         # what `type(...).__name__` answers and what tells a reader why it is
-        # lazy. A plain `iter(x)` is an `iterator` -- CPython names those
-        # after what they walk (`list_iterator`), which is the one
-        # distinction not kept.
+        # lazy. A plain or reversed one is named after what it WALKS, as
+        # CPython names those -- `list_iterator`, `dict_valueiterator`,
+        # `list_reverseiterator`. See `apy_cursor_name` in the C, whose arms
+        # these are.
         m: i64 = i64(load(i32, offset(v, apy_it_mode_offset())))
         if m == apy_it_map():
             return rodata(b"map\0")
@@ -286,6 +322,73 @@ def apy_kind_name_of(v: ptr) -> ptr:
             return rodata(b"enumerate\0")
         if m == apy_it_zip():
             return rodata(b"zip\0")
+        tag: i64 = i64(load(i32, offset(v, apy_it_named_offset())))
+        rev: i64 = 0
+        if tag >= apy_it_revof():
+            rev = 1
+            tag = tag - apy_it_revof()
+        if tag == apy_it_viewed() + apy_part_keys():
+            if rev:
+                return rodata(b"dict_reversekeyiterator\0")
+            return rodata(b"dict_keyiterator\0")
+        if tag == apy_it_viewed() + apy_part_values():
+            if rev:
+                return rodata(b"dict_reversevalueiterator\0")
+            return rodata(b"dict_valueiterator\0")
+        if tag == apy_it_viewed() + apy_part_items():
+            if rev:
+                return rodata(b"dict_reverseitemiterator\0")
+            return rodata(b"dict_itemiterator\0")
+        if tag == apy_it_callable():
+            return rodata(b"callable_iterator\0")
+        if tag == apy_list_kind():
+            if rev:
+                return rodata(b"list_reverseiterator\0")
+            return rodata(b"list_iterator\0")
+        if tag == apy_dict_kind():
+            if rev:
+                return rodata(b"dict_reversekeyiterator\0")
+            return rodata(b"dict_keyiterator\0")
+        # A RANGE REVERSED IS STILL A RANGE ITERATOR: CPython answers
+        # `range_iterator` both ways, because `reversed(r)` hands back a walk
+        # over the range with its step negated rather than a wrapper.
+        if tag == apy_range_kind():
+            return rodata(b"range_iterator\0")
+        if tag == apy_set_kind():
+            return rodata(b"set_iterator\0")
+        if tag == apy_frozen_kind():
+            return rodata(b"set_iterator\0")
+        if rev:
+            return rodata(b"reversed\0")
+        if tag == apy_tuple_kind():
+            return rodata(b"tuple_iterator\0")
+        if tag == apy_mview_kind():
+            return rodata(b"memory_iterator\0")
+        src: ptr = ptr(load(u64, offset(v, apy_it_src_offset())))
+        if tag == apy_bytes_kind():
+            # A bytearray and a bytes share the kind, so the mutable flag
+            # decides -- read from the source while it is still there.
+            if src:
+                if i64(load(i32, offset(src, 0))) == apy_bytes_kind():
+                    if load(i32, offset(src, apy_s_mut_offset())):
+                        return rodata(b"bytearray_iterator\0")
+            return rodata(b"bytes_iterator\0")
+        if tag == apy_str_kind():
+            # `str_ascii_iterator` IS A NAME OF ITS OWN IN CPYTHON, which
+            # records the width on the string. A str here is UTF-8 bytes, so
+            # "every character is one byte" is the same question as "no byte
+            # has its high bit set" -- asked here, where nothing reads the
+            # answer in a loop.
+            if src:
+                if i64(load(i32, offset(src, 0))) == apy_str_kind():
+                    text: ptr = apy_str_data(src)
+                    wide: i64 = apy_str_byte_len(src)
+                    seen: i64 = 0
+                    while seen < wide:
+                        if i64(load(u8, offset(text, seen))) >= 128:
+                            return rodata(b"str_iterator\0")
+                        seen = seen + 1
+            return rodata(b"str_ascii_iterator\0")
         return rodata(b"iterator\0")
     if k == apy_view_kind():
         p: i64 = i64(load(i32, offset(v, apy_vw_part_offset())))

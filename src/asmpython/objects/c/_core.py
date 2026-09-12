@@ -151,8 +151,25 @@ enum apy_iter_mode {
     APY_IT_MAP,
     APY_IT_FILTER,
     APY_IT_ENUMERATE,
-    APY_IT_ZIP
+    APY_IT_ZIP,
+    /* `reversed(x)`: the same index walk, counting DOWN. A mode rather than
+       an eagerly built list, because CPython's is lazy -- `reversed(xs)` is
+       an iterator, not a sequence, so it has no length, cannot be indexed
+       and cannot be walked twice. Building the list answered all three
+       wrongly and cost the whole copy. */
+    APY_IT_REV
 };
+
+/* WHAT A CURSOR IS NAMED AFTER, in `v.it.named`: the KIND of what it was
+   made from, or `APY_IT_VIEWED + part` for a dict view -- whose items are
+   materialised at construction, so the view itself is gone by the time
+   anything asks. Recorded because CPython names an iterator after its
+   source (`list_iterator`, `dict_valueiterator`) and neither the cursor's
+   mode nor its `src` can still say which: a drained `map` becomes a plain
+   cursor over a list, and so does `iter(d.values())`.
+
+   Past every kind, so one field carries both without a second. */
+enum { APY_IT_VIEWED = 64, APY_IT_CALLABLE = 68, APY_IT_REVOF = 128 };
 
 struct apy_obj {
     int kind;
@@ -189,6 +206,8 @@ struct apy_obj {
                -- and refusing needs the original size to compare against. */
             int64_t n0;
             int mode;
+            /* WHAT THIS CURSOR IS NAMED AFTER -- see `apy_iter_mode`. */
+            int named;
         } it;
         /* A GENERATOR: the step function, the frame its locals live in, where
            to resume, and what `send` last passed in. */
@@ -390,6 +409,13 @@ struct apy_obj {
                AttributeError. Created on first write, so an ordinary `def`
                still allocates nothing extra. */
             apy_value dict;
+            /* WHERE THE `def` WAS WRITTEN -- `fractions` for a spliced
+               definition -- or 0, which reads as `__main__`. Only a spliced
+               `def` is given one, because a program's own module has no
+               other name and paying a call per `def` to say so would be a
+               call per `def`. A builtin thunk answers `builtins` from its
+               flag instead and never looks here. */
+            apy_value module;
         } fn;
         /* A runtime descriptor -- `property`, `classmethod`, `staticmethod`.
            `get` holds the getter (or the wrapped function, for the other

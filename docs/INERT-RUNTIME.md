@@ -646,7 +646,7 @@ genuinely frees. `runtime/blocks.py` is size classes and free lists over the
 same arena: `apy_alloc_block`, `apy_realloc_block`, `apy_free_block`.
 
 **Two allocators and not one, which was the design question.** Rounding every
-allocation up to a size class costs a CELL 40% -- 152 bytes into a 256-byte
+allocation up to a size class costs a CELL 38% -- 160 bytes into a 256-byte
 class -- to serve the one kind of allocation that is ever freed. So
 `apy_alloc_bytes` keeps its exact-fit bump for immortal things and blocks get
 classes. Both draw from the same arena, so the platform floor is still three

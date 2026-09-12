@@ -1082,6 +1082,24 @@ _CONST_FOLD = {ast.Add: lambda a, b: a + b,
                ast.Mult: lambda a, b: a * b}
 
 
+def _written_qual(qualname: str) -> str:
+    """The qualname as the SOURCE spells it: `Fraction.limit_denominator`.
+
+    The first component of a nested qualname is the enclosing definition's
+    key, and a spliced class's key carries the mangling -- so a method of a
+    bundled class answered `__qualname__` as
+    `_asmpy_bundled_9_fractions_Fraction.limit_denominator`, the mangling in
+    plain sight. The key itself stays mangled: it is what keeps a spliced
+    class from colliding with a program's own class of the same name. Only
+    the spelling a program can READ is restored.
+    """
+    # Deferred: `bundled` imports `span_of` from this module.
+    from .bundled import bare_of
+    head, dot, tail = qualname.partition(".")
+    real = bare_of(head)
+    return qualname if real is None else real + dot + tail
+
+
 def span_of(source: SourceFile, node) -> Span:
     """The source range an AST node occupies.
 
@@ -1210,7 +1228,7 @@ def genexp_def(node: ast.GeneratorExp) -> ast.FunctionDef:
 
     `(f(x) for x in xs if p(x))` is exactly
 
-        def <genexp>(.0):
+        def <genexpr>(.0):
             for x in .0:
                 if p(x):
                     yield f(x)
@@ -1245,7 +1263,7 @@ def genexp_def(node: ast.GeneratorExp) -> ast.FunctionDef:
                         orelse=[], type_comment=None)]
 
     made = ast.FunctionDef(
-        name="<genexp>",
+        name="<genexpr>",
         args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=".0")],
                            vararg=None, kwonlyargs=[], kw_defaults=[],
                            kwarg=None, defaults=[]),
@@ -1653,7 +1671,7 @@ class Analyzer:
         genexp = isinstance(lam, ast.GeneratorExp)
         made = genexp_def(lam) if genexp else lambda_def(lam)
         key = self._register_nested(made, scope,
-                                    "<genexp>" if genexp else "<lambda>")
+                                    "<genexpr>" if genexp else "<lambda>")
         self.def_of_node[id(lam)] = key
         child = self._new_scope(key, "function", scope, made)
         child.bound.update(parameter_names(made.args))
@@ -1753,6 +1771,25 @@ class Analyzer:
                     elif isinstance(sub, ast.stmt):
                         self._collect(sub, scope)
 
+    def _scope_qual(self, scope: _Scope) -> str:
+        """The WRITTEN qualname of the scope a definition sits in, or "" at
+        module level.
+
+        Read from whatever registered that scope rather than from its key,
+        so that the three differences between a key and a qualname are
+        already gone by the time a nested name is built on it. See
+        `_register_nested`.
+        """
+        if scope.kind == "module":
+            return ""
+        info = self.functions.get(scope.key)
+        if info is not None and info.qualname:
+            return info.qualname
+        held = self.classes.get(scope.key)
+        if held is not None and held.qualname:
+            return _written_qual(held.qualname)
+        return _written_qual(scope.key)
+
     def _register_nested(self, node, scope: _Scope, qual: str) -> str:
         """Give a `def` below module level its own FunctionInfo."""
         known = self.def_of_node.get(id(node))
@@ -1780,7 +1817,34 @@ class Analyzer:
             key = f"{qualname}#{n}"      # two `def f` in one body: both exist
         info = self._signature(node)
         info.name = key
-        info.qualname = qualname
+        # THE NAME A PROGRAM READS, BUILT FROM THE ENCLOSING SCOPE'S OWN
+        # QUALNAME AND NOT FROM ITS KEY. The two differ in three ways, and a
+        # key leaking into `__qualname__` showed all three at once -- a
+        # generator expression inside a module-level lambda read
+        # `<module>.<locals>.<lambda>#19.<locals>.<genexpr>` where CPython
+        # says `<lambda>.<locals>.<genexpr>`:
+        #
+        #   the `<module>` prefix   CPython's qualname names the enclosing
+        #                           functions and classes and never the
+        #                           module, so a definition at module level
+        #                           is qualified by nothing
+        #   the `#19` suffix        what tells two `def f` in one body apart,
+        #                           which is a fact about this compiler
+        #   the mangling           `_asmpy_bundled_9_fractions_Fraction` is
+        #                           how a spliced class avoids colliding
+        #                           with the program's own names
+        #
+        # The key keeps all three; only the spelling a program can READ is
+        # rebuilt. See `_written_qual` for the third.
+        outer = self._scope_qual(scope)
+        if scope.kind == "module":
+            info.qualname = node.name
+        elif not outer:
+            info.qualname = node.name
+        elif scope.kind == "class":
+            info.qualname = f"{outer}.{node.name}"
+        else:
+            info.qualname = f"{outer}.<locals>.{node.name}"
         info.parent = parent.key if parent is not None else None
         info.owner = owner
         info.is_value = True

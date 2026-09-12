@@ -1952,10 +1952,10 @@ PROGRAMS = {
         show("filter", lambda: shape(repr(filter(None, "ab"))))
         show("zip", lambda: shape(repr(zip([1], [2]))))
         show("enumerate", lambda: shape(repr(enumerate([1]))))
-        # A GENERATOR'S QUALNAME IS NOT CARRIED. CPython writes `<generator object
-        # <genexpr> at 0x...>`; the cell has no name field, so only the shape is
-        # checked here.
-        show("generator", lambda: shape(repr(x for x in [1]))[:18])
+        # A GENERATOR NAMES THE `def` IT CAME FROM, and a generator expression
+        # the qualified name of the scope it was written in -- which for one
+        # inside a lambda is `<lambda>.<locals>.<genexpr>`.
+        show("generator", lambda: shape(repr(x for x in [1])))
         show("memoryview", lambda: shape(repr(memoryview(b"ab"))))
         show("property", lambda: shape(repr(property(len))))
         show("staticmethod", lambda: shape(repr(staticmethod(len))))
@@ -1975,12 +1975,467 @@ PROGRAMS = {
         show("builtin function", lambda: repr(len))
         show("builtin type", lambda: repr(int))
         show("user function", lambda: shape(repr(g)))
-        # THE INSTANCE IN IT IS NOT QUALIFIED BY ITS MODULE: CPython writes
-        # `<__main__.C object at 0x...>` and a class here carries no `__module__`.
-        show("user method", lambda: shape(repr(C().m))[:22])
+        show("user method", lambda: shape(repr(C().m)))
         show("builtin method", lambda: shape(repr("a".upper)))
         show("a view's method", lambda: shape(repr(memoryview(b"ab").tobytes)))
         show("printed, not repred", lambda: shape(str(len)))
+    """,
+    "an_iterator_is_named_after_what_it_walks": """
+        # EVERY PLAIN CURSOR WAS AN `iterator`, where CPython names it after its
+        # source: `list_iterator`, `dict_valueiterator`, `str_ascii_iterator`.
+        # The name is what `type(it).__name__` answers and what the repr prints.
+        #
+        # `reversed(xs)` WAS A LIST, which answered three questions wrongly --
+        # `type()` said `list`, `isinstance(..., list)` was True, and it could be
+        # walked twice and indexed -- and copied the whole sequence before the
+        # first element was wanted. It is a cursor counting down now.
+        def show(label, f):
+            try:
+                print(label, "->", f())
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        def shape(text):
+            # The repr with any hexadecimal address replaced, so two runs agree.
+            out, i = "", 0
+            while i < len(text):
+                if text[i:i + 2] == "0x":
+                    out += "0x_"
+                    i += 2
+                    while i < len(text) and text[i] in "0123456789abcdef":
+                        i += 1
+                    continue
+                out += text[i]
+                i += 1
+            return out
+
+        d = {1: 2}
+        show("list", lambda: type(iter([1])).__name__)
+        show("its repr", lambda: shape(repr(iter([1]))))
+        show("tuple", lambda: type(iter((1,))).__name__)
+        show("str", lambda: type(iter("a")).__name__)
+        # A STRING WIDER THAN ASCII IS A DIFFERENT ITERATOR in CPython, which
+        # records the width on the string; a str is UTF-8 bytes in the compiled
+        # runtimes, so the same question there is whether any byte is above 0x7f.
+        show("wide str", lambda: type(iter(chr(233))).__name__)
+        show("bytes", lambda: type(iter(b"a")).__name__)
+        show("bytearray", lambda: type(iter(bytearray(b"a"))).__name__)
+        show("dict", lambda: type(iter(d)).__name__)
+        show("keys", lambda: type(iter(d.keys())).__name__)
+        show("values", lambda: type(iter(d.values())).__name__)
+        show("items", lambda: type(iter(d.items())).__name__)
+        show("set", lambda: type(iter({1})).__name__)
+        show("frozenset", lambda: type(iter(frozenset({1}))).__name__)
+        show("range", lambda: type(iter(range(3))).__name__)
+        show("a callable and a sentinel", lambda: type(iter(int, 0)).__name__)
+        show("map", lambda: type(map(len, [])).__name__)
+        show("filter", lambda: type(filter(None, "")).__name__)
+
+        show("reversed list", lambda: type(reversed([1])).__name__)
+        show("its repr", lambda: shape(repr(reversed([1]))))
+        show("reversed elements", lambda: list(reversed([1, 2, 3])))
+        show("reversed tuple", lambda: type(reversed((1,))).__name__)
+        show("reversed str", lambda: type(reversed("ab")).__name__)
+        show("its elements", lambda: list(reversed("ab")))
+        show("reversed range", lambda: type(reversed(range(3))).__name__)
+        show("its elements", lambda: list(reversed(range(3))))
+        show("reversed dict", lambda: type(reversed(d)).__name__)
+        show("reversed keys", lambda: type(reversed(d.keys())).__name__)
+        show("reversed values", lambda: type(reversed(d.values())).__name__)
+        show("reversed items", lambda: type(reversed(d.items())).__name__)
+        show("its elements", lambda: list(reversed({1: 2, 3: 4}.items())))
+        # NOT EVERYTHING ITERABLE IS REVERSIBLE, and CPython refuses these four
+        # by name: reversing needs a length and indexing, or a `__reversed__`.
+        show("a set", lambda: reversed({1}))
+        show("a frozenset", lambda: reversed(frozenset({1})))
+        show("a cursor", lambda: reversed(iter([1])))
+        show("a generator", lambda: reversed(x for x in [1]))
+        show("a map", lambda: reversed(map(len, [])))
+        show("an int", lambda: reversed(5))
+        # A CLASS SAYS WHAT ITS REVERSE IS, and the hook wins over the index
+        # walk -- a class may define both and they need not agree.
+        class Own:
+            def __reversed__(self):
+                return iter("own")
+        show("its own", lambda: "".join(reversed(Own())))
+        class Indexed:
+            def __len__(self):
+                return 2
+            def __getitem__(self, i):
+                return "ab"[i]
+        show("through the index walk", lambda: list(reversed(Indexed())))
+    """,
+    "an_unpack_reads_whatever_it_was_handed": """
+        # THE UNPACK READS BY INDEX -- `a, *b, c = xs` takes `c` from `xs[-1]`
+        # without ever computing a length -- and four ordinary sources have no
+        # indices to read, each failing in its own way while `for` over the same
+        # value worked:
+        #
+        #   a dict         subscripts by KEY, so `a, b = {1: 0, 2: 0}` asked for
+        #                  key 0 and raised KeyError
+        #   a set          cannot be subscripted at all
+        #   a cursor       holds a position instead of indices
+        #   an instance    with `__len__` and `__getitem__` was subscripted, and
+        #                  the `*rest` branch handed its `__getitem__` a SLICE
+        #
+        # So the check that establishes the length ANSWERS WHAT TO INDEX, and
+        # anything not read by position is copied into a list there.
+        def show(label, f):
+            try:
+                print(label, "->", f())
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        def two(src):
+            a, b = src
+            return [a, b]
+
+        def star(src):
+            a, *r = src
+            return [a, r]
+
+        def mid(src):
+            a, *r, z = src
+            return [a, r, z]
+
+        class Seq:
+            # `__len__` AND `__getitem__` -- the older protocol, and the one
+            # whose `__getitem__` must never be handed a slice.
+            def __init__(self, n):
+                self.n = n
+            def __len__(self):
+                return self.n
+            def __getitem__(self, i):
+                if not isinstance(i, int):
+                    raise TypeError("no slices here")
+                if i >= self.n:
+                    raise IndexError(i)
+                return i + 1
+
+        class Walks:
+            def __iter__(self):
+                return iter([4, 5, 6])
+
+        show("a list", lambda: two([1, 2]))
+        show("a tuple", lambda: two((1, 2)))
+        show("a str", lambda: two("ab"))
+        show("bytes", lambda: two(b"ab"))
+        show("a bytearray", lambda: two(bytearray(b"ab")))
+        show("a range", lambda: two(range(2)))
+        show("a memoryview", lambda: two(memoryview(b"ab")))
+        show("a dict", lambda: two({"x": 1, "y": 2}))
+        show("a set", lambda: sorted(two({1, 2})))
+        show("a frozenset", lambda: sorted(two(frozenset({1, 2}))))
+        show("keys", lambda: two({1: 0, 2: 0}.keys()))
+        show("values", lambda: two({1: 7, 2: 8}.values()))
+        show("items", lambda: two({1: 7, 2: 8}.items()))
+        show("a cursor", lambda: two(iter([1, 2])))
+        show("a map", lambda: two(map(int, "12")))
+        show("a reversed", lambda: two(reversed([1, 2])))
+        show("a generator", lambda: two(x for x in [1, 2]))
+        show("a sequence class", lambda: two(Seq(2)))
+        show("a class with iter", lambda: two(Walks()))
+        show("its star", lambda: star(Walks()))
+        show("its middle", lambda: mid(Walks()))
+        show("a sequence class star", lambda: star(Seq(3)))
+        show("a sequence class middle", lambda: mid(Seq(3)))
+        show("a cursor middle", lambda: mid(iter([1, 2, 3, 4])))
+        show("a str middle", lambda: mid("abcd"))
+        # THE MESSAGES. Whether the surplus is COUNTED is decided by the source:
+        # an exact list, tuple or dict knows its own length, and everything else
+        # is unpacked through the iterator protocol, which can only say that
+        # there was one element too many. The shortfall is always counted.
+        show("a long list", lambda: two([1, 2, 3]))
+        show("a long tuple", lambda: two((1, 2, 3)))
+        show("a long dict", lambda: two({1: 0, 2: 0, 3: 0}))
+        show("a long str", lambda: two("abc"))
+        show("a long range", lambda: two(range(3)))
+        show("a long cursor", lambda: two(iter([1, 2, 3])))
+        show("a long generator", lambda: two(x for x in [1, 2, 3]))
+        show("a long class", lambda: two(Seq(3)))
+        show("a short list", lambda: two([1]))
+        show("a short cursor", lambda: two(iter([1])))
+        show("a short star", lambda: mid([1]))
+        show("not iterable", lambda: two(5))
+        show("None", lambda: two(None))
+        show("a float", lambda: two(1.5))
+    """,
+    "a_consumer_walks_a_cursor_by_stepping_it": """
+        # FOUR CONSUMERS COULD NOT WALK A CURSOR, each for the same reason: the
+        # walk is by INDEX here and `apy_iterable` hands a cursor straight back
+        # rather than draining it, so a `map` reached a loop that could only
+        # read a container. Every one of them reported a thing that is plainly
+        # iterable as not iterable:
+        #
+        #   `x in map(f, xs)`     every path        argument of type 'map' ...
+        #   `set(map(f, xs))`     the interpreter   'Iterator' object is not ...
+        #   `f(*map(f, xs))`      both compiled     'map' object is not ...
+        #   `"".join(map(...))`   both compiled     can only join an iterable
+        #
+        # STEPPING, NOT DRAINING, is what makes `x in it` consume only as far as
+        # the match and leave the rest -- which is the same rule `x in gen`
+        # follows, and the reason a cursor is walked once.
+        def show(label, f):
+            try:
+                print(label, "->", f())
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        def three(a, b, c):
+            return [a, b, c]
+
+        def _ext(into, src):
+            into.extend(src)
+            return into
+
+        class Bare:
+            pass
+
+        class Seq:
+            # `__len__` AND `__getitem__`: the older protocol, whose walk IS
+            # the index walk -- and whose `__getitem__` must never be handed
+            # a slice.
+            def __len__(self):
+                return 3
+            def __getitem__(self, i):
+                if not isinstance(i, int):
+                    raise TypeError("no slices here")
+                if i >= 3:
+                    raise IndexError(i)
+                return i + 1
+
+        class Only:
+            # `__getitem__` ALONE, walked until it reports IndexError.
+            def __getitem__(self, i):
+                if i >= 2:
+                    raise IndexError(i)
+                return i * 10
+
+        show("in a map", lambda: 1 in map(int, "12"))
+        show("in a filter", lambda: 2 in filter(None, [1, 2]))
+        show("in a plain cursor", lambda: 1 in iter([1, 2]))
+        show("in a zip", lambda: (1, 2) in zip([1], [2]))
+        show("in an enumerate", lambda: (0, 1) in enumerate([1]))
+        show("in a reversed", lambda: 1 in reversed([1, 2]))
+        show("absent", lambda: 9 in map(int, "12"))
+        # CONSUMED ONLY AS FAR AS THE MATCH, and what is left is what a later
+        # walk sees -- the whole difference between stepping and draining.
+        def partly():
+            it = iter([1, 2, 3])
+            return [1 in it, list(it)]
+        show("consumed to the match", partly)
+        show("set", lambda: sorted(set(map(int, "121"))))
+        show("frozenset", lambda: sorted(frozenset(iter([2, 1, 2]))))
+        show("splat into a call", lambda: three(*map(int, "123")))
+        show("splat a plain cursor", lambda: three(*iter([1, 2, 3])))
+        show("splat a reversed", lambda: three(*reversed([1, 2, 3])))
+        show("a list display", lambda: [*map(int, "12")])
+        show("a tuple display", lambda: (*iter([1, 2]),))
+        show("a set display", lambda: sorted({*map(int, "12")}))
+        show("extend", lambda: [0] + list(map(int, "12")))
+        show("join", lambda: "".join(map(str, [1, 2])))
+        show("join a reversed", lambda: "".join(reversed("abc")))
+        show("join a plain cursor", lambda: "-".join(iter(["a", "b"])))
+        # THE REFUSALS STAY REFUSALS. `join` words its own, and the three
+        # iterables that yield ints get CPython's message about the element.
+        show("join an int", lambda: "".join(5))
+        show("join a range", lambda: "".join(range(3)))
+        show("join bytes", lambda: "".join(b"ab"))
+        show("in an int", lambda: 1 in 5)
+        show("in a bare class", lambda: 1 in Bare())
+        # A MEMORYVIEW IS A SEQUENCE OF INTS, and it fell past every arm to
+        # the refusal at the end.
+        show("in a memoryview", lambda: 97 in memoryview(b"ab"))
+        show("absent from one", lambda: 1 in memoryview(b"ab"))
+        show("in a class", lambda: 2 in Seq())
+        show("in only getitem", lambda: 10 in Only())
+        # AND THE OLDER PROTOCOL, which the same walks could not read: a class
+        # with `__len__` and `__getitem__`, or with `__getitem__` alone.
+        show("a class display", lambda: [*Seq()])
+        show("into a call", lambda: three(*Seq()))
+        show("its extend", lambda: _ext([0], Seq()))
+        show("only getitem", lambda: [*Only()])
+        show("a memoryview display", lambda: [*memoryview(b"ab")])
+        show("a memoryview extend", lambda: _ext([0], memoryview(b"ab")))
+        # A BYTEARRAY EXTENDS FROM ANY ITERABLE OF INTEGERS, and the two
+        # refusals are different questions: a non-number is a TypeError and a
+        # number outside a byte a ValueError.
+        show("a bytearray from a map",
+             lambda: _ext(bytearray(), map(int, "12")))
+        show("a bytearray from a class", lambda: _ext(bytearray(), Seq()))
+        show("a bytearray from a range", lambda: _ext(bytearray(), range(3)))
+        show("a bytearray from a bool", lambda: _ext(bytearray(), [True]))
+        show("a bytearray from a str", lambda: _ext(bytearray(), ["a"]))
+        show("a bytearray out of range", lambda: _ext(bytearray(), [256]))
+    """,
+    "a_generator_names_the_def_it_came_from": """
+        # `repr(gen())` WAS `<generator object at 0x...>` -- CPython writes the
+        # qualified name of the `def` between `object` and `at`, and a program
+        # that logs a generator or reads a traceback sees the difference. Nor
+        # was there a `__name__` or a `__qualname__` to read.
+        #
+        # THE NAME LIVES ON THE STEP FUNCTION, because the generator cell is a
+        # frame and the frame's code is the step.
+        def show(label, f):
+            try:
+                print(label, "->", f())
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        def shape(text):
+            out, i = "", 0
+            while i < len(text):
+                if text[i:i + 2] == "0x":
+                    out += "0x_"
+                    i += 2
+                    while i < len(text) and text[i] in "0123456789abcdef":
+                        i += 1
+                    continue
+                out += text[i]
+                i += 1
+            return out
+
+        def gen():
+            yield 1
+
+        class C:
+            def m(self):
+                yield 1
+
+        def outer():
+            def inner():
+                yield 1
+            return inner()
+
+        show("a def", lambda: shape(repr(gen())))
+        show("its name", lambda: gen().__name__)
+        show("its qualname", lambda: gen().__qualname__)
+        show("a method", lambda: shape(repr(C().m())))
+        show("its qualname", lambda: C().m().__qualname__)
+        show("its name", lambda: C().m().__name__)
+        show("a nested def", lambda: outer().__qualname__)
+        # A GENERATOR EXPRESSION IS `<genexpr>`, qualified by the scope it was
+        # written in -- and at module level by nothing at all, because CPython's
+        # `__qualname__` never names the module.
+        show("an expression", lambda: shape(repr(x for x in [1])))
+        show("its name", lambda: (x for x in [1]).__name__)
+        show("its qualname", lambda: (x for x in [1]).__qualname__)
+        show("in a def", lambda: outer.__qualname__)
+        def holds():
+            return (y for y in [1])
+        show("one inside a def", lambda: holds().__qualname__)
+        show("a lambda's", lambda: (lambda: 0).__qualname__)
+        show("one inside a lambda",
+             lambda: (lambda: (z for z in [1]))().__qualname__)
+        # A COROUTINE AND AN ASYNC GENERATOR take the same shape under their own
+        # kind names.
+        async def waits():
+            return 1
+        made = waits()
+        show("a coroutine", lambda: shape(repr(made)))
+        made.close()
+    """,
+    "a_class_and_its_instances_are_qualified_by_their_module": """
+        # `__module__` WAS NOT RECORDED AT ALL, so every class printed as
+        # `<class 'C'>` where CPython says `<class '__main__.C'>` and every instance
+        # as `<C object at 0x...>`. A class WRITTEN OUT gets it from its body; one
+        # built by `type(name, bases, ns)` gets it from the constructor, as CPython's
+        # own `type_new` supplies it -- and `enum`, `dataclasses` and `namedtuple`
+        # all build classes that way.
+        #
+        # `builtins` IS THE ONE CPYTHON LEAVES OUT of a repr: `int` prints as
+        # `<class 'int'>` and never `<class 'builtins.int'>`.
+        def show(label, f):
+            try:
+                print(label, "->", f())
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        def shape(text):
+            # The repr with any hexadecimal address replaced, so two runs agree.
+            out, i = "", 0
+            while i < len(text):
+                if text[i:i + 2] == "0x":
+                    out += "0x_"
+                    i += 2
+                    while i < len(text) and text[i] in "0123456789abcdef":
+                        i += 1
+                    continue
+                out += text[i]
+                i += 1
+            return out
+
+        class C:
+            pass
+
+        class D(C):
+            pass
+
+        show("written", lambda: C.__module__)
+        show("in the dict", lambda: "__module__" in C.__dict__)
+        show("inherited", lambda: D.__module__)
+        show("class repr", lambda: repr(C))
+        show("instance repr", lambda: shape(repr(C())))
+        show("builtin type", lambda: repr(int))
+        show("builtin type module", lambda: int.__module__)
+        made = type("Made", (), {})
+        show("by the constructor", lambda: made.__module__)
+        show("its repr", lambda: repr(made))
+        told = type("Told", (), {"__module__": "elsewhere"})
+        show("told which", lambda: told.__module__)
+        show("its repr", lambda: repr(told))
+        # A SPLICED CLASS IS NOT `__main__`. The module a bundled definition was
+        # written in is the only thing its mangled name still says, and this is the
+        # half that reads it back out.
+        import fractions
+        show("bundled", lambda: fractions.Fraction.__module__)
+        show("bundled repr", lambda: repr(fractions.Fraction))
+    """,
+    "a_callable_says_which_module_it_was_written_in": """
+        # `f.__module__` WAS AN AttributeError on every path, for every callable.
+        # CPython answers five different ways and the receiver decides which:
+        #
+        #   `len`                     `builtins`      a builtin reached as a value
+        #   `int`                     `builtins`      a builtin TYPE as a value
+        #   a program's own `def`     `__main__`      including a lambda
+        #   a spliced `def`           `fractions`     where it was written
+        #   `[].append`               None            a BOUND builtin method
+        #
+        # `__main__` IS A DEFAULT AND NOT A RECORD: every `def` a program writes is
+        # in one module and there is only one it can be in, so nothing is emitted to
+        # say so and only a spliced `def` is told.
+        def show(label, f):
+            try:
+                print(label, "->", f())
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        def g():
+            pass
+
+        class C:
+            def m(self):
+                pass
+
+        show("builtin", lambda: len.__module__)
+        show("builtin printer", lambda: print.__module__)
+        show("builtin type", lambda: int.__module__)
+        show("own def", lambda: g.__module__)
+        show("a lambda", lambda: (lambda: 0).__module__)
+        show("a method", lambda: C.m.__module__)
+        show("a bound method", lambda: C().m.__module__)
+        show("a bound builtin", lambda: [].append.__module__)
+        show("its receiver", lambda: [1].append.__self__)
+        # THE MANGLED NAME IS AN IMPLEMENTATION DETAIL AND A PROGRAM CAN SEE IT: a
+        # method of a spliced class took its `__qualname__` from the class's key, so
+        # it read `_asmpy_bundled_9_fractions_Fraction.limit_denominator`.
+        import fractions
+        show("spliced module", lambda: fractions.Fraction.limit_denominator.__module__)
+        show("spliced qualname",
+             lambda: fractions.Fraction.limit_denominator.__qualname__)
+        show("spliced name", lambda: fractions.Fraction.limit_denominator.__name__)
+        show("its own name", lambda: g.__qualname__)
+        show("a method's", lambda: C.m.__qualname__)
     """,
     "a_keyword_reaches_sort_and_update_by_every_route": """
         # `sort` AND `update` PLACE THEIR OWN KEYWORDS -- `key` and `reverse` travel as

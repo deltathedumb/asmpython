@@ -83,6 +83,10 @@ def apy_fn_annotate_offset() -> i64:
     return 136
 
 
+def apy_fn_module_offset() -> i64:
+    return 152
+
+
 # ── the two that index an array ────────────────────────────────────────────
 #
 # BOUNDS-CHECKED AND SILENT, exactly as the C is. An out-of-range index does
@@ -153,6 +157,15 @@ def apy_func_qualname(f: ptr, name: ptr) -> ptr:
     """`__qualname__` -- the dotted path, so a method reports `C.m`."""
     if i64(load(i32, offset(f, 0))) == apy_func_kind():
         store(u64, u64(name), offset(f, apy_fn_qualname_offset()))
+    return f
+
+
+def apy_func_module(f: ptr, name: ptr) -> ptr:
+    """`__module__` -- where a SPLICED `def` was written, so that
+    `Fraction.limit_denominator.__module__` is `fractions`. Emitted for those
+    only: a program's own `def` leaves the field 0, which reads `__main__`."""
+    if i64(load(i32, offset(f, 0))) == apy_func_kind():
+        store(u64, u64(name), offset(f, apy_fn_module_offset()))
     return f
 
 

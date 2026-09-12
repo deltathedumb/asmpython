@@ -31,7 +31,7 @@
 
 
 def apy_obj_size() -> i64:
-    return 152
+    return 160
 
 
 def apy_kind_offset() -> i64:
