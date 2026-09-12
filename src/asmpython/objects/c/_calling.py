@@ -1117,12 +1117,10 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
             if (n < 2) return apy_fail("TypeError",
                                        "fromhex() takes exactly one "
                                        "argument (0 given)");
-            if (O(a[0])->kind == APY_FLOAT_K)
-                return apy_float_fromhex(a[1]);
-            /* THE KIND IT WAS REACHED THROUGH decides the answer's
-               mutability, as it does for the written form. */
-            return O(a[0])->v.s.mut ? apy_bytearray_fromhex(a[0], a[1])
-                                    : apy_bytes_fromhex(a[0], a[1]);
+            /* THE KIND IT WAS REACHED THROUGH decides both which reading
+               and, for bytes, the answer's mutability -- as it does for the
+               written form, which reaches the same entry point. */
+            return apy_any_fromhex(a[0], a[1]);
         }
         if (strcmp(w, "fromkeys") == 0) {
             if (n < 2) return apy_fail("TypeError",

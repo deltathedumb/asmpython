@@ -159,7 +159,10 @@ DYN_METHOD_TABLE = {
     # things -- so the no-argument form dispatches on the receiver. The
     # separator form is bytes' alone.
     "hex":          ["apy_hex_of", "apy_bytes_hex"],
-    "fromhex":      [None, "apy_bytes_fromhex"],
+    # THE RECEIVER DECIDES WHICH READING: a float's `fromhex` parses one
+    # number where a bytes one reads byte pairs, and `apy_any_fromhex` is
+    # where that is settled.
+    "fromhex":      [None, "apy_any_fromhex"],
     # `to_bytes` TAKES ITS THREE PARAMETERS ALWAYS. Lowering pads the ones the
     # call left out, because `signed` is keyword-only and the other two have
     # defaults -- so every arity reaches one entry point rather than three.

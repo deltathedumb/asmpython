@@ -2097,6 +2097,15 @@ class DynamicLowering:
             # path picks one at compile time, so a call written between the
             # two reached the second -- a wrong answer rather than a refusal.
             or name in self.rebound
+            # A LOCAL OF THIS SCOPE IS NOT THE MODULE'S `def` OF THAT NAME.
+            # `def call(g)` beside a module-level `def g` called `g()`
+            # through the direct symbol, so the PARAMETER was never consulted
+            # and the global ran instead -- `call(lambda: ...)` answered what
+            # the global returns. A silent wrong answer, and the shape every
+            # callback, every `key=` function and every injected helper has.
+            # It bit only when the two names matched, which is why it lasted.
+            or (info is not None and self.info.name != ENTRY_NAME
+                and self.info.locals.get(name) is not None)
             # A PROVABLY WRONG ARGUMENT COUNT is a TypeError a program may
             # CATCH, so it has to reach the runtime. The direct path would
             # hand the symbol a count it cannot accept, which is a C compile

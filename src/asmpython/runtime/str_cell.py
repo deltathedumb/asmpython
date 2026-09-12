@@ -312,13 +312,11 @@ def apy_bytes_fromhex(self: ptr, text: ptr) -> ptr:
     AN ODD NUMBER OF DIGITS IS AN ERROR, caught after the walk: a trailing
     high nibble with nothing to pair it with is exactly that.
     """
-    # A FLOAT'S `fromhex` IS A DIFFERENT READING ENTIRELY -- `0x1.8p+0` is
-    # one number, not three bytes -- and the receiver is the only thing that
-    # says which was meant. `(0.0).fromhex(s)` lowers to this symbol the way
-    # every other value-form method does, and read the text as byte pairs.
-    if self:
-        if i64(load(i32, offset(self, 0))) == apy_float_kind():
-            return apy_float_fromhex(text)
+    # A FLOAT'S `fromhex` IS A DIFFERENT READING and is NOT SPLIT HERE.
+    # The ported runtime has to DEFINE everything it calls -- see
+    # `test_the_allocator_asks_the_floor_and_nothing_else` -- and the hex
+    # float parser is the C's. `apy_any_fromhex` is where the receiver
+    # decides, and it is reached from the call site rather than from here.
     if i64(load(i32, offset(text, 0))) != apy_str_kind():
         return apy_raise_at(
             rodata(b"TypeError\0"),

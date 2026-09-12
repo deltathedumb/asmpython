@@ -666,12 +666,6 @@ APY_API apy_value apy_bytes_fromhex(apy_value self, apy_value text) {
     int64_t n, i, out = 0;
     char *buf;
     int hi = -1;
-    /* A FLOAT'S `fromhex` IS A DIFFERENT READING ENTIRELY -- `0x1.8p+0` is
-       one number, not three bytes -- and the receiver is the only thing that
-       says which was meant. `(0.0).fromhex(s)` lowers to this symbol the way
-       every other value-form method does, and read the text as byte pairs. */
-    if (self && O(self)->kind == APY_FLOAT_K)
-        return apy_float_fromhex(text);
     if (O(text)->kind != APY_STR_K)
         return apy_fail("TypeError", "fromhex() argument must be str");
     n = O(text)->v.s.n;
@@ -704,6 +698,16 @@ APY_API apy_value apy_bytes_fromhex(apy_value self, apy_value text) {
             O(v)->v.s.mut = 1;
         return v;
     }
+}
+
+/* WHICHEVER `fromhex` THE RECEIVER MEANT. A float's is a different reading
+   entirely -- `0x1.8p+0` is one number, not three bytes -- and the receiver
+   is the only thing that says which was written. THE SPLIT LIVES HERE rather
+   than inside the bytes body because that body is IR, and the ported runtime
+   has to define everything it calls: the hex float parser is the C's. */
+APY_API apy_value apy_any_fromhex(apy_value self, apy_value text) {
+    if (self && O(self)->kind == APY_FLOAT_K) return apy_float_fromhex(text);
+    return apy_bytes_fromhex(self, text);
 }
 
 /* `bytearray.fromhex(text)` -- the same reading, a MUTABLE answer. CPython

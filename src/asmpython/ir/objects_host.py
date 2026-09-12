@@ -4179,12 +4179,6 @@ def _apy_bytes_fromhex(h, a):
     # so that `b.fromhex(s)` and `bytes.fromhex(s)` are one implementation.
     held = h._get(a[0], "apy_bytes_fromhex")
     text = h._get(a[1], "apy_bytes_fromhex")
-    # A FLOAT'S `fromhex` IS A DIFFERENT READING ENTIRELY -- `0x1.8p+0` is one
-    # number, not three bytes -- and the receiver is the only thing that says
-    # which was meant. `(0.0).fromhex(s)` lowers to this symbol the way every
-    # other value-form method does, and read the text as byte pairs.
-    if isinstance(held, float):
-        return _apy_float_fromhex(h, [a[1]])
     if not isinstance(text, str):
         return h._fail("TypeError", "fromhex() argument must be str")
     try:
@@ -4193,6 +4187,20 @@ def _apy_bytes_fromhex(h, a):
         return h._fail_like(exc)
     # AND THE ANSWER IS THE KIND IT WAS REACHED THROUGH.
     return h._new(bytearray(got) if isinstance(held, bytearray) else got)
+
+
+def _apy_any_fromhex(h, a):
+    """Whichever `fromhex` the receiver meant.
+
+    A float's is a different reading entirely -- `0x1.8p+0` is one number,
+    not three bytes -- and the receiver is the only thing that says which was
+    written. THE SPLIT LIVES HERE rather than inside the bytes body because
+    that body is IR, and the ported runtime has to define everything it
+    calls: the hex float parser is the C's.
+    """
+    if isinstance(h._get(a[0], "apy_any_fromhex"), float):
+        return _apy_float_fromhex(h, [a[1]])
+    return _apy_bytes_fromhex(h, a)
 
 
 def _apy_bytearray_fromhex(h, a):

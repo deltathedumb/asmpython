@@ -1782,6 +1782,40 @@ PROGRAMS = {
                (("", "fromkeys"), ([], "fromkeys"), ("", "fromhex"),
                 (1.5, "maketrans"), (0j, "from_bytes"), (5, "from_number"))])
     """,
+    "a_local_wins_over_a_module_level_def": """
+        def g():
+            return "global g"
+        def call(g):
+            return g()
+        print(call(lambda: "parameter"))
+        # AN ASSIGNMENT IN THE BODY SHADOWS TOO, from the point it is a local -- which
+        # in Python is the whole function, not the line after.
+        def assigned():
+            g = lambda: "assigned"
+            return g()
+        print(assigned())
+        # A RECURSIVE MODULE-LEVEL `def` STILL REACHES ITSELF: its own name is a
+        # global there, not a local, so nothing shadows it.
+        def fact(n):
+            return 1 if n < 2 else n * fact(n - 1)
+        print(fact(5))
+        # A NESTED `def` IS A LOCAL OF ITS ENCLOSING SCOPE and wins over a module one.
+        def outer():
+            def g():
+                return "nested g"
+            return g()
+        print(outer())
+        # AND A PLAIN CALL TO THE MODULE'S OWN `def` IS UNCHANGED.
+        print(g())
+        # A keyword argument through a shadowed parameter still lands.
+        def kw(sorted):
+            return sorted([3, 1, 2], reverse=True)
+        print(kw(lambda xs, reverse=False: sorted(xs, reverse=reverse)))
+        # A DEFAULT THAT NAMES THE GLOBAL is evaluated where the `def` runs.
+        def defaulted(g=g):
+            return g()
+        print(defaulted())
+    """,
     "traceback_positions": """
         try:
             (1).missing
