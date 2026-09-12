@@ -1075,6 +1075,102 @@ PROGRAMS = {
         show("user", lambda: C().shuffled("a", **{"count": 3}))
         show("user empty", lambda: C().shuffled("a", **{}))
     """,
+    # A NAME COLLISION DROPPED THE BUILTIN HALF'S KEYWORDS. A module that
+    # defines its own `split` puts every `x.split(...)` on the two-way
+    # dispatch, where the receiver decides at run time which half is meant --
+    # and the builtin half had nowhere to put the keywords, so
+    # `"a,b,c".split(",", maxsplit=1)` answered THREE pieces and
+    # `"a,b".split(",", nope=1)` answered two rather than reporting the name.
+    # Both are wrong answers with nothing to mark them.
+    #
+    # WHAT STOOD IN THE WAY was double evaluation: the user half lowers the
+    # keywords itself, so folding for the builtin half as well ran every
+    # argument twice. They are lowered ONCE now, before the branch, and each
+    # arm is handed registers -- the user arm through a `_Given` node that
+    # gives the register straight back.
+    #
+    # THE ARRANGEMENT BELONGS INSIDE THE BUILTIN BLOCK, refusals and all: a
+    # keyword the builtin cannot take may be exactly the one the user method
+    # wants, which is the whole reason the call is in two halves.
+    #
+    # A CLASS EXTENDING A BUILTIN puts EVERY method name on this path, which
+    # is why the cases below are not only the two the classes name.
+    "a_colliding_name_keeps_both_halves_keywords": """
+        class Thing:
+            def split(self, sep, maxsplit=-1):
+                return ("user split", sep, maxsplit)
+            def encode(self, encoding="x", errors="y"):
+                return ("user encode", encoding, errors)
+            def sort(self, key=None, reverse=False):
+                return ("user sort", reverse)
+            def update(self, other=None, **kw):
+                return ("user update", other, sorted(kw.items()))
+
+        class L(list):
+            pass
+
+        class D(dict):
+            pass
+
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except TypeError as e:
+                print(label, "TypeError:", e)
+
+        # THE BUILTIN HALF, which is the half that was losing them.
+        show("split", lambda: "a,b,c".split(",", maxsplit=1))
+        show("split positional", lambda: "a,b,c".split(",", 1))
+        show("rsplit", lambda: "a,b,c".rsplit(",", maxsplit=1))
+        show("replace", lambda: "aaa".replace("a", "b", count=1))
+        show("encode", lambda: "a".encode(encoding="utf-8"))
+        show("encode both",
+             lambda: "a\\u00ff".encode(encoding="ascii", errors="replace"))
+        show("decode", lambda: b"a".decode(errors="replace"))
+        show("expandtabs", lambda: "a\\tb".expandtabs(tabsize=2))
+        show("splitlines", lambda: "a\\nb".splitlines(keepends=True))
+        show("mapping", lambda: "a,b,c".split(",", **{"maxsplit": 1}))
+        # AND ITS REFUSALS, which used to be silent acceptance.
+        show("unknown", lambda: "a,b".split(",", nope=1))
+        show("suggested", lambda: "a,b".split(",", masplit=1))
+        show("twice", lambda: "a,b".split(",", 1, maxsplit=2))
+        show("no keywords at all", lambda: "abc".upper(x=1))
+        # THE USER HALF is untouched, keywords and all.
+        show("user split", lambda: Thing().split(",", maxsplit=1))
+        show("user positional", lambda: Thing().split(",", 1))
+        show("user encode", lambda: Thing().encode(encoding="z"))
+        show("user mapping", lambda: Thing().split(",", **{"maxsplit": 1}))
+        # THE TWO WITH KEYWORDS OF THEIR OWN take the branch they always did.
+        show("user sort", lambda: Thing().sort(reverse=True))
+        show("user update", lambda: Thing().update(x=1))
+        v = [1, 3, 2]
+        v.sort(reverse=True)
+        print("list sort", v)
+        d = {"a": 1}
+        d.update(b=2)
+        print("dict update", sorted(d.items()))
+        # A CLASS EXTENDING A BUILTIN reaches the builtin through the
+        # instance, which is the other way into this dispatch.
+        w = L([1, 3, 2])
+        w.sort(reverse=True)
+        print("extended sort", list(w))
+        e = D(a=1)
+        e.update(b=2)
+        print("extended update", sorted(e.items()))
+        print("extended pop", L([1, 2, 3]).pop(0))
+        # AND EVERY ARGUMENT RUNS ONCE. Lowering both halves is what this
+        # change is made of, and running a keyword's expression twice is the
+        # way it would go wrong without being visible in any answer above.
+        box = []
+        print("once", "a,b,c".split(",", maxsplit=(box.append(1) or 1)),
+              len(box))
+
+        def rows():
+            yield "a,b,c".split(",", maxsplit=1)
+            yield Thing().split(",", maxsplit=1)
+
+        print("in a generator", list(rows()))
+    """,
     "traceback_positions": """
         try:
             (1).missing

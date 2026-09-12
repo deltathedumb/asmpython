@@ -1842,17 +1842,21 @@ def _ctor_call(h, tn, args, kwrest):
         raise _UserFailed
 
 
-def _apy_kw_none(h, a):
-    """`"abc".upper(**opts)` -- a method that takes no keyword at all, handed
-    a mapping that may hold one. CPython names the OWNER, which is the
-    receiver's kind and is not known until now."""
-    bag = h._get(a[2], "apy_kw_none")
-    if not bag:
-        return h._new(None)
-    recv = h._get(a[0], "apy_kw_none")
+def _apy_kw_owner(h, a):
+    """`"abc".upper(x=1)` -- a method that takes no keyword at all. CPython
+    names the OWNER here, and the owner is the receiver's kind."""
+    recv = h._get(a[0], "apy_kw_owner")
     return h._fail("TypeError", f"{h.kind_name(recv)}."
-                                f"{h._get(a[1], 'apy_kw_none')}() takes no "
+                                f"{h._get(a[1], 'apy_kw_owner')}() takes no "
                                 f"keyword arguments")
+
+
+def _apy_kw_none(h, a):
+    """The same refusal, for a `**` mapping that may or may not hold one. The
+    empty case is the common one and passes straight through."""
+    if not h._get(a[2], "apy_kw_none"):
+        return h._new(None)
+    return _apy_kw_owner(h, a)
 
 
 def _apy_kw_check(h, a):

@@ -5651,7 +5651,35 @@ class DynamicLowering:
         foldable = (attr in DYN_METHOD_TABLE
                     and attr not in _KEYWORDS_OF_THEIR_OWN
                     and not collides)
-        if foldable and (node.keywords or attr == "to_bytes"):
+        # A COLLIDING NAME WITH KEYWORDS. Both halves need the arguments, and
+        # an argument may only be lowered ONCE -- so it is lowered here and
+        # each arm is handed registers rather than AST. Without this the
+        # builtin arm had no keywords to fold at all: `"a,b,c".split(",",
+        # maxsplit=1)` in a module that happens to define its own `split`
+        # answered three pieces, and `"a,b".split(",", nope=1)` answered two
+        # rather than reporting the name. Both are wrong answers with nothing
+        # to mark them.
+        prelowered = None
+        if (collides and node.keywords and attr in DYN_METHOD_TABLE
+                and attr not in _KEYWORDS_OF_THEIR_OWN
+                and not (self._gen is not None
+                         and any(_suspends(kw.value)
+                                 for kw in node.keywords))):
+            args, lowered_kw, spreads = self._dyn_lower_call(node.args,
+                                                            node.keywords)
+            # SYNTHETIC KEYWORDS FOR THE USER ARM: `_Given` hands the register
+            # straight back through `_dyn_expr`, so the ordinary value-call
+            # lowering runs unchanged and evaluates nothing a second time.
+            spare = iter(spreads)
+            prelowered = (
+                [ast.keyword(arg=kw.arg,
+                             value=_Given(lowered_kw[kw.arg] if kw.arg
+                                          else next(spare)))
+                 for kw in node.keywords],
+                [kw.arg for kw in node.keywords], lowered_kw, spreads)
+        if prelowered is not None:
+            pass
+        elif foldable and (node.keywords or attr == "to_bytes"):
             # `to_bytes` FOLDS WHETHER OR NOT A KEYWORD WAS WRITTEN: `signed`
             # is keyword-only and the other two have defaults, so every arity
             # pads to one three-argument entry point rather than a family.
@@ -5671,7 +5699,7 @@ class DynamicLowering:
                 # refusing it would reject a call that works.
                 if attr in METHOD_PARAMS or method_symbol(
                         attr, len(args)) is not None:
-                    self._dyn_keyword_error(exc)
+                    self._dyn_keyword_error(exc, receiver, attr)
                     return self.b.call(T.PTR, "apy_none", [])
         else:
             args = self._dyn_operands(node.args)
@@ -5701,6 +5729,11 @@ class DynamicLowering:
             # `'D' object has no attribute 'keys'` for a method the object
             # plainly has. The receiver decides here too, so it gets the same
             # two-way shape; a program with no such class still pays nothing.
+            if prelowered is not None:
+                spelled, names, lowered_kw, spreads = prelowered
+                return self._dyn_method_either(
+                    receiver, attr, args, sym, spelled,
+                    fold=(names, lowered_kw, spreads))
             return self._dyn_method_either(receiver, attr, args, sym,
                                            node.keywords)
         if sym is None:
@@ -5712,10 +5745,13 @@ class DynamicLowering:
             attribute = self.b.call(T.PTR, "apy_getattr",
                                     [receiver, self._dyn_str_literal(attr)])
             self._dyn_check()
-            return self._dyn_indirect(attribute, args, node.keywords)
+            return self._dyn_indirect(
+                attribute, args,
+                prelowered[0] if prelowered is not None else node.keywords)
 
-        out = self._dyn_builtin_method(receiver, attr, args, sym,
-                                       node.keywords)
+        out = self._dyn_builtin_method(
+            receiver, attr, args, sym,
+            prelowered[0] if prelowered is not None else node.keywords)
         # A STR METHOD ON A BYTES RECEIVER answers bytes. The two share a
         # layout, so the operation is the same one -- only the tag on the
         # result differs, and doing it here covers every method at once rather
@@ -5928,14 +5964,24 @@ class DynamicLowering:
         self.b.jump(fine)
         self.b.switch_to(fine)
 
-    def _dyn_keyword_error(self, exc: KeywordError) -> None:
+    def _dyn_keyword_error(self, exc: KeywordError, receiver: int = 0,
+                           attr: str = "") -> None:
         """The TypeError CPython raises for a keyword a method cannot take.
 
         A RUN-TIME RAISE rather than a diagnostic, because that is where
         CPython puts it and a program may be testing for exactly it -- the
         same reasoning `dict(a, b)` above is built on. The arguments have
         already been lowered by the time this is reached, so they still run.
+
+        A MARKED REFUSAL NAMES THE OWNER, and only the runtime knows which
+        type that is: `str.upper() takes no keyword arguments`. See
+        `KeywordError.owner`.
         """
+        if exc.owner and receiver:
+            self.b.call(T.PTR, "apy_kw_owner",
+                        [receiver, self._dyn_str_literal(attr)])
+            self._dyn_check()
+            return
         self.b.call(T.PTR, "apy_raise",
                     [self.b.call(
                         T.PTR, "apy_make_exc",
@@ -6131,7 +6177,7 @@ class DynamicLowering:
         return any(c.builtin_base is not None for c in self.classes.values())
 
     def _dyn_method_either(self, receiver: int, attr: str, args: list,
-                           sym: str, keywords=()) -> int:
+                           sym: str, keywords=(), fold=None) -> int:
         """One call site, two answers, chosen by the receiver's kind.
 
         The result lands in ONE register written on both paths, which is what
@@ -6144,6 +6190,13 @@ class DynamicLowering:
         `od.popitem(last=False)` quietly popped the other end -- the keyword
         was dropped and the default stood, which is a wrong answer with
         nothing to mark it.
+
+        `fold` IS THE BUILTIN HALF'S SIGNATURE, and is what the user half
+        cannot have: a keyword the builtin cannot take may be exactly what the
+        user method wants, so the arrangement and every refusal belong INSIDE
+        the builtin block. `"a,b,c".split(",", maxsplit=1)` in a module that
+        defines its own `split` used to answer three pieces -- the builtin arm
+        saw the keywords and had nowhere to put them.
         """
         out = self.b.reg(T.PTR)
         user = self.b.new_block("usermethod")
@@ -6173,12 +6226,32 @@ class DynamicLowering:
         # UNWRAPPED FIRST. A `class D(dict)` reaching `apy_dict_keys` has to
         # arrive as the dict it carries; handing the instance over is what
         # made the runtime report `'D' object has no attribute 'keys'`.
+        held = self.b.call(T.PTR, "apy_method_self",
+                           [receiver, self._dyn_str_literal(attr)])
+        theirs, their_sym = args, sym
+        if fold is not None:
+            names, lowered_kw, spreads = fold
+            try:
+                theirs = self._dyn_arrange(
+                    attr, args, names, lowered_kw, spreads,
+                    pad_to=3 if attr == "to_bytes" else 0, receiver=held)
+                found = method_symbol(attr, len(theirs))
+                if found is not None:
+                    their_sym = found
+                if attr in METHOD_KW_SYMBOL:
+                    # THE KEYWORD SPELLING REACHES ITS OWN SYMBOL: folding has
+                    # just made this call indistinguishable from the
+                    # positional one. See `methods.METHOD_KW_SYMBOL`.
+                    their_sym = METHOD_KW_SYMBOL[attr]
+            except KeywordError as exc:
+                # A REFUSAL THE BUILTIN WOULD HAVE MADE, and only here: the
+                # user arm is a different block and a keyword this half
+                # cannot take may be exactly the one that half wants.
+                self._dyn_keyword_error(exc, held, attr)
         self.b.emit(Instruction(
             Op.COPY, T.PTR, dst=out,
-            args=[self._dyn_builtin_method(
-                self.b.call(T.PTR, "apy_method_self",
-                            [receiver, self._dyn_str_literal(attr)]),
-                attr, args, sym, keywords)]))
+            args=[self._dyn_builtin_method(held, attr, theirs, their_sym,
+                                           keywords if fold is None else ())]))
         self.b.jump(done)
 
         self.b.switch_to(done)

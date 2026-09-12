@@ -293,7 +293,16 @@ METHOD_KW_SYMBOL = {"translate": "apy_translate_kw"}
 
 
 class KeywordError(Exception):
-    """A keyword this method cannot take. Carries CPython's own wording."""
+    """A keyword this method cannot take. Carries CPython's own wording.
+
+    `owner` MARKS THE ONE WORDING THAT NAMES THE RECEIVER'S TYPE. CPython
+    writes `str.upper() takes no keyword arguments`, and which type that is
+    cannot be known here -- the dispatch is by arity precisely because there
+    is no static receiver. The lowering turns a marked refusal into a run-time
+    call that does have it; see `apy_kw_owner`.
+    """
+
+    owner = False
 
 
 #: What a substitution costs. CPython's `Python/suggestions.c` constants, and
@@ -392,10 +401,14 @@ def fold_keywords(name: str, argc: int, given: list[str],
         return None
     params = METHOD_PARAMS.get(name)
     if params is None:
-        # CPython writes `str.count()`, naming the OWNER. There is no static
-        # type for the receiver here -- that is the whole reason the dispatch
-        # is by arity -- so the bare method name is as close as this can get.
-        raise KeywordError(f"{name}() takes no keyword arguments")
+        # CPython WRITES THE OWNER -- `str.upper() takes no keyword
+        # arguments` -- and there is no static type for the receiver here,
+        # which is the whole reason the dispatch is by arity. So the refusal
+        # is MARKED rather than worded: the lowering has the receiver and
+        # turns a marked one into `apy_kw_owner`, which names it.
+        blame = KeywordError(f"{name}() takes no keyword arguments")
+        blame.owner = True
+        raise blame
     index = {p: i for i, (p, _) in enumerate(params) if p is not None}
     slots: dict[int, tuple] = {i: ("pos", i) for i in range(argc)}
     # THE ORDER OF THESE FOUR REFUSALS IS CPYTHON'S and is not the order they

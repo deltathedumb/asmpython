@@ -1698,12 +1698,16 @@ static apy_value apy_builtin_ctor(const char *tn, apy_value *argv,
 
    THE EMPTY CASE IS THE COMMON ONE and passes straight through: a wrapper
    forwarding `*args, **kwargs` passes an empty mapping nearly always. */
-APY_API apy_value apy_kw_none(apy_value recv, apy_value methv, apy_value bag) {
+APY_API apy_value apy_kw_owner(apy_value recv, apy_value methv) {
     char buf[160];
-    if (!apy_truth(bag)) return apy_none();
     snprintf(buf, sizeof buf, "%s.%s() takes no keyword arguments",
              apy_kind_name(recv), APY_CSTR(methv));
     return apy_fail("TypeError", buf);
+}
+
+APY_API apy_value apy_kw_none(apy_value recv, apy_value methv, apy_value bag) {
+    if (!apy_truth(bag)) return apy_none();
+    return apy_kw_owner(recv, methv);
 }
 
 APY_API apy_value apy_kw_check(apy_value bag, apy_value names,
