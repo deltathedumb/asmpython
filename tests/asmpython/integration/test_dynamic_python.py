@@ -1919,6 +1919,119 @@ PROGRAMS = {
         print([type(getattr(view, n)).__name__ for n in
                ("hex", "count", "index", "__setitem__", "__delitem__")])
     """,
+    "a_keyword_reaches_sort_and_update_by_every_route": """
+        # `sort` AND `update` PLACE THEIR OWN KEYWORDS -- `key` and `reverse` travel as
+        # VALUES so the key runs once per element, and `update`'s keywords ARE the value
+        # -- and four routes got past that branch. Three of them DROPPED the keyword in
+        # silence: the call answered as though it had never been written.
+        def show(label, f):
+            try:
+                print(label, "->", repr(f()))
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        def mk():
+            return ["bb", "a", "ccc"]
+
+        def sorted_with(*a, **kw):
+            held = mk()
+            held.sort(*a, **kw)
+            return held
+
+        # A NAME `sort` DOES NOT TAKE, written out.
+        show("unknown name", lambda: mk().sort(nope=1))
+        show("a near miss", lambda: mk().sort(revers=1))
+        show("a known name and an unknown one", lambda: mk().sort(reverse=True, nope=1))
+        # A `**` MAPPING, whose contents are a run-time value.
+        show("spread reverse", lambda: (lambda xs: (xs.sort(**{"reverse": True}), xs)[1])(mk()))
+        show("spread key", lambda: (lambda xs: (xs.sort(**{"key": len}), xs)[1])(mk()))
+        show("spread both",
+             lambda: (lambda xs: (xs.sort(**{"key": len, "reverse": True}), xs)[1])(mk()))
+        show("spread empty", lambda: (lambda xs: (xs.sort(**{}), xs)[1])(mk()))
+        show("spread unknown", lambda: mk().sort(**{"nope": 1}))
+        show("spread and written", lambda: sorted_with(**{"reverse": True}))
+        # SOURCE ORDER DECIDES: a later key wins over one a `**` brought.
+        show("written wins", lambda: (lambda xs: (xs.sort(**{"reverse": True}, reverse=False), xs)[1])(mk()))
+        show("mapping wins", lambda: (lambda xs: (xs.sort(reverse=False, **{"reverse": True}), xs)[1])(mk()))
+        # AND A POSITIONAL IS STILL REFUSED, which is what keyword-only means.
+        show("positional", lambda: mk().sort(None))
+
+        # `update`'s KEYWORDS ARE THE VALUE, so any name at all becomes a key.
+        def merged(*a, **kw):
+            held = {"x": 0}
+            held.update(*a, **kw)
+            return sorted(held.items())
+
+        show("written name", lambda: merged(a=1))
+        show("a mapping", lambda: merged({"b": 2}))
+        show("both", lambda: merged({"b": 2}, c=3))
+        show("spread", lambda: merged(**{"a": 1}))
+        show("spread and written", lambda: merged(**{"a": 1}, b=2))
+        show("spread empty", lambda: merged(**{}))
+        show("by name", lambda: (lambda d: (getattr(d, "update")(a=1), sorted(d.items()))[1])({"x": 0}))
+        show("by name with a mapping",
+             lambda: (lambda d: (getattr(d, "update")({"b": 2}, c=3), sorted(d.items()))[1])({"x": 0}))
+        # A SET'S `update` REALLY DOES TAKE NO KEYWORD, which is the line this is on
+        # the other side of.
+        show("a set by name", lambda: (lambda s: getattr(s, "update")(a=1))({1}))
+        show("a set with others", lambda: sorted((lambda s: (s.update({2}, {3}), s)[1])({1})))
+
+        # A NAME GIVEN BOTH BY A MAPPING AND WRITTEN OUT is a TypeError, whichever
+        # order the two come in -- and a merge cannot see it, so the later key simply
+        # won and `"a,b".split(**{"sep": ","}, sep=";")` answered `['a,b']` with
+        # nothing to mark it. Every spread-folded method had it.
+        show("split twice", lambda: "a,b".split(**{"sep": ","}, sep=";"))
+        show("split the other way", lambda: "a,b".split(sep=";", **{"sep": ","}))
+        show("replace twice", lambda: "aaa".replace("a", "b", **{"count": 1}, count=2))
+        show("encode twice", lambda: "a".encode(**{"encoding": "utf-8"}, encoding="ascii"))
+        show("two mappings", lambda: "a,b".split(**{"sep": ","}, **{"sep": ";"}))
+        show("a mapping and a different name",
+             lambda: "a,b,c".split(**{"sep": ","}, maxsplit=1))
+        show("still one name", lambda: "a,b".split(**{"sep": ","}))
+    """,
+    "a_keyword_named_like_a_rest_parameter_is_collected": """
+        def show(label, f):
+            try:
+                print(label, "->", repr(f()))
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+        def only_rest(*a):
+            return a
+        def only_kw(**kw):
+            return sorted(kw.items())
+        def both(*a, **kw):
+            return (a, sorted(kw.items()))
+        def mixed(p, q=9, *a, r=8, **kw):
+            return (p, q, a, r, sorted(kw.items()))
+        show("kw named kw", lambda: only_kw(kw=1))
+        show("both a", lambda: both(a=1))
+        show("both kw", lambda: both(kw=1))
+        show("mixed a", lambda: mixed(1, a=2))
+        show("mixed kw", lambda: mixed(1, kw=2))
+        show("mixed r", lambda: mixed(1, r=2))
+        show("mixed q", lambda: mixed(1, q=2))
+        show("mixed all", lambda: mixed(1, 2, 3, r=4, z=5))
+        show("posonly", lambda: (lambda: None)())
+        def po(x, /, y):
+            return (x, y)
+        show("positional only", lambda: po(x=1, y=2))
+        show("dup", lambda: mixed(1, 2, q=3))
+        # A `*rest` OR `**kw` PARAMETER CANNOT BE FILLED BY NAME: the name belongs to
+        # the COLLECTION and not to a slot. The interpreter matched a keyword against
+        # every declared parameter including those two, so `f(a=1)` on a `def f(*a,
+        # **kw)` bound the tuple to 1 and then tried to walk it -- an interpreter-only
+        # wrong answer where both compiled runtimes collected the name.
+        show("a name the tuple has", lambda: both(a=1))
+        show("a name the mapping has", lambda: both(kw=1))
+        show("both at once", lambda: both(a=1, kw=2))
+        show("through a spread", lambda: both(**{"a": 1, "kw": 2}))
+        def carries(*a, **kw):
+            held = {"x": 0}
+            held.update(*a, **kw)
+            return sorted(held.items())
+        show("forwarded to update", lambda: carries(a=1))
+        show("forwarded with a mapping", lambda: carries({"b": 2}, c=3))
+    """,
     "an_argument_of_the_wrong_type_is_worded_by_cpython": """
         # A BUILTIN METHOD'S ARGUMENT-TYPE REFUSALS were worded differently from
         # CPython's in seven places, and three of them were not refusals at all: a None

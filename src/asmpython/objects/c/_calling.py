@@ -2328,6 +2328,49 @@ APY_API apy_value apy_kw_none(apy_value recv, apy_value methv, apy_value bag) {
     return apy_kw_owner(recv, methv);
 }
 
+/* `f(**{"k": v}, k=w)` -- THE SAME NAME TWICE, once through a mapping and
+   once written out. CPython refuses it whichever order the two come in, and
+   NAMES THE OWNER: `str.split() got multiple values for keyword argument
+   'sep'`. Two WRITTEN names cannot collide -- that is a SyntaxError -- so any
+   repeat in the bag-building order is this.
+   OFFERED ONE KEY AT A TIME, because a merge cannot see it: the later key
+   simply wins, and `"a,b".split(**{"sep": ","}, sep=";")` answered `['a,b']`
+   with nothing to mark it. */
+static apy_value apy_kw_twice(apy_value recv, apy_value methv,
+                              apy_value key) {
+    char buf[200];
+    snprintf(buf, sizeof buf, "%s.%s() got multiple values for keyword "
+             "argument '%.60s'", apy_kind_name(recv), APY_CSTR(methv),
+             APY_CSTR(key));
+    return apy_fail("TypeError", buf);
+}
+
+APY_API apy_value apy_kw_put(apy_value bag, apy_value key, apy_value val,
+                             apy_value recv, apy_value methv) {
+    if (apy_dict_find(bag, key) >= 0) return apy_kw_twice(recv, methv, key);
+    if (!apy_dict_set(bag, key, val)) return 0;
+    return apy_none();
+}
+
+APY_API apy_value apy_kw_merge(apy_value bag, apy_value src, apy_value recv,
+                               apy_value methv) {
+    int64_t i;
+    if (O(src)->kind != APY_DICT_K) {
+        /* NOT A MAPPING AT ALL, which `**` requires. Left to `apy_update`,
+           which already words it -- this only has to not crash reading a
+           `v.d` that is not there. */
+        if (!apy_update(bag, src)) return 0;
+        return apy_none();
+    }
+    for (i = 0; i < O(src)->v.d.n; i++) {
+        apy_value k = O(src)->v.d.keys[i];
+        if (O(k)->kind == APY_STR_K && apy_dict_find(bag, k) >= 0)
+            return apy_kw_twice(recv, methv, k);
+        if (!apy_dict_set(bag, k, O(src)->v.d.vals[i])) return 0;
+    }
+    return apy_none();
+}
+
 APY_API apy_value apy_kw_check(apy_value bag, apy_value names,
                                apy_value methv, int64_t argc) {
     const char *meth = APY_CSTR(methv);
@@ -2809,6 +2852,16 @@ APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
         int64_t np = apy_kind_meth_sign(meth, names, defs);
         int64_t at, k2, i2, top = 0;
         char b[200];
+        /* `d.update(a=1)` -- THE KEYWORDS ARE THE VALUE, and no signature
+           can say that: any name at all becomes a key. So the dict the
+           caller built IS the argument, applied after a positional mapping
+           if there was one. A SET'S `update` really does take no keyword,
+           which is why this is the dict's alone. */
+        if (strcmp(meth, "update") == 0 && self
+                && O(self)->kind == APY_DICT_K) {
+            if (argc && !apy_update(self, raw[0])) return 0;
+            return apy_update(self, kwd);
+        }
         if (!np || np != O(f)->v.fn.arity - 1)
             return apy_kw_owner(self ? self : (argc ? raw[0] : apy_none()),
                                 O(f)->v.fn.name);

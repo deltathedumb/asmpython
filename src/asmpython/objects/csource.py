@@ -191,6 +191,7 @@ OBJECT_NAMES = (
     "apy_kind_method_var",
     "apy_meth_arity",
     "apy_bytes_hex_n",
+    "apy_kw_put", "apy_kw_merge",
     "apy_mview_from_flags",
     "apy_set_issubset", "apy_set_issuperset", "apy_set_isdisjoint",
     "apy_update", "apy_clear", "apy_copy", "apy_hash",

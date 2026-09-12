@@ -1907,6 +1907,51 @@ def _apy_kw_none(h, a):
     return _apy_kw_owner(h, a)
 
 
+def _kw_twice(h, recv, meth: str, key):
+    """`f(**{"k": v}, k=w)` -- the same name twice, once through a mapping and
+    once written out. CPython refuses it whichever order the two come in, and
+    NAMES THE OWNER. The C twin is `apy_kw_twice`."""
+    return h._fail("TypeError",
+                   f"{h.kind_name(recv)}.{meth}() got multiple values for "
+                   f"keyword argument {key!r}")
+
+
+def _apy_kw_put(h, a):
+    """One written keyword into the bag, refused if the bag already holds it.
+
+    OFFERED ONE KEY AT A TIME, because a merge cannot see a collision: the
+    later key simply wins, and `"a,b".split(**{"sep": ","}, sep=";")` answered
+    `['a,b']` with nothing to mark it. Two WRITTEN names cannot collide --
+    that is a SyntaxError -- so any repeat here is the mapping meeting a name.
+    """
+    bag = h._get(a[0], "apy_kw_put")
+    key = h._get(a[1], "apy_kw_put")
+    val = h._get(a[2], "apy_kw_put")
+    recv = h._get(a[3], "apy_kw_put") if a[3] else None
+    meth = h._get(a[4], "apy_kw_put")
+    if key in bag:
+        return _kw_twice(h, recv, meth, key)
+    bag[key] = val
+    return h._none
+
+
+def _apy_kw_merge(h, a):
+    """A `**` mapping into the bag, key by key. See `_apy_kw_put`."""
+    bag = h._get(a[0], "apy_kw_merge")
+    src = h._get(a[1], "apy_kw_merge")
+    recv = h._get(a[2], "apy_kw_merge") if a[2] else None
+    meth = h._get(a[3], "apy_kw_merge")
+    if not isinstance(src, dict):
+        # NOT A MAPPING AT ALL, which `**` requires. Left to `apy_update`,
+        # which already words it.
+        return _TABLE["apy_update"](h, [a[0], a[1]])
+    for key, val in src.items():
+        if isinstance(key, str) and key in bag:
+            return _kw_twice(h, recv, meth, key)
+        bag[key] = val
+    return h._none
+
+
 def _apy_kw_check(h, a):
     """`"aaa".replace("a", "b", **opts)` -- what the mapping holds, checked
     where it is finally known.
@@ -9342,6 +9387,18 @@ def _native_kwargs(h, f, args, kwargs):
         who = (f.bound if f.bound is not None
                else f.owner if f.owner is not _NO_OWNER
                else args[0] if args else None)
+        # `d.update(a=1)` IS THE EXCEPTION: the keywords ARE the value, and
+        # no signature can say that -- any name at all becomes a key. A SET'S
+        # `update` really does take no keyword, so this is the dict's alone.
+        if f.name == "update" and isinstance(who, dict):
+            for one in args:
+                if not isinstance(one, (dict, _VIEW_TYPES)):
+                    return h._fail("TypeError",
+                                   f"'{h.kind_name(one)}' object is not a "
+                                   f"mapping")
+                who.update(one)
+            who.update(kwargs)
+            return h._none
         return h._fail("TypeError", f"{h.kind_name(who)}.{f.name}() takes no "
                                     f"keyword arguments")
     named = [p for p, _ in params]
@@ -9452,6 +9509,14 @@ def _call_kwargs(h, f, args, kwargs):
         # specific, but it does not match.
         posonly_hit = 0 <= at + skip < target.posonly
         if posonly_hit:
+            at = -1
+        # A `*rest` OR `**kw` PARAMETER CANNOT BE FILLED BY NAME. The name
+        # belongs to the COLLECTION and not to a slot, so a keyword spelling
+        # either of them goes into `**kw` like any other unmatched name --
+        # and both sit PAST the declared positions, which is what tells them
+        # apart. `def f(*a, **kw)` called as `f(a=1)` bound the tuple to `1`
+        # and then tried to walk it; the compiled runtimes collect it.
+        if at >= want:
             at = -1
         # NOT `or extra`. Surplus positionals belong to `*rest`; they do
         # not stop a keyword from naming a parameter, and least of all a

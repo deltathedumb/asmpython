@@ -5888,7 +5888,7 @@ class DynamicLowering:
             # ordinary arity dispatch sees the call it should have seen all
             # along. See `_dyn_spread_fold`.
             return self._dyn_spread_fold(attr, lowered_pos, names,
-                                         lowered_kw, spreads)
+                                         lowered_kw, spreads, receiver)
         if spreads:
             # `**mapping` ON A METHOD WITH NO KEYWORD SIGNATURE, which means
             # the mapping can only legally be EMPTY -- `f(*args, **kwargs)`
@@ -5922,7 +5922,8 @@ class DynamicLowering:
         return out
 
     def _dyn_spread_fold(self, attr: str, lowered_pos: list, names: list,
-                         lowered_kw: dict, spreads: list) -> list:
+                         lowered_kw: dict, spreads: list,
+                         receiver: int = 0) -> list:
         """`"aaa".replace("a", "b", **opts)` -- every slot read at run time.
 
         THE NAMES ARE KNOWN AND THE VALUES ARE NOT. `METHOD_PARAMS` says what
@@ -5959,13 +5960,20 @@ class DynamicLowering:
         bag = self.b.call(T.PTR, "apy_dict_new",
                           [self.b.const(T.I64, len(names) + 4)])
         held = iter(spreads)
+        # THROUGH `apy_kw_put` AND `apy_kw_merge` rather than a plain set and
+        # a plain update: a name given BOTH by a mapping and written out is a
+        # TypeError in CPython, and a merge cannot see it -- the later key
+        # simply wins, so `"a,b".split(**{"sep": ","}, sep=";")` answered
+        # `['a,b']` with nothing to mark it.
+        methv = self._dyn_str_literal(attr)
         for name in names:
             if name is None:
-                self.b.call(T.PTR, "apy_update", [bag, next(held)])
+                self.b.call(T.PTR, "apy_kw_merge",
+                            [bag, next(held), receiver, methv])
             else:
-                self.b.call(T.PTR, "apy_dict_set",
+                self.b.call(T.PTR, "apy_kw_put",
                             [bag, self._dyn_str_literal(name),
-                             lowered_kw[name]])
+                             lowered_kw[name], receiver, methv])
             self._dyn_check()
         # A PARAMETER CPYTHON MARKS POSITIONAL-ONLY IS AN EMPTY STRING here.
         # A key can never name one, and leaving a hole would misalign every
@@ -5992,6 +6000,55 @@ class DynamicLowering:
                 [bag, self._dyn_str_literal(pname or ""),
                  self._dyn_constant(None if default is REQUIRED else default)]))
         return out
+
+    def _dyn_sort_bag(self, keywords, receiver: int) -> list:
+        """`sort`'s two parameters, read out of one keyword bag at run time.
+
+        ONE BAG IN SOURCE ORDER, so a later key wins over one a `**` brought
+        -- `f(**d, k=1)` and `f(k=1, **d)` are different calls and CPython
+        keeps the difference. THE NAMES ARE KNOWN AND THE VALUES ARE NOT,
+        which is the split `_dyn_spread_fold` is built on; `sort` cannot use
+        that one because its parameters travel as VALUES to a single entry
+        point rather than into positional slots.
+
+        `apy_kw_check` IS THE HALF THAT CANNOT BE DECIDED HERE, and its
+        wordings are CPython's: an unknown name, a name given twice, or more
+        keywords than there are parameters.
+        """
+        bag = self.b.call(T.PTR, "apy_dict_new",
+                          [self.b.const(T.I64, len(keywords) + 4)])
+        # THROUGH `apy_kw_put` AND `apy_kw_merge`, which refuse a name the
+        # bag already holds: a name given both by a mapping and written out
+        # is a TypeError and not the later of the two. See `_dyn_spread_fold`.
+        methv = self._dyn_str_literal("sort")
+        for kw in keywords:
+            if kw.arg is None:
+                self.b.call(T.PTR, "apy_kw_merge",
+                            [bag, self._dyn_expr(kw.value), receiver, methv])
+            else:
+                self.b.call(T.PTR, "apy_kw_put",
+                            [bag, self._dyn_str_literal(kw.arg),
+                             self._dyn_expr(kw.value), receiver, methv])
+            self._dyn_check()
+        spelled = self.b.call(T.PTR, "apy_tuple_new",
+                              [self.b.const(T.I64, 3)])
+        for pname in ("key", "reverse"):
+            self.b.call(T.PTR, "apy_seq_push",
+                        [spelled, self._dyn_str_literal(pname)])
+        # NO POSITIONALS: `sort`'s two parameters are keyword-only, so the
+        # count check inside reads this as the keyword-argument form.
+        self.b.call(T.PTR, "apy_kw_check",
+                    [bag, spelled, self._dyn_str_literal("sort"),
+                     self.b.const(T.I64, 0)])
+        self._dyn_check()
+        return [
+            self.b.call(T.PTR, "apy_dict_get_or",
+                        [bag, self._dyn_str_literal("key"),
+                         self._dyn_constant(None)]),
+            self.b.call(T.PTR, "apy_dict_get_or",
+                        [bag, self._dyn_str_literal("reverse"),
+                         self._dyn_constant(False)]),
+        ]
 
     def _dyn_refuse_nonempty_mapping(self, attr: str, mapping: int,
                                      receiver: int = 0) -> None:
@@ -6166,17 +6223,26 @@ class DynamicLowering:
             # a dict of their own and are applied after the positional one, so
             # a key given both ways takes the keyword -- which is what CPython
             # does and the only order that makes `d.update(d2, k=v)` useful.
-            named = {kw.arg: kw.value for kw in keywords if kw.arg}
             call_args = [receiver, args[0]] if args else None
             if call_args is not None:
                 self.b.call(T.PTR, sym, call_args)
                 self._dyn_check()
             extra = self.b.call(T.PTR, "apy_dict_new",
-                                [self.b.const(T.I64, len(named) + 1)])
-            for key, value in named.items():
-                self.b.call(T.PTR, "apy_dict_set",
-                            [extra, self._dyn_str_literal(key),
-                             self._dyn_expr(value)])
+                                [self.b.const(T.I64, len(keywords) + 1)])
+            # A `**` MAPPING IS MERGED IN TOO, in SOURCE ORDER with the
+            # written names -- `d.update(**m)` was dropped entirely, which
+            # is the one silent wrong answer this whole arrangement is
+            # against. Nothing has to be READ out of it here: the keywords of
+            # `update` ARE the value, so the mapping goes in whole.
+            for kw in keywords:
+                if kw.arg is None:
+                    self.b.call(T.PTR, "apy_update",
+                                [extra, self._dyn_expr(kw.value)])
+                else:
+                    self.b.call(T.PTR, "apy_dict_set",
+                                [extra, self._dyn_str_literal(kw.arg),
+                                 self._dyn_expr(kw.value)])
+                self._dyn_check()
             call_args = [receiver, extra]
         elif attr in ("encode", "decode"):
             # THREE PARAMETERS ALWAYS: the receiver, the encoding and the
@@ -6214,14 +6280,25 @@ class DynamicLowering:
             # keywords. Both travel as VALUES so the runtime calls the key
             # once per element, which is where the element ordering lives.
             named = {kw.arg: kw.value for kw in keywords if kw.arg}
-            call_args = [
-                receiver,
-                (self._dyn_expr(named["key"]) if "key" in named
-                 else self.b.call(T.PTR, "apy_none", [])),
-                (self._dyn_expr(named["reverse"]) if "reverse" in named
-                 else self.b.call(T.PTR, "apy_from_bool",
-                                  [self.b.const(T.I64, 0)])),
-            ]
+            odd = [kw for kw in keywords
+                   if kw.arg is None or kw.arg not in ("key", "reverse")]
+            if odd:
+                # A `**` MAPPING OR A NAME `sort` DOES NOT TAKE. Neither can
+                # be settled here -- what a mapping HOLDS is a run-time value
+                # -- and both were DROPPED IN SILENCE: `xs.sort(nope=1)`
+                # sorted and said nothing, and `xs.sort(**{"reverse": True})`
+                # sorted ascending. See `_dyn_sort_bag`.
+                call_args = [receiver,
+                             *self._dyn_sort_bag(keywords, receiver)]
+            else:
+                call_args = [
+                    receiver,
+                    (self._dyn_expr(named["key"]) if "key" in named
+                     else self.b.call(T.PTR, "apy_none", [])),
+                    (self._dyn_expr(named["reverse"]) if "reverse" in named
+                     else self.b.call(T.PTR, "apy_from_bool",
+                                      [self.b.const(T.I64, 0)])),
+                ]
         else:
             call_args = [receiver, *args]
 
