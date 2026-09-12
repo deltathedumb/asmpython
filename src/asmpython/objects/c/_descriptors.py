@@ -1035,6 +1035,36 @@ APY_API apy_value apy_str_maketrans(apy_value a, apy_value b, apy_value drop) {
     apy_value out;
     int64_t i = 0, j = 0, alen, blen;
     const unsigned char *ap, *bp;
+    /* THE ONE-ARGUMENT FORM IS A MAPPING, and it is a different operation:
+       nothing is paired off, the table is COPIED with its string keys turned
+       into the code points `translate` looks up. A one-character string key
+       is the only kind that can be, which is what the ValueError says. */
+    if (O(a)->kind == APY_DICT_K) {
+        int64_t at;
+        if ((b && O(b)->kind != APY_NONE_K) || (drop && O(drop)->kind != APY_NONE_K))
+            return apy_fail("TypeError",
+                            "first maketrans argument must be a string if "
+                            "there is a second argument");
+        out = apy_dict_new(O(a)->v.d.n + 1);
+        if (!out) return 0;
+        for (at = 0; at < O(a)->v.d.n; at++) {
+            apy_value key = O(a)->v.d.keys[at];
+            apy_value point = key;
+            if (O(key)->kind == APY_STR_K) {
+                int64_t used, cp;
+                if (apy_str_chars(key) != 1)
+                    return apy_fail("ValueError",
+                                    "string keys in translate table must be "
+                                    "of length 1");
+                cp = apy_utf8_at((const unsigned char *)O(key)->v.s.p,
+                                 O(key)->v.s.n, 0, &used);
+                point = apy_from_int(cp);
+            }
+            if (!apy_dict_set(out, point, O(a)->v.d.vals[at]))
+                return 0;
+        }
+        return out;
+    }
     if (O(a)->kind != APY_STR_K || O(b)->kind != APY_STR_K)
         return apy_fail("TypeError",
                         "maketrans() arguments must be strings");

@@ -1736,6 +1736,52 @@ PROGRAMS = {
         print(frozen.readonly, frozen.shape, frozen.strides, frozen.contiguous)
         print(whole.readonly, whole.itemsize, whole.format)
     """,
+    "a_static_is_reachable_from_a_value_too": """
+        def show(label, f):
+            try:
+                print(label, f())
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        # AN IMPLICIT STATICMETHOD IS ONE METHOD, and the receiver decides which body
+        # and is otherwise ignored: `bytes.fromhex(s)` and `b"".fromhex(s)` are the
+        # same call. Every one of these was reachable only as a written call on the
+        # type's own name, so a program holding the VALUE found nothing.
+        show("str maketrans", lambda: "".maketrans("a", "b"))
+        show("str maketrans deleting", lambda: "".maketrans("a", "b", "c"))
+        show("str maketrans mapping", lambda: "".maketrans({"a": "b"}))
+        show("bytes maketrans", lambda: type(b"".maketrans(b"a", b"b")).__name__)
+        show("bytes fromhex", lambda: b"".fromhex("41 42"))
+        show("bytearray fromhex", lambda: bytearray().fromhex("41 42"))
+        show("float fromhex", lambda: (0.0).fromhex("0x1.8p+0"))
+        show("dict fromkeys", lambda: {}.fromkeys([1, 2]))
+        show("dict fromkeys with value", lambda: {}.fromkeys([1], 9))
+        show("int from_bytes", lambda: (0).from_bytes(b"\\x01\\x00"))
+        show("int from_bytes little", lambda: (0).from_bytes(b"\\x01\\x00", "little"))
+        # 3.14's `from_number` converts a NUMBER and nothing else, which is the whole
+        # reason it exists beside the constructor: `float("5")` reads text and this
+        # refuses it.
+        show("float from_number", lambda: (0.0).from_number(5))
+        show("float from_number float", lambda: (0.0).from_number(1.5))
+        show("float from_number str", lambda: (0.0).from_number("5"))
+        show("float from_number complex", lambda: (0.0).from_number(1j))
+        show("complex from_number", lambda: (0j).from_number(5))
+        show("complex from_number cx", lambda: (0j).from_number(2j))
+        show("complex from_number str", lambda: (0j).from_number("5"))
+        # The type-object form still answers the same way, which is what makes them
+        # one implementation rather than two that can drift.
+        show("on the type", lambda: (bytes.fromhex("41"), bytearray.fromhex("41"),
+                                     float.fromhex("0x1.8p+0"),
+                                     dict.fromkeys([1]), int.from_bytes(b"\\x02"),
+                                     float.from_number(7), complex.from_number(7)))
+        print([type(getattr(v, n)).__name__ for v, n in
+               (("", "maketrans"), (b"", "fromhex"), ({}, "fromkeys"),
+                (0, "from_bytes"), (0.0, "from_number"), (0j, "from_number"))])
+        # AND NO KIND CARRIES ONE IT DOES NOT HAVE.
+        print([hasattr(v, n) for v, n in
+               (("", "fromkeys"), ([], "fromkeys"), ("", "fromhex"),
+                (1.5, "maketrans"), (0j, "from_bytes"), (5, "from_number"))])
+    """,
     "traceback_positions": """
         try:
             (1).missing

@@ -741,6 +741,29 @@ APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
     /* PEP 688: whatever can be handed to `memoryview` HAS `__buffer__`. It is
        a protocol a program asks about far more often than it calls, and
        answering False for `bytes` said this runtime has no buffers at all. */
+    /* THE STATICS A TYPE CARRIES AND A VALUE CARRIES TOO. `bytes.fromhex`
+       and `b"".fromhex` are ONE method in Python -- an implicit
+       staticmethod, so the receiver decides which body and is otherwise
+       ignored -- and every one of these was reachable only as a written call
+       on the type's own name. */
+    if (strcmp(want, "maketrans") == 0) {
+        if (k == APY_STR_K) return apy_kind_method_opt(
+            obj, 4, 2, (apy_value)(uintptr_t)want, bind);
+        if (k == APY_BYTES_K) return apy_kind_method(obj, 3, want, bind);
+    }
+    if (strcmp(want, "fromhex") == 0
+            && (k == APY_BYTES_K || k == APY_FLOAT_K))
+        return apy_kind_method(obj, 2, want, bind);
+    if (strcmp(want, "from_number") == 0
+            && (k == APY_FLOAT_K || k == APY_COMPLEX_K))
+        return apy_kind_method(obj, 2, want, bind);
+    if (strcmp(want, "fromkeys") == 0 && dict)
+        return apy_kind_method_opt(obj, 3, 1, (apy_value)(uintptr_t)want,
+                                   bind);
+    if (strcmp(want, "from_bytes") == 0
+            && (k == APY_INT_K || k == APY_BOOL_K || k == APY_BIG_K))
+        return apy_kind_method_opt(obj, 3, 1, (apy_value)(uintptr_t)want,
+                                   bind);
     if (strcmp(want, "__buffer__") == 0
             && (k == APY_BYTES_K || k == APY_MVIEW_K))
         return apy_kind_method(obj, 2, "__buffer__", bind);
@@ -1077,6 +1100,51 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
            none to give. A name the table knows means the same thing on every
            arm they share, because both read `DYN_METHOD_TABLE`. */
         if (apy_kind_meth_arity(w, 0xFFFFu)) return apy_kind_meth_call(w, a, n);
+        /* THE STATICS, which a TYPE carries and a VALUE carries too --
+           `bytes.fromhex` and `b"".fromhex` are one implicit staticmethod,
+           so the receiver decides which body and is otherwise ignored. The
+           frontend already lowers the written `bytes.fromhex(s)` form; this
+           is the same call reached by name. */
+        if (strcmp(w, "maketrans") == 0) {
+            if (O(a[0])->kind == APY_STR_K)
+                return apy_str_maketrans(n > 1 ? a[1] : apy_none(),
+                                         n > 2 ? a[2] : apy_none(),
+                                         n > 3 ? a[3] : apy_none());
+            return apy_bytes_maketrans(n > 1 ? a[1] : apy_none(),
+                                       n > 2 ? a[2] : apy_none());
+        }
+        if (strcmp(w, "fromhex") == 0) {
+            if (n < 2) return apy_fail("TypeError",
+                                       "fromhex() takes exactly one "
+                                       "argument (0 given)");
+            if (O(a[0])->kind == APY_FLOAT_K)
+                return apy_float_fromhex(a[1]);
+            /* THE KIND IT WAS REACHED THROUGH decides the answer's
+               mutability, as it does for the written form. */
+            return O(a[0])->v.s.mut ? apy_bytearray_fromhex(a[0], a[1])
+                                    : apy_bytes_fromhex(a[0], a[1]);
+        }
+        if (strcmp(w, "fromkeys") == 0) {
+            if (n < 2) return apy_fail("TypeError",
+                                       "fromkeys expected at least 1 "
+                                       "argument, got 0");
+            return apy_dict_fromkeys(a[1], n > 2 ? a[2] : apy_none());
+        }
+        if (strcmp(w, "from_bytes") == 0) {
+            if (n < 2) return apy_fail("TypeError",
+                                       "from_bytes() missing required "
+                                       "argument 'bytes' (pos 1)");
+            return apy_from_bytes_n(a[1], n > 2 ? a[2] : apy_lit("big"));
+        }
+        if (strcmp(w, "from_number") == 0) {
+            if (n < 2) return apy_fail2("TypeError",
+                                        "%s.from_number() takes exactly one "
+                                        "argument (0 given)%s",
+                                        apy_kind_name(a[0]), "");
+            return O(a[0])->kind == APY_COMPLEX_K
+                   ? apy_complex_from_number(a[0], a[1])
+                   : apy_float_from_number(a[0], a[1]);
+        }
         if (strcmp(w, "tobytes") == 0) return apy_mview_bytes(a[0]);
         if (strcmp(w, "tolist") == 0) {
             apy_value bytes = apy_mview_bytes(a[0]);

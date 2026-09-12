@@ -4177,13 +4177,22 @@ def _apy_bytes_hex(h, a):
 def _apy_bytes_fromhex(h, a):
     # The RECEIVER is `a[0]` and ignored: the shape matches the method table's
     # so that `b.fromhex(s)` and `bytes.fromhex(s)` are one implementation.
+    held = h._get(a[0], "apy_bytes_fromhex")
     text = h._get(a[1], "apy_bytes_fromhex")
+    # A FLOAT'S `fromhex` IS A DIFFERENT READING ENTIRELY -- `0x1.8p+0` is one
+    # number, not three bytes -- and the receiver is the only thing that says
+    # which was meant. `(0.0).fromhex(s)` lowers to this symbol the way every
+    # other value-form method does, and read the text as byte pairs.
+    if isinstance(held, float):
+        return _apy_float_fromhex(h, [a[1]])
     if not isinstance(text, str):
         return h._fail("TypeError", "fromhex() argument must be str")
     try:
-        return h._new(bytes.fromhex(text))
+        got = bytes.fromhex(text)
     except ValueError as exc:
         return h._fail_like(exc)
+    # AND THE ANSWER IS THE KIND IT WAS REACHED THROUGH.
+    return h._new(bytearray(got) if isinstance(held, bytearray) else got)
 
 
 def _apy_bytearray_fromhex(h, a):
@@ -7378,6 +7387,25 @@ def _kind_attr(h, obj, want: str):
     # PEP 688: whatever can be handed to `memoryview` HAS `__buffer__`. It is
     # a protocol a program asks about far more often than it calls, and
     # answering False for `bytes` said this runtime has no buffers at all.
+    # THE STATICS A TYPE CARRIES AND A VALUE CARRIES TOO. `bytes.fromhex`
+    # and `b"".fromhex` are ONE method in Python -- an implicit staticmethod,
+    # so the receiver decides which body and is otherwise ignored -- and
+    # every one of these was reachable only as a written call on the type's
+    # own name. A program holding the VALUE found nothing.
+    if want == "maketrans" and isinstance(obj, (str, bytes, bytearray)):
+        return made("maketrans",
+                    lambda *r, _t=type(obj): _t.maketrans(*r))
+    if want == "fromhex" and isinstance(obj, (bytes, bytearray, float)):
+        return made("fromhex", lambda text, _t=type(obj): _t.fromhex(text))
+    if want == "fromkeys" and dict_:
+        return made("fromkeys", lambda keys, value=None:
+                    dict.fromkeys(keys, value))
+    if want == "from_bytes" and isinstance(obj, int):
+        return made("from_bytes", lambda data, order="big":
+                    int.from_bytes(data, order))
+    if want == "from_number" and isinstance(obj, (float, complex)):
+        return made("from_number",
+                    lambda v, _t=type(obj): _t.from_number(v))
     if want == "__buffer__" and isinstance(obj, (bytes, bytearray,
                                                  memoryview)):
         return made("__buffer__", lambda flags=0: memoryview(obj))
@@ -10156,6 +10184,32 @@ def _apy_hex_of(h, a):
     if isinstance(x, float):
         return h._new(x.hex())
     return _TABLE["apy_bytes_hex"](h, a)
+
+
+def _apy_float_from_number(h, a):
+    """`float.from_number(x)` -- 3.14's way of converting a NUMBER.
+
+    The whole reason it exists beside the constructor is that `float("5")`
+    reads text and this refuses it: a program that means "convert this
+    number" can say so and have a string rejected rather than parsed. The
+    RECEIVER is `a[0]` and ignored, so the type form and the value form are
+    one implementation.
+    """
+    v = h._get(a[1], "apy_float_from_number")
+    if isinstance(v, (int, float)) and not isinstance(v, bool) \
+            or isinstance(v, bool):
+        return h._new(float(v))
+    return h._fail("TypeError", f"must be real number, not {h.kind_name(v)}")
+
+
+def _apy_complex_from_number(h, a):
+    """`complex.from_number(x)`. See `_apy_float_from_number`."""
+    v = h._get(a[1], "apy_complex_from_number")
+    if isinstance(v, complex):
+        return h._new(v)
+    if isinstance(v, (int, float)):
+        return h._new(complex(v, 0.0))
+    return h._fail("TypeError", f"must be real number, not {h.kind_name(v)}")
 
 
 def _apy_float_fromhex(h, a):

@@ -1794,6 +1794,31 @@ APY_API apy_value apy_to_float(apy_value v) {
                      apy_kind_name(v), "");
 }
 
+/* `float.from_number(x)` and `complex.from_number(x)` -- 3.14's way of
+   converting a NUMBER and nothing else. `float("5")` reads text and this
+   refuses it, which is the whole reason both exist: a program that means
+   "convert this number" can say so and have a string rejected rather than
+   parsed. */
+APY_API apy_value apy_float_from_number(apy_value self, apy_value v) {
+    (void)self;
+    if (O(v)->kind == APY_FLOAT_K || apy_is_int_like(v) || apy_is_big(v))
+        return apy_to_float(v);
+    return apy_fail2("TypeError", "must be real number, not %s%s",
+                     apy_kind_name(v), "");
+}
+
+APY_API apy_value apy_complex_from_number(apy_value self, apy_value v) {
+    (void)self;
+    if (O(v)->kind == APY_COMPLEX_K) return v;
+    if (O(v)->kind == APY_FLOAT_K || apy_is_int_like(v) || apy_is_big(v)) {
+        apy_value f = apy_to_float(v);
+        if (!f) return 0;
+        return apy_from_complex(O(f)->v.f, 0.0);
+    }
+    return apy_fail2("TypeError", "must be real number, not %s%s",
+                     apy_kind_name(v), "");
+}
+
 APY_API apy_value apy_to_bool(apy_value v) { return apy_from_bool(apy_truth(v)); }
 
 """

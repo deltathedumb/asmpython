@@ -183,6 +183,7 @@ OBJECT_NAMES = (
     "apy_set_symdiff_update",
     "apy_str_format_map", "apy_bytearray_resize",
     "apy_bytearray_fromhex",
+    "apy_float_from_number", "apy_complex_from_number",
     "apy_set_issubset", "apy_set_issuperset", "apy_set_isdisjoint",
     "apy_update", "apy_clear", "apy_copy", "apy_hash",
     # str methods

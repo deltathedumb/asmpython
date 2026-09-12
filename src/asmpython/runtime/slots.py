@@ -1266,6 +1266,34 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
             return apy_kind_method_of(obj, 2, want, bind)
     if sset and apy_name_is(want, rodata(b"isdisjoint\0")):
         return apy_kind_method_of(obj, 2, rodata(b"isdisjoint\0"), bind)
+    # THE STATICS A TYPE CARRIES AND A VALUE CARRIES TOO. `bytes.fromhex`
+    # and `b"".fromhex` are ONE method in Python -- an implicit
+    # staticmethod, so the receiver decides which body and is otherwise
+    # ignored -- and every one of these was reachable only as a written call
+    # on the type's own name. A program holding the VALUE, or reaching the
+    # method through `getattr`, found nothing.
+    if is_str:
+        if apy_name_is(want, rodata(b"maketrans\0")):
+            return apy_kind_method_opt(obj, 4, 2, want, bind)
+    if is_bytes:
+        if apy_name_is(want, rodata(b"maketrans\0")):
+            return apy_kind_method_of(obj, 3, want, bind)
+        if apy_name_is(want, rodata(b"fromhex\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+    if is_float:
+        if apy_name_is(want, rodata(b"fromhex\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"from_number\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+    if is_complex:
+        if apy_name_is(want, rodata(b"from_number\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+    if is_dict:
+        if apy_name_is(want, rodata(b"fromkeys\0")):
+            return apy_kind_method_opt(obj, 3, 1, want, bind)
+    if is_int:
+        if apy_name_is(want, rodata(b"from_bytes\0")):
+            return apy_kind_method_opt(obj, 3, 1, want, bind)
     if apy_name_is(want, rodata(b"__buffer__\0")):
         if is_bytes or is_mview:
             return apy_kind_method_of(obj, 2, rodata(b"__buffer__\0"),

@@ -197,6 +197,11 @@ _TYPE_STATICS = {
     ("bytes", "maketrans"): ("apy_bytes_maketrans", 2, ()),
     ("bytearray", "maketrans"): ("apy_bytes_maketrans", 2, ()),
     ("float", "fromhex"): ("apy_float_fromhex", 1, ()),
+    # 3.14's `from_number`. Its runtime shape is (receiver, value), shared
+    # with the value form, and the type has no receiver to give -- so it is
+    # padded here exactly as `fromhex` is.
+    ("float", "from_number"): ("apy_float_from_number", 1, ()),
+    ("complex", "from_number"): ("apy_complex_from_number", 1, ()),
 }
 
 _MULTI_BUILTINS = frozenset({"round", "int", "sum", "min", "max", "zip",
@@ -2029,7 +2034,9 @@ class DynamicLowering:
                 filler = defaults[len(args) - len(node.args)] \
                     if len(args) - len(node.args) < len(defaults) else "apy_none"
                 args.append(self.b.call(T.PTR, filler, []))
-            if symbol in ("apy_bytes_fromhex", "apy_bytearray_fromhex"):
+            if symbol in ("apy_bytes_fromhex", "apy_bytearray_fromhex",
+                          "apy_float_from_number",
+                          "apy_complex_from_number"):
                 # Its runtime shape is (receiver, text), shared with the
                 # method form; the type has no receiver to give.
                 args = [self.b.call(T.PTR, "apy_none", [])] + args
