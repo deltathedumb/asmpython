@@ -39,6 +39,25 @@ Usage:
     py -3.14 tools/objects_diff.py --only str       # one group
     py -3.14 tools/objects_diff.py --list           # what groups exist
 """
+# FOUR GROUPS WERE ADDED AFTER THE FIRST SWEEP SATURATED, and each exists
+# because a whole SHAPE of call was missing rather than a few cases:
+#
+#   keywords            Every case above is written POSITIONALLY, and a
+#                       keyword is a different lowering path -- so 9,339
+#                       generated expressions found five real divergences and
+#                       none of the eight keyword bugs. 26 distinct shapes on
+#                       the first run.
+#   bytes               The bytes family had no group at all, and it shares
+#                       its implementation with str -- which turns out to mean
+#                       it shares str's UTF-8 view of a receiver that has no
+#                       characters in it.
+#   bytearray-mutation  An in-place method answers None and puts the change in
+#                       the RECEIVER, so a group printing only the result
+#                       cannot see it. Both are printed, and for the operators
+#                       an ALIAS is printed too: that is the whole question.
+#   attributes          `x.upper` and `getattr(x, "upper")` are different
+#                       lowerings and only the first was generated. 167
+#                       divergences of 650.
 from __future__ import annotations
 
 import argparse
@@ -253,6 +272,177 @@ def group_translate():
     return [f"{_lit(s)}.translate({t})" for s in STRINGS[:14] for t in tables]
 
 
+def group_keywords():
+    """EVERY BUILTIN METHOD THAT TAKES A KEYWORD, written as one.
+
+    THE GAP THIS FILLS. 9,339 generated expressions found five real
+    divergences and none of the keyword bugs, for one reason: every case
+    above is written POSITIONALLY, and a keyword is a different lowering
+    path. `"a,b,c".split(",", maxsplit=1)` and `"a,b,c".split(",", 1)` reach
+    the same runtime symbol by different roads, and only one of the roads was
+    ever generated.
+
+    THE TABLE IS THE ORACLE FOR WHAT TO WRITE and CPython for what it should
+    answer -- so a method that grows a parameter is covered the day
+    `METHOD_PARAMS` learns about it.
+
+    FOUR SHAPES PER PARAMETER, because each is a different failure:
+    the keyword alone, the keyword after a positional, the keyword given
+    twice, and a keyword the method does not have.
+    """
+    sys.path.insert(0, str(SRC))
+    try:
+        from asmpython.frontends.python.methods import (
+            METHOD_PARAMS, POSITIONAL_ONLY)
+    finally:
+        sys.path.remove(str(SRC))
+    #: A receiver each method can be called on, and arguments its positional
+    #: parameters accept. Written out because a keyword call has to be
+    #: WELL-FORMED to reach the interesting part -- a generated argument of
+    #: the wrong type fails before the keyword matters.
+    subjects = {
+        "split": ("'a,b,c'", ["','", "None"]),
+        "rsplit": ("'a,b,c'", ["','", "None"]),
+        "splitlines": ("'a\\nb\\nc'", ["True", "False"]),
+        "replace": ("'aaa'", ["'a'", "'b'"]),
+        "expandtabs": ("'a\\tb'", ["4"]),
+        "encode": ("'caf\\u00e9'", ["'utf-8'", "'strict'"]),
+        "decode": ("b'caf\\xc3\\xa9'", ["'utf-8'", "'strict'"]),
+        "to_bytes": ("(258)", ["4", "'little'"]),
+        "translate": ("b'abc'", ["bytes.maketrans(b'ab', b'xy')"]),
+    }
+    values = {"sep": "','", "maxsplit": "1", "keepends": "True",
+              "count": "2", "tabsize": "4", "encoding": "'utf-8'",
+              "errors": "'replace'", "length": "4", "byteorder": "'little'",
+              "signed": "True", "delete": "b'c'"}
+    out = []
+    for name, params in sorted(METHOD_PARAMS.items()):
+        recv, args = subjects[name]
+        nameable = [p for p, _ in params if p is not POSITIONAL_ONLY]
+        for i, (param, _) in enumerate(params):
+            if param is POSITIONAL_ONLY:
+                continue
+            value = values.get(param, "1")
+            # The keyword ALONE, with the parameters before it left out.
+            out.append(f"{recv}.{name}({param}={value})")
+            # And after each number of positionals it can legally follow.
+            for k in range(min(i, len(args)) + 1):
+                given = ", ".join(args[:k])
+                lead = given + ", " if given else ""
+                out.append(f"{recv}.{name}({lead}{param}={value})")
+            # GIVEN BY NAME AND BY POSITION AT ONCE, which CPython refuses
+            # with a message naming the slot.
+            if i < len(args):
+                given = ", ".join(args[:i + 1])
+                out.append(f"{recv}.{name}({given}, {param}={value})")
+        # A KEYWORD THE METHOD DOES NOT HAVE, and one it does spelled wrong.
+        out.append(f"{recv}.{name}(nosuch=1)")
+        if nameable:
+            out.append(f"{recv}.{name}({nameable[0].upper()}=1)")
+        # AND A `**` MAPPING, empty and not.
+        out.append(f"{recv}.{name}(**{{}})")
+        if nameable:
+            out.append(f"{recv}.{name}(**{{{nameable[0]!r}: "
+                       f"{values.get(nameable[0], '1')}}})")
+    return out
+
+
+#: The bytes family, which had no group of its own and holds a third of the
+#: divergences found by hand: `translate`, `maketrans`, `copy`, the mutable
+#: sequence methods, `expandtabs`, and the retagging that makes a bytearray
+#: method answer a bytearray.
+BYTES_RECEIVERS = ["b''", "b'a'", "b'abc'", "b'a-b-c'", "b'  pad  '",
+                   "b'MiXeD'", "b'\\xc3\\xa9'", "b'a\\tb'", "b'a\\nb'",
+                   "bytearray(b'')", "bytearray(b'abc')",
+                   "bytearray(b'a-b-c')", "bytearray(b'MiXeD')"]
+
+
+def group_bytes():
+    out = []
+    for r in BYTES_RECEIVERS:
+        for m in ["upper", "lower", "title", "capitalize", "swapcase",
+                  "strip", "lstrip", "rstrip", "split", "splitlines",
+                  "isalpha", "isdigit", "isalnum", "isspace", "isupper",
+                  "islower", "istitle", "isascii", "hex", "expandtabs",
+                  "decode", "copy"]:
+            out.append(f"{r}.{m}()")
+        for m, a in [("find", "b'b'"), ("rfind", "b'b'"), ("index", "b'b'"),
+                     ("count", "b'b'"), ("startswith", "b'a'"),
+                     ("endswith", "b'c'"), ("partition", "b'-'"),
+                     ("rpartition", "b'-'"), ("split", "b'-'"),
+                     ("join", "[b'x', b'y']"), ("center", "9"),
+                     ("ljust", "9"), ("rjust", "9"), ("zfill", "9"),
+                     ("removeprefix", "b'a'"), ("removesuffix", "b'c'"),
+                     ("lstrip", "b'a'"), ("rstrip", "b'c'"),
+                     ("strip", "b'ac'"), ("expandtabs", "4")]:
+            out.append(f"{r}.{m}({a})")
+        out.append(f"{r}.replace(b'a', b'z')")
+        out.append(f"{r}.translate(bytes.maketrans(b'ab', b'xy'))")
+        out.append(f"{r}.translate(None, b'a')")
+        out.append(f"{r}.translate(bytes.maketrans(b'ab', b'xy'), b'c')")
+        # THE KIND OF THE ANSWER, which is the half a value comparison hides:
+        # a bytearray method answers a bytearray and `hex` answers a str.
+        out.append(f"type({r}.upper()).__name__")
+        out.append(f"type({r}.split(b'-')[0]).__name__")
+        out.append(f"[{r} + b'z', b'z' + {r}, {r} * 2, 2 * {r}]")
+        out.append(f"[len({r}), bool({r}), list({r})]")
+        for probe in ["b'a'", "97", "b'zz'"]:
+            out.append(f"{probe} in {r}")
+    return out
+
+
+def group_bytearray_mutation():
+    """THE IN-PLACE HALF, which a value comparison cannot see on its own: the
+    method answers None and the change is in the receiver, so both are
+    printed."""
+    out = []
+    for m in ["append(122)", "append(b'z')", "append(300)", "append(True)",
+              "extend(b'de')", "extend([1, 2])", "insert(0, 122)",
+              "insert(99, 122)", "insert(-99, 122)", "insert(0, b'z')",
+              "pop()", "pop(0)", "pop(-1)", "pop(9)", "remove(98)",
+              "remove(122)", "remove(b'b')", "clear()", "reverse()",
+              "copy()", "__iadd__(b'z')", "__imul__(2)"]:
+        for start in ["b''", "b'abc'", "b'a'"]:
+            out.append(f"(lambda v: (v.{m}, v))(bytearray({start}))")
+    # AND THE OPERATORS, where the question is whether the ALIAS sees it.
+    for recv in ["bytearray(b'ab')", "[1, 2]", "(1, 2)", "'ab'", "b'ab'"]:
+        out.append(f"_iop({recv}, b'z' if isinstance({recv}, (bytes, "
+                   f"bytearray)) else [9], '+')")
+        for k in ["2", "0", "-1"]:
+            out.append(f"_iop({recv}, {k}, '*')")
+    for recv in ["{1, 2}", "frozenset({1})", "{1: 2}"]:
+        for which in ["|", "&", "-", "^"]:
+            other = "{3: 4}" if which == "|" else "{3}"
+            out.append(f"_iop({recv}, {other} if {recv!r}.startswith('{{1:')"
+                       f" else {{3}}, {which!r})")
+    return out
+
+
+def group_attributes():
+    """`getattr(x, name)` OVER EVERY KIND AND EVERY METHOD NAME.
+
+    The written form `x.upper` and the looked-up form `getattr(x, "upper")`
+    are DIFFERENT LOWERINGS -- the first is a call the frontend recognises,
+    the second goes through the runtime's attribute table -- and only the
+    first was ever generated. Anything doing dynamic dispatch by method name
+    takes the second.
+    """
+    kinds = ["'abc'", "b'abc'", "bytearray(b'abc')", "[1, 2]", "(1, 2)",
+             "{'a': 1}", "{1, 2}", "frozenset({1})", "5", "1.5", "range(3)",
+             "None", "1j"]
+    names = ["upper", "append", "keys", "add", "index", "count", "copy",
+             "find", "split", "strip", "join", "translate", "pop",
+             "__class__", "__len__", "__iter__", "__contains__", "__add__",
+             "__iadd__", "__eq__", "__hash__", "__getitem__", "__round__",
+             "__sizeof__", "nosuch"]
+    out = []
+    for k in kinds:
+        for n in names:
+            out.append(f"hasattr({k}, {n!r})")
+            out.append(f"type(getattr({k}, {n!r})).__name__")
+    return out
+
+
 def group_slices():
     return [f"slice({a}, {b}, {c}).indices({n})"
             for a in ["None", "0", "2", "-3", "100"]
@@ -275,6 +465,10 @@ GROUPS = {
     "conversions": group_conversions,
     "translate": group_translate,
     "slices": group_slices,
+    "keywords": group_keywords,
+    "bytes": group_bytes,
+    "bytearray-mutation": group_bytearray_mutation,
+    "attributes": group_attributes,
 }
 
 
@@ -284,6 +478,25 @@ GROUPS = {
 
 PRELUDE = '''\
 import sys
+def _iop(v, o, which):
+    """`v op= o` with the ALIAS kept, which is the whole question for the
+    in-place operators: a list and a bytearray must change in place, so `w`
+    sees it and `v is w` stays True; everything else rebinds. A STATEMENT and
+    so a function -- `lambda: (v += o)` is not Python."""
+    w = v
+    if which == "+":
+        v += o
+    elif which == "*":
+        v *= o
+    elif which == "|":
+        v |= o
+    elif which == "&":
+        v &= o
+    elif which == "-":
+        v -= o
+    else:
+        v ^= o
+    return (v, w, v is w)
 def _s(i, f):
     try:
         v = f()
