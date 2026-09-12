@@ -113,6 +113,10 @@ _tmp*.*
 # output, etc.) -- use this instead of littering the repo root.
 /tmp/
 
+# The same, when it is a SYMLINK to a scratch area outside the tree -- which
+# is what a sandboxed session gets instead of a writable /tmp here.
+/scratchpad
+
 # Zip for some reason
 asmpython.zip
 

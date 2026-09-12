@@ -1305,6 +1305,34 @@ def apy_dir_chain(out: ptr, cls: ptr) -> None:
             here = ptr(load(u64, offset(here, apy_t_base_offset())))
 
 
+def apy_dir_builtin(out: ptr, v: ptr) -> None:
+    """Add every name a BUILT-IN value answers to, from the generated table.
+
+    THE TABLE IS ONE STRING PER KIND, names NUL-separated and ended by an
+    empty one -- so the walk is a `strlen` per name and stops on the empty.
+
+    A BUILTIN TYPE IS A FUNC WEARING `is_type`, and `dir(str)` is the same
+    list as `dir("")`, so the type's own name is the key rather than the
+    word `type` its kind name would give.
+    """
+    kn: ptr = apy_kind_name_of(v)
+    if i64(load(i32, offset(v, 0))) == apy_func_kind():
+        if load(i32, offset(v, apy_fn_is_type_offset())):
+            kn = apy_str_data(ptr(load(u64, offset(v, apy_fn_name_offset()))))
+    names: ptr = apy_kind_dir_of(kn)
+    if not names:
+        return
+    at: i64 = 0
+    going: i64 = 1
+    while going:
+        here: ptr = offset(names, at)
+        if load(u8, offset(here, 0)) == u8(0):
+            going = 0
+        else:
+            apy_q_append_of(out, apy_name_of(here))
+            at = at + apy_cstr_len(here) + 1
+
+
 def apy_dir(v: ptr) -> ptr:
     """`dir(v)` -- the names it answers to, sorted.
 
@@ -1314,9 +1342,10 @@ def apy_dir(v: ptr) -> ptr:
     THE INSTANCE FIRST AND THEN ITS CLASSES, so a name bound on the instance
     is the one that appears -- the same order a lookup takes.
 
-    A BUILT-IN KIND ANSWERS AN EMPTY LIST rather than a made-up one: the
-    method table lives in the frontend, not in a place this can enumerate,
-    and inventing a partial list would be worse than admitting to none.
+    A BUILT-IN KIND READS A GENERATED TABLE -- `apy_kind_dir_of`, which is
+    CPython's own `dir()` read at generation time. There is no class chain
+    here to walk, so this answered an EMPTY LIST where CPython lists eighty
+    names.
     """
     if i64(load(i32, offset(v, 0))) == apy_inst_kind():
         hook: ptr = apy_class_find_of(
@@ -1339,6 +1368,8 @@ def apy_dir(v: ptr) -> ptr:
         apy_dir_chain(out, ptr(load(u64, offset(v, apy_o_cls_offset()))))
     elif k == apy_type_kind():
         apy_dir_chain(out, v)
+    else:
+        apy_dir_builtin(out, v)
     return apy_sorted(out)
 
 

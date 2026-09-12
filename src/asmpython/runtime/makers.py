@@ -160,6 +160,21 @@ def apy_mv_step_offset() -> i64:
     return 32
 
 
+def apy_mv_wide_offset() -> i64:
+    """How many bytes one element of the view is.
+
+    ONE FOR EVERY VIEW `memoryview(b)` BUILDS, because every source this
+    runtime can wrap is flat bytes; `cast` is the only thing that changes it.
+    """
+    return 48
+
+
+def apy_mv_fmt_offset() -> i64:
+    """The format character one element reads as -- `struct`'s spelling, so
+    'B' for a fresh view and whatever `cast` was given after one."""
+    return 56
+
+
 def apy_mv_ro_offset() -> i64:
     """Whether the VIEW refuses writes, which is not the buffer's answer.
 
@@ -239,7 +254,102 @@ def apy_mview_readonly(v: ptr) -> ptr:
           offset(o, apy_mv_n_offset()))
     store(i64, load(i64, offset(v, apy_mv_step_offset())),
           offset(o, apy_mv_step_offset()))
+    store(i64, load(i64, offset(v, apy_mv_wide_offset())),
+          offset(o, apy_mv_wide_offset()))
+    store(i64, load(i64, offset(v, apy_mv_fmt_offset())),
+          offset(o, apy_mv_fmt_offset()))
     store(i64, 1, offset(o, apy_mv_ro_offset()))
+    return o
+
+
+def apy_fmt_width_of(c: i64) -> i64:
+    """How wide one element is for a format character, or 0 for one that is
+    not a native single-character format. `struct`'s spelling and sizes.
+
+    THE `_of` SUFFIX IS NOT DECORATION: the C has a static of the same idea
+    under the plain name, and the two halves are ONE translation unit -- a
+    ported helper keeping a C static's name is `conflicting types` from gcc
+    rather than a second copy sitting harmlessly beside it.
+    """
+    if c == 66 or c == 98 or c == 99 or c == 63:
+        return 1
+    if c == 104 or c == 72:
+        return 2
+    if c == 105 or c == 73 or c == 102:
+        return 4
+    if c == 108 or c == 76 or c == 113 or c == 81:
+        return 8
+    if c == 110 or c == 78 or c == 100 or c == 80:
+        return 8
+    return 0
+
+
+def apy_mview_cast(v: ptr, fmt: ptr) -> ptr:
+    """`m.cast(fmt)` -- THE SAME BYTES, READ AS SOMETHING ELSE.
+
+    Only a C-contiguous view can be cast, because a stride over the buffer has
+    no whole elements to regroup, and the length has to divide by the new
+    element size.
+    """
+    if i64(load(i32, offset(v, 0))) != apy_mview_kind():
+        return apy_raise_fmt(
+            rodata(b"AttributeError\0"),
+            rodata(b"'%s' object has no attribute 'cast'%s\0"),
+            apy_kind_name_of(v), rodata(b"\0"))
+    if not apy_mview_live(v):
+        return ptr(0)
+    bad: i64 = 0
+    if i64(load(i32, offset(fmt, 0))) != apy_str_kind():
+        bad = 1
+    written: i64 = 0
+    if bad == 0:
+        written = load(i64, offset(fmt, apy_str_len_offset()))
+        if written < 1:
+            bad = 1
+        if written > 2:
+            bad = 1
+    c: i64 = 0
+    wide: i64 = 0
+    if bad == 0:
+        text: ptr = ptr(load(u64, offset(fmt, apy_str_ptr_offset())))
+        c = i64(load(u8, offset(text, written - 1)))
+        wide = apy_fmt_width_of(c)
+        if wide == 0:
+            bad = 1
+        # `@` IS THE ONLY PREFIX, and it means the platform's own order --
+        # which is the only one a cast here produces.
+        if written == 2:
+            if i64(load(u8, text)) != 64:
+                bad = 1
+    if bad:
+        return apy_raise_at(
+            rodata(b"ValueError\0"),
+            rodata(b"memoryview: destination format must be a native "
+                   b"single character format prefixed with an optional "
+                   b"'@'\0"))
+    if load(i64, offset(v, apy_mv_step_offset())) != 1:
+        return apy_raise_at(
+            rodata(b"TypeError\0"),
+            rodata(b"memoryview: casts are restricted to C-contiguous "
+                   b"views\0"))
+    if load(i64, offset(v, apy_mv_n_offset())) % wide:
+        return apy_raise_at(
+            rodata(b"TypeError\0"),
+            rodata(b"memoryview: length is not a multiple of itemsize\0"))
+    o: ptr = apy_obj_alloc(apy_mview_kind())
+    if not o:
+        return o
+    store(u64, load(u64, offset(v, apy_mv_src_offset())),
+          offset(o, apy_mv_src_offset()))
+    store(i64, load(i64, offset(v, apy_mv_off_offset())),
+          offset(o, apy_mv_off_offset()))
+    store(i64, load(i64, offset(v, apy_mv_n_offset())),
+          offset(o, apy_mv_n_offset()))
+    store(i64, 1, offset(o, apy_mv_step_offset()))
+    store(i64, load(i64, offset(v, apy_mv_ro_offset())),
+          offset(o, apy_mv_ro_offset()))
+    store(i64, wide, offset(o, apy_mv_wide_offset()))
+    store(i64, c, offset(o, apy_mv_fmt_offset()))
     return o
 
 
@@ -349,10 +459,15 @@ def apy_memoryview(src: ptr) -> ptr:
             return ptr(0)
         store(u64, load(u64, offset(src, apy_mv_src_offset())),
               offset(o, apy_mv_src_offset()))
-        # A COPY OF A READ-ONLY VIEW IS READ-ONLY. The flag is the view's,
-        # not the buffer's, so it has to travel with the window.
+        # A COPY OF A READ-ONLY VIEW IS READ-ONLY, and a copy of a cast one
+        # reads the same way. Both are the view's own and not the buffer's,
+        # so both travel with the window.
         store(i64, load(i64, offset(src, apy_mv_ro_offset())),
               offset(o, apy_mv_ro_offset()))
+        store(i64, load(i64, offset(src, apy_mv_wide_offset())),
+              offset(o, apy_mv_wide_offset()))
+        store(i64, load(i64, offset(src, apy_mv_fmt_offset())),
+              offset(o, apy_mv_fmt_offset()))
         store(i64, load(i64, offset(src, apy_mv_off_offset())),
               offset(o, apy_mv_off_offset()))
         store(i64, load(i64, offset(src, apy_mv_n_offset())),
@@ -369,6 +484,10 @@ def apy_memoryview(src: ptr) -> ptr:
     store(u64, u64(src), offset(o, apy_mv_src_offset()))
     store(i64, apy_str_byte_len(src), offset(o, apy_mv_n_offset()))
     store(i64, 1, offset(o, apy_mv_step_offset()))
+    # BYTES, ONE WIDE, which is every source this runtime can wrap; `cast` is
+    # the only thing that changes either.
+    store(i64, 1, offset(o, apy_mv_wide_offset()))
+    store(i64, 66, offset(o, apy_mv_fmt_offset()))
     return o
 
 

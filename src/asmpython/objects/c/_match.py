@@ -84,6 +84,11 @@ APY_API apy_value apy_match_rest(apy_value d, apy_value used) {
    rely on is that the attribute EXISTS, that it answers an int, and that a
    longer container is not smaller than a shorter one -- so the model is the
    CELL plus whatever the payload really holds. */
+/* GENERATED, and defined in the LAST part -- the kind tables are spliced
+   into `_calling.py` and this is read from here. See `apy_kind_doc`, which
+   `_descriptors.py` reaches the same way. */
+static const char *apy_kind_dir(const char *kind);
+
 APY_API apy_value apy_sizeof(apy_value v) {
     int64_t cell = (int64_t)sizeof(apy_obj);
     switch (O(v)->kind) {
@@ -135,10 +140,30 @@ APY_API apy_value apy_dir(apy_value v) {
                     apy_seq_push(out, O(cd)->v.d.keys[i]);
             cls = O(cls)->v.t.base;
         }
+    } else {
+        /* A BUILT-IN KIND READS A GENERATED TABLE. There is no class chain
+           here to walk -- the method table lives in the frontend and the
+           dunder gates are strcmp chains -- so this answered an EMPTY LIST
+           where CPython lists eighty names, and `dir(5)`, `dir("")` and
+           `dir({})` were all `[]`.
+
+           THE LIST IS CPYTHON'S OWN `dir()`, read at generation time; see
+           `apy_kind_dir`. It is only honest because every name on it now
+           answers, which the `dir_lists_every_name_getattr_answers` program
+           holds it to -- advertising a name `getattr` then refuses would be
+           worse than the empty list it replaces. */
+        const char *kn = apy_kind_name(v);
+        const char *names;
+        /* A BUILTIN TYPE IS A FUNC WEARING `is_type`, and `dir(str)` is the
+           same list as `dir("")` -- so the type's own name is the key. */
+        if (O(v)->kind == APY_FUNC_K && O(v)->v.fn.is_type)
+            kn = APY_CSTR(O(v)->v.fn.name);
+        names = apy_kind_dir(kn);
+        while (names && *names) {
+            apy_seq_push(out, apy_lit(names));
+            names += strlen(names) + 1;
+        }
     }
-    /* A built-in kind answers an empty list rather than a made-up one: the
-       method table lives in the frontend, not in a place this can enumerate,
-       and inventing a partial list would be worse than admitting to none. */
     return apy_sorted(out);
 }
 
@@ -546,12 +571,17 @@ APY_API apy_value apy_hex_of(apy_value x, apy_value sep) {
        neither. */
     /* A VIEW HEXES THE BYTES IT SHOWS, which is what a program makes one to
        look at. */
+    /* NONE HERE IS THE DEFAULT THIS SYMBOL SUPPLIES and not a separator the
+       program wrote: `b.hex()` reaches here and `b.hex(None)` reaches
+       `apy_bytes_hex`, which refuses it the way CPython does. An empty slot
+       is how that is said. */
+    if (O(sep)->kind == APY_NONE_K) sep = 0;
     if (O(x)->kind == APY_MVIEW_K) {
         apy_value held = apy_mview_bytes(x);
         if (!held) return 0;
-        return apy_bytes_hex(held, sep);
+        return apy_bytes_hex_n(held, sep, 0);
     }
-    return apy_bytes_hex(x, sep);
+    return apy_bytes_hex_n(x, sep, 0);
 }
 
 /* `float.fromhex('0x1.4p+1')` -- the inverse, and exact for the same reason. */
@@ -761,6 +791,10 @@ APY_API apy_value apy_memoryview(apy_value src) {
     o->v.mv.off = 0;
     o->v.mv.n = O(src)->v.s.n;
     o->v.mv.step = 1;
+    /* BYTES, ONE WIDE, which is every source this runtime can wrap; `cast`
+       is the only thing that changes either. */
+    o->v.mv.wide = 1;
+    o->v.mv.fmt = 'B';
     return V(o);
 }
 
@@ -778,6 +812,123 @@ static apy_value apy_mview_slice(apy_value v, int64_t off, int64_t n,
        the buffer's, so it has to travel with every window cut from it. */
     o->v.mv.ro = O(v)->v.mv.ro;
     return V(o);
+}
+
+/* Defined in a LATER part: `int.from_bytes`, which the unsigned eight-byte
+   formats borrow so a value past an i64 is a big integer and not a negative
+   one. */
+APY_API apy_value apy_from_bytes_n(apy_value b, apy_value order);
+
+/* HOW WIDE ONE ELEMENT IS for a format character, or 0 for one that is not
+   a native single-character format. `struct`'s spelling, and its sizes. */
+static int64_t apy_fmt_width(int c) {
+    switch (c) {
+    case 'B': case 'b': case 'c': case '?': return 1;
+    case 'h': case 'H': return 2;
+    case 'i': case 'I': case 'f': return 4;
+    case 'l': case 'L': case 'q': case 'Q':
+    case 'n': case 'N': case 'd': case 'P': return 8;
+    default: return 0;
+    }
+}
+
+/* ONE ELEMENT OF A VIEW, decoded as its format says. A fresh view is bytes
+   and answers an int per byte; a cast one answers whatever `cast` was given.
+   LITTLE-ENDIAN AND NATIVE, which is what `cast` means -- `@` order, the
+   platform's own -- and the only order this runtime builds for. */
+APY_API apy_value apy_mview_item(apy_value v, int64_t i) {
+    const char *buf;
+    int64_t at, wide = O(v)->v.mv.wide ? O(v)->v.mv.wide : 1;
+    int fmt = O(v)->v.mv.fmt ? (int)O(v)->v.mv.fmt : 'B';
+    uint64_t raw = 0;
+    int64_t k;
+    if (!apy_mview_live(v)) return 0;
+    buf = apy_mview_buf(v);
+    at = apy_mview_at(v, i * wide);
+    if (fmt == 'c') {
+        apy_value one = apy_str_copy(buf + at, 1);
+        if (!one) return 0;
+        O(one)->kind = APY_BYTES_K;
+        return one;
+    }
+    for (k = 0; k < wide; k++)
+        raw |= (uint64_t)(unsigned char)buf[at + k] << (8 * k);
+    switch (fmt) {
+    /* BIT ZERO AND NOT "ANY BIT", which is what a C `_Bool` holds and what
+       CPython reads back: `memoryview(b"\x02").cast("?")` is `[False]`. */
+    case '?': return apy_from_bool((raw & 1) != 0);
+    case 'f': { float f; memcpy(&f, &raw, 4); return apy_from_float(f); }
+    case 'd': { double d; memcpy(&d, &raw, 8); return apy_from_float(d); }
+    case 'b': return apy_from_int((int64_t)(signed char)raw);
+    case 'h': return apy_from_int((int64_t)(int16_t)raw);
+    case 'i': return apy_from_int((int64_t)(int32_t)raw);
+    case 'l': case 'q': case 'n': return apy_from_int((int64_t)raw);
+    default: break;
+    }
+    /* THE UNSIGNED EIGHT-BYTE FORMATS CAN EXCEED AN i64, and answering a
+       negative number there would be a wrong value rather than a refusal --
+       so they go through the big-integer path the way `int.from_bytes`
+       does. */
+    if (wide == 8 && (int64_t)raw < 0) {
+        char eight[8];
+        apy_value held;
+        for (k = 0; k < 8; k++) eight[k] = (char)((raw >> (8 * k)) & 0xFF);
+        held = apy_str_copy(eight, 8);
+        if (!held) return 0;
+        O(held)->kind = APY_BYTES_K;
+        return apy_from_bytes_n(held, apy_lit("little"));
+    }
+    return apy_from_int((int64_t)raw);
+}
+
+/* `m.cast(fmt)` -- THE SAME BYTES, READ AS SOMETHING ELSE. Only a
+   C-contiguous view can be cast, because a stride over the buffer has no
+   whole elements to regroup, and the length has to divide by the new
+   element size. */
+APY_API apy_value apy_mview_cast(apy_value v, apy_value fmt) {
+    apy_obj *o;
+    int c;
+    int64_t wide;
+    if (O(v)->kind != APY_MVIEW_K)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'cast'%s",
+                         apy_kind_name(v), "");
+    if (!apy_mview_live(v)) return 0;
+    if (O(fmt)->kind != APY_STR_K || O(fmt)->v.s.n < 1
+            || O(fmt)->v.s.n > 2
+            || !(wide = apy_fmt_width(c = APY_CSTR(fmt)[O(fmt)->v.s.n - 1])))
+        return apy_fail("ValueError",
+                        "memoryview: destination format must be a native "
+                        "single character format prefixed with an optional "
+                        "'@'");
+    if (O(fmt)->v.s.n == 2 && APY_CSTR(fmt)[0] != '@')
+        return apy_fail("ValueError",
+                        "memoryview: destination format must be a native "
+                        "single character format prefixed with an optional "
+                        "'@'");
+    if (O(v)->v.mv.step != 1)
+        return apy_fail("TypeError", "memoryview: casts are restricted to "
+                                     "C-contiguous views");
+    if (O(v)->v.mv.n % wide)
+        return apy_fail("TypeError",
+                        "memoryview: length is not a multiple of itemsize");
+    o = apy_alloc(APY_MVIEW_K);
+    o->v.mv = O(v)->v.mv;
+    o->v.mv.wide = wide;
+    o->v.mv.fmt = c;
+    return V(o);
+}
+
+/* `memoryview._from_flags(obj, flags)` -- PEP 688's private constructor.
+   The flags pick which buffer REQUEST to make of the object, and every
+   source this runtime can wrap is a flat contiguous byte buffer that answers
+   them all alike -- so the view is the one `memoryview(obj)` builds and the
+   flags are read only to be refused when absent. */
+APY_API apy_value apy_mview_from_flags(apy_value self, apy_value src,
+                                       apy_value flags) {
+    (void)self;
+    (void)flags;
+    return apy_memoryview(src);
 }
 
 /* `m.release()` -- HAND THE BUFFER BACK. A view borrows its source and stops

@@ -160,6 +160,8 @@ static apy_value apy_dict_parts_snapshot(apy_value d, int64_t which);
 static apy_value apy_view_as_set(apy_value v);
 /* `x.hex()` dispatches to the bytes form well above where it is defined. */
 APY_API apy_value apy_bytes_hex(apy_value b, apy_value sep);
+APY_API apy_value apy_bytes_hex_n(apy_value b, apy_value sep,
+                                  apy_value perv);
 /* `ascii` walks a str by CHARACTER to escape it, far above where the UTF-8
    step is defined. */
 static int64_t apy_utf8_at(const unsigned char *p, int64_t n, int64_t i,
@@ -219,6 +221,7 @@ static apy_value apy_mview_slice(apy_value v, int64_t off, int64_t n,
                                  int64_t step);
 APY_API apy_value apy_mview_bytes(apy_value v);
 APY_API int64_t apy_mview_live(apy_value v);
+APY_API apy_value apy_mview_item(apy_value v, int64_t i);
 /* Cycle detection for `repr`, used by the dict renderer well above where the
    sequence one defines it. */
 APY_API int64_t apy_repr_entered(apy_value v);
@@ -532,6 +535,18 @@ APY_API apy_value apy_getitem(apy_value seq, apy_value index) {
     int64_t i, n;
     if (O(seq)->kind == APY_MVIEW_K) {
         if (!apy_mview_live(seq)) return 0;
+        /* A CAST VIEW IS INDEXED IN ELEMENTS and each one is decoded as its
+           format says, which is the whole of what `cast` did. A fresh view
+           is one byte wide and takes the plain path below. */
+        if (apy_is_int_like(index) && O(seq)->v.mv.wide > 1) {
+            int64_t at, many = O(seq)->v.mv.n / O(seq)->v.mv.wide;
+            if (!apy_index_arg(index, &at, APY_IDX_SUB)) return 0;
+            if (at < 0) at += many;
+            if (at < 0 || at >= many)
+                return apy_fail("IndexError",
+                                "index out of bounds on dimension 1");
+            return apy_mview_item(seq, at);
+        }
         if (apy_is_int_like(index)) {
             if (!apy_index_arg(index, &i, APY_IDX_SUB)) return 0;
             n = O(seq)->v.mv.n;
@@ -966,7 +981,8 @@ APY_API int64_t apy_raw_len(apy_value v) {
         return O(O(v)->v.vw.dict)->v.d.n;
     if (O(v)->kind == APY_MVIEW_K) {
         if (!apy_mview_live(v)) return 0;
-        return O(v)->v.mv.n;
+        /* IN ELEMENTS, NOT BYTES: eight bytes read as `i` are two. */
+        return O(v)->v.mv.n / (O(v)->v.mv.wide ? O(v)->v.mv.wide : 1);
     }
     if (O(v)->kind == APY_RANGE_K) return apy_range_len(v);
     if (O(v)->kind == APY_DICT_K) return O(v)->v.d.n;

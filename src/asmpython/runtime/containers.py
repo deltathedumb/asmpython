@@ -176,10 +176,10 @@ def apy_from_bytes_n(b: ptr, order: ptr) -> ptr:
     would need the big integers. The C says so with an OverflowError and so
     does this.
 
-    UNSIGNED, THEN REINTERPRETED. The accumulator is a `u64` so a leading
-    0xFF shifts in without becoming a sign; handing it to `apy_from_int` is
-    what turns eight 0xFF bytes into -1, which is what `signed=True` would
-    ask for and what this runtime gives either way.
+    UNSIGNED THROUGHOUT. The accumulator is a `u64` so a leading 0xFF shifts
+    in without becoming a sign, and it leaves as a MAGNITUDE rather than
+    through `apy_from_int` -- which is what turned eight 0xFF bytes into -1
+    where Python answers 18446744073709551615.
     """
     if i64(load(i32, offset(b, 0))) != apy_bytes_kind():
         return apy_raise_fmt(
@@ -203,7 +203,11 @@ def apy_from_bytes_n(b: ptr, order: ptr) -> ptr:
             at = n - 1 - i
         acc = (acc << u64(8)) | u64(load(u8, offset(p, at)))
         i = i + 1
-    return apy_from_int(i64(acc))
+    # PAST AN i64 IS A BIG INTEGER, not a negative one. Eight unsigned bytes
+    # reach 1.8e19 and this conversion is unsigned, so handing the
+    # accumulator to `apy_from_int` answered -1 for the largest of them --
+    # a wrong VALUE rather than a refusal.
+    return apy_big_of_u64_of(acc)
 
 
 def apy_env_cell(env: ptr, i: i64) -> ptr:

@@ -249,11 +249,21 @@ def apy_hex_digit(d: i64) -> i64:
 
 
 def apy_bytes_hex(b: ptr, sep: ptr) -> ptr:
-    """`b.hex()` and `b.hex(sep)`.
+    """`b.hex()` and `b.hex(sep)`. ONE BYTE PER GROUP, which is the default
+    CPython declares -- see `apy_bytes_hex_n`, which both spellings are. The
+    count slot is EMPTY because this call did not write one."""
+    return apy_bytes_hex_n(b, sep, ptr(0))
 
-    A ONE-CHARACTER SEPARATOR AND NOTHING ELSE, which is what the C accepts:
-    anything longer is ignored rather than refused, and the default is no
-    separator at all.
+
+def apy_bytes_hex_n(b: ptr, sep: ptr, perv: ptr) -> ptr:
+    """`b.hex()`, `b.hex(sep)` and `b.hex(sep, bytes_per_sep)`.
+
+    THE GROUPING IS COUNTED FROM AN END AND WHICH END IS THE SIGN. A
+    positive count groups from the RIGHT -- `bytes(range(1, 8)).hex(":", 2)`
+    is `01:0203:0405:0607`, the leftover at the front -- and a negative one
+    from the LEFT. That is CPython's rule and it is not the obvious one: the
+    common use is a number written down, whose low end is the one that
+    matters.
 
     THE BUFFER IS SIZED FOR THE WORST CASE -- three bytes per input byte,
     which is two digits and a separator -- and the terminator makes it
@@ -272,11 +282,49 @@ def apy_bytes_hex(b: ptr, sep: ptr) -> ptr:
             rodata(b"AttributeError\0"),
             rodata(b"'%s' object has no attribute 'hex'%s\0"),
             apy_kind_name_of(b), rodata(b"\0"))
+    # AN EMPTY SLOT IS ONE THE CALL DID NOT WRITE, and it is the only way to
+    # tell `b.hex()` from `b.hex(None)` -- the first is the no-argument form
+    # whose default this fills in, the second a separator CPython refuses.
+    #
+    # THE COUNT IS CONVERTED FIRST, which is CPython's order: `b.hex(None,
+    # None)` complains about the integer and `b.hex(None)` about the
+    # separator's length.
+    per: i64 = 1
+    if perv:
+        pk: i64 = i64(load(i32, offset(perv, 0)))
+        if pk != apy_int_kind():
+            if pk != apy_big_kind():
+                if pk != apy_bool_kind():
+                    return apy_raise_fmt(
+                        rodata(b"TypeError\0"),
+                        rodata(b"'%s' object cannot be interpreted as an "
+                               b"integer%s\0"),
+                        apy_kind_name_of(perv), rodata(b"\0"))
+        per = apy_as_int(perv)
+        if apy_error_occurred():
+            return ptr(0)
     s: i64 = 0
-    if i64(load(i32, offset(sep, 0))) == apy_str_kind():
-        if load(i64, offset(sep, apy_str_len_offset())) == 1:
-            s = i64(load(u8, ptr(load(u64, offset(
-                sep, apy_str_ptr_offset())))))
+    if sep:
+        # CPython ASKS THE SEPARATOR FOR ITS LENGTH, so anything without one
+        # is a TypeError about `len` rather than about hex.
+        sk: i64 = i64(load(i32, offset(sep, 0)))
+        if sk != apy_str_kind():
+            if sk != apy_bytes_kind():
+                return apy_raise_fmt(
+                    rodata(b"TypeError\0"),
+                    rodata(b"object of type '%s' has no len()%s\0"),
+                    apy_kind_name_of(sep), rodata(b"\0"))
+        if load(i64, offset(sep, apy_str_len_offset())) != 1:
+            return apy_raise_fmt(
+                rodata(b"ValueError\0"), rodata(b"sep must be length 1.\0"),
+                rodata(b"\0"), rodata(b"\0"))
+        s = i64(load(u8, ptr(load(u64, offset(
+            sep, apy_str_ptr_offset())))))
+    # A NEGATIVE COUNT GROUPS FROM THE LEFT, a positive one from the right,
+    # and zero -- or one no smaller than the length -- separates nothing.
+    group: i64 = per
+    if per < 0:
+        group = -per
     n: i64 = load(i64, offset(held, apy_str_len_offset()))
     buf: ptr = apy_alloc_bytes(n * 3 + 2)
     if not buf:
@@ -288,8 +336,13 @@ def apy_bytes_hex(b: ptr, sep: ptr) -> ptr:
         c: i64 = i64(load(u8, offset(src, i)))
         if s:
             if i:
-                store(u8, u8(s), offset(buf, out))
-                out = out + 1
+                if group:
+                    at: i64 = (n - i) % group
+                    if per < 0:
+                        at = i % group
+                    if at == 0:
+                        store(u8, u8(s), offset(buf, out))
+                        out = out + 1
         store(u8, u8(apy_hex_digit(c >> 4)), offset(buf, out))
         store(u8, u8(apy_hex_digit(c & 15)), offset(buf, out + 1))
         out = out + 2

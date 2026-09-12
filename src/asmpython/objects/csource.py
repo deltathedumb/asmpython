@@ -187,6 +187,11 @@ OBJECT_NAMES = (
     "apy_any_fromhex",
     "apy_mview_live",
     "apy_mview_release", "apy_mview_readonly",
+    "apy_mview_item", "apy_mview_cast",
+    "apy_kind_method_var",
+    "apy_meth_arity",
+    "apy_bytes_hex_n",
+    "apy_mview_from_flags",
     "apy_set_issubset", "apy_set_issuperset", "apy_set_isdisjoint",
     "apy_update", "apy_clear", "apy_copy", "apy_hash",
     # str methods

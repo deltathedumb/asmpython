@@ -186,6 +186,11 @@ REPLACES: dict[str, tuple[str, ...]] = {
                   # the cell they read.
                   "apy_mview_live", "apy_mview_release",
                   "apy_mview_readonly",
+                  # AND `cast`, which changes only the cell -- the element
+                  # DECODE stays in the C, because `apy_mview_item` reads a
+                  # float out of eight bytes and the subset has no way to
+                  # spell that reinterpretation.
+                  "apy_mview_cast",
                   # WHAT A VIEW SHOWS, AS BYTES. Ported because the ported
                   # runtime has to DEFINE everything it calls -- see
                   # `test_the_allocator_asks_the_floor_and_nothing_else` --
@@ -290,7 +295,7 @@ REPLACES: dict[str, tuple[str, ...]] = {
                       "apy_dict_of", "apy_dir",
                       # AND TWO WHOSE ONLY LIBC WAS AN ABORT THE ARENA
                       # DOES NOT NEED.
-                      "apy_bytes_hex", "apy_bytes_fromhex",
+                      "apy_bytes_hex", "apy_bytes_hex_n", "apy_bytes_fromhex",
                       "apy_extreme_or", "apy_splitlines_impl_of",
                       "apy_str_expandtabs", "apy_to_bytes_n",
                       "apy_call_spread",
@@ -324,6 +329,10 @@ REPLACES: dict[str, tuple[str, ...]] = {
                       # what it carries has to be written somewhere, and
                       # arity is the only thing the caller needs back.
                       "apy_object_arity", "apy_number_arity",
+                      # AND THE VARIADIC BUILTIN METHOD, beside the fixed
+                      # and optional-tail ones: `format` takes whatever it
+                      # is given and neither of those can say so.
+                      "apy_kind_method_var",
                       "apy_kind_attr", "apy_kind_prototype",
                       "apy_no_attribute", "apy_mro_entries",
                       "apy_traceback_of",

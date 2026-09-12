@@ -118,6 +118,24 @@ def apy_big_of_i64_of(v: i64) -> ptr:
     return o
 
 
+def apy_big_of_u64_of(m: u64) -> ptr:
+    """An UNSIGNED sixty-four-bit magnitude as an integer.
+
+    `int.from_bytes` IS UNSIGNED BY DEFAULT, so eight 0xFF bytes are
+    18446744073709551615 and not -1 -- and that is past an i64, which is why
+    it has to arrive as a magnitude rather than through `apy_from_int`.
+    `apy_big_done_of` demotes anything that does fit, so nothing below
+    2**63 becomes a big.
+    """
+    o: ptr = apy_big_alloc_of(2)
+    if not o:
+        return o
+    limb: ptr = ptr(load(u64, offset(o, apy_big_limb_offset())))
+    store(u32, u32(m & u64(4294967295)), limb)
+    store(u32, u32(m >> 32), offset(limb, apy_limb_size()))
+    return apy_big_done_of(o)
+
+
 def apy_as_big_of(v: ptr) -> ptr:
     """Either integer kind as a big object.
 

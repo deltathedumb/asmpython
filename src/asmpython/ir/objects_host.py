@@ -851,8 +851,14 @@ class ObjectHost:
             return self._bool(obj)
         if isinstance(obj, int):
             return self._int(obj)
+        # A BYTEARRAY AND A VIEW BELONG HERE TOO, and their absence was two
+        # lists disagreeing: `_new` records an identity for everything in
+        # `_INTERNED`, which names both, and this decided whether to LOOK --
+        # so `memoryview(h).obj is h` and `xs[0] is h` for a bytearray `h`
+        # were False here and True in both compiled runtimes.
         if isinstance(obj, (Instance, Class, Exc, Func, Gen, Iterator,
-                            list, dict, set, frozenset, tuple, Alias, Cell)):
+                            list, dict, set, frozenset, tuple, Alias, Cell,
+                            bytearray, memoryview)):
             # ONE HANDLE PER OBJECT, so `is` answers about the object and not
             # about which handle it came back through. The C compares
             # pointers, so a fresh handle for the same instance made
@@ -1551,6 +1557,12 @@ class ObjectHost:
             # argument. Tested here rather than at each call site, so every
             # route into a callable reaches one the same way.
             given = ([f.bound] if f.bound is not None else []) + list(args)
+            # THE POSITIONAL BOUND, for the two methods whose is narrower
+            # than their total. Only where the caller has NOT already
+            # matched names to slots -- after that the count says nothing
+            # about how the call was written. See `_meth_positional`.
+            if not bound and _meth_positional(self, f, args):
+                raise _UserFailed
             try:
                 return f.body(*given)
             except TypeError as exc:
@@ -1572,6 +1584,20 @@ class ObjectHost:
                 # has a name a program wrote. A bound SLOT is anonymous, the
                 # same line `type()` draws between `method-wrapper` and
                 # `builtin_function_or_method`.
+                # A BOUND BUILTIN METHOD IS WORDED BY ITS RECEIVER, and
+                # there are nine wordings rather than the three below --
+                # `[].append()` is `list.append() takes exactly one argument
+                # (0 given)` in CPython. See `_meth_arity_words`. Anything
+                # the generated table does not know -- a generator's `send`,
+                # a bound slot, a native this runtime invented -- falls
+                # through to the plainer wording.
+                who = (f.bound if f.bound is not None
+                       else f.owner if f.owner is not _NO_OWNER else None)
+                packed = (KINDMETH_WORDS.get((f.name, _meth_kind(who)))
+                          if who is not None else None)
+                if packed:
+                    _meth_arity_words(self, who, f.name, packed, len(args))
+                    raise _UserFailed
                 code = getattr(f.body, "__code__", None)
                 count = code.co_argcount if code else 0
                 ndef = len(getattr(f.body, "__defaults__", None) or ())
@@ -2581,6 +2607,45 @@ def _apy_kind_attr_of(h, a):
     raise RuntimeError(
         "apy_kind_attr_of has no host equivalent: the interpreter asks "
         "Python for a builtin's attributes")
+
+
+def _apy_meth_arity(h, a):
+    """Refuse `got` arguments to this builtin method on this receiver the way
+    CPython does, or answer None so the call goes ahead.
+
+    THE LOWERING EMITS THIS ahead of a written call whose argument count SOME
+    kind refuses -- ten `(name, count)` pairs, no more, because the frontend
+    knows both statically and emits nothing where every kind that has the
+    name accepts the count. Without it `set().pop(1)` was `'set' object has
+    no attribute 'pop'` about a method a set plainly has, and `{}.pop()` was
+    a `KeyError` from a symbol that took a call it should have refused.
+    """
+    recv = h._get(a[0], "apy_meth_arity")
+    want = h._get(a[1], "apy_meth_arity")
+    # THE COUNT IS AN `int64_t` and arrives unboxed, not as a handle.
+    got = int(a[2])
+    packed = KINDMETH_WORDS.get((want, _meth_kind(recv)))
+    # A NAME THIS KIND DOES NOT HAVE really is an AttributeError, and the
+    # caller's own path words it.
+    if packed is None:
+        return h._new(None)
+    if (packed & 15) <= got <= ((packed >> 4) & 15):
+        return h._new(None)
+    return _meth_arity_words(h, recv, want, packed, got)
+
+
+def _apy_kind_method_var(h, a):
+    """A builtin method that takes WHATEVER IT IS GIVEN, by name.
+
+    The compiled runtimes need this one because their native carries a
+    declared arity and `str.format` has none -- see `apy_kind_method_var`.
+    The host has nothing to declare: `_kind_attr` hands out a `Native` with
+    `variadic` set and Python's own `*args, **kw` does the rest, so there is
+    nothing here to build.
+    """
+    raise RuntimeError(
+        "apy_kind_method_var has no host equivalent: the interpreter's "
+        "natives take what they are given")
 
 
 def _apy_kind_method_of(h, a):
@@ -4166,10 +4231,25 @@ _TEXTY = (str, bytes, bytearray)
 
 
 def _apy_bytes_hex(h, a):
-    """`b.hex()` and `b.hex(sep)` -- the separator form is what makes a
-    fingerprint readable and is the only reason the argument exists."""
+    """`b.hex()` and `b.hex(sep)`. ONE BYTE PER GROUP, which is the default
+    CPython declares -- see `_apy_bytes_hex_n`, which both spellings are.
+    The count slot is EMPTY because this call did not write one."""
+    return _apy_bytes_hex_n(h, [a[0], a[1], 0])
+
+
+def _apy_bytes_hex_n(h, a):
+    """`b.hex()`, `b.hex(sep)` and `b.hex(sep, bytes_per_sep)`.
+
+    THE GROUPING IS COUNTED FROM AN END AND WHICH END IS THE SIGN -- see
+    `apy_bytes_hex_n` in the C. Python's own `bytes.hex` has the rule, so
+    the count is handed straight to it rather than reimplemented.
+    """
     b = h._get(a[0], "apy_bytes_hex")
-    sep = h._get(a[1], "apy_bytes_hex")
+    # AN EMPTY SLOT IS ONE THE CALL DID NOT WRITE, and it is the only way to
+    # tell `b.hex()` from `b.hex(None)` -- the first is the no-argument form
+    # whose default gets filled in, the second a separator CPython refuses.
+    sep = h._get(a[1], "apy_bytes_hex") if a[1] else None
+    per = h._get(a[2], "apy_bytes_hex") if a[2] else None
     # A VIEW HEXES THE BYTES IT SHOWS, which is most of what a program makes
     # one to look at.
     if isinstance(b, memoryview):
@@ -4177,8 +4257,25 @@ def _apy_bytes_hex(h, a):
     if not isinstance(b, (bytes, bytearray)):
         return h._fail("AttributeError",
                        f"'{h.kind_name(b)}' object has no attribute 'hex'")
-    return h._new(b.hex(sep) if isinstance(sep, str) and len(sep) == 1
-                  else b.hex())
+    # THE COUNT IS CONVERTED FIRST, which is CPython's order: `b.hex(None,
+    # None)` complains about the integer and `b.hex(None)` about the
+    # separator's length.
+    if a[2] and not isinstance(per, int):
+        return h._fail("TypeError",
+                       f"'{h.kind_name(per)}' object cannot be interpreted "
+                       f"as an integer")
+    if sep is None and not a[1]:
+        return h._new(b.hex())
+    # CPython ASKS THE SEPARATOR FOR ITS LENGTH, so anything without one is a
+    # TypeError about `len` rather than about hex.
+    if not isinstance(sep, (str, bytes, bytearray)):
+        return h._fail("TypeError",
+                       f"object of type '{h.kind_name(sep)}' has no len()")
+    if len(sep) != 1:
+        return h._fail("ValueError", "sep must be length 1.")
+    if per is None:
+        return h._new(b.hex(sep))
+    return h._new(b.hex(sep, per))
 
 
 def _apy_bytes_fromhex(h, a):
@@ -6979,10 +7076,10 @@ class Native:
     twice is the same object, as any other attribute would be.
     """
 
-    __slots__ = ("name", "body", "bound", "ranged", "owner")
+    __slots__ = ("name", "body", "bound", "ranged", "owner", "variadic")
 
     def __init__(self, name: str, body, ranged: bool = False,
-                 owner=_NO_OWNER) -> None:
+                 owner=_NO_OWNER, variadic: bool = False) -> None:
         self.name = name
         self.body = body
         self.bound = None
@@ -6999,9 +7096,15 @@ class Native:
         #: Only `__round__` and its like say so here, and the difference
         #: decides both what `type()` answers and how a wrong count is worded.
         self.ranged = ranged
+        #: Whether it takes WHATEVER IT IS GIVEN, keywords included.
+        #: `format` is the one builtin method shaped that way, and the
+        #: keyword binder has to hand the names over rather than match them
+        #: against a signature it has none of.
+        self.variadic = variadic
 
     def bind(self, receiver) -> "Native":
-        out = Native(self.name, self.body, self.ranged, self.owner)
+        out = Native(self.name, self.body, self.ranged, self.owner,
+                     self.variadic)
         out.bound = receiver
         return out
 
@@ -7152,6 +7255,105 @@ def _rich_compare(h, want: str, obj, other):
 from asmpython.frontends.python.methods import (  # noqa: E402
     DYN_METHOD_TABLE, METHOD_PARAMS, REQUIRED, KeywordError, _suggest,
     fold_ctor_keywords, method_symbol)
+from asmpython.objects.c.kindmeth_table import (  # noqa: E402
+    KINDMETH_WORDS)
+
+#: What kind a value COUNTS AS when a builtin method is looked up on it.
+#: `True` is an `int` here, exactly as `apy_kind_bit` folds the bool kind
+#: into the int one -- `True.bit_count()` IS int's method, and CPython says
+#: `int.bit_count() takes no arguments` when it is handed one.
+_METH_KIND = {bool: "int"}
+
+
+def _meth_kind(v) -> str:
+    return _METH_KIND.get(type(v), type(v).__name__)
+
+
+def _meth_positional(h, f, args) -> bool:
+    """Refuse this many POSITIONAL arguments to a bound builtin method, for
+    the two whose positional bound is narrower than their total.
+
+    WHERE THE POSITIONAL COUNT IS STILL KNOWN, which is only before the
+    keywords are folded into slots: a call three slots wide may have been
+    written with three positionals -- a TypeError -- or with two names, which
+    is not one. The C twin is `apy_meth_positional`.
+    """
+    # THE OWNER IS THE RECEIVER when the native was made unbound, which is
+    # what `_made_table_method` hands out: the receiver travels in `owner`
+    # and the body closes over it.
+    recv = (f.bound if f.bound is not None
+            else f.owner if f.owner is not _NO_OWNER else None)
+    if recv is None:
+        return False
+    packed = KINDMETH_WORDS.get((f.name, _meth_kind(recv)))
+    if not packed:
+        return False
+    family = (packed >> 16) & 15
+    # FAMILY 4 IS `takes at most N positional arguments` and family 9 is
+    # `takes no positional arguments`, whose N is nought. Nothing else in
+    # the table counts positions.
+    if family == 4:
+        allowed = (packed >> 20) & 15
+    elif family == 9:
+        allowed = 0
+    else:
+        return False
+    if len(args) <= allowed:
+        return False
+    _meth_arity_words(h, recv, f.name, packed, len(args))
+    return True
+
+
+def _meth_arity_words(h, recv, want: str, packed: int, got: int):
+    """CPython's own refusal for the wrong number of arguments to a builtin
+    method, worded for THIS receiver.
+
+    THE C TWIN IS `apy_meth_arity_words`, and the packed word both read is
+    generated by asking CPython -- see `_gen_kindmeth.py`. Nine shapes,
+    because CPython really does have nine and they disagree about every
+    visible thing: whether the type qualifies the name, whether there are
+    parentheses, and whether the count is `exactly one` or `at most 3`.
+
+    RECORDS THE FAILURE AND ANSWERS 0, which is what a `_TABLE` binding
+    returns; a caller inside a native's body raises `_UserFailed` on top.
+    """
+    least = packed & 15
+    if got < least:
+        fam, n = (packed >> 8) & 15, (packed >> 12) & 15
+    else:
+        fam, n = (packed >> 16) & 15, (packed >> 20) & 15
+        # A SECOND UPPER WORDING, past a second bound. `(5).to_bytes` says
+        # `takes at most 2 positional arguments` for a third POSITIONAL and
+        # `takes at most 3 arguments` for a fourth argument -- its `signed`
+        # is keyword-only, so the two counts differ and so do the words.
+        over = (packed >> 25) & 15
+        if over and got >= over:
+            fam, n = (packed >> 29) & 15, (packed >> 33) & 15
+    plural = "" if n == 1 else "s"
+    kind = _meth_kind(recv)
+    if fam == 1:
+        said = f"{kind}.{want}() takes exactly one argument ({got} given)"
+    elif fam == 2:
+        said = f"{kind}.{want}() takes no arguments ({got} given)"
+    elif fam == 3:
+        said = f"{want}() takes at most {n} argument{plural} ({got} given)"
+    elif fam == 4:
+        said = (f"{want}() takes at most {n} positional "
+                f"argument{plural} ({got} given)")
+    elif fam == 5:
+        said = (f"{want}() takes at least {n} positional "
+                f"argument{plural} ({got} given)")
+    elif fam == 6:
+        said = f"{want} expected at least {n} argument{plural}, got {got}"
+    elif fam == 7:
+        said = f"{want} expected at most {n} argument{plural}, got {got}"
+    elif fam == 9:
+        # NO COUNT AT ALL, which is what a signature with nothing but
+        # keyword-only parameters says: `[].sort(None)`.
+        said = f"{want}() takes no positional arguments"
+    else:
+        said = f"{want} expected {n} argument{plural}, got {got}"
+    return h._fail("TypeError", said)
 
 #: The names that table answers -- the dunders are left out, because every
 #: one of them is a PROTOCOL name the arms above answer with their own
@@ -7189,21 +7391,65 @@ def _table_shape(h, name: str, held, args):
     return [held, *args]
 
 
+#: The six set methods that take ANY NUMBER of other sets. `s.union()` is a
+#: copy, `s.union(a, b)` folds both in, and no row in an arity table can say
+#: "any count" -- so each was declared as taking exactly one and refused
+#: every other call CPython answers. The compiled twin is `apy_set_fold`.
+_SET_FOLDS = frozenset({"union", "intersection", "difference", "update",
+                        "intersection_update", "difference_update"})
+
+
+def _made_set_fold(h, obj, want: str):
+    """One of the six, as a variadic bound callable value."""
+    def body(*args, _w=want, _o=obj, **named):
+        if named:
+            # NONE OF THE SIX TAKES A KEYWORD, and it is named by its owner:
+            # CPython says `set.union() takes no keyword arguments`.
+            h._fail("TypeError",
+                    f"{h.kind_name(_o)}.{_w}() takes no keyword arguments")
+            raise _UserFailed
+        try:
+            return getattr(_o, _w)(*args)
+        except TypeError as exc:
+            h._fail("TypeError", str(exc))
+            raise _UserFailed
+    return h._new(Native(want, body, owner=obj, variadic=True))
+
+
 def _made_table_method(h, obj, want: str):
     """One ordinary builtin method, as a bound callable value."""
+    # THE SIX SET METHODS TAKE WHATEVER THEY ARE GIVEN -- see `_SET_FOLDS`.
+    if want in _SET_FOLDS and isinstance(obj, (set, frozenset)):
+        return _made_set_fold(h, obj, want)
     held = h._new(obj)
     live = [i for i, sym in enumerate(DYN_METHOD_TABLE[want]) if sym]
     lo, hi = (0, 3) if want == "to_bytes" else (min(live), max(live))
 
-    def body(*args, _w=want, _h=held):
+    def body(*args, _w=want, _h=held, _o=obj):
         sym = method_symbol(_w, len(args))
         if _w == "to_bytes":
             sym = DYN_METHOD_TABLE[_w][3]
-        if sym is None or len(args) < lo or len(args) > hi:
-            # THE WORDING IS THE ONE `apy_arity_error` USES for a builtin
-            # with a range, which is CPython's: `find expected at least 1
-            # argument, got 0`. Named, because none of these is a dunder.
-            got = len(args)
+        # THE RANGE IS THE RECEIVER'S, not the union over every kind that
+        # has the name. `str.count` takes three arguments and `list.count`
+        # takes one, and a union said three for both -- so `[1].count(1, 2)`
+        # went through to a symbol that could not serve it.
+        packed = KINDMETH_WORDS.get((_w, _meth_kind(_o)))
+        low, high = (packed & 15, (packed >> 4) & 15) if packed else (lo, hi)
+        # A SECOND BOUND MEANS THE ACCEPTED RANGE IS THE WIDER ONE.
+        # `to_bytes` takes at most TWO positionals and THREE arguments, and
+        # `sort` takes none and two, because each has a keyword-only
+        # parameter -- and the keywords are folded into slots before the body
+        # sees them. The POSITIONAL bound is checked where the positional
+        # count is still known; see `_meth_positional`.
+        if packed and (packed >> 25) & 15:
+            high = ((packed >> 25) & 15) - 1
+        got = len(args)
+        if got < low or got > high:
+            if packed:
+                _meth_arity_words(h, _o, _w, packed, got)
+                raise _UserFailed
+            # A NAME THE GENERATED TABLE DOES NOT KNOW keeps the plainer
+            # wording `apy_arity_error` falls back to.
             if lo == hi:
                 how = f"expected {hi} argument{'' if hi == 1 else 's'}"
             elif got < lo:
@@ -7213,6 +7459,11 @@ def _made_table_method(h, obj, want: str):
                 how = (f"expected at most {hi} "
                        f"argument{'' if hi == 1 else 's'}")
             h._fail("TypeError", f"{_w} {how}, got {got}")
+            raise _UserFailed
+        if sym is None:
+            h._fail("TypeError",
+                    f"{_w} expected {hi} argument{'' if hi == 1 else 's'}, "
+                    f"got {got}")
             raise _UserFailed
         # A NATIVE'S BODY IS HANDED VALUES and a runtime symbol takes
         # HANDLES, which is the whole of the conversion here.
@@ -7439,16 +7690,12 @@ def _kind_attr(h, obj, want: str):
     if set_ and want in ("__or__", "__and__", "__sub__", "__xor__",
                          "__ror__", "__rand__", "__rsub__", "__rxor__"):
         return made(want, lambda o, _w=want: getattr(obj, _w)(o))
-    if (seq or text) and want in ("index", "count"):
-        return made(want, lambda x: getattr(obj, want)(x))
-    if isinstance(obj, list) and want == "append":
-        return made("append", lambda x: obj.append(x))
-    if isinstance(obj, list) and want == "insert":
-        return made("insert", lambda i, x: obj.insert(i, x))
-    if isinstance(obj, set) and want in ("add", "discard"):
-        return made(want, lambda x: getattr(obj, want)(x))
-    if set_ and want == "isdisjoint":
-        return made("isdisjoint", lambda o: obj.isdisjoint(o))
+    # `index`, `count`, `append`, `insert`, `add`, `discard` and
+    # `isdisjoint` ARE ORDINARY TABLE METHODS and are answered below, by
+    # `_made_table_method`, which reads each receiver's real bounds out of
+    # the generated table. They were arms of their own here with a
+    # fixed-arity lambda apiece, which refused `"ab".count("a", 0, 2)` --
+    # a call CPython answers -- and named no kind when it did.
     # PEP 688: whatever can be handed to `memoryview` HAS `__buffer__`. It is
     # a protocol a program asks about far more often than it calls, and
     # answering False for `bytes` said this runtime has no buffers at all.
@@ -7457,6 +7704,16 @@ def _kind_attr(h, obj, want: str):
     # so the receiver decides which body and is otherwise ignored -- and
     # every one of these was reachable only as a written call on the type's
     # own name. A program holding the VALUE found nothing.
+    # `format` TAKES WHATEVER IT IS GIVEN, positionally and by keyword, which
+    # is why it is not in the method table: no row there can say "any count".
+    # The WRITTEN form is lowered at the call site; this is the same call
+    # reached by name.
+    if want == "format" and isinstance(obj, str):
+        def _formatted(*rest, _o=obj, **named):
+            return _unwrap(h, _apy_str_format(
+                h, [h._new(_o), h._new(list(rest)), h._new(dict(named))]))
+        return h._new(Native("format", _formatted, owner=obj,
+                             variadic=True))
     if want == "maketrans" and isinstance(obj, (str, bytes, bytearray)):
         return made("maketrans",
                     lambda *r, _t=type(obj): _t.maketrans(*r))
@@ -8563,7 +8820,14 @@ def _apy_default_getattr(h, a):
                     raise _UserFailed
                 return h._get(_at, "__enter__")
             return h._new(Native("__enter__", _enter, owner=obj))
-        if name in ("release", "toreadonly", "__exit__"):
+        if name == "_from_flags":
+            # PEP 688's private constructor. The flags pick which buffer
+            # REQUEST to make, and every source this runtime can wrap is a
+            # flat contiguous byte buffer that answers them all alike.
+            return h._new(Native("_from_flags",
+                                 lambda src, flags: memoryview(src),
+                                 owner=obj))
+        if name in ("release", "toreadonly", "cast", "__exit__"):
             return h._new(Native(
                 name, lambda *r, _n=name, _o=obj: _mview_call(h, _o, _n, r),
                 ranged=name == "__exit__", owner=obj))
@@ -8989,6 +9253,12 @@ def _native_kwargs(h, f, args, kwargs):
     CPython's and in CPython's order: too many first, then a slot given twice,
     then a name no parameter has.
     """
+    # A VARIADIC BUILTIN COLLECTS ITS KEYWORDS rather than matching them
+    # against declared names: `"{a}".format(a=1)` has no parameter called
+    # `a`, and the dict IS the argument. Its body takes `**named` and this
+    # hands them straight over.
+    if f.variadic:
+        return h._value(f.body(*args, **kwargs))
     params = METHOD_PARAMS.get(f.name) if f.name in _TABLE_METHODS else None
     if params is None:
         # A METHOD WITH NO KEYWORD SIGNATURE AT ALL names its owner, which is
@@ -9034,7 +9304,10 @@ def _native_kwargs(h, f, args, kwargs):
         # the defaults supply the rest.
         slots[i] = default
     try:
-        return h._value(h._invoke(f, slots))
+        # `bound` SAYS THE NAMES ARE ALREADY IN THEIR SLOTS, which is what
+        # keeps the positional bound from being re-applied to a call that
+        # filled those slots by name. See `_meth_positional`.
+        return h._value(h._invoke(f, slots, bound=True))
     except _UserFailed:
         return 0
 
@@ -9828,8 +10101,18 @@ def _apy_dir(h, a):
         while isinstance(cls, Class):
             add(cls.dict)
             cls = cls.base
-    # A built-in kind answers an empty list rather than a made-up one: the
-    # method table lives in the frontend, not anywhere this can enumerate.
+    elif isinstance(v, _DOC_KINDS):
+        # A BUILT-IN KIND. CPython's own `dir()` over the same value, which
+        # is exactly what the compiled runtimes read out of a generated
+        # table -- see `apy_kind_dir`. This answered an EMPTY LIST, so
+        # `dir(5)` and `dir("")` were both `[]` where CPython lists eighty
+        # names.
+        add(dir(v))
+    elif (isinstance(v, Func) and getattr(v, "is_type", False)
+            and v.name in _DOC_TYPES):
+        # A BUILTIN TYPE IS A FUNC WEARING `is_type`, and `dir(str)` is the
+        # same list as `dir("")`.
+        add(dir(_DOC_TYPES[v.name]))
     return h._new(sorted(names))
 
 
@@ -10312,7 +10595,12 @@ def _apy_hex_of(h, a):
     x = h._get(a[0], "apy_hex_of")
     if isinstance(x, float):
         return h._new(x.hex())
-    return _TABLE["apy_bytes_hex"](h, a)
+    # NONE HERE IS THE DEFAULT THIS SYMBOL SUPPLIES and not a separator the
+    # program wrote: `b.hex()` reaches here and `b.hex(None)` reaches
+    # `apy_bytes_hex`, which refuses it the way CPython does. An empty slot
+    # is how that is said.
+    sep = h._get(a[1], "apy_hex_of") if a[1] else None
+    return _apy_bytes_hex_n(h, [a[0], 0 if sep is None else a[1], 0])
 
 
 def _apy_float_from_number(h, a):
@@ -10997,9 +11285,10 @@ def _apy_bytearray_resize(h, a):
     return h._none
 
 
-# Set algebra. The pair operations reject a non-set operand the way Python's
-# METHODS do not -- `{1}.union([2])` accepts an iterable while `{1} | [2]` does
-# not -- so these follow the C, which is operator-shaped throughout.
+# Set algebra. These symbols serve the METHOD spelling, which takes ANY
+# ITERABLE -- `{1}.union([2])` is `{1, 2}` where `{1} | [2]` is a TypeError,
+# and the operator has its own path and its own wording. Refusing a list here
+# refused eight calls the compiled runtimes and CPython both answer.
 _SET_OP_SPEC = (
     ("apy_set_union", "union"),
     ("apy_set_intersection", "intersection"),
@@ -11020,10 +11309,12 @@ def _make_set_op(symbol: str, method: str):
                 "AttributeError",
                 f"'{h.kind_name(left)}' object has no attribute '{_m}'")
         if not isinstance(right, (set, frozenset)):
-            return h._fail(
-                "TypeError",
-                f"unsupported operand type(s): '{h.kind_name(left)}' and "
-                f"'{h.kind_name(right)}'")
+            try:
+                right = set(right)
+            except TypeError:
+                return h._fail(
+                    "TypeError",
+                    f"'{h.kind_name(right)}' object is not iterable")
         result = getattr(left, _m)(right)
         # A frozenset operand keeps the LEFT operand's kind, as Python does.
         if isinstance(result, (set, frozenset)) and isinstance(left, frozenset):
@@ -11180,6 +11471,7 @@ _TABLE.update({
     "apy_str_encode": _apy_str_encode,
     "apy_bytes_decode": _apy_bytes_decode,
     "apy_bytes_hex": _apy_bytes_hex,
+    "apy_bytes_hex_n": _apy_bytes_hex_n,
     "apy_bytes_fromhex": _apy_bytes_fromhex,
     "apy_to_bytes_n": _apy_to_bytes_n,
     "apy_as_integer_ratio": _apy_as_integer_ratio,
@@ -13875,6 +14167,45 @@ def _apy_mview_live(h, a):
     live, 0 having raised.
     """
     return h._int(1 if _mview_live(h, h._get(a[0], "apy_mview_live")) else 0)
+
+
+def _apy_mview_from_flags(h, a):
+    """`memoryview._from_flags(obj, flags)` -- PEP 688's private
+    constructor. See the C's `apy_mview_from_flags` for why the flags are
+    read only to be refused when absent."""
+    return _apy_memoryview(h, [a[1]])
+
+
+def _apy_mview_cast(h, a):
+    """`m.cast(fmt)` -- THE SAME BYTES, READ AS SOMETHING ELSE.
+
+    Only a C-contiguous view can be cast and its length has to divide by the
+    new element size; Python's own `cast` says both, in the words the
+    compiled halves repeat.
+    """
+    view = h._get(a[0], "apy_mview_cast")
+    fmt = h._get(a[1], "apy_mview_cast")
+    if not isinstance(view, memoryview):
+        return h._fail("AttributeError",
+                       f"'{h.kind_name(view)}' object has no attribute "
+                       f"'cast'")
+    if not _mview_live(h, view):
+        return 0
+    try:
+        return h._new(view.cast(fmt))
+    except (TypeError, ValueError) as exc:
+        return h._fail_like(exc)
+
+
+def _apy_mview_item(h, a):
+    """One element of a view, decoded as its format says."""
+    view = h._get(a[0], "apy_mview_item")
+    if not _mview_live(h, view):
+        return 0
+    try:
+        return h._value(view[int(a[1])])
+    except (IndexError, ValueError) as exc:
+        return h._fail_like(exc)
 
 
 def _apy_mview_release(h, a):

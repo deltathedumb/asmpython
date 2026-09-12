@@ -783,8 +783,14 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
            source produces, and the only one this constructs. A view over an
            `array('i')` would report differently, and there is no such source
            here to report for. */
-        if (strcmp(want, "itemsize") == 0) return apy_from_int(1);
-        if (strcmp(want, "format") == 0) return apy_lit("B");
+        if (strcmp(want, "itemsize") == 0)
+            return apy_from_int(O(obj)->v.mv.wide ? O(obj)->v.mv.wide : 1);
+        if (strcmp(want, "format") == 0) {
+            char one[2];
+            one[0] = O(obj)->v.mv.fmt ? (char)O(obj)->v.mv.fmt : 'B';
+            one[1] = 0;
+            return apy_str_copy(one, 1);
+        }
         if (strcmp(want, "obj") == 0) return O(obj)->v.mv.src;
         /* THE BUFFER'S SHAPE, which is one dimension here because every
            source this runtime can wrap is flat. A program that asks is
@@ -794,9 +800,12 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
         if (strcmp(want, "shape") == 0 || strcmp(want, "strides") == 0) {
             apy_value out = apy_tuple_new(2);
             if (!out) return 0;
+            /* IN ELEMENTS, NOT BYTES, which is what `cast` changes:
+               eight bytes read as `i` are two elements four apart. */
+            int64_t wide = O(obj)->v.mv.wide ? O(obj)->v.mv.wide : 1;
             if (!apy_seq_push(out, apy_from_int(
-                    strcmp(want, "shape") == 0 ? O(obj)->v.mv.n
-                                               : O(obj)->v.mv.step)))
+                    strcmp(want, "shape") == 0 ? O(obj)->v.mv.n / wide
+                                               : O(obj)->v.mv.step * wide)))
                 return 0;
             return out;
         }

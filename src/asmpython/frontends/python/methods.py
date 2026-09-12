@@ -158,7 +158,9 @@ DYN_METHOD_TABLE = {
     # `hex` reaches BYTES or a FLOAT, and the two answer entirely different
     # things -- so the no-argument form dispatches on the receiver. The
     # separator form is bytes' alone.
-    "hex":          ["apy_hex_of", "apy_bytes_hex"],
+    # `bytes_per_sep` IS THE THIRD SLOT. `b.hex(":", 2)` groups the pairs,
+    # which is most of what makes a long fingerprint readable.
+    "hex":          ["apy_hex_of", "apy_bytes_hex", "apy_bytes_hex_n"],
     # THE RECEIVER DECIDES WHICH READING: a float's `fromhex` parses one
     # number where a bytes one reads byte pairs, and `apy_any_fromhex` is
     # where that is settled.
@@ -533,6 +535,37 @@ CTOR_PARAMS = {
 #: The constructors that take ONE positional argument and any keyword at all,
 #: because the keywords ARE the value: `dict(a=1)` is `{"a": 1}`.
 CTOR_ANY_KEYWORD = {"dict": 1}
+
+def _guarded_arities() -> frozenset:
+    """The `(method name, argument count)` pairs that need a run-time guard.
+
+    A SYMBOL SERVES THE COUNT BUT SOME KIND REFUSES IT. `x.pop()` reaches
+    `apy_list_pop` because a list's `pop` takes none -- and a DICT's does not,
+    so `{}.pop()` was `KeyError: None` from a symbol that should have refused
+    the call, and `set().pop(1)` was `'set' object has no attribute 'pop'`
+    about a method a set plainly has. CPython raises a TypeError about the
+    COUNT for both.
+
+    TEN PAIRS, computed rather than listed: the name and the count are both
+    known at the call site, so the guard is emitted only where a kind
+    disagrees and every other builtin method call pays nothing. See
+    `apy_meth_arity`, which is the guard.
+    """
+    from ...objects.c.kindmeth_table import KINDMETH_WORDS
+    out = set()
+    for (name, _kind), packed in KINDMETH_WORDS.items():
+        least, most = packed & 15, (packed >> 4) & 15
+        for argc in range(5):
+            if least <= argc <= most:
+                continue
+            if method_symbol(name, argc) is not None:
+                out.add((name, argc))
+    return frozenset(out)
+
+
+#: Computed once at import, from the generated table -- see above.
+METHOD_ARITY_GUARD = _guarded_arities()
+
 
 #: THE SURPLUS-ARGUMENT WORDING IS NOT ONE WORDING. Most of the builtin types
 #: are `list expected at most 1 argument, got 2` -- the bare name, no

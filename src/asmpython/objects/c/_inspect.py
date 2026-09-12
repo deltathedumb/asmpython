@@ -462,7 +462,9 @@ APY_API apy_value apy_len(apy_value v) {
         return apy_from_int(O(O(v)->v.vw.dict)->v.d.n);
     if (O(v)->kind == APY_MVIEW_K) {
         if (!apy_mview_live(v)) return 0;
-        return apy_from_int(O(v)->v.mv.n);
+        /* IN ELEMENTS, NOT BYTES: eight bytes read as `i` are two. */
+        return apy_from_int(O(v)->v.mv.n
+                            / (O(v)->v.mv.wide ? O(v)->v.mv.wide : 1));
     }
     if (O(v)->kind == APY_RANGE_K) return apy_from_int(apy_range_len(v));
     if (O(v)->kind == APY_DICT_K) return apy_from_int(O(v)->v.d.n);

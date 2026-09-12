@@ -818,6 +818,26 @@ def apy_kind_method_of(obj: ptr, arity: i64, name: ptr, bind: i64) -> ptr:
     return fn
 
 
+def apy_kind_method_var(obj: ptr, name: ptr, bind: i64) -> ptr:
+    """The same, TAKING WHATEVER IT IS GIVEN.
+
+    `"{} {}".format(a, b)` has no argument count to declare and keywords
+    besides, so neither a fixed arity nor an optional tail can say what it
+    accepts. DECLARED AS THREE WITH BOTH VARIADIC PARTS -- receiver, the
+    surplus as a tuple, the keywords as a dict -- which is the shape the call
+    machinery already packs for a `def f(self, *rest, **kw)`, and the body
+    reads the three slots.
+    """
+    fn: ptr = apy_native_of(apy_nat_kind(), 3, name)
+    if not fn:
+        return fn
+    store(i32, i32(1), offset(fn, apy_fn_vararg_offset()))
+    store(i32, i32(1), offset(fn, apy_fn_kwarg_offset()))
+    if bind:
+        return apy_bind_of(fn, obj)
+    return fn
+
+
 def apy_kind_bit_of(v: ptr) -> i64:
     """The bit the generated method table wants for this receiver.
 
@@ -1080,6 +1100,39 @@ def apy_number_arity(want: ptr, is_int: i64, is_complex: i64) -> i64:
     return 0
 
 
+def apy_kind_method_ranged_of(obj: ptr, want: ptr, bind: i64) -> ptr:
+    """The native for a builtin method whose real bounds the generated words
+    table knows -- or 0 for a name it does not have, and for the six set
+    methods that take ANY number of others.
+
+    THE BOUNDS ARE THIS KIND'S. The arity table holds one row per NAME:
+    `str.count` takes three arguments and `list.count` takes one, and the
+    union of the two said three for both -- so a method reached BY NAME
+    accepted counts its receiver refuses and refused counts its receiver
+    accepts. The C twin is `apy_kind_method_ranged`.
+    """
+    said: i64 = apy_kind_meth_words_of(want, apy_kind_bit_of(obj))
+    if not said:
+        return ptr(0)
+    most: i64 = (said >> 4) & 15
+    # NO UPPER END AT ALL is the six set methods, and a declared arity
+    # cannot say so: they take whatever they are given. The FOLD is in the
+    # C -- `apy_set_fold` -- which both compiled runtimes share.
+    if most == 15:
+        return apy_kind_method_var(obj, want, bind)
+    least: i64 = said & 15
+    # A SECOND BOUND MEANS THE DECLARED RANGE IS THE WIDER ONE. `to_bytes`
+    # takes at most TWO positionals and THREE arguments, and `sort` takes
+    # none and two, because each has a keyword-only parameter -- and once the
+    # keywords are folded into slots the call arrives at its full width. The
+    # POSITIONAL bound is checked where the positional count is still known;
+    # the C's `apy_meth_positional` does it for both compiled runtimes.
+    over: i64 = (said >> 25) & 15
+    if over:
+        most = over - 1
+    return apy_kind_method_opt(obj, most + 1, most - least, want, bind)
+
+
 def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
     """The builtin method or field `want` names on `obj`, or null.
 
@@ -1256,9 +1309,18 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
         if apy_name_is(want, rodata(b"items\0")):
             return apy_kind_method_of(obj, 1, want, bind)
     if seq or text:
+        # A WINDOW, ON THE KINDS THAT TAKE ONE. `"ab".count("a", 0, 2)` is a
+        # call CPython answers and `[1].count(1, 2)` is not, so the bounds
+        # come from the table rather than from this line.
         if apy_name_is(want, rodata(b"index\0")):
+            ranged: ptr = apy_kind_method_ranged_of(obj, want, bind)
+            if ranged:
+                return ranged
             return apy_kind_method_of(obj, 2, want, bind)
         if apy_name_is(want, rodata(b"count\0")):
+            counted: ptr = apy_kind_method_ranged_of(obj, want, bind)
+            if counted:
+                return counted
             return apy_kind_method_of(obj, 2, want, bind)
     if is_list:
         if apy_name_is(want, rodata(b"append\0")):
@@ -1281,6 +1343,12 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
     if is_str:
         if apy_name_is(want, rodata(b"maketrans\0")):
             return apy_kind_method_opt(obj, 4, 2, want, bind)
+        # `format` TAKES WHATEVER IT IS GIVEN, positionally and by keyword,
+        # which is why it is not in the method table: no row there can say
+        # "any count". The WRITTEN form is lowered at the call site; this is
+        # the same call reached by name.
+        if apy_name_is(want, rodata(b"format\0")):
+            return apy_kind_method_var(obj, want, bind)
     if is_bytes:
         if apy_name_is(want, rodata(b"maketrans\0")):
             return apy_kind_method_of(obj, 3, want, bind)
@@ -1360,11 +1428,19 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
     # program writes. `__delitem__` exists and always refuses, which is not
     # the same claim as having no such method.
     if is_mview:
+        # THE SAME BOUNDS A BYTES RECEIVER HAS, because a view's `hex` and
+        # `index` read the bytes it shows.
         if apy_name_is(want, rodata(b"hex\0")):
+            hexed: ptr = apy_kind_method_ranged_of(obj, want, bind)
+            if hexed:
+                return hexed
             return apy_kind_method_opt(obj, 2, 1, want, bind)
         if apy_name_is(want, rodata(b"count\0")):
             return apy_kind_method_of(obj, 2, want, bind)
         if apy_name_is(want, rodata(b"index\0")):
+            viewed: ptr = apy_kind_method_ranged_of(obj, want, bind)
+            if viewed:
+                return viewed
             return apy_kind_method_of(obj, 2, want, bind)
         if apy_name_is(want, rodata(b"__delitem__\0")):
             return apy_kind_method_of(obj, 2, want, bind)
@@ -1381,6 +1457,10 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
             return apy_kind_method_of(obj, 1, want, bind)
         if apy_name_is(want, rodata(b"toreadonly\0")):
             return apy_kind_method_of(obj, 1, want, bind)
+        if apy_name_is(want, rodata(b"cast\0")):
+            return apy_kind_method_of(obj, 2, want, bind)
+        if apy_name_is(want, rodata(b"_from_flags\0")):
+            return apy_kind_method_of(obj, 3, want, bind)
         if apy_name_is(want, rodata(b"__enter__\0")):
             return apy_kind_method_of(obj, 1, want, bind)
         if apy_name_is(want, rodata(b"__exit__\0")):
@@ -1421,6 +1501,13 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
     # LAST, so every arm above still decides first: a few names mean
     # different things to different kinds and are split there rather than in
     # a table keyed by name.
+    #
+    # THE BOUNDS ARE THIS KIND'S where the words table knows them -- see
+    # `apy_kind_method_ranged_of`. The arity table decides for a name it does
+    # not carry, and for the six set methods whose range has no upper end.
+    tabled: ptr = apy_kind_method_ranged_of(obj, want, bind)
+    if tabled:
+        return tabled
     packed: i64 = apy_kind_meth_arity_of(want, apy_kind_bit_of(obj))
     if packed:
         return apy_kind_method_opt(obj, packed >> 8, packed & 255, want, bind)

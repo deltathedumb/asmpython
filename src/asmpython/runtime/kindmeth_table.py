@@ -104,7 +104,7 @@ def apy_kind_meth_arity_of(w: ptr, bit: i64) -> i64:
         return 0
     if apy_cstr_eq(w, rodata(b"hex\0")):
         if bit & 518:
-            return 513
+            return 770
         return 0
     if apy_cstr_eq(w, rodata(b"index\0")):
         if bit & 1055:
@@ -441,5 +441,394 @@ def apy_kind_meth_written_of(w: ptr, bit: i64) -> i64:
     if apy_cstr_eq(w, rodata(b"__trunc__\0")):
         if bit & 768:
             return 1
+        return 0
+    return 0
+
+
+def apy_kind_dir_of(kind: ptr) -> ptr:
+    """Every name `dir(x)` answers for a value of this kind, by the
+    type's name: NUL-separated, ended by an empty name.
+    """
+    if apy_cstr_eq(kind, rodata(b"str\0")):
+        return rodata(b"__add__\0__class__\0__contains__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getitem__\0__getnewargs__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__len__\0__lt__\0__mod__\0__mul__\0__ne__\0__new__\0__reduce__\0__reduce_ex__\0__repr__\0__rmod__\0__rmul__\0__setattr__\0__sizeof__\0__str__\0__subclasshook__\0capitalize\0casefold\0center\0count\0encode\0endswith\0expandtabs\0find\0format\0format_map\0index\0isalnum\0isalpha\0isascii\0isdecimal\0isdigit\0isidentifier\0islower\0isnumeric\0isprintable\0isspace\0istitle\0isupper\0join\0ljust\0lower\0lstrip\0maketrans\0partition\0removeprefix\0removesuffix\0replace\0rfind\0rindex\0rjust\0rpartition\0rsplit\0rstrip\0split\0splitlines\0startswith\0strip\0swapcase\0title\0translate\0upper\0zfill\0\0")
+    if apy_cstr_eq(kind, rodata(b"bytes\0")):
+        return rodata(b"__add__\0__buffer__\0__bytes__\0__class__\0__contains__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getitem__\0__getnewargs__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__len__\0__lt__\0__mod__\0__mul__\0__ne__\0__new__\0__reduce__\0__reduce_ex__\0__repr__\0__rmod__\0__rmul__\0__setattr__\0__sizeof__\0__str__\0__subclasshook__\0capitalize\0center\0count\0decode\0endswith\0expandtabs\0find\0fromhex\0hex\0index\0isalnum\0isalpha\0isascii\0isdigit\0islower\0isspace\0istitle\0isupper\0join\0ljust\0lower\0lstrip\0maketrans\0partition\0removeprefix\0removesuffix\0replace\0rfind\0rindex\0rjust\0rpartition\0rsplit\0rstrip\0split\0splitlines\0startswith\0strip\0swapcase\0title\0translate\0upper\0zfill\0\0")
+    if apy_cstr_eq(kind, rodata(b"bytearray\0")):
+        return rodata(b"__add__\0__alloc__\0__buffer__\0__class__\0__contains__\0__delattr__\0__delitem__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getitem__\0__getstate__\0__gt__\0__hash__\0__iadd__\0__imul__\0__init__\0__init_subclass__\0__iter__\0__le__\0__len__\0__lt__\0__mod__\0__mul__\0__ne__\0__new__\0__reduce__\0__reduce_ex__\0__release_buffer__\0__repr__\0__rmod__\0__rmul__\0__setattr__\0__setitem__\0__sizeof__\0__str__\0__subclasshook__\0append\0capitalize\0center\0clear\0copy\0count\0decode\0endswith\0expandtabs\0extend\0find\0fromhex\0hex\0index\0insert\0isalnum\0isalpha\0isascii\0isdigit\0islower\0isspace\0istitle\0isupper\0join\0ljust\0lower\0lstrip\0maketrans\0partition\0pop\0remove\0removeprefix\0removesuffix\0replace\0resize\0reverse\0rfind\0rindex\0rjust\0rpartition\0rsplit\0rstrip\0split\0splitlines\0startswith\0strip\0swapcase\0title\0translate\0upper\0zfill\0\0")
+    if apy_cstr_eq(kind, rodata(b"list\0")):
+        return rodata(b"__add__\0__class__\0__class_getitem__\0__contains__\0__delattr__\0__delitem__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getitem__\0__getstate__\0__gt__\0__hash__\0__iadd__\0__imul__\0__init__\0__init_subclass__\0__iter__\0__le__\0__len__\0__lt__\0__mul__\0__ne__\0__new__\0__reduce__\0__reduce_ex__\0__repr__\0__reversed__\0__rmul__\0__setattr__\0__setitem__\0__sizeof__\0__str__\0__subclasshook__\0append\0clear\0copy\0count\0extend\0index\0insert\0pop\0remove\0reverse\0sort\0\0")
+    if apy_cstr_eq(kind, rodata(b"tuple\0")):
+        return rodata(b"__add__\0__class__\0__class_getitem__\0__contains__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getitem__\0__getnewargs__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__len__\0__lt__\0__mul__\0__ne__\0__new__\0__reduce__\0__reduce_ex__\0__repr__\0__rmul__\0__setattr__\0__sizeof__\0__str__\0__subclasshook__\0count\0index\0\0")
+    if apy_cstr_eq(kind, rodata(b"dict\0")):
+        return rodata(b"__class__\0__class_getitem__\0__contains__\0__delattr__\0__delitem__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getitem__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__ior__\0__iter__\0__le__\0__len__\0__lt__\0__ne__\0__new__\0__or__\0__reduce__\0__reduce_ex__\0__repr__\0__reversed__\0__ror__\0__setattr__\0__setitem__\0__sizeof__\0__str__\0__subclasshook__\0clear\0copy\0fromkeys\0get\0items\0keys\0pop\0popitem\0setdefault\0update\0values\0\0")
+    if apy_cstr_eq(kind, rodata(b"set\0")):
+        return rodata(b"__and__\0__class__\0__class_getitem__\0__contains__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__iand__\0__init__\0__init_subclass__\0__ior__\0__isub__\0__iter__\0__ixor__\0__le__\0__len__\0__lt__\0__ne__\0__new__\0__or__\0__rand__\0__reduce__\0__reduce_ex__\0__repr__\0__ror__\0__rsub__\0__rxor__\0__setattr__\0__sizeof__\0__str__\0__sub__\0__subclasshook__\0__xor__\0add\0clear\0copy\0difference\0difference_update\0discard\0intersection\0intersection_update\0isdisjoint\0issubset\0issuperset\0pop\0remove\0symmetric_difference\0symmetric_difference_update\0union\0update\0\0")
+    if apy_cstr_eq(kind, rodata(b"frozenset\0")):
+        return rodata(b"__and__\0__class__\0__class_getitem__\0__contains__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__len__\0__lt__\0__ne__\0__new__\0__or__\0__rand__\0__reduce__\0__reduce_ex__\0__repr__\0__ror__\0__rsub__\0__rxor__\0__setattr__\0__sizeof__\0__str__\0__sub__\0__subclasshook__\0__xor__\0copy\0difference\0intersection\0isdisjoint\0issubset\0issuperset\0symmetric_difference\0union\0\0")
+    if apy_cstr_eq(kind, rodata(b"int\0")):
+        return rodata(b"__abs__\0__add__\0__and__\0__bool__\0__ceil__\0__class__\0__delattr__\0__dir__\0__divmod__\0__doc__\0__eq__\0__float__\0__floor__\0__floordiv__\0__format__\0__ge__\0__getattribute__\0__getnewargs__\0__getstate__\0__gt__\0__hash__\0__index__\0__init__\0__init_subclass__\0__int__\0__invert__\0__le__\0__lshift__\0__lt__\0__mod__\0__mul__\0__ne__\0__neg__\0__new__\0__or__\0__pos__\0__pow__\0__radd__\0__rand__\0__rdivmod__\0__reduce__\0__reduce_ex__\0__repr__\0__rfloordiv__\0__rlshift__\0__rmod__\0__rmul__\0__ror__\0__round__\0__rpow__\0__rrshift__\0__rshift__\0__rsub__\0__rtruediv__\0__rxor__\0__setattr__\0__sizeof__\0__str__\0__sub__\0__subclasshook__\0__truediv__\0__trunc__\0__xor__\0as_integer_ratio\0bit_count\0bit_length\0conjugate\0denominator\0from_bytes\0imag\0is_integer\0numerator\0real\0to_bytes\0\0")
+    if apy_cstr_eq(kind, rodata(b"float\0")):
+        return rodata(b"__abs__\0__add__\0__bool__\0__ceil__\0__class__\0__delattr__\0__dir__\0__divmod__\0__doc__\0__eq__\0__float__\0__floor__\0__floordiv__\0__format__\0__ge__\0__getattribute__\0__getformat__\0__getnewargs__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__int__\0__le__\0__lt__\0__mod__\0__mul__\0__ne__\0__neg__\0__new__\0__pos__\0__pow__\0__radd__\0__rdivmod__\0__reduce__\0__reduce_ex__\0__repr__\0__rfloordiv__\0__rmod__\0__rmul__\0__round__\0__rpow__\0__rsub__\0__rtruediv__\0__setattr__\0__sizeof__\0__str__\0__sub__\0__subclasshook__\0__truediv__\0__trunc__\0as_integer_ratio\0conjugate\0from_number\0fromhex\0hex\0imag\0is_integer\0real\0\0")
+    if apy_cstr_eq(kind, rodata(b"range\0")):
+        return rodata(b"__bool__\0__class__\0__contains__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getitem__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__len__\0__lt__\0__ne__\0__new__\0__reduce__\0__reduce_ex__\0__repr__\0__reversed__\0__setattr__\0__sizeof__\0__str__\0__subclasshook__\0count\0index\0start\0step\0stop\0\0")
+    if apy_cstr_eq(kind, rodata(b"complex\0")):
+        return rodata(b"__abs__\0__add__\0__bool__\0__class__\0__complex__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getnewargs__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__le__\0__lt__\0__mul__\0__ne__\0__neg__\0__new__\0__pos__\0__pow__\0__radd__\0__reduce__\0__reduce_ex__\0__repr__\0__rmul__\0__rpow__\0__rsub__\0__rtruediv__\0__setattr__\0__sizeof__\0__str__\0__sub__\0__subclasshook__\0__truediv__\0conjugate\0from_number\0imag\0real\0\0")
+    if apy_cstr_eq(kind, rodata(b"memoryview\0")):
+        return rodata(b"__buffer__\0__class__\0__class_getitem__\0__delattr__\0__delitem__\0__dir__\0__doc__\0__enter__\0__eq__\0__exit__\0__format__\0__ge__\0__getattribute__\0__getitem__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__len__\0__lt__\0__ne__\0__new__\0__reduce__\0__reduce_ex__\0__release_buffer__\0__repr__\0__setattr__\0__setitem__\0__sizeof__\0__str__\0__subclasshook__\0_from_flags\0c_contiguous\0cast\0contiguous\0count\0f_contiguous\0format\0hex\0index\0itemsize\0nbytes\0ndim\0obj\0readonly\0release\0shape\0strides\0suboffsets\0tobytes\0tolist\0toreadonly\0\0")
+    if apy_cstr_eq(kind, rodata(b"bool\0")):
+        return rodata(b"__abs__\0__add__\0__and__\0__bool__\0__ceil__\0__class__\0__delattr__\0__dir__\0__divmod__\0__doc__\0__eq__\0__float__\0__floor__\0__floordiv__\0__format__\0__ge__\0__getattribute__\0__getnewargs__\0__getstate__\0__gt__\0__hash__\0__index__\0__init__\0__init_subclass__\0__int__\0__invert__\0__le__\0__lshift__\0__lt__\0__mod__\0__mul__\0__ne__\0__neg__\0__new__\0__or__\0__pos__\0__pow__\0__radd__\0__rand__\0__rdivmod__\0__reduce__\0__reduce_ex__\0__repr__\0__rfloordiv__\0__rlshift__\0__rmod__\0__rmul__\0__ror__\0__round__\0__rpow__\0__rrshift__\0__rshift__\0__rsub__\0__rtruediv__\0__rxor__\0__setattr__\0__sizeof__\0__str__\0__sub__\0__subclasshook__\0__truediv__\0__trunc__\0__xor__\0as_integer_ratio\0bit_count\0bit_length\0conjugate\0denominator\0from_bytes\0imag\0is_integer\0numerator\0real\0to_bytes\0\0")
+    if apy_cstr_eq(kind, rodata(b"NoneType\0")):
+        return rodata(b"__bool__\0__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__le__\0__lt__\0__ne__\0__new__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    return ptr(0)
+
+
+def apy_kind_meth_words_of(w: ptr, bit: i64) -> i64:
+    """What CPython says about a wrong number of arguments to this
+    builtin method on a receiver of kind `bit`, packed. See
+    `apy_kind_meth_words` in the C half.
+    """
+    if apy_cstr_eq(w, rodata(b"add\0")):
+        if bit & 64:
+            return 17895697
+        return 0
+    if apy_cstr_eq(w, rodata(b"append\0")):
+        if bit & 12:
+            return 17895697
+        return 0
+    if apy_cstr_eq(w, rodata(b"as_integer_ratio\0")):
+        if bit & 768:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"bit_count\0")):
+        if bit & 256:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"bit_length\0")):
+        if bit & 256:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"capitalize\0")):
+        if bit & 7:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"casefold\0")):
+        if bit & 1:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"center\0")):
+        if bit & 7:
+            return 19338785
+        return 0
+    if apy_cstr_eq(w, rodata(b"clear\0")):
+        if bit & 108:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"conjugate\0")):
+        if bit & 2816:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"copy\0")):
+        if bit & 236:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"count\0")):
+        if bit & 7:
+            return 20387377
+        if bit & 5144:
+            return 17895697
+        return 0
+    if apy_cstr_eq(w, rodata(b"decode\0")):
+        if bit & 6:
+            return 19071008
+        return 0
+    if apy_cstr_eq(w, rodata(b"difference\0")):
+        if bit & 192:
+            return 16777456
+        return 0
+    if apy_cstr_eq(w, rodata(b"difference_update\0")):
+        if bit & 64:
+            return 16777456
+        return 0
+    if apy_cstr_eq(w, rodata(b"discard\0")):
+        if bit & 64:
+            return 17895697
+        return 0
+    if apy_cstr_eq(w, rodata(b"encode\0")):
+        if bit & 1:
+            return 19071008
+        return 0
+    if apy_cstr_eq(w, rodata(b"endswith\0")):
+        if bit & 7:
+            return 20387377
+        return 0
+    if apy_cstr_eq(w, rodata(b"expandtabs\0")):
+        if bit & 7:
+            return 18022416
+        return 0
+    if apy_cstr_eq(w, rodata(b"extend\0")):
+        if bit & 12:
+            return 17895697
+        return 0
+    if apy_cstr_eq(w, rodata(b"find\0")):
+        if bit & 7:
+            return 20387377
+        return 0
+    if apy_cstr_eq(w, rodata(b"format_map\0")):
+        if bit & 1:
+            return 17895697
+        return 0
+    if apy_cstr_eq(w, rodata(b"get\0")):
+        if bit & 32:
+            return 19338785
+        return 0
+    if apy_cstr_eq(w, rodata(b"hex\0")):
+        if bit & 4102:
+            return 19071008
+        if bit & 512:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"index\0")):
+        if bit & 4127:
+            return 20387377
+        if bit & 1024:
+            return 17895697
+        return 0
+    if apy_cstr_eq(w, rodata(b"insert\0")):
+        if bit & 12:
+            return 19408930
+        return 0
+    if apy_cstr_eq(w, rodata(b"intersection\0")):
+        if bit & 192:
+            return 16777456
+        return 0
+    if apy_cstr_eq(w, rodata(b"intersection_update\0")):
+        if bit & 64:
+            return 16777456
+        return 0
+    if apy_cstr_eq(w, rodata(b"is_integer\0")):
+        if bit & 768:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"isalnum\0")):
+        if bit & 7:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"isalpha\0")):
+        if bit & 7:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"isascii\0")):
+        if bit & 7:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"isdecimal\0")):
+        if bit & 1:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"isdigit\0")):
+        if bit & 7:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"isdisjoint\0")):
+        if bit & 192:
+            return 17895697
+        return 0
+    if apy_cstr_eq(w, rodata(b"isidentifier\0")):
+        if bit & 1:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"islower\0")):
+        if bit & 7:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"isnumeric\0")):
+        if bit & 1:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"isprintable\0")):
+        if bit & 1:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"isspace\0")):
+        if bit & 7:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"issubset\0")):
+        if bit & 192:
+            return 17895697
+        return 0
+    if apy_cstr_eq(w, rodata(b"issuperset\0")):
+        if bit & 192:
+            return 17895697
+        return 0
+    if apy_cstr_eq(w, rodata(b"istitle\0")):
+        if bit & 7:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"isupper\0")):
+        if bit & 7:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"items\0")):
+        if bit & 32:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"join\0")):
+        if bit & 7:
+            return 17895697
+        return 0
+    if apy_cstr_eq(w, rodata(b"keys\0")):
+        if bit & 32:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"ljust\0")):
+        if bit & 7:
+            return 19338785
+        return 0
+    if apy_cstr_eq(w, rodata(b"lower\0")):
+        if bit & 7:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"lstrip\0")):
+        if bit & 7:
+            return 18284560
+        return 0
+    if apy_cstr_eq(w, rodata(b"partition\0")):
+        if bit & 7:
+            return 17895697
+        return 0
+    if apy_cstr_eq(w, rodata(b"pop\0")):
+        if bit & 12:
+            return 18284560
+        if bit & 32:
+            return 19338785
+        if bit & 64:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"popitem\0")):
+        if bit & 32:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"remove\0")):
+        if bit & 76:
+            return 17895697
+        return 0
+    if apy_cstr_eq(w, rodata(b"removeprefix\0")):
+        if bit & 7:
+            return 17895697
+        return 0
+    if apy_cstr_eq(w, rodata(b"removesuffix\0")):
+        if bit & 7:
+            return 17895697
+        return 0
+    if apy_cstr_eq(w, rodata(b"replace\0")):
+        if bit & 6:
+            return 20391474
+        if bit & 1:
+            return 20129074
+        return 0
+    if apy_cstr_eq(w, rodata(b"resize\0")):
+        if bit & 4:
+            return 17895697
+        return 0
+    if apy_cstr_eq(w, rodata(b"reverse\0")):
+        if bit & 12:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"rfind\0")):
+        if bit & 7:
+            return 20387377
+        return 0
+    if apy_cstr_eq(w, rodata(b"rindex\0")):
+        if bit & 7:
+            return 20387377
+        return 0
+    if apy_cstr_eq(w, rodata(b"rjust\0")):
+        if bit & 7:
+            return 19338785
+        return 0
+    if apy_cstr_eq(w, rodata(b"rpartition\0")):
+        if bit & 7:
+            return 17895697
+        return 0
+    if apy_cstr_eq(w, rodata(b"rsplit\0")):
+        if bit & 7:
+            return 19071008
+        return 0
+    if apy_cstr_eq(w, rodata(b"rstrip\0")):
+        if bit & 7:
+            return 18284560
+        return 0
+    if apy_cstr_eq(w, rodata(b"setdefault\0")):
+        if bit & 32:
+            return 19338785
+        return 0
+    if apy_cstr_eq(w, rodata(b"sort\0")):
+        if bit & 8:
+            return 18908512256
+        return 0
+    if apy_cstr_eq(w, rodata(b"split\0")):
+        if bit & 7:
+            return 19071008
+        return 0
+    if apy_cstr_eq(w, rodata(b"splitlines\0")):
+        if bit & 7:
+            return 18022416
+        return 0
+    if apy_cstr_eq(w, rodata(b"startswith\0")):
+        if bit & 7:
+            return 20387377
+        return 0
+    if apy_cstr_eq(w, rodata(b"strip\0")):
+        if bit & 7:
+            return 18284560
+        return 0
+    if apy_cstr_eq(w, rodata(b"swapcase\0")):
+        if bit & 7:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"symmetric_difference\0")):
+        if bit & 192:
+            return 17895697
+        return 0
+    if apy_cstr_eq(w, rodata(b"symmetric_difference_update\0")):
+        if bit & 64:
+            return 17895697
+        return 0
+    if apy_cstr_eq(w, rodata(b"title\0")):
+        if bit & 7:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"to_bytes\0")):
+        if bit & 256:
+            return 27533770784
+        return 0
+    if apy_cstr_eq(w, rodata(b"translate\0")):
+        if bit & 6:
+            return 19076385
+        if bit & 1:
+            return 17895697
+        return 0
+    if apy_cstr_eq(w, rodata(b"union\0")):
+        if bit & 192:
+            return 16777456
+        return 0
+    if apy_cstr_eq(w, rodata(b"update\0")):
+        if bit & 32:
+            return 18284560
+        if bit & 64:
+            return 16777456
+        return 0
+    if apy_cstr_eq(w, rodata(b"upper\0")):
+        if bit & 7:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"values\0")):
+        if bit & 32:
+            return 16908288
+        return 0
+    if apy_cstr_eq(w, rodata(b"zfill\0")):
+        if bit & 7:
+            return 17895697
         return 0
     return 0

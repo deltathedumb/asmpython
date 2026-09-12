@@ -33,7 +33,7 @@ from .analysis import (
 )
 from .methods import (
     CTOR_ANY_KEYWORD, CTOR_PARAMS, DICT_PARTS, DYN_METHOD_TABLE,
-    METHOD_KW_SYMBOL, METHOD_PARAMS, REQUIRED, KeywordError,
+    METHOD_ARITY_GUARD, METHOD_KW_SYMBOL, METHOD_PARAMS, REQUIRED, KeywordError,
     fold_ctor_keywords, fold_keywords, method_symbol,
 )
 
@@ -201,6 +201,10 @@ _TYPE_STATICS = {
     # with the value form, and the type has no receiver to give -- so it is
     # padded here exactly as `fromhex` is.
     ("float", "from_number"): ("apy_float_from_number", 1, ()),
+    # PEP 688's private constructor. Its runtime shape is
+    # (receiver, source, flags), shared with the value form, and the type has
+    # no receiver to give.
+    ("memoryview", "_from_flags"): ("apy_mview_from_flags", 2, ()),
     ("complex", "from_number"): ("apy_complex_from_number", 1, ()),
 }
 
@@ -268,9 +272,10 @@ _OBJRT_DYNAMIC_NAMES = frozenset({
 #: one-argument thunk every non-type builtin gets -- where CPython answers
 #: `0j`. Every name here goes through `apy_ctor_call`, which already serves
 #: complex's two-parameter signature.
+#: `memoryview` IS ONE OF THEM TOO -- see `_VALUE_BUILTINS`.
 _BUILTIN_TYPE_VALUES = frozenset({
     "int", "float", "bool", "str", "bytes", "list", "tuple", "dict", "set",
-    "frozenset", "bytearray", "complex"})
+    "frozenset", "bytearray", "complex", "memoryview"})
 
 #: The two builtin CLASSES that are values in their own right. `object` is
 #: what `object.__new__(cls)` and `class C(object)` name, and `type` is a
@@ -2036,7 +2041,8 @@ class DynamicLowering:
                 args.append(self.b.call(T.PTR, filler, []))
             if symbol in ("apy_bytes_fromhex", "apy_bytearray_fromhex",
                           "apy_float_from_number",
-                          "apy_complex_from_number"):
+                          "apy_complex_from_number",
+                          "apy_mview_from_flags"):
                 # Its runtime shape is (receiver, text), shared with the
                 # method form; the type has no receiver to give.
                 args = [self.b.call(T.PTR, "apy_none", [])] + args
@@ -5740,6 +5746,31 @@ class DynamicLowering:
         else:
             args = self._dyn_operands(node.args)
         sym = method_symbol(attr, len(args))
+        # THE COUNT THE PROGRAM WROTE, not the count the call carries. A
+        # keyword the fold placed and a slot `to_bytes` pads both widen
+        # `args`, and neither is a positional argument -- reading the widened
+        # list refused `(258).to_bytes(4, "little")`, a call with two.
+        #
+        # A `*rest` HAS NO STATIC COUNT, so a call carrying one is left to the
+        # run-time path rather than guarded with a number that is not the
+        # one it will have.
+        written = len(node.args)
+        spread = any(isinstance(one, ast.Starred) for one in node.args)
+        if not spread and (attr, written) in METHOD_ARITY_GUARD:
+            # A COUNT SOME KIND REFUSES. A symbol serves it -- a list's `pop`
+            # takes none, so `x.pop()` reaches `apy_list_pop` -- and the
+            # symbol cannot tell a dict receiver that the COUNT is what was
+            # wrong: `{}.pop()` was `KeyError: None` and `set().pop(1)` was
+            # an AttributeError about a method a set plainly has.
+            #
+            # AFTER THE ARGUMENTS ARE LOWERED, because Python evaluates them
+            # before it complains about how many there are. Ten pairs in all
+            # -- see `METHOD_ARITY_GUARD` -- so every other builtin method
+            # call is unchanged.
+            self.b.call(T.PTR, "apy_meth_arity",
+                        [receiver, self._dyn_str_literal(attr),
+                         self.b.const(T.I64, written)])
+            self._dyn_check()
         if sym is not None and foldable and node.keywords \
                 and attr in METHOD_KW_SYMBOL:
             # THE KEYWORD SPELLING REACHES ITS OWN SYMBOL. Folding has just

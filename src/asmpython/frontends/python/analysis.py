@@ -418,6 +418,15 @@ _VALUE_BUILTINS = frozenset({
     # `map(bytearray, xs)` and `[bytearray][0](b"ab")` were COMPILE ERRORS
     # for a name Python hands out as an ordinary value.
     "bytearray",
+    # `memoryview` IS A TYPE LIKE THE REST. It was the last builtin type
+    # that could not be NAMED: `memoryview._from_flags(b, 0)`,
+    # `memoryview[int]` and `type(m) is memoryview` were all
+    # `'memoryview' is a builtin that cannot be used as a value` -- an
+    # E0056 for a name CPython hands out as an ordinary object. The
+    # constructor's signature was already declared (`CTOR_PARAMS`) and
+    # `apy_builtin_ctor` already served it, so only the two sets that say
+    # "this name has a value form" were missing it.
+    "memoryview",
     # THE RUNTIME DESCRIPTORS, which are written `@property` far more often
     # than `property(f)`. A bare decorator is a NAME USED AS A VALUE, so
     # without these three here every `@staticmethod` was refused as a builtin

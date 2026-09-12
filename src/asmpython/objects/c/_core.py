@@ -408,7 +408,10 @@ struct apy_obj {
            answer to `m.readonly` has to live on the VIEW. A RELEASED view
            is one whose `src` is 0, which needs no field of its own and is
            what every reader tests. */
-        struct { apy_value src; int64_t off, n, step, ro; } mv;
+        /* `wide` AND `fmt` ARE WHAT `cast` CHANGES: one element is `wide`
+           bytes and reads as the format character says. Both are 1 and 'B'
+           for a fresh view, which is every source this runtime can wrap. */
+        struct { apy_value src; int64_t off, n, step, ro, wide, fmt; } mv;
         /* The dict a view looks at, and WHICH of the three it is. */
         struct { apy_value dict; int part; } vw;
         /* One closure variable's box. A captured local lives HERE instead of

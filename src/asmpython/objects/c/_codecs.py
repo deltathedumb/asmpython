@@ -631,12 +631,20 @@ APY_API apy_value apy_str_ctor(apy_value v, apy_value encoding,
     return apy_bytes_decode(v, encoding, errors);
 }
 
-/* `b.hex()` and `b.hex(sep)` -- the octets as lowercase hex pairs. The
-   separator form is `bytes.hex(':')`, which is what makes a fingerprint
-   readable and is the only reason the argument exists. */
-APY_API apy_value apy_bytes_hex(apy_value b, apy_value sep) {
+/* `b.hex()`, `b.hex(sep)` and `b.hex(sep, bytes_per_sep)` -- the octets as
+   lowercase hex pairs.
+
+   THE GROUPING IS COUNTED FROM AN END AND WHICH END IS THE SIGN. A positive
+   count groups from the RIGHT -- `bytes(range(1, 8)).hex(":", 2)` is
+   `01:0203:0405:0607`, the leftover at the front -- and a negative one from
+   the LEFT. That is CPython's rule and it is not the obvious one: the
+   common use is a number written down, whose low end is the one that
+   matters. A count of zero, or one no smaller than the length, separates
+   nothing. */
+APY_API apy_value apy_bytes_hex_n(apy_value b, apy_value sep,
+                                  apy_value perv) {
     static const char *D = "0123456789abcdef";
-    int64_t n, i, out = 0;
+    int64_t n, i, out = 0, per = 1, group = 0;
     char *buf;
     char s = 0;
     /* A VIEW HEXES THE BYTES IT SHOWS, which is most of what a program
@@ -650,18 +658,61 @@ APY_API apy_value apy_bytes_hex(apy_value b, apy_value sep) {
         return apy_fail2("AttributeError",
                          "'%s' object has no attribute 'hex'%s",
                          apy_kind_name(b), "");
-    if (O(sep)->kind == APY_STR_K && O(sep)->v.s.n == 1) s = APY_CSTR(sep)[0];
+    /* A NULL SLOT IS ONE THE CALL DID NOT WRITE, and it is the only way to
+       tell `b.hex()` from `b.hex(None)` -- the first is the no-argument form
+       whose default this fills in, and the second is a separator CPython
+       refuses. The two spellings reach different symbols (`apy_hex_of` and
+       `apy_bytes_hex`), which is where the distinction is made.
+
+       THE COUNT IS CONVERTED FIRST, which is CPython's order: `b.hex(None,
+       None)` complains about the integer and `b.hex(None)` about the
+       separator's length. */
+    if (perv) {
+        if (O(perv)->kind != APY_INT_K && O(perv)->kind != APY_BIG_K
+                && O(perv)->kind != APY_BOOL_K)
+            return apy_fail2("TypeError",
+                             "'%s' object cannot be interpreted as an "
+                             "integer%s", apy_kind_name(perv), "");
+        per = apy_as_int(perv);
+        if (apy_error_occurred()) return 0;
+    }
+    if (sep) {
+        /* CPython ASKS THE SEPARATOR FOR ITS LENGTH, so anything without one
+           is a TypeError about `len` rather than about hex. */
+        if (O(sep)->kind != APY_STR_K && O(sep)->kind != APY_BYTES_K)
+            return apy_fail2("TypeError",
+                             "object of type '%s' has no len()%s",
+                             apy_kind_name(sep), "");
+        if (O(sep)->v.s.n != 1)
+            return apy_fail("ValueError", "sep must be length 1.");
+        s = APY_CSTR(sep)[0];
+    }
     n = O(b)->v.s.n;
+    if (per < 0) {
+        /* FROM THE LEFT, which is what a negative count means. */
+        group = -per;
+    } else if (per > 0) {
+        group = per;
+    }
     buf = (char *)malloc((size_t)(n * 3 + 2));
     if (!buf) { fputs("asmpython: out of memory\n", stderr); exit(1); }
     for (i = 0; i < n; i++) {
         unsigned char c = (unsigned char)O(b)->v.s.p[i];
-        if (s && i) buf[out++] = s;
+        if (s && i && group
+                && (per < 0 ? i % group == 0 : (n - i) % group == 0))
+            buf[out++] = s;
         buf[out++] = D[c >> 4];
         buf[out++] = D[c & 15];
     }
     buf[out] = 0;
     return apy_str_take(buf, out);
+}
+
+/* The one-separator form. ONE BYTE PER GROUP is the default CPython
+   declares, and the two spellings are one implementation. The count slot is
+   NULL because this call did not write one. */
+APY_API apy_value apy_bytes_hex(apy_value b, apy_value sep) {
+    return apy_bytes_hex_n(b, sep, 0);
 }
 
 /* `bytes.fromhex(text)` -- the inverse, ignoring ASCII spaces between pairs

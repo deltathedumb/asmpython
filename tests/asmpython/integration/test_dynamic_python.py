@@ -1919,6 +1919,133 @@ PROGRAMS = {
         print([type(getattr(view, n)).__name__ for n in
                ("hex", "count", "index", "__setitem__", "__delitem__")])
     """,
+    "a_wrong_argument_count_is_worded_by_its_receiver": """
+        # A WRONG NUMBER OF ARGUMENTS to a builtin method was reported with ONE wording
+        # where CPython has nine -- and sometimes not as a wrong count at all: a set's
+        # `pop` said the set had no such method, and a dict's said `KeyError: None`.
+        def show(label, f):
+            try:
+                print(label, "->", f())
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        # THE NINE WORDINGS, one example apiece. They disagree about every visible
+        # thing: whether the type qualifies the name, whether the parentheses are
+        # there, and whether the count is `exactly one` or `at most 3`.
+        show("qualified exact", lambda: [].append())
+        show("qualified none", lambda: (5).bit_count(1))
+        show("at most", lambda: "a".encode(1, 2, 3))
+        show("at most positional", lambda: (5).to_bytes(1, 2, 3))
+        show("at least positional", lambda: "a".replace("a"))
+        show("expected at least", lambda: "a".count())
+        show("expected at most", lambda: "a".lstrip(1, 2))
+        show("expected exactly", lambda: [].insert(1))
+        show("no positional", lambda: [].sort(None))
+
+        # THE SAME NAME WORDED BY THE RECEIVER. `list.count` takes exactly one and
+        # `str.count` takes a window, so one refusal names the type and the other
+        # does not -- a table keyed by name alone could not hold both.
+        show("list count", lambda: [1].count(1, 2))
+        show("str count", lambda: "a".count("a", 0, 1, 2))
+        show("str count window", lambda: "abcabc".count("a", 1, 6))
+        show("dict pop none", lambda: {}.pop())
+        show("set pop one", lambda: set().pop(1))
+        show("list pop two", lambda: [1].pop(0, 1))
+        show("float hex one", lambda: (1.5).hex(1))
+
+        # AND REACHED BY NAME, which is the same question asked the other way: the
+        # method value used to declare the widest arity any kind has.
+        show("by name append", lambda: getattr([], "append")())
+        show("by name count", lambda: getattr("abcabc", "count")("a", 1, 6))
+        show("by name pop", lambda: getattr({}, "pop")())
+        show("by name hex", lambda: getattr((1.5), "hex")(1))
+
+        # `bytes.hex` TAKES A GROUP SIZE, and which end it counts from is the SIGN.
+        show("hex grouped", lambda: bytes(range(1, 8)).hex(":", 2))
+        show("hex from the left", lambda: bytes(range(1, 8)).hex(":", -3))
+        show("hex wider than the whole", lambda: bytes(range(1, 8)).hex(":", 8))
+        show("hex bad separator", lambda: b"ab".hex(":::"))
+        show("hex no separator", lambda: b"ab".hex())
+
+        # THE SIX SET METHODS TAKE ANY NUMBER OF OTHERS, which no arity table can say.
+        s = {1, 2, 3}
+        show("union none", lambda: sorted(s.union()))
+        show("union two", lambda: sorted(s.union({4}, {5})))
+        show("intersection two", lambda: sorted(s.intersection({1, 2}, {2, 3})))
+        show("difference two", lambda: sorted(s.difference({1}, {2})))
+        show("union keeps the kind", lambda: type(frozenset({1}).union()).__name__)
+        show("union takes an iterable", lambda: sorted(s.union([9])))
+        show("union refuses keywords", lambda: s.union(x=1))
+        def updated(name, *others):
+            held = {1, 2, 3}
+            getattr(held, name)(*others)
+            return sorted(held)
+        show("update two", lambda: updated("update", {4}, {5}))
+        show("intersection_update two", lambda: updated("intersection_update", {1, 2}, {2, 3}))
+        show("difference_update two", lambda: updated("difference_update", {1}, {2}))
+    """,
+    "dir_lists_every_name_getattr_answers": """
+        # `dir(x)` OVER A BUILTIN ANSWERED AN EMPTY LIST, on every path: a builtin has no
+        # class chain to walk here, so `dir(5)`, `dir("")` and `dir({})` were all `[]`
+        # where CPython lists seventy to ninety names apiece.
+        vals = ["", b"", bytearray(), [], (), {}, set(), frozenset(), 5, 1.5,
+                range(3), 1j, True, None, memoryview(b"ab")]
+        for v in vals:
+            names = dir(v)
+            print(type(v).__name__, len(names), names[:2], names[-2:])
+
+        # A LIST THAT ADVERTISES A NAME `getattr` REFUSES would be worse than the empty
+        # one it replaces, so the two are held against each other here.
+        missing = []
+        for v in vals:
+            for n in dir(v):
+                try:
+                    getattr(v, n)
+                except Exception as e:
+                    missing.append((type(v).__name__, n, type(e).__name__))
+        print("refused:", missing)
+        # SORTED AND DEDUPLICATED, and `x.__dir__()` is the same question.
+        print([dir(v) == sorted(set(v.__dir__())) for v in vals])
+        # A BUILTIN TYPE IS THE SAME LIST AS A VALUE OF IT.
+        print(dir(str) == dir(""), dir(int) == dir(5), dir(dict) == dir({}))
+        # A USER CLASS STILL WALKS ITS OWN CHAIN, and `__dir__` still overrides it --
+        # sorted but NOT deduplicated, which is what CPython does with what it returned.
+        class Base:
+            def inherited(self): pass
+        class Sub(Base):
+            def mine(self): pass
+        print([n for n in dir(Sub()) if not n.startswith("_")])
+        print([n for n in dir(Sub) if not n.startswith("_")])
+        class Proxy:
+            def __dir__(self): return ["b", "a", "a"]
+        print(dir(Proxy()))
+    """,
+    "a_builtin_type_is_an_ordinary_value": """
+        # A BUILTIN TYPE IS AN ORDINARY VALUE, and `memoryview` was the last one that was
+        # not: naming it at all was `'memoryview' is a builtin that cannot be used as a
+        # value`, so its constructor, its subscript and its statics were all out of reach.
+        def show(label, f):
+            try:
+                print(label, f())
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        held = b"xy"
+        print(memoryview, memoryview.__name__, memoryview.__qualname__)
+        show("the written call", lambda: memoryview(held).tobytes())
+        show("by keyword", lambda: memoryview(object=held).tobytes())
+        show("through a name", lambda: (lambda f: f(held).tobytes())(memoryview))
+        show("through map", lambda: [m.tobytes() for m in map(memoryview, [held, b"ab"])])
+        show("out of a list", lambda: [memoryview][0](held).tobytes())
+        show("its type", lambda: type(memoryview(held)) is memoryview)
+        show("isinstance", lambda: isinstance(memoryview(held), memoryview))
+        show("a subscript of the type", lambda: memoryview[int])
+        show("the private constructor", lambda: memoryview._from_flags(held, 0).tobytes())
+        show("it on a value too", lambda: memoryview(held)._from_flags(held, 0).tobytes())
+        show("with nothing", lambda: memoryview())
+        show("with too much", lambda: memoryview(held, 1))
+        show("equal to itself", lambda: memoryview == memoryview)
+    """,
     "a_view_hands_its_buffer_back": """
         def show(label, f):
             try:

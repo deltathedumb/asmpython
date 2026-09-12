@@ -412,10 +412,15 @@ static apy_value apy_format_at(apy_value fmt, apy_value args, apy_value kw,
                     value = *auto_at < O(args)->v.q.n
                         ? O(args)->v.q.items[(*auto_at)++] : 0;
                     if (!value) {
+                        /* WHICH INDEX, which is the part a reader needs:
+                           `"{} {}".format(1)` names the 1 that is missing
+                           and not merely that one is. */
+                        char b[80];
+                        snprintf(b, sizeof b, "Replacement index %lld out of "
+                                 "range for positional args tuple",
+                                 (long long)*auto_at);
                         free(out);
-                        return apy_fail("IndexError",
-                                        "Replacement index out of range for "
-                                        "positional args tuple");
+                        return apy_fail("IndexError", b);
                     }
                 } else if (field[0] >= '0' && field[0] <= '9') {
                     int64_t at = 0, k;
@@ -430,10 +435,12 @@ static apy_value apy_format_at(apy_value fmt, apy_value args, apy_value kw,
                     for (k = 0; field[k] >= '0' && field[k] <= '9'; k++)
                         at = at * 10 + (field[k] - '0');
                     if (at >= O(args)->v.q.n) {
+                        char b[80];
+                        snprintf(b, sizeof b, "Replacement index %lld out of "
+                                 "range for positional args tuple",
+                                 (long long)at);
                         free(out);
-                        return apy_fail("IndexError",
-                                        "Replacement index out of range for "
-                                        "positional args tuple");
+                        return apy_fail("IndexError", b);
                     }
                     value = O(args)->v.q.items[at];
                 } else {

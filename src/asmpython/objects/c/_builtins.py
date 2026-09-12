@@ -454,6 +454,17 @@ APY_API apy_value apy_from_bytes_n(apy_value b, apy_value order) {
             O(b)->v.s.p[big ? i : n - 1 - i];
         acc = (acc << 8) | byte;
     }
+    /* PAST AN i64 IS A BIG INTEGER, not a negative one. Eight unsigned
+       bytes reach 1.8e19 and `int.from_bytes` is unsigned by default, so
+       casting the accumulator would answer -1 for the largest of them --
+       a wrong VALUE rather than a refusal. Through the decimal spelling,
+       because that is the one constructor a big integer has. */
+    if ((int64_t)acc < 0) {
+        char text[24];
+        int len = snprintf(text, sizeof text, "%llu",
+                           (unsigned long long)acc);
+        return apy_int_literal((apy_value)(uintptr_t)text, len, 0);
+    }
     return apy_from_int((int64_t)acc);
 }
 
