@@ -1715,6 +1715,27 @@ PROGRAMS = {
                (({1}, "difference_update"), ("", "format_map"),
                 (bytearray(), "resize"), (None, "__bool__"))])
     """,
+    "a_view_says_what_shape_its_buffer_is": """
+        # WHAT SHAPE A BUFFER IS, which a program asks before it indexes one:
+        # `m.ndim == 1` is the everyday check, and it was an AttributeError about
+        # the answer it wanted.
+        whole = memoryview(bytearray(b"abcd"))
+        print(whole.ndim, whole.shape, whole.strides, whole.suboffsets)
+        print(whole.c_contiguous, whole.f_contiguous, whole.contiguous)
+        # A SLICE WITH A STEP IS NOT CONTIGUOUS -- it skips bytes -- and its stride
+        # says by how many. Both orders agree for a single dimension, which is why
+        # C and Fortran answer alike.
+        stepped = whole[::2]
+        print(stepped.ndim, stepped.shape, stepped.strides)
+        print(stepped.c_contiguous, stepped.f_contiguous, stepped.contiguous)
+        print(stepped.nbytes, stepped.tolist())
+        part = whole[1:3]
+        print(part.shape, part.strides, part.contiguous, part.tolist())
+        # And over bytes, where the view cannot be written through.
+        frozen = memoryview(b"xy")
+        print(frozen.readonly, frozen.shape, frozen.strides, frozen.contiguous)
+        print(whole.readonly, whole.itemsize, whole.format)
+    """,
     "traceback_positions": """
         try:
             (1).missing

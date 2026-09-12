@@ -726,6 +726,31 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
         if (strcmp(want, "itemsize") == 0) return apy_from_int(1);
         if (strcmp(want, "format") == 0) return apy_lit("B");
         if (strcmp(want, "obj") == 0) return O(obj)->v.mv.src;
+        /* THE BUFFER'S SHAPE, which is one dimension here because every
+           source this runtime can wrap is flat. A program that asks is
+           usually checking exactly that -- `m.ndim == 1` before it indexes
+           -- and got an AttributeError about the answer it wanted. */
+        if (strcmp(want, "ndim") == 0) return apy_from_int(1);
+        if (strcmp(want, "shape") == 0 || strcmp(want, "strides") == 0) {
+            apy_value out = apy_tuple_new(2);
+            if (!out) return 0;
+            if (!apy_seq_push(out, apy_from_int(
+                    strcmp(want, "shape") == 0 ? O(obj)->v.mv.n
+                                               : O(obj)->v.mv.step)))
+                return 0;
+            return out;
+        }
+        /* EMPTY FOR A FLAT BUFFER, and CPython answers the empty tuple
+           rather than None for one. */
+        if (strcmp(want, "suboffsets") == 0) return apy_tuple_new(1);
+        /* A SLICE WITH A STEP IS NOT CONTIGUOUS: `m[::2]` skips bytes, so
+           the three flags are one question asked three ways. Both orders
+           agree for a single dimension, which is why C and Fortran answer
+           alike here. */
+        if (strcmp(want, "c_contiguous") == 0
+                || strcmp(want, "f_contiguous") == 0
+                || strcmp(want, "contiguous") == 0)
+            return apy_from_bool(O(obj)->v.mv.step == 1);
         return apy_no_attribute(obj, name);
     case APY_COMPLEX_K:
         if (strcmp(want, "real") == 0) return apy_from_float(O(obj)->v.z.re);

@@ -8410,7 +8410,14 @@ def _apy_default_getattr(h, a):
         # what a bytes-like source always has -- Python's own view reports the
         # same for the same reason, so these are read off it rather than
         # written out.
-        if name in ("readonly", "nbytes", "itemsize", "format", "obj"):
+        # THE BUFFER'S SHAPE joins them, because a program that asks is
+        # usually checking exactly that -- `m.ndim == 1` before it indexes --
+        # and a slice with a step is NOT contiguous, which is the one of
+        # these that is not constant. Both orders agree for a single
+        # dimension, which is why C and Fortran answer alike.
+        if name in ("readonly", "nbytes", "itemsize", "format", "obj",
+                    "ndim", "shape", "strides", "suboffsets",
+                    "c_contiguous", "f_contiguous", "contiguous"):
             return h._value(getattr(obj, name))
         # THE TWO WAYS A VIEW HANDS ITS CONTENTS OVER, and the reason a
         # program makes one at all: `mv.tobytes()` copies them out and
