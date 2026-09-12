@@ -271,6 +271,14 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
            frontend's own keys have for classes. */
         if (strcmp(want, "__qualname__") == 0)
             return apy_bare_name(O(obj)->v.t.name);
+        /* `C.__class__` IS THE METACLASS, which is `type` unless the class
+           named one. Every other kind answers this and a class did not, so
+           `C.__class__` was an AttributeError about a class that plainly has
+           one -- and `isinstance(x, C.__class__)` is how a program asks. */
+        if (strcmp(want, "__class__") == 0
+                && !apy_dict_get_or(O(obj)->v.t.dict, apy_name("__class__"),
+                                    0))
+            return apy_type_of(obj);
         /* PEP 649 for a CLASS: `C.__annotations__` is built on access by the
            thunk the body left in the dict, for the same reason a function's
            is -- an annotation may name something that does not exist yet. */

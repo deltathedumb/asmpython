@@ -1404,6 +1404,48 @@ PROGRAMS = {
         print("empty", "".encode("utf-8"), b"".decode("utf-8"))
         print("round", "caf\\u00e9".encode("utf-8").decode("utf-8"))
     """,
+    # `type(C) is type` WAS FALSE while `print(type(C))` said
+    # `<class 'type'>` -- the worst pair of answers to have, because the
+    # printed one says the identity question was already settled. There were
+    # THREE objects named `type`: the one the bare word evaluates to, one the
+    # name-keyed table built for a class, and one an attribute read built
+    # again. Which of them a program got depended on how it asked.
+    #
+    # A BUILTIN TYPE IS A CLASS TOO. The canonical thunk standing for one is
+    # a FUNC carrying `is_type` rather than a TYPE cell, so it fell past the
+    # class arm entirely and `type(int) is type` was False on every path.
+    #
+    # AND A CLASS HAS A `__class__`, which every other kind already answered:
+    # it was an AttributeError about the one attribute Python guarantees, and
+    # `isinstance(x, C.__class__)` is how a program asks.
+    "one_type_object_answers_every_way_of_asking": """
+        class C:
+            pass
+
+        class M(type):
+            pass
+
+        class D(metaclass=M):
+            pass
+
+        print("user", type(C) is type, C.__class__ is type)
+        print("builtin", type(int) is type, int.__class__ is type)
+        print("value", type(5).__class__ is type, type("").__class__ is type)
+        print("itself", type is type, type(type) is type)
+        print("metaclass", type(D) is M, D.__class__ is M, type(M) is type)
+        print("names", type(C).__name__, type(int).__name__,
+              C.__class__.__name__)
+        print("shown", type(C), type(int), C.__class__)
+        # ONE OBJECT, however it was reached -- which is what `is` asks and
+        # what `id` measures.
+        print("one", id(type(C)) == id(type), id(type(int)) == id(type),
+              id(C.__class__) == id(type(C)))
+        # AND THE QUESTIONS BUILT ON IT.
+        print("isinstance", isinstance(C, type), isinstance(int, type),
+              isinstance(5, int), isinstance(C(), C))
+        print("issubclass", issubclass(M, type), issubclass(C, object))
+        print("base", M.__base__ is type)
+    """,
     "traceback_positions": """
         try:
             (1).missing

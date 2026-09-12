@@ -1280,6 +1280,14 @@ class ObjectHost:
         if isinstance(v, Class) and v.meta is not None:
             return v.meta
         key = "type" if isinstance(v, Class) else self.kind_name(v)
+        if key == "type":
+            # THE ONE `type` OBJECT, which is also what the bare word
+            # evaluates to. A second one built here made `type(C) is type`
+            # False while `print(type(C))` said `<class 'type'>` -- the worst
+            # pair of answers to have. A builtin type reached as a value
+            # lands here too: its kind name is `type`, because that is what
+            # it is.
+            return self._get(_apy_type_class(self, ()), "apy_type_class")
         got = self._types.get(key)
         if got is None:
             got = self._types[key] = Class(key, None)
@@ -7998,6 +8006,15 @@ def _apy_default_getattr(h, a):
         # frontend's own keys have for classes.
         if name == "__qualname__":
             return h._new(obj.name)
+        # `C.__class__` IS THE METACLASS, which is `type` unless the class
+        # named one. Every other kind answers this and a class did not, so
+        # `C.__class__` was an AttributeError about a class that plainly has
+        # one -- and `isinstance(x, C.__class__)` is how a program asks.
+        if name == "__class__" and "__class__" not in obj.dict:
+            # `_value` AND NOT `_new`: identity has to survive the handle, so
+            # `C.__class__ is type` holds. A fresh handle for the same object
+            # answers False to `is`, which is the one question this is for.
+            return h._value(h._type_of(obj))
         # PEP 649 for a CLASS: `C.__annotations__` is built on access by the
         # thunk the body left in the dict, for the same reason a function's
         # is -- an annotation may name something that does not exist yet.

@@ -553,6 +553,14 @@ def apy_type_for(v: ptr) -> ptr:
         if meta:
             return meta
         return apy_type_class()
+    # A BUILTIN TYPE IS A CLASS TOO, and the canonical thunk standing for one
+    # is a FUNC carrying `is_type` rather than a TYPE cell. Without this it
+    # fell through to the name-keyed table below, which built a SECOND object
+    # named `type` -- so `type(int) is type` was False while `print(type(int))`
+    # said `<class 'type'>`, which is the worst pair of answers to have.
+    if k == apy_func_kind():
+        if load(i32, offset(v, apy_fn_is_type_offset())):
+            return apy_type_class()
     key: ptr = apy_kind_name_of(v)
     canon: ptr = apy_canonical_slot()
     held: ptr = ptr(load(u64, canon))

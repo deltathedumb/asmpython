@@ -2530,6 +2530,13 @@ APY_API apy_value apy_type_for(apy_value v) {
        metaclass recorded and reads as `type`, which is what it is. */
     if (O(v)->kind == APY_TYPE_K && O(v)->v.t.meta) return O(v)->v.t.meta;
     if (O(v)->kind == APY_TYPE_K) return apy_type_class();
+    /* A BUILTIN TYPE IS A CLASS TOO, and the canonical thunk standing for one
+       is a FUNC carrying `is_type` rather than a TYPE cell. Without this it
+       fell through to the name-keyed table below, which built a SECOND object
+       named `type` -- so `type(int) is type` was False while `print(type(int))`
+       said `<class 'type'>`, which is the worst pair of answers to have. */
+    if (O(v)->kind == APY_FUNC_K && O(v)->v.fn.is_type)
+        return apy_type_class();
     key = apy_kind_name(v);
     /* THE SAME OBJECT THE NAME ANSWERS, when the program names that builtin
        type anywhere -- so `type(1) is int` holds. The frontend registers each
