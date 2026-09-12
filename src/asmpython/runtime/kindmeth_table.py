@@ -276,7 +276,7 @@ def apy_kind_meth_arity_of(w: ptr, bit: i64) -> i64:
         return 0
     if apy_cstr_eq(w, rodata(b"sort\0")):
         if bit & 8:
-            return 256
+            return 770
         return 0
     if apy_cstr_eq(w, rodata(b"split\0")):
         if bit & 7:

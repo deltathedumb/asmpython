@@ -602,10 +602,23 @@ def apy_to_bytes_n(v: ptr, length: ptr, order: ptr, signed: ptr) -> ptr:
             rodata(b"'%s' object has no attribute "
                    b"'to_bytes'%s\0"),
             apy_kind_name_of(v), rodata(b"\0"))
+    # CPYTHON'S OWN TWO REFUSALS, which are not one: the LENGTH is named by
+    # the value that was handed over -- the wording every index-taking slot
+    # uses -- and the BYTEORDER by the parameter, the arg clinic's form.
     if not apy_is_int_like_of(length):
-        return apy_raise_at(
+        return apy_raise_fmt(
             rodata(b"TypeError\0"),
-            rodata(b"to_bytes() length must be an integer\0"))
+            rodata(b"'%s' object cannot be interpreted as an integer%s\0"),
+            apy_kind_name_of(length), rodata(b"\0"))
+    if i64(load(i32, offset(order, 0))) != apy_str_kind():
+        named: ptr = apy_kind_name_of(order)
+        if i64(load(i32, offset(order, 0))) == apy_none_kind():
+            named = rodata(b"None\0")
+        return apy_raise_fmt(
+            rodata(b"TypeError\0"),
+            rodata(b"to_bytes() argument 'byteorder' must be str, "
+                   b"not %s%s\0"),
+            named, rodata(b"\0"))
     n: i64 = apy_int_payload(length)
     if n < 0:
         return apy_raise_at(rodata(b"ValueError\0"),

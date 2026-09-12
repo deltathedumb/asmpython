@@ -6180,12 +6180,18 @@ class DynamicLowering:
             call_args = [receiver, extra]
         elif attr in ("encode", "decode"):
             # THREE PARAMETERS ALWAYS: the receiver, the encoding and the
-            # error handler. A call that named fewer is padded with None,
-            # which the runtime reads as "the default" for each.
+            # error handler.
+            #
+            # THE DEFAULTS THEMSELVES, NOT None. `"a".encode(None)` is a
+            # TypeError in Python and `"a".encode()` is `"a".encode("utf-8")`,
+            # and once a slot has been padded nothing downstream can tell an
+            # omission from a written value -- so the slot carries the
+            # default's own text and the runtime refuses a None. See
+            # `expandtabs`, which had the same bug.
             call_args = [receiver]
-            for i in range(2):
+            for i, filled in enumerate(("utf-8", "strict")):
                 call_args.append(args[i] if i < len(args)
-                                 else self.b.call(T.PTR, "apy_none", []))
+                                 else self._dyn_str_literal(filled))
         elif attr == "expandtabs" and not args:
             # THE DEFAULT ITSELF, NOT A SENTINEL. A tab width of None used to
             # stand for "not given", which made `s.expandtabs(None)` -- a

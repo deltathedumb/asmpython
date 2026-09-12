@@ -54,10 +54,19 @@ def apy_str_translate(s: ptr, table: ptr) -> ptr:
         return ptr(0)
     # A BYTES RECEIVER IS A DIFFERENT METHOD, mapping bytes through a
     # 256-byte table rather than code points through a dict. See the bytes
-    # family at the foot of this file; None is the delete set the
-    # one-argument form has.
+    # family at the foot of this file.
+    #
+    # AN EMPTY DELETE SET, NOT None. `b.translate(table)` deletes nothing and
+    # `b.translate(table, None)` is a TypeError -- the one-argument form
+    # reaches HERE and the two-argument one reaches `apy_bytes_translate`
+    # directly, which is the only thing that tells them apart. `b""` is the
+    # default CPython's own signature declares.
     if i64(load(i32, offset(s, 0))) == apy_bytes_kind():
-        return apy_bytes_translate(s, table, apy_none())
+        empty: ptr = apy_from_bytes(rodata(b"\0"), 0)
+        if not empty:
+            return empty
+        store(i32, i32(apy_bytes_kind()), offset(empty, 0))
+        return apy_bytes_translate(s, table, empty)
     if i64(load(i32, offset(table, 0))) != apy_dict_kind():
         return apy_raise_fmt(
             rodata(b"TypeError\0"),
@@ -237,16 +246,19 @@ def apy_bytes_translate(s: ptr, table: ptr, delete: ptr) -> ptr:
     while i < 256:
         store(u8, u8(0), offset(drop, i))
         i = i + 1
+    # NO None HERE. A delete set that was WRITTEN must be bytes-like --
+    # `b"abc".translate(None, None)` is `a bytes-like object is required, not
+    # 'NoneType'` in CPython -- and the one-argument form passes an empty one
+    # rather than a None.
     gone: ptr = apy_bytes_like_of(delete)
-    if i64(load(i32, offset(gone, 0))) != apy_none_kind():
-        if i64(load(i32, offset(gone, 0))) != apy_bytes_kind():
-            return apy_bytes_like_bad_of(gone)
-        dn: i64 = apy_str_byte_len(gone)
-        dp: ptr = apy_str_data(gone)
-        i = 0
-        while i < dn:
-            store(u8, u8(1), offset(drop, i64(load(u8, offset(dp, i)))))
-            i = i + 1
+    if i64(load(i32, offset(gone, 0))) != apy_bytes_kind():
+        return apy_bytes_like_bad_of(gone)
+    dn: i64 = apy_str_byte_len(gone)
+    dp: ptr = apy_str_data(gone)
+    i = 0
+    while i < dn:
+        store(u8, u8(1), offset(drop, i64(load(u8, offset(dp, i)))))
+        i = i + 1
     n: i64 = apy_str_byte_len(s)
     p: ptr = apy_str_data(s)
     buf: ptr = apy_alloc_bytes(n + 1)

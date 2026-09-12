@@ -452,6 +452,25 @@ static apy_value apy_format_at(apy_value fmt, apy_value args, apy_value kw,
                     memcpy(base, field, (size_t)n2);
                     base[n2] = 0;
                     key = apy_lit(base);
+                    /* CPYTHON SUBSCRIPTS RATHER THAN CHECKING, so a
+                       non-mapping is a complaint only once a field ASKS for
+                       a key: `"".format_map(None)` is `''` and
+                       `"{}".format_map(None)` is an IndexError about the
+                       positional args. These are the subscript's own two
+                       messages, which is why they name no method. */
+                    if (O(kw)->kind != APY_DICT_K) {
+                        free(out);
+                        return O(kw)->kind == APY_LIST_K
+                                   || O(kw)->kind == APY_TUPLE_K
+                               ? apy_fail2("TypeError",
+                                           "%s indices must be integers or "
+                                           "slices, not str%s",
+                                           apy_kind_name(kw), "")
+                               : apy_fail2("TypeError",
+                                           "'%s' object is not "
+                                           "subscriptable%s",
+                                           apy_kind_name(kw), "");
+                    }
                     at = apy_dict_find(kw, key);
                     if (at < 0) {
                         free(out);
@@ -775,15 +794,10 @@ APY_API apy_value apy_str_format_map(apy_value fmt, apy_value mapping) {
         return apy_fail2("AttributeError",
                          "'%s' object has no attribute 'format_map'%s",
                          apy_kind_name(fmt), "");
-    if (O(mapping)->kind != APY_DICT_K)
-        /* CPython does not check: it SUBSCRIPTS, and whatever that refuses
-           is what a program sees. These are those two messages. */
-        return O(mapping)->kind == APY_LIST_K
-                   || O(mapping)->kind == APY_TUPLE_K
-               ? apy_fail2("TypeError", "%s indices must be integers or "
-                           "slices, not str%s", apy_kind_name(mapping), "")
-               : apy_fail2("TypeError", "'%s' object is not subscriptable%s",
-                           apy_kind_name(mapping), "");
+    /* NO CHECK HERE. CPython SUBSCRIPTS the mapping, and only once a field
+       asks it for a key -- so `"".format_map(None)` is `''` rather than a
+       complaint about None. `apy_format_at` makes it where the subscript
+       would have been. */
     empty = apy_list_new(1);
     if (!empty) return 0;
     return apy_str_format(fmt, empty, mapping);

@@ -3021,12 +3021,26 @@ APY_API apy_value apy_call_spread(apy_value f, apy_value args) {
    Used to flatten a starred argument into the list a spread call builds. */
 APY_API apy_value apy_extend(apy_value seq, apy_value other) {
     int64_t i;
+    int into_bytes = O(seq)->kind == APY_BYTES_K && O(seq)->v.s.mut;
+    apy_value raw = other;
+    /* A STR IS ITERABLE AND ITS ELEMENTS ARE NOT INTEGERS, which CPython
+       says in its own words: `expected iterable of integers; got: 'str'`.
+       That is NOT `can't extend bytearray with str`, which is what it says
+       for something it cannot walk at all. */
+    if (into_bytes && O(other)->kind == APY_STR_K)
+        return apy_fail2("TypeError",
+                         "expected iterable of integers; got: '%s'%s",
+                         apy_kind_name(other), "");
     /* BYTES ON THE END OF A BYTEARRAY -- the other half of what
        `apy_seq_push` gained, and missing for the same reason. Handled
        before `apy_iterable` because a `bytes` argument is the common case
        and walking it element by element would push ints through the same
-       one-byte reallocation each time. */
-    if (O(seq)->kind == APY_BYTES_K && O(seq)->v.s.mut) {
+       one-byte reallocation each time.
+       ONLY FOR SOMETHING THAT REALLY IS BYTES-LIKE: `apy_to_bytes` accepts
+       an INT and makes that many zero bytes, which is `bytes(5)` and not
+       what `extend(5)` means -- CPython refuses it as unwalkable. */
+    if (into_bytes && (O(other)->kind == APY_BYTES_K
+                       || O(other)->kind == APY_MVIEW_K)) {
         apy_value add = apy_to_bytes(other);
         int64_t n, m;
         char *buf;
@@ -3049,7 +3063,18 @@ APY_API apy_value apy_extend(apy_value seq, apy_value other) {
        user object with `__iter__` -- so `[*gen]` and `f(*gen)` work. Both
        walks below are by index and neither can step a cursor. */
     other = apy_iterable(other);
-    if (!other) return 0;
+    if (!other) {
+        /* A BYTEARRAY NAMES WHAT IT COULD NOT WALK rather than passing on
+           the iteration's own complaint: `bytearray().extend(None)` is
+           `can't extend bytearray with NoneType`. */
+        if (into_bytes) {
+            apy_error_clear();
+            return apy_fail2("TypeError",
+                             "can't extend bytearray with %s%s",
+                             apy_kind_name(raw), "");
+        }
+        return 0;
+    }
     if (O(other)->kind == APY_STR_K || O(other)->kind == APY_BYTES_K
         || O(other)->kind == APY_DICT_K || O(other)->kind == APY_RANGE_K) {
         int64_t n = apy_raw_len(other);
@@ -3062,9 +3087,14 @@ APY_API apy_value apy_extend(apy_value seq, apy_value other) {
         }
         return apy_none();
     }
-    if (!apy_is_seq(other) && !apy_is_set(other))
+    if (!apy_is_seq(other) && !apy_is_set(other)) {
+        if (into_bytes)
+            return apy_fail2("TypeError",
+                             "can't extend bytearray with %s%s",
+                             apy_kind_name(raw), "");
         return apy_fail2("TypeError", "'%s' object is not iterable%s",
                          apy_kind_name(other), "");
+    }
     for (i = 0; i < O(other)->v.q.n; i++)
         apy_seq_push(seq, O(other)->v.q.items[i]);
     return apy_none();

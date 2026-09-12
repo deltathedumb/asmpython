@@ -19,6 +19,10 @@ enum { APY_ENC_UTF8 = 0, APY_ENC_ASCII, APY_ENC_LATIN1,
        APY_ENC_UTF16, APY_ENC_UTF16LE, APY_ENC_UTF16BE,
        APY_ENC_UTF32, APY_ENC_UTF32LE, APY_ENC_UTF32BE, APY_ENC_UNKNOWN };
 
+/* Defined below, beside `apy_codec_arg`, which it is the strict half of. */
+static apy_value apy_codec_given(const char *who, const char *slot,
+                                 apy_value v);
+
 static int apy_codec_of(apy_value name) {
     char buf[32];
     int64_t i, n;
@@ -268,6 +272,8 @@ APY_API apy_value apy_str_encode(apy_value s, apy_value encoding,
         return apy_fail2("AttributeError",
                          "'%s' object has no attribute 'encode'%s",
                          apy_kind_name(s), "");
+    if (apy_codec_given("encode", "encoding", encoding)) return 0;
+    if (apy_codec_given("encode", "errors", errors)) return 0;
     codec = apy_codec_of(encoding);
     handler = apy_errors_of(errors);
     if (codec == APY_ENC_UNKNOWN)
@@ -441,11 +447,16 @@ APY_API apy_value apy_bytes_decode(apy_value b, apy_value encoding,
     const unsigned char *p;
     int64_t n, i, at = 0;
     char *buf;
-    if (O(b)->kind == APY_MVIEW_K) b = apy_mview_bytes(b);
+    /* A VIEW IS NOT A RECEIVER FOR THIS. `memoryview(b"a").decode()` is an
+       AttributeError in CPython -- a view has no `decode` -- and converting
+       one here answered the text instead. The CONSTRUCTOR spelling does
+       take a view, and `apy_str_ctor` converts it before calling. */
     if (O(b)->kind != APY_BYTES_K)
         return apy_fail2("AttributeError",
                          "'%s' object has no attribute 'decode'%s",
                          apy_kind_name(b), "");
+    if (apy_codec_given("decode", "encoding", encoding)) return 0;
+    if (apy_codec_given("decode", "errors", errors)) return 0;
     codec = apy_codec_of(encoding);
     handler = apy_errors_of(errors);
     if (codec == APY_ENC_UNKNOWN)
@@ -584,6 +595,26 @@ static apy_value apy_codec_arg(const char *who, const char *slot,
     return apy_fail("TypeError", buf);
 }
 
+/* THE SAME, WHERE NONE IS NOT A DEFAULT EITHER. `"a".encode(None)` is a
+   TypeError in CPython and `"a".encode()` is `"a".encode("utf-8")` -- the
+   two are told apart by the lowering, which pads a slot the call left out
+   with the DEFAULT'S OWN TEXT rather than with None. The constructors are
+   the exception and keep `apy_codec_arg`: a None encoding there means the
+   slot was never written, which is `encoding without a string argument`
+   and not a bad encoding.
+
+   `not None` AND NOT `not NoneType`, because the arg clinic writes the
+   VALUE for these two and the type for everything else. */
+static apy_value apy_codec_given(const char *who, const char *slot,
+                                 apy_value v) {
+    char buf[160];
+    if (O(v)->kind == APY_STR_K) return 0;
+    snprintf(buf, sizeof buf, "%s() argument '%s' must be str, not %s",
+             who, slot,
+             O(v)->kind == APY_NONE_K ? "None" : apy_kind_name(v));
+    return apy_fail("TypeError", buf);
+}
+
 /* `bytes(s, encoding)` and `bytearray(s, encoding, errors)` -- THE
    CONSTRUCTOR SPELLING OF `.encode()`, and a different constructor from the
    one-argument form beside it: `bytes(xs)` is a sequence of octets and
@@ -602,6 +633,12 @@ APY_API apy_value apy_bytes_ctor(apy_value v, apy_value encoding,
     if (apy_codec_arg(who, "errors", errors)) return 0;
     if (O(v)->kind != APY_STR_K)
         return apy_fail("TypeError", "encoding without a string argument");
+    /* A NONE SLOT IS ONE THE CALL NEVER WROTE, which is the constructor's
+       own reading of it -- so the default is filled in HERE rather than
+       accepted by `apy_str_encode`, which refuses a None the way CPython
+       does for the method spelling. */
+    if (O(encoding)->kind == APY_NONE_K) encoding = apy_lit("utf-8");
+    if (O(errors)->kind == APY_NONE_K) errors = apy_lit("strict");
     made = apy_str_encode(v, encoding, errors);
     if (!made) return 0;
     if (mut) {
@@ -628,6 +665,16 @@ APY_API apy_value apy_str_ctor(apy_value v, apy_value encoding,
         return apy_fail2("TypeError",
                          "decoding to str: need a bytes-like object, %s "
                          "found%s", apy_kind_name(v), "");
+    /* The same, and for the same reason -- see `apy_bytes_ctor`. */
+    if (O(encoding)->kind == APY_NONE_K) encoding = apy_lit("utf-8");
+    if (O(errors)->kind == APY_NONE_K) errors = apy_lit("strict");
+    /* A VIEW IS A BYTES-LIKE OBJECT HERE, which `decode` itself no longer
+       accepts as a receiver: `str(memoryview(b"a"), "utf-8")` is text and
+       `memoryview(b"a").decode()` is an AttributeError. */
+    if (O(v)->kind == APY_MVIEW_K) {
+        v = apy_mview_bytes(v);
+        if (!v) return 0;
+    }
     return apy_bytes_decode(v, encoding, errors);
 }
 
@@ -851,8 +898,20 @@ APY_API apy_value apy_to_bytes_n(apy_value v, apy_value length,
         return apy_fail2("AttributeError",
                          "'%s' object has no attribute 'to_bytes'%s",
                          apy_kind_name(v), "");
+    /* CPYTHON'S OWN TWO REFUSALS, which are not one: the LENGTH is named by
+       the value that was handed over -- `'NoneType' object cannot be
+       interpreted as an integer`, the wording every index-taking slot uses
+       -- and the BYTEORDER by the parameter, the arg clinic's form. */
     if (!apy_is_int_like(length))
-        return apy_fail("TypeError", "to_bytes() length must be an integer");
+        return apy_fail2("TypeError",
+                         "'%s' object cannot be interpreted as an integer%s",
+                         apy_kind_name(length), "");
+    if (O(order)->kind != APY_STR_K)
+        return apy_fail2("TypeError",
+                         "to_bytes() argument 'byteorder' must be str, not "
+                         "%s%s",
+                         O(order)->kind == APY_NONE_K
+                             ? "None" : apy_kind_name(order), "");
     n = O(length)->v.i;
     if (n < 0)
         return apy_fail("ValueError", "length argument must be non-negative");

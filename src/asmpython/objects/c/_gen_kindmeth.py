@@ -179,7 +179,14 @@ def call_shape(name, sym, argc) -> str:
             return f"{sym}(a[0], apy_none(), 0)"
         return f"{sym}(a[0], a[1], 1)"
     if name in ("encode", "decode"):
-        args = ", ".join(["a[0]"] + [f"a[{i + 1}]" if i < argc else "apy_none()"
+        # THE DEFAULTS THEMSELVES, NOT None. `"a".encode(None)` is a
+        # TypeError in CPython and `"a".encode()` is `"a".encode("utf-8")`,
+        # and once a slot has been padded nothing downstream can tell an
+        # omission from a written value -- so the slot carries the default's
+        # own text and the runtime refuses a None. The lowering pads the
+        # written spelling the same way.
+        pad = ['apy_lit("utf-8")', 'apy_lit("strict")']
+        args = ", ".join(["a[0]"] + [f"a[{i + 1}]" if i < argc else pad[i]
                                      for i in range(2)])
         return f"{sym}({args})"
     if name in ("hex", "expandtabs") and argc == 0:
@@ -188,7 +195,13 @@ def call_shape(name, sym, argc) -> str:
     if name in ("get", "setdefault") and argc == 1:
         return f"{sym}(a[0], a[1], apy_none())"
     if name == "sort":
-        return f"{sym}(a[0], apy_none(), apy_from_bool(0))"
+        # PADDED FROM THE DEFAULTS, so the no-argument form and the folded
+        # two-keyword form reach one entry point -- the same arrangement
+        # `to_bytes` has below.
+        pad = ["apy_none()", "apy_from_bool(0)"]
+        args = ["a[0]"] + [f"a[{i + 1}]" if i < argc else pad[i]
+                           for i in range(2)]
+        return f"{sym}({', '.join(args)})"
     if name == "update" and argc == 0:
         return f"{sym}(a[0], apy_dict_new(1))"
     if name == "to_bytes":

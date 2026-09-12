@@ -198,6 +198,31 @@ APY_API apy_value apy_index_of(apy_value seq, apy_value item) {
 static apy_value apy_index_bounded(apy_value seq, apy_value item,
                                    apy_value start, apy_value end) {
     int64_t i, n, lo = 0, hi;
+    /* A VIEW IS A SEQUENCE OF NUMBERS -- the same element walk
+       `apy_index_of` makes, with the window applied. Without this arm a
+       bounded search on one was `'memoryview' object has no attribute
+       'index'`, about a method a view plainly has. */
+    if (O(seq)->kind == APY_MVIEW_K) {
+        apy_value held = apy_mview_bytes(seq);
+        int64_t m, low = 0, high;
+        if (!held) return 0;
+        m = O(held)->v.s.n;
+        high = m;
+        if ((start && !apy_is_int_like(start) && O(start)->kind != APY_INST_K)
+                || (end && !apy_is_int_like(end)
+                    && O(end)->kind != APY_INST_K))
+            return apy_fail("TypeError", "slice indices must be integers or "
+                                         "have an __index__ method");
+        if (start && !apy_slice_arg(start, &low)) return 0;
+        if (end && !apy_slice_arg(end, &high)) return 0;
+        apy_clamp_range(m, &low, &high);
+        for (i = low; i < high; i++) {
+            apy_value one = apy_from_int(
+                (int64_t)(unsigned char)O(held)->v.s.p[i]);
+            if (apy_eq_raw(one, item)) return apy_from_int(i);
+        }
+        return apy_fail("ValueError", "memoryview.index(x): x not found");
+    }
     /* A str or bytes receiver means SUBSTRING, exactly as at one argument --
        the element loop below would answer for a one-character needle and
        silently wrongly for any longer one. */

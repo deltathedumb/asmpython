@@ -1919,6 +1919,117 @@ PROGRAMS = {
         print([type(getattr(view, n)).__name__ for n in
                ("hex", "count", "index", "__setitem__", "__delitem__")])
     """,
+    "an_argument_of_the_wrong_type_is_worded_by_cpython": """
+        # A BUILTIN METHOD'S ARGUMENT-TYPE REFUSALS were worded differently from
+        # CPython's in seven places, and three of them were not refusals at all: a None
+        # encoding was read as "the default", a None delete set as "delete nothing", and
+        # a view's bounded `index` said the view had no such method.
+        def show(label, f):
+            try:
+                print(label, "->", repr(f()))
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        # A CODEC ARGUMENT IS NAMED, and None is not a default once it is WRITTEN: the
+        # lowering pads a slot the call left out with the default's own text, so the
+        # two can be told apart at all.
+        show("encode", lambda: "a".encode())
+        show("encode named", lambda: "a".encode("utf-8", "strict"))
+        show("encode None", lambda: "a".encode(None))
+        show("encode errors None", lambda: "a".encode("utf-8", None))
+        show("encode int", lambda: "a".encode(5))
+        show("encode by keyword", lambda: "a".encode(encoding=None))
+        show("decode None", lambda: b"a".decode(None))
+        show("bytearray decode None", lambda: bytearray(b"a").decode(None))
+        show("a view has no decode", lambda: memoryview(b"a").decode())
+        show("the constructor still defaults", lambda: bytes("a", "utf-8"))
+        show("and so does str's", lambda: str(memoryview(b"a"), "utf-8"))
+
+        # A BYTEARRAY NAMES WHAT IT COULD NOT WALK, and a str is walkable while its
+        # elements are not integers -- which CPython says in different words again.
+        show("extend None", lambda: bytearray(b"a").extend(None))
+        show("extend int", lambda: bytearray(b"a").extend(5))
+        show("extend str", lambda: bytearray(b"a").extend("ab"))
+        show("extend bytes", lambda: (lambda t: (t.extend(b"bc"), bytes(t))[1])(bytearray(b"a")))
+        show("extend ints", lambda: (lambda t: (t.extend([1, 2]), bytes(t))[1])(bytearray(b"a")))
+        show("a list still says iterable", lambda: [].extend(None))
+
+        # `format_map` SUBSCRIPTS RATHER THAN CHECKING, and only once a field asks it
+        # for a key -- so a string with no field never touches the mapping at all.
+        show("no field", lambda: "".format_map(None))
+        show("no field but text", lambda: "a".format_map(None))
+        show("a field", lambda: "{a}".format_map(None))
+        show("a field and a list", lambda: "{a}".format_map([]))
+        show("a field and a mapping", lambda: "{a}".format_map({"a": 1}))
+
+        # A SEQUENCE'S BOUNDED `index` TAKES NO None, where a string's does -- and a
+        # view is one of the sequences.
+        show("view index", lambda: memoryview(b"abc").index(98))
+        show("view index window", lambda: memoryview(b"abcb").index(98, 2, 4))
+        show("view index None", lambda: memoryview(b"ab").index(97, None, None))
+        show("view index missing", lambda: memoryview(b"ab").index(99))
+        show("list index None", lambda: [1, 2].index(2, None, None))
+        show("str index None", lambda: "ab".index("b", None, None))
+        show("bytes index None", lambda: b"ab".index(b"b", None, None))
+
+        # THE TWO PARTITION REFUSALS, which differ by RECEIVER: a bytes one quotes the
+        # type and a str one does not.
+        show("bytes partition", lambda: b"ab".partition(None))
+        show("bytearray partition", lambda: bytearray(b"ab").partition(None))
+        show("str partition", lambda: "ab".partition(None))
+        show("bytes rpartition", lambda: b"ab".rpartition(None))
+
+        # `to_bytes` NAMES ITS LENGTH BY THE VALUE and its byteorder by the parameter.
+        show("to_bytes None", lambda: (5).to_bytes(None))
+        show("to_bytes str", lambda: (5).to_bytes("x"))
+        show("to_bytes order None", lambda: (5).to_bytes(2, None))
+        show("to_bytes ok", lambda: (258).to_bytes(2, "little"))
+
+        # A DELETE SET THAT WAS WRITTEN must be bytes-like; the one-argument form
+        # passes an empty one rather than a None.
+        show("translate table only", lambda: b"abc".translate(None))
+        show("translate delete", lambda: b"abc".translate(None, b"b"))
+        show("translate delete None", lambda: b"abc".translate(None, None))
+        show("str translate None", lambda: "abc".translate(None))
+    """,
+    "a_sort_reached_by_name_still_takes_its_keywords": """
+        # `list.sort`'s KEYWORDS WERE REFUSED when the method was reached by name.
+        # `getattr(xs, "sort")(reverse=True)` was `list.sort() takes no keyword
+        # arguments` for a call CPython sorts: the written form has a branch of its own
+        # -- `key` and `reverse` travel as VALUES so the key runs once per element --
+        # and the by-name spelling had no signature to match a name against.
+        def show(label, f):
+            try:
+                print(label, "->", repr(f()))
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        def mk():
+            return ["bb", "a", "ccc"]
+
+        def sorted_by(**named):
+            held = mk()
+            getattr(held, "sort")(**named) if False else held.sort(**named)
+            return held
+
+        show("written plain", lambda: (lambda xs: (xs.sort(), xs)[1])(mk()))
+        show("written reverse", lambda: (lambda xs: (xs.sort(reverse=True), xs)[1])(mk()))
+        show("written key", lambda: (lambda xs: (xs.sort(key=len), xs)[1])(mk()))
+        show("written both", lambda: (lambda xs: (xs.sort(key=len, reverse=True), xs)[1])(mk()))
+        show("by name plain", lambda: getattr(mk(), "sort")())
+        show("by name reverse", lambda: (lambda xs: (getattr(xs, "sort")(reverse=True), xs)[1])(mk()))
+        show("by name key", lambda: (lambda xs: (getattr(xs, "sort")(key=len), xs)[1])(mk()))
+        show("by name both",
+             lambda: (lambda xs: (getattr(xs, "sort")(key=len, reverse=True), xs)[1])(mk()))
+        show("by name unknown", lambda: getattr(mk(), "sort")(nope=1))
+        # A POSITIONAL IS STILL REFUSED, by the arity gate rather than by a signature:
+        # both parameters are keyword-only.
+        show("written positional", lambda: mk().sort(None))
+        show("by name positional", lambda: getattr(mk(), "sort")(None))
+        # AND THE METHOD VALUE IS STILL A BUILTIN METHOD of the right owner.
+        show("its type", lambda: type(getattr(mk(), "sort")).__name__)
+        show("a tuple has none", lambda: ().sort())
+    """,
     "a_wrong_argument_count_is_worded_by_its_receiver": """
         # A WRONG NUMBER OF ARGUMENTS to a builtin method was reported with ONE wording
         # where CPython has nine -- and sometimes not as a wrong count at all: a set's

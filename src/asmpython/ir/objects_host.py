@@ -4134,6 +4134,10 @@ def _apy_str_encode(h, a):
     if not isinstance(v, str):
         return h._fail("AttributeError", f"'{h.kind_name(v)}' object has no "
                                          f"attribute 'encode'")
+    if _codec_given(h, "encode", "encoding", a[1]):
+        return 0
+    if _codec_given(h, "encode", "errors", a[2]):
+        return 0
     name, handler = _codec_args(h, a, "apy_str_encode")
     if name is None:
         return h._fail("LookupError",
@@ -4164,6 +4168,35 @@ def _codec_arg(h, who, slot, handle):
     return 1
 
 
+def _codec_or(h, handle, filled: str):
+    """The handle, or one holding `filled` where the slot holds None -- the
+    constructor's reading of a slot the call never wrote."""
+    if handle and h._get(handle, "apy_codec_arg") is not None:
+        return handle
+    return h._new(filled)
+
+
+def _codec_given(h, who, slot, handle):
+    """The same, WHERE NONE IS NOT A DEFAULT EITHER.
+
+    `"a".encode(None)` is a TypeError in CPython and `"a".encode()` is
+    `"a".encode("utf-8")` -- the two are told apart by the lowering, which
+    pads a slot the call left out with the DEFAULT'S OWN TEXT rather than
+    with None. The constructors are the exception and keep `_codec_arg`: a
+    None encoding there means the slot was never written.
+
+    `not None` AND NOT `not NoneType`, because the arg clinic writes the
+    VALUE for these two and the type for everything else.
+    """
+    v = h._get(handle, "apy_codec_arg") if handle else None
+    if isinstance(v, str):
+        return 0
+    h._fail("TypeError",
+            f"{who}() argument {slot!r} must be str, "
+            f"not {'None' if v is None else h.kind_name(v)}")
+    return 1
+
+
 def _apy_bytes_ctor(h, a):
     """`bytes(s, encoding)` and `bytearray(s, encoding, errors)` -- THE
     CONSTRUCTOR SPELLING OF `.encode()`, and a different constructor from the
@@ -4181,7 +4214,12 @@ def _apy_bytes_ctor(h, a):
     v = h._get(a[0], "apy_bytes_ctor")
     if not isinstance(v, str):
         return h._fail("TypeError", "encoding without a string argument")
-    made = _apy_str_encode(h, [a[0], a[1], a[2]])
+    # A NONE SLOT IS ONE THE CALL NEVER WROTE, which is the constructor's own
+    # reading of it -- so the default is filled in HERE rather than accepted
+    # by `encode`, which refuses a None the way CPython does for the method
+    # spelling.
+    made = _apy_str_encode(h, [a[0], _codec_or(h, a[1], "utf-8"),
+                               _codec_or(h, a[2], "strict")])
     if not made:
         return 0
     if int(a[3]):
@@ -4201,16 +4239,27 @@ def _apy_str_ctor(h, a):
     if not isinstance(v, (bytes, bytearray, memoryview)):
         return h._fail("TypeError", f"decoding to str: need a bytes-like "
                                     f"object, {h.kind_name(v)} found")
-    return _apy_bytes_decode(h, [a[0], a[1], a[2]])
+    # The same, and for the same reason -- see `_apy_bytes_ctor`. A VIEW IS A
+    # BYTES-LIKE OBJECT HERE, which `decode` itself no longer accepts as a
+    # receiver.
+    held = h._new(bytes(v)) if isinstance(v, memoryview) else a[0]
+    return _apy_bytes_decode(h, [held, _codec_or(h, a[1], "utf-8"),
+                                 _codec_or(h, a[2], "strict")])
 
 
 def _apy_bytes_decode(h, a):
     v = h._get(a[0], "apy_bytes_decode")
-    if isinstance(v, memoryview):
-        v = bytes(v)
+    # A VIEW IS NOT A RECEIVER FOR THIS. `memoryview(b"a").decode()` is an
+    # AttributeError in CPython -- a view has no `decode` -- and converting
+    # one here answered the text instead. The CONSTRUCTOR spelling does take
+    # a view, and `_apy_str_ctor` converts it before calling.
     if not isinstance(v, (bytes, bytearray)):
         return h._fail("AttributeError", f"'{h.kind_name(v)}' object has no "
                                          f"attribute 'decode'")
+    if _codec_given(h, "decode", "encoding", a[1]):
+        return 0
+    if _codec_given(h, "decode", "errors", a[2]):
+        return 0
     name, handler = _codec_args(h, a, "apy_bytes_decode")
     if name is None:
         return h._fail("LookupError",
@@ -4359,8 +4408,16 @@ def _apy_to_bytes_n(h, a):
     if not _is_int_like(v):
         return h._fail("AttributeError", f"'{h.kind_name(v)}' object has no "
                                          f"attribute 'to_bytes'")
+    # CPYTHON'S OWN TWO REFUSALS, which are not one: the LENGTH is named by
+    # the value that was handed over -- the wording every index-taking slot
+    # uses -- and the BYTEORDER by the parameter, the arg clinic's form.
     if not _is_int_like(length):
-        return h._fail("TypeError", "to_bytes() length must be an integer")
+        return h._fail("TypeError", f"'{h.kind_name(length)}' object cannot "
+                                    f"be interpreted as an integer")
+    if not isinstance(order, str):
+        return h._fail("TypeError",
+                       f"to_bytes() argument 'byteorder' must be str, not "
+                       f"{'None' if order is None else h.kind_name(order)}")
     try:
         return h._new(int(v).to_bytes(
             int(length), "little" if order == "little" else "big",
@@ -4850,10 +4907,15 @@ def _apy_str_translate(h, a):
     s = h._get(a[0], "apy_str_translate")
     table = h._get(a[1], "apy_str_translate")
     # A BYTES RECEIVER IS A DIFFERENT METHOD -- bytes through a 256-byte
-    # table, not code points through a dict. None is the delete set the
-    # one-argument form has.
+    # table, not code points through a dict.
+    #
+    # AN EMPTY DELETE SET, NOT None. `b.translate(table)` deletes nothing and
+    # `b.translate(table, None)` is a TypeError -- the one-argument form
+    # reaches HERE and the two-argument one reaches `_apy_bytes_translate`
+    # directly, which is the only thing that tells them apart. `b""` is the
+    # default CPython's own signature declares.
     if isinstance(s, (bytes, bytearray)):
-        return _apy_bytes_translate(h, [a[0], a[1], h._none])
+        return _apy_bytes_translate(h, [a[0], a[1], h._new(b"")])
     if not isinstance(s, str):
         return h._fail("AttributeError", f"'{h.kind_name(s)}' object has no "
                                          f"attribute 'translate'")
@@ -4932,10 +4994,14 @@ def _apy_bytes_translate(h, a):
     if table is not None and len(table) != 256:
         return h._fail("ValueError",
                        "translation table must be 256 characters long")
-    if drop is not None and not isinstance(drop, _BYTES_LIKE):
+    # NO None HERE. A delete set that was WRITTEN must be bytes-like --
+    # `b"abc".translate(None, None)` is `a bytes-like object is required, not
+    # 'NoneType'` in CPython -- and the one-argument form passes an empty one
+    # rather than a None.
+    if not isinstance(drop, _BYTES_LIKE):
         return _bytes_like_bad(h, drop)
     out = bytes(s).translate(None if table is None else bytes(table),
-                             b"" if drop is None else bytes(drop))
+                             bytes(drop))
     return h._new(bytearray(out) if isinstance(s, bytearray) else out)
 
 
@@ -7376,13 +7442,23 @@ def _table_shape(h, name: str, held, args):
     if name == "pop" and argc < 2:
         return [held, args[0] if args else h._none, 1 if args else 0]
     if name in ("encode", "decode"):
-        return [held] + [args[i] if i < argc else h._none for i in range(2)]
+        # THE DEFAULTS THEMSELVES, NOT None -- see `_dyn_builtin_method`,
+        # which pads the written spelling the same way, and `_codec_given`,
+        # which refuses a None once a slot really can only hold one the
+        # program wrote.
+        pad = [h._new("utf-8"), h._new("strict")]
+        return [held] + [args[i] if i < argc else pad[i] for i in range(2)]
     if name in ("hex", "expandtabs") and argc == 0:
-        return [held, h._int(8) if name == "expandtabs" else h._none]
+        # `hex` WITH NOTHING has an EMPTY separator slot, which is how the
+        # no-argument form is told from `b.hex(None)` -- see `_apy_hex_of`.
+        return [held, h._int(8) if name == "expandtabs" else 0]
     if name in ("get", "setdefault") and argc == 1:
         return [held, args[0], h._none]
     if name == "sort":
-        return [held, h._none, h._new(False)]
+        # PADDED FROM THE DEFAULTS, so the no-argument form and the folded
+        # two-keyword form reach one entry point.
+        pad = [h._none, h._new(False)]
+        return [held] + [args[i] if i < argc else pad[i] for i in range(2)]
     if name == "update" and argc == 0:
         return [held, h._new({})]
     if name == "to_bytes":
@@ -10904,9 +10980,20 @@ def _index_bounded(h, a, has_end):
     item = h._get(a[1], "apy_index_of")
     lo = h._get(a[2], "apy_index_of")
     hi = h._get(a[3], "apy_index_of") if has_end else None
-    if not isinstance(seq, (str, bytes, bytearray, list, tuple)):
+    if not isinstance(seq, (str, bytes, bytearray, list, tuple, memoryview)):
         return h._fail("AttributeError",
                        f"'{h.kind_name(seq)}' object has no attribute 'index'")
+    # A SEQUENCE'S `index` TAKES NO None AT ALL, where a string's does --
+    # CPython leaves the `or None` out of this one, and it is the only thing
+    # that tells the two messages apart. A VIEW is one of the sequences.
+    if not isinstance(seq, (str, bytes, bytearray)):
+        # NONE IS NOT A BOUND HERE. `hi` is absent rather than None when the
+        # call wrote no third argument, which is what `has_end` says.
+        for bound in ((lo, hi) if has_end else (lo,)):
+            if not _is_int_like(bound):
+                return h._fail("TypeError",
+                               "slice indices must be integers or have an "
+                               "__index__ method")
     try:
         if hi is None:
             return h._int(seq.index(item, 0 if lo is None else lo))
@@ -10918,6 +11005,8 @@ def _index_bounded(h, a, has_end):
             # not found` for one.
             return h._fail("ValueError", "substring not found"
                            if isinstance(seq, str) else "subsection not found")
+        if isinstance(seq, memoryview):
+            return h._fail("ValueError", "memoryview.index(x): x not found")
         return h._fail("ValueError",
                        f"{h.kind_name(seq)}.index(x): x not in "
                        f"{h.kind_name(seq)}")
@@ -11249,14 +11338,14 @@ def _apy_str_format_map(h, a):
         return h._fail("AttributeError",
                        f"'{h.kind_name(fmt)}' object has no attribute "
                        f"'format_map'")
-    if not isinstance(mapping, dict):
-        if isinstance(mapping, (list, tuple)):
-            return h._fail("TypeError",
-                           f"{h.kind_name(mapping)} indices must be integers "
-                           f"or slices, not str")
-        return h._fail("TypeError",
-                       f"'{h.kind_name(mapping)}' object is not subscriptable")
-    return _apy_str_format(h, [a[0], h._new([]), a[1]])
+    # THROUGH PYTHON'S OWN `format_map`, which is what makes the mapping
+    # LAZY: it is subscripted only once a field asks it for a key, so
+    # `"".format_map(None)` is `''` rather than a complaint about None. A
+    # check here could not tell the two apart.
+    try:
+        return h._new(fmt.format_map(mapping))
+    except (IndexError, KeyError, ValueError, TypeError) as exc:
+        return h._fail_like(exc)
 
 
 def _apy_bytearray_resize(h, a):
@@ -12170,6 +12259,14 @@ def _apy_extend(h, a):
         if isinstance(other, (bytes, bytearray, memoryview)):
             seq.extend(bytes(other))
             return h._none
+        # A STR IS ITERABLE AND ITS ELEMENTS ARE NOT INTEGERS, which CPython
+        # says in its own words: `expected iterable of integers; got: 'str'`.
+        # That is NOT `can't extend bytearray with str`, which is what it
+        # says for something it cannot walk at all.
+        if isinstance(other, str):
+            return h._fail("TypeError",
+                           f"expected iterable of integers; got: "
+                           f"'{h.kind_name(other)}'")
         if isinstance(other, (list, tuple)):
             for one in other:
                 if not isinstance(one, int) or not 0 <= one <= 255:

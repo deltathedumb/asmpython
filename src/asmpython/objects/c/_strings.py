@@ -1179,11 +1179,18 @@ static apy_value apy_partition_impl(apy_value s, apy_value sep, int from_right) 
     apy_value out = apy_seq_new(APY_TUPLE_K, 3);
     int64_t n = O(s)->v.s.n, m, at;
     /* `must be str, not int` -- no method name at all, which is how CPython
-       words this one and unlike every other method in this file. */
-    /* BYTES TOO -- `b"abc".partition(b"b")` is the same operation. */
-    if (O(sep)->kind != APY_STR_K && O(sep)->kind != APY_BYTES_K)
+       words this one and unlike every other method in this file.
+       BYTES TOO -- `b"abc".partition(b"b")` is the same operation -- and a
+       BYTES RECEIVER WORDS IT DIFFERENTLY: `a bytes-like object is
+       required, not 'int'`, quoting the type where the str form does not. */
+    if (O(sep)->kind != APY_STR_K && O(sep)->kind != APY_BYTES_K) {
+        if (O(s)->kind == APY_BYTES_K)
+            return apy_fail2("TypeError",
+                             "a bytes-like object is required, not '%s'%s",
+                             apy_kind_name(sep), "");
         return apy_fail2("TypeError", "must be str, not %s%s",
                          apy_kind_name(sep), "");
+    }
     m = O(sep)->v.s.n;
     if (m == 0) return apy_fail("ValueError", "empty separator");
     at = from_right ? apy_rfind_at(s, sep, 0, n) : apy_find_at(s, sep, 0, n);

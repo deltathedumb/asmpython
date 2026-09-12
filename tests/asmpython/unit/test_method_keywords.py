@@ -37,6 +37,10 @@ OWNER = {
     # BYTES IS THE OWNER THE TABLE DESCRIBES, because a keyword can only be
     # meant for the owner that has one; see `DIFFERS_BY_OWNER`.
     "translate": bytes,
+    # `list.sort(*, key=None, reverse=False)`. In the table for the BY-NAME
+    # spelling only -- the written one has a branch of its own, because both
+    # parameters travel as VALUES rather than into slots.
+    "sort": list,
 }
 
 #: A method whose CPython signature really does differ between the types that

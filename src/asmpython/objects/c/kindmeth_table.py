@@ -163,7 +163,7 @@ static int64_t apy_kind_meth_arity(const char *w, unsigned bit) {
     if (strcmp(w, "setdefault") == 0)
         return (bit & 32u) ? ((3 << 8) | 1) : 0;
     if (strcmp(w, "sort") == 0)
-        return (bit & 8u) ? ((1 << 8) | 0) : 0;
+        return (bit & 8u) ? ((3 << 8) | 2) : 0;
     if (strcmp(w, "split") == 0)
         return (bit & 7u) ? ((3 << 8) | 2) : 0;
     if (strcmp(w, "splitlines") == 0)
@@ -233,6 +233,11 @@ static int64_t apy_kind_meth_sign(const char *w, apy_value *names,
     if (strcmp(w, "rsplit") == 0) {
         names[0] = apy_lit("sep"); defs[0] = apy_none();
         names[1] = apy_lit("maxsplit"); defs[1] = apy_from_int(-1);
+        return 2;
+    }
+    if (strcmp(w, "sort") == 0) {
+        names[0] = apy_lit("key"); defs[0] = apy_none();
+        names[1] = apy_lit("reverse"); defs[1] = apy_from_bool(0);
         return 2;
     }
     if (strcmp(w, "split") == 0) {
@@ -363,8 +368,8 @@ static apy_value apy_kind_meth_call(const char *w, apy_value *a,
     }
     if (strcmp(w, "decode") == 0) {
         if (n >= 3) return apy_bytes_decode(a[0], a[1], a[2]);
-        if (n >= 2) return apy_bytes_decode(a[0], a[1], apy_none());
-        if (n >= 1) return apy_bytes_decode(a[0], apy_none(), apy_none());
+        if (n >= 2) return apy_bytes_decode(a[0], a[1], apy_lit("strict"));
+        if (n >= 1) return apy_bytes_decode(a[0], apy_lit("utf-8"), apy_lit("strict"));
     }
     if (strcmp(w, "difference") == 0) {
         if (n >= 2) return apy_set_difference(a[0], a[1]);
@@ -377,8 +382,8 @@ static apy_value apy_kind_meth_call(const char *w, apy_value *a,
     }
     if (strcmp(w, "encode") == 0) {
         if (n >= 3) return apy_str_encode(a[0], a[1], a[2]);
-        if (n >= 2) return apy_str_encode(a[0], a[1], apy_none());
-        if (n >= 1) return apy_str_encode(a[0], apy_none(), apy_none());
+        if (n >= 2) return apy_str_encode(a[0], a[1], apy_lit("strict"));
+        if (n >= 1) return apy_str_encode(a[0], apy_lit("utf-8"), apy_lit("strict"));
     }
     if (strcmp(w, "endswith") == 0) {
         if (n >= 4) return apy_str_endswith3(a[0], a[1], a[2], a[3]);
@@ -552,6 +557,7 @@ static apy_value apy_kind_meth_call(const char *w, apy_value *a,
         if (n >= 2) return apy_setdefault(a[0], a[1], apy_none());
     }
     if (strcmp(w, "sort") == 0) {
+        if (n >= 3) return apy_list_sort(a[0], a[1], a[2]);
         if (n >= 1) return apy_list_sort(a[0], apy_none(), apy_from_bool(0));
     }
     if (strcmp(w, "split") == 0) {

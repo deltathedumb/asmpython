@@ -1182,8 +1182,13 @@ APY_API apy_value apy_str_translate(apy_value s, apy_value table) {
     /* A BYTES RECEIVER IS A DIFFERENT METHOD -- bytes through a 256-byte
        table, not code points through a dict. None is the delete set the
        one-argument form has. */
+    /* AN EMPTY DELETE SET, NOT None. `b.translate(table)` deletes nothing
+       and `b.translate(table, None)` is a TypeError -- the one-argument form
+       reaches HERE and the two-argument one reaches `apy_bytes_translate`
+       directly, which is the only thing that tells them apart. `b""` is the
+       default CPython's own signature declares. */
     if (O(s)->kind == APY_BYTES_K)
-        return apy_bytes_translate(s, table, apy_none());
+        return apy_bytes_translate(s, table, apy_bytes_copy("", 0));
     if (O(table)->kind != APY_DICT_K)
         return apy_fail2("TypeError", "'%s' object is not subscriptable%s",
                          apy_kind_name(table), "");
@@ -1323,11 +1328,13 @@ APY_API apy_value apy_bytes_translate(apy_value s, apy_value table,
                             "translation table must be 256 characters long");
         memcpy(map256, O(table)->v.s.p, 256);
     }
-    if (O(delete)->kind != APY_NONE_K) {
-        if (O(delete)->kind != APY_BYTES_K) return apy_bytes_like_bad(delete);
-        p = (const unsigned char *)O(delete)->v.s.p;
-        for (i = 0; i < O(delete)->v.s.n; i++) drop[p[i]] = 1;
-    }
+    /* NO None HERE. A delete set that was WRITTEN must be bytes-like --
+       `b"abc".translate(None, None)` is `a bytes-like object is required,
+       not 'NoneType'` in CPython -- and the one-argument form passes an
+       empty one rather than a None. */
+    if (O(delete)->kind != APY_BYTES_K) return apy_bytes_like_bad(delete);
+    p = (const unsigned char *)O(delete)->v.s.p;
+    for (i = 0; i < O(delete)->v.s.n; i++) drop[p[i]] = 1;
     n = O(s)->v.s.n;
     p = (const unsigned char *)O(s)->v.s.p;
     buf = (char *)malloc((size_t)n + 1);

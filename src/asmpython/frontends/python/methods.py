@@ -53,7 +53,12 @@ DYN_METHOD_TABLE = {
     # `sort` is IN PLACE and answers None; `sorted` is the other one. Both
     # arities take the key and reverse VALUES, which lowering supplies as
     # None/False when the call omitted them -- see `_dyn_builtin_method`.
-    "sort":         ["apy_list_sort"],
+    # TWO ENTRIES FOR ONE SYMBOL. `apy_list_sort` takes all three slots and
+    # the lowering pads the ones a call left out, so the no-argument form and
+    # the folded two-keyword form reach the same place -- which is what lets
+    # `getattr(xs, "sort")(reverse=True)` arrive as a call the dispatch
+    # recognises.
+    "sort":         ["apy_list_sort", None, "apy_list_sort"],
     # dict. All three are `apy_dict_parts` with a selector, so the table
     # records the shape and lowering supplies the constant -- see
     # `DICT_PARTS`.
@@ -271,12 +276,20 @@ POSITIONAL_ONLY = None
 
 #: method -> its parameters IN POSITIONAL ORDER, each `(name, default)`.
 #:
-#: `sort` and `update` are absent ON PURPOSE: both already have a branch of
-#: their own in the lowering, because their keywords are keyword-ONLY and
-#: travel to a different entry point than a positional would. A method here
-#: takes its keywords by POSITION, which is the whole mechanism -- the
-#: keyword is moved into the slot it names and the ordinary arity dispatch
-#: then sees the call it should have seen all along.
+#: `update` is absent ON PURPOSE: it already has a branch of its own in the
+#: lowering, because its keywords ARE the value -- `d.update(a=1)` sets a key
+#: called `a` -- and there is no slot to fold one into.
+#:
+#: `sort` IS HERE FOR THE BY-NAME SPELLING ONLY. The written form has a
+#: branch of its own too (`_KEYWORDS_OF_THEIR_OWN` keeps the fold off it, so
+#: nothing is lowered twice), but `getattr(xs, "sort")(reverse=True)` reaches
+#: the runtime through `apy_call_kw`, which has no signature to match the
+#: name against unless it is written here -- and answered `list.sort() takes
+#: no keyword arguments` for a call CPython sorts.
+#:
+#: A method here takes its keywords by POSITION, which is the whole
+#: mechanism -- the keyword is moved into the slot it names and the ordinary
+#: arity dispatch then sees the call it should have seen all along.
 METHOD_PARAMS: dict[str, tuple[tuple[str | None, object], ...]] = {
     "split":      (("sep", None), ("maxsplit", -1)),
     "rsplit":     (("sep", None), ("maxsplit", -1)),
@@ -292,6 +305,11 @@ METHOD_PARAMS: dict[str, tuple[tuple[str | None, object], ...]] = {
     # keyword at all and is refused at run time, where the receiver is finally
     # known; see `METHOD_KW_SYMBOL`.
     "translate":  ((POSITIONAL_ONLY, REQUIRED), ("delete", b"")),
+    # KEYWORD-ONLY IN CPYTHON, and a positional is refused by the arity gate
+    # rather than here: `[].sort(None)` is `sort() takes no positional
+    # arguments`, which the generated words table knows -- see
+    # `apy_meth_positional`.
+    "sort":       (("key", None), ("reverse", False)),
 }
 
 #: A method whose KEYWORD spelling reaches a DIFFERENT runtime symbol than the

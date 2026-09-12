@@ -639,8 +639,28 @@ def apy_extend(seq: ptr, other: ptr) -> ptr:
     str has no items array and a list has no `__getitem__` worth going
     through.
     """
+    # A BYTEARRAY NAMES WHAT IT COULD NOT WALK rather than passing on the
+    # iteration's own complaint: `bytearray().extend(None)` is `can't extend
+    # bytearray with NoneType`. And A STR IS ITERABLE WHILE ITS ELEMENTS ARE
+    # NOT INTEGERS, which CPython says in its own words.
+    into_bytes: i64 = 0
+    if i64(load(i32, offset(seq, 0))) == apy_bytes_kind():
+        if load(i32, offset(seq, apy_s_mut_offset())):
+            into_bytes = 1
+    if into_bytes:
+        if i64(load(i32, offset(other, 0))) == apy_str_kind():
+            return apy_raise_fmt(
+                rodata(b"TypeError\0"),
+                rodata(b"expected iterable of integers; got: '%s'%s\0"),
+                apy_kind_name_of(other), rodata(b"\0"))
     src: ptr = apy_iterable(other)
     if not src:
+        if into_bytes:
+            apy_error_clear()
+            return apy_raise_fmt(
+                rodata(b"TypeError\0"),
+                rodata(b"can't extend bytearray with %s%s\0"),
+                apy_kind_name_of(other), rodata(b"\0"))
         return ptr(0)
     k: i64 = i64(load(i32, offset(src, 0)))
     if (k == apy_str_kind() or k == apy_bytes_kind()
@@ -660,6 +680,11 @@ def apy_extend(seq: ptr, other: ptr) -> ptr:
             i = i + 1
         return apy_none()
     if not apy_is_seq_of(src) and not apy_is_set_of(src):
+        if into_bytes:
+            return apy_raise_fmt(
+                rodata(b"TypeError\0"),
+                rodata(b"can't extend bytearray with %s%s\0"),
+                apy_kind_name_of(other), rodata(b"\0"))
         return apy_raise_fmt(
             rodata(b"TypeError\0"),
             rodata(b"'%s' object is not iterable%s\0"),
