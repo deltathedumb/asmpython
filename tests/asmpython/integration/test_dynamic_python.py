@@ -1919,6 +1919,69 @@ PROGRAMS = {
         print([type(getattr(view, n)).__name__ for n in
                ("hex", "count", "index", "__setitem__", "__delitem__")])
     """,
+    "an_object_with_no_repr_of_its_own_says_what_it_is": """
+        # `repr` OF A KIND WITH NO REPR OF ITS OWN read the value as a STR -- the cell
+        # union's other half -- so `repr(map(len, xs))` walked a wild pointer and DIED
+        # on both compiled runtimes while `repr(property(f))` answered the empty
+        # string. The interpreter did not crash and leaked its own class names
+        # instead: `<asmpython.ir.objects_host.Iterator object at 0x...>`.
+        #
+        # AN ADDRESS CANNOT MATCH CPYTHON, so what is checked here is the shape: the
+        # kind CPython names and the punctuation around it.
+        def show(label, f):
+            try:
+                print(label, "->", f())
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        def shape(text):
+            # The repr with any hexadecimal address replaced, so two runs agree.
+            out, i = "", 0
+            while i < len(text):
+                if text[i:i + 2] == "0x":
+                    out += "0x_"
+                    i += 2
+                    while i < len(text) and text[i] in "0123456789abcdef":
+                        i += 1
+                    continue
+                out += text[i]
+                i += 1
+            return out
+
+        show("map", lambda: shape(repr(map(len, ["a"]))))
+        show("filter", lambda: shape(repr(filter(None, "ab"))))
+        show("zip", lambda: shape(repr(zip([1], [2]))))
+        show("enumerate", lambda: shape(repr(enumerate([1]))))
+        # A GENERATOR'S QUALNAME IS NOT CARRIED. CPython writes `<generator object
+        # <genexpr> at 0x...>`; the cell has no name field, so only the shape is
+        # checked here.
+        show("generator", lambda: shape(repr(x for x in [1]))[:18])
+        show("memoryview", lambda: shape(repr(memoryview(b"ab"))))
+        show("property", lambda: shape(repr(property(len))))
+        show("staticmethod", lambda: shape(repr(staticmethod(len))))
+        show("classmethod", lambda: shape(repr(classmethod(len))))
+        show("slice", lambda: repr(slice(1, 2)))
+        show("range", lambda: repr(range(3)))
+        show("dict keys", lambda: repr({}.keys()))
+
+        # AND WHAT A CALLABLE IS CALLED. A builtin reached as a value has NO address
+        # -- there is only ever the one -- and a bound method names what it is bound
+        # to, with `built-in method` for the runtime's own.
+        class C:
+            def m(self):
+                pass
+        def g():
+            pass
+        show("builtin function", lambda: repr(len))
+        show("builtin type", lambda: repr(int))
+        show("user function", lambda: shape(repr(g)))
+        # THE INSTANCE IN IT IS NOT QUALIFIED BY ITS MODULE: CPython writes
+        # `<__main__.C object at 0x...>` and a class here carries no `__module__`.
+        show("user method", lambda: shape(repr(C().m))[:22])
+        show("builtin method", lambda: shape(repr("a".upper)))
+        show("a view's method", lambda: shape(repr(memoryview(b"ab").tobytes)))
+        show("printed, not repred", lambda: shape(str(len)))
+    """,
     "a_keyword_reaches_sort_and_update_by_every_route": """
         # `sort` AND `update` PLACE THEIR OWN KEYWORDS -- `key` and `reverse` travel as
         # VALUES so the key runs once per element, and `update`'s keywords ARE the value

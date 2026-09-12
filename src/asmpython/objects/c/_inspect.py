@@ -585,7 +585,11 @@ APY_API apy_value apy_seq_text_of(apy_value v) {
 static apy_value apy_seq_text(apy_value v) { return apy_seq_text_of(v); }
 
 APY_API apy_value apy_text_of(apy_value v, int64_t quoted) {
-    char buf[64];
+    /* WIDE ENOUGH FOR THE LONGEST SHAPE, which is a bound builtin method's
+       `<built-in method tobytes of memoryview object at 0x...>` -- at 64 it
+       was TRUNCATED, and a repr missing its closing bracket is a wrong
+       answer that reads like a right one. */
+    char buf[192];
     switch (O(v)->kind) {
     /* IGNORES `quoted`. `str(b'ab')` is "b'ab'" in Python 3 -- bytes has no
        separate str, which is the wart CPython emits a BytesWarning about
@@ -819,11 +823,88 @@ APY_API apy_value apy_text_of(apy_value v, int64_t quoted) {
                      APY_CSTR(O(v)->v.fn.name));
             return apy_str_copy(buf, (int64_t)strlen(buf));
         }
-        snprintf(buf, sizeof buf, "<%s %s at 0x%llx>",
-                 O(v)->v.fn.bound ? "bound method" : "function",
+        /* A BUILTIN REACHED AS A VALUE HAS NO ADDRESS IN ITS REPR.
+           `repr(len)` is `<built-in function len>` -- CPython writes no
+           address for one, because there is only ever the one. The flag is
+           the same one `type()` reads. */
+        if (O(v)->v.fn.builtin && !O(v)->v.fn.bound) {
+            snprintf(buf, sizeof buf, "<built-in function %s>",
+                     APY_CSTR(O(v)->v.fn.name));
+            return apy_str_copy(buf, (int64_t)strlen(buf));
+        }
+        /* A BOUND METHOD SHOWS WHAT IT IS BOUND TO, and a BUILTIN one is
+           called a `built-in method`: `"a".upper` is `<built-in method
+           upper of str object at 0x...>` where a compiled method is
+           `<bound method C.m of <C object at 0x...>>`. Both name the
+           receiver, which is most of what makes the text useful. */
+        if (O(v)->v.fn.bound) {
+            apy_value held = O(v)->v.fn.bound;
+            if (O(v)->v.fn.native || O(v)->v.fn.builtin) {
+                snprintf(buf, sizeof buf,
+                         "<built-in method %s of %s object at 0x%llx>",
+                         APY_CSTR(O(v)->v.fn.name), apy_kind_name(held),
+                         (unsigned long long)held);
+                return apy_str_copy(buf, (int64_t)strlen(buf));
+            }
+            {
+                /* THE OWNER'S NAME BEFORE THE METHOD'S, which is CPython's
+                   `C.m` -- the qualified name a reader needs to find it. */
+                apy_value shown = apy_text_of(held, 1);
+                char *big;
+                if (!shown) return 0;
+                big = (char *)malloc((size_t)O(shown)->v.s.n + 128);
+                if (!big) { fputs("asmpython: out of memory\n", stderr); exit(1); }
+                sprintf(big, "<bound method %s.%s of %s>",
+                        apy_kind_name(held), APY_CSTR(O(v)->v.fn.name),
+                        APY_CSTR(shown));
+                return apy_str_take(big, (int64_t)strlen(big));
+            }
+        }
+        snprintf(buf, sizeof buf, "<function %s at 0x%llx>",
                  APY_CSTR(O(v)->v.fn.name), (unsigned long long)v);
         return apy_str_copy(buf, (int64_t)strlen(buf));
-    default: break;
+    /* A STRING IS THE ONLY KIND THE QUOTING BELOW IS FOR. */
+    case APY_STR_K: break;
+    /* A MEMORYVIEW IS `<memory at 0x...>` -- `memory`, not `memoryview`,
+       which makes it the one kind whose repr does not use its type name. */
+    case APY_MVIEW_K: {
+        char buf[64];
+        snprintf(buf, sizeof buf, "<memory at 0x%llx>",
+                 (unsigned long long)v);
+        return apy_str_copy(buf, (int64_t)strlen(buf));
+    }
+    /* A CLASSMETHOD OR STATICMETHOD SHOWS WHAT IT WRAPS, which is what
+       CPython writes: `<staticmethod(<function f at 0x...>)>`. A `property`
+       does not, and takes the ordinary object shape below. */
+    case APY_PROP_K:
+        if (O(v)->v.p.kind != APY_PROP_PROPERTY) {
+            apy_value inner = O(v)->v.p.get
+                ? apy_text_of(O(v)->v.p.get, 1) : apy_lit("None");
+            char *buf2;
+            int64_t n2;
+            const char *word = O(v)->v.p.kind == APY_PROP_CLASSMETHOD
+                ? "classmethod" : "staticmethod";
+            if (!inner) return 0;
+            n2 = (int64_t)strlen(word) + O(inner)->v.s.n + 4;
+            buf2 = (char *)malloc((size_t)n2 + 1);
+            if (!buf2) { fputs("asmpython: out of memory\n", stderr); exit(1); }
+            snprintf(buf2, (size_t)n2 + 1, "<%s(%s)>", word,
+                     APY_CSTR(inner));
+            return apy_str_take(buf2, (int64_t)strlen(buf2));
+        }
+        /* FALLS THROUGH to the object shape, which is what a property has. */
+        /* fall through */
+    default: {
+        /* EVERY OTHER KIND IS AN OBJECT WITH NO REPR OF ITS OWN, and the
+           quoting below reads the value as a STR: `v.s.p` on an iterator
+           cell is whatever the union's other half left there, so
+           `repr(map(len, xs))` WALKED A WILD POINTER AND DIED while
+           `repr(property(f))` answered the empty string. */
+        char buf[96];
+        snprintf(buf, sizeof buf, "<%s object at 0x%llx>",
+                 apy_kind_name(v), (unsigned long long)v);
+        return apy_str_copy(buf, (int64_t)strlen(buf));
+    }
     }
     if (!quoted) return v;
     {

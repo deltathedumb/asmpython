@@ -1056,8 +1056,22 @@ class ObjectHost:
             # flag -- not the kind -- decides what it is called.
             if getattr(v, "is_type", False):
                 return f"<class '{v.name}'>"
-            kind = "bound method" if v.bound is not None else "function"
-            return f"<{kind} {v.name} at 0x{id(v):x}>"
+            # A BUILTIN REACHED AS A VALUE HAS NO ADDRESS IN ITS REPR.
+            # `repr(len)` is `<built-in function len>` -- CPython writes no
+            # address for one, because there is only ever the one. The flag
+            # is the same one `type()` reads.
+            if getattr(v, "builtin", False) and v.bound is None:
+                return f"<built-in function {v.name}>"
+            # A BOUND METHOD SHOWS WHAT IT IS BOUND TO, with the owner's name
+            # before its own -- `<bound method C.m of <C object at 0x...>>`.
+            if v.bound is not None:
+                if getattr(v, "builtin", False):
+                    return (f"<built-in method {v.name} of "
+                            f"{self.kind_name(v.bound)} object at "
+                            f"0x{id(v.bound):x}>")
+                return (f"<bound method {self.kind_name(v.bound)}.{v.name} "
+                        f"of {self._text(v.bound, True)}>")
+            return f"<function {v.name} at 0x{id(v):x}>"
         if isinstance(v, Instance):
             # A TYPING FORM PRINTS AS `typing.Name`. It is an instance with no
             # `__repr__`, so the default `<_SpecialForm object at 0x...>` came
@@ -1190,6 +1204,35 @@ class ObjectHost:
                 self._rendering.discard(here)
         if isinstance(v, str):
             return repr(v) if quoted else v
+        if isinstance(v, memoryview):
+            # `<memory at 0x...>` -- `memory`, not `memoryview`, which makes
+            # it the one kind whose repr does not use its type name.
+            return f"<memory at 0x{id(v):x}>"
+        if isinstance(v, Descr):
+            # A CLASSMETHOD OR STATICMETHOD SHOWS WHAT IT WRAPS, which is
+            # what CPython writes. A `property` does not.
+            if v.kind == PROP_PROPERTY:
+                return f"<property object at 0x{id(v):x}>"
+            return (f"<{self.kind_name(v)}("
+                    f"{self._text(v.get, True)})>")
+        if isinstance(v, Native):
+            # A RUNTIME METHOD IS A `built-in method`, named after what it is
+            # bound to. It answered `<asmpython.ir.objects_host.Native object
+            # at 0x...>` -- a name from inside the compiler, in text a
+            # program prints.
+            held = (v.bound if v.bound is not None
+                    else v.owner if v.owner is not _NO_OWNER else None)
+            if held is None:
+                return f"<built-in function {v.name}>"
+            return (f"<built-in method {v.name} of "
+                    f"{self.kind_name(held)} object at 0x{id(held):x}>")
+        if isinstance(v, (Iterator, Gen, Cell, Super)):
+            # THE KIND, NOT THIS FILE'S CLASS NAME. Python's own `repr` of an
+            # internal object here answered
+            # `<asmpython.ir.objects_host.Iterator object at 0x...>` -- a
+            # name from inside the compiler, in text a program prints. The
+            # compiled runtimes say `<map object at 0x...>`.
+            return f"<{self.kind_name(v)} object at 0x{id(v):x}>"
         return repr(v)
 
     # ── calling compiled code ───────────────────────────────────────────────
