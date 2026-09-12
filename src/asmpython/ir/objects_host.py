@@ -6715,8 +6715,19 @@ def _made_table_method(h, obj, want: str):
         if _w == "to_bytes":
             sym = DYN_METHOD_TABLE[_w][3]
         if sym is None or len(args) < lo or len(args) > hi:
-            h._fail("TypeError",
-                    f"{_w}() takes no {len(args)}-argument form")
+            # THE WORDING IS THE ONE `apy_arity_error` USES for a builtin
+            # with a range, which is CPython's: `find expected at least 1
+            # argument, got 0`. Named, because none of these is a dunder.
+            got = len(args)
+            if lo == hi:
+                how = f"expected {hi} argument{'' if hi == 1 else 's'}"
+            elif got < lo:
+                how = (f"expected at least {lo} "
+                       f"argument{'' if lo == 1 else 's'}")
+            else:
+                how = (f"expected at most {hi} "
+                       f"argument{'' if hi == 1 else 's'}")
+            h._fail("TypeError", f"{_w} {how}, got {got}")
             raise _UserFailed
         # A NATIVE'S BODY IS HANDED VALUES and a runtime symbol takes
         # HANDLES, which is the whole of the conversion here.

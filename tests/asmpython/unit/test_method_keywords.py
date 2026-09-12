@@ -187,6 +187,38 @@ class TestWhatIsRefused:
 
     def test_a_required_parameter_cannot_be_defaulted_around(self):
         """`"a".replace(count=1)` leaves `old` and `new` unfilled, and neither
-        has a default to fill them with."""
-        with harness.raises(KeywordError, match="missing required argument"):
+        has a default to fill them with.
+
+        REPORTED AS THE POSITIONALS IT DID NOT GET, which is CPython's wording
+        and its ORDER: a missing required positional beats the keyword that
+        was given, and beats an unknown one. The message this used to carry
+        named the parameter, which for a POSITIONAL-ONLY one is None -- and
+        `replace() missing required argument None` is what a program saw.
+        """
+        with harness.raises(KeywordError,
+                            match="takes at least 2 positional arguments"):
             fold_keywords("replace", 0, ["count"])
+
+    def test_the_suggestion_is_cpythons_own_edit_distance(self):
+        """A near-miss keyword gets `. Did you mean 'sep'?` and a far one gets
+        nothing.
+
+        PORTED RATHER THAN APPROXIMATED. A suggestion this compiler makes
+        where CPython makes none is a new divergence, not a kindness -- and
+        the line falls in a place no simple rule finds: `SEP` finds `sep`
+        because a case change is half the cost of a real one, and `TABSIZE`
+        does NOT find `tabsize`, because seven of them exceed the budget that
+        two longer names allow.
+        """
+        with harness.raises(KeywordError, match="Did you mean 'sep'"):
+            fold_keywords("split", 0, ["SEP"])
+        with harness.raises(KeywordError, match="Did you mean 'maxsplit'"):
+            fold_keywords("split", 0, ["masplit"])
+        with harness.raises(KeywordError, match="Did you mean 'tabsize'"):
+            fold_keywords("expandtabs", 0, ["tabsiz"])
+        try:
+            fold_keywords("expandtabs", 0, ["TABSIZE"])
+        except KeywordError as exc:
+            assert "Did you mean" not in str(exc), str(exc)
+        else:
+            raise AssertionError("TABSIZE was accepted")

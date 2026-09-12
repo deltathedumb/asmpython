@@ -735,6 +735,46 @@ PROGRAMS = {
             except AttributeError as e:
                 print(e)
     """,
+    # THE ORDER OF CPYTHON'S KEYWORD REFUSALS IS NOT THE ORDER THEY OCCUR TO
+    # A READER, and this compiler had it wrong four ways. A MISSING REQUIRED
+    # POSITIONAL BEATS EVERYTHING -- `"aaa".replace(count=1)` reports the two
+    # positionals it did not get, not the keyword it did. TOO MANY counts the
+    # keywords in. Only then does a slot given twice, and only then an
+    # unknown name. One of the four used to print `None`: a positional-only
+    # parameter has no name, and the message said so out loud.
+    #
+    # AND THE SUGGESTION IS CPYTHON'S OWN EDIT DISTANCE, ported rather than
+    # approximated: a suggestion this compiler makes where CPython makes none
+    # is a new divergence, not a kindness. `SEP` finds `sep` and `TABSIZE`
+    # does not find `tabsize`, which is the case cost doing its work.
+    "the_keyword_refusals": """
+        def show(f):
+            try:
+                print(repr(f()))
+            except TypeError as e:
+                print("TypeError:", e)
+        show(lambda: "aaa".replace(count=1))
+        show(lambda: "aaa".replace(nosuch=1))
+        show(lambda: "aaa".replace("a", nosuch=1))
+        show(lambda: "aaa".replace("a", "b", nosuch=1))
+        show(lambda: "a,b".split(",", None, maxsplit=1))
+        show(lambda: "a,b".split(SEP=1))
+        show(lambda: "a,b".split(nosuch=1))
+        show(lambda: "a,b".split(masplit=1))
+        show(lambda: "a".encode(nosuch=1))
+        show(lambda: "a".encode("u", encoding="x"))
+        show(lambda: "a".encode(a=1, b=2, c=3))
+        show(lambda: "a".splitlines(keepends=1, x=2))
+        show(lambda: "a".splitlines(1, x=2))
+        show(lambda: "a".splitlines(x=2))
+        show(lambda: "a".expandtabs(TABSIZE=1))
+        show(lambda: "a".expandtabs(tabsiz=1))
+        show(lambda: (5).to_bytes(x=1))
+        # AND THE CALLS THAT ARE FINE STAY FINE.
+        show(lambda: "a,b,c".split(",", maxsplit=1))
+        show(lambda: "aaa".replace("a", "b", count=1))
+        show(lambda: "a\\tb".expandtabs(tabsize=4))
+    """,
     "traceback_positions": """
         try:
             (1).missing

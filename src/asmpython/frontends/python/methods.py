@@ -296,6 +296,82 @@ class KeywordError(Exception):
     """A keyword this method cannot take. Carries CPython's own wording."""
 
 
+#: What a substitution costs. CPython's `Python/suggestions.c` constants, and
+#: the reason they are not 1: a CASE change is cheaper than a real one, so
+#: `SEP` finds `sep` and a longer all-caps name does not find its lowercase
+#: twin. Reproduced rather than approximated, because a suggestion this
+#: compiler makes where CPython makes none is a new divergence, not a
+#: kindness.
+_MOVE_COST = 2
+_CASE_COST = 1
+_MAX_STRING_SIZE = 40
+
+
+def _substitution_cost(a: str, b: str) -> int:
+    if a == b:
+        return 0
+    if a.lower() == b.lower():
+        return _CASE_COST
+    return _MOVE_COST
+
+
+def _levenshtein(a: str, b: str, max_cost: int) -> int:
+    """CPython's own edit distance, ported from `Python/suggestions.c`.
+
+    THE COMMON AFFIXES COME OFF FIRST, which is not an optimisation here but
+    part of the answer: the trimmed lengths are what the row below is sized
+    against, and the early exits depend on them.
+    """
+    if a == b:
+        return 0
+    i = 0
+    while i < len(a) and i < len(b) and a[i] == b[i]:
+        i += 1
+    a, b = a[i:], b[i:]
+    while a and b and a[-1] == b[-1]:
+        a, b = a[:-1], b[:-1]
+    if not a or not b:
+        return (len(a) + len(b)) * _MOVE_COST
+    if len(a) > _MAX_STRING_SIZE or len(b) > _MAX_STRING_SIZE:
+        return max_cost + 1
+    if len(b) < len(a):
+        a, b = b, a
+    if (len(b) - len(a)) * _MOVE_COST > max_cost:
+        return max_cost + 1
+    row = [(k + 1) * _MOVE_COST for k in range(len(a))]
+    result = 0
+    for b_index, code in enumerate(b):
+        distance = result = b_index * _MOVE_COST
+        minimum = None
+        for k, ch in enumerate(a):
+            substitute = distance + _substitution_cost(code, ch)
+            distance = row[k]
+            result = min(min(result, distance) + _MOVE_COST, substitute)
+            row[k] = result
+            if minimum is None or result < minimum:
+                minimum = result
+        if minimum is not None and minimum > max_cost:
+            return max_cost + 1
+    return result
+
+
+def _suggest(wrong: str, options) -> str | None:
+    """The parameter CPython would propose for a misspelling, or None.
+
+    NEAREST WINS AND TIES KEEP THE FIRST, which is what the `<` does -- the
+    same walk CPython makes over the names it has.
+    """
+    best, best_at = None, None
+    for option in options:
+        limit = (len(wrong) + len(option) + 3) * _MOVE_COST // 6
+        far = _levenshtein(wrong, option, limit)
+        if far > limit:
+            continue
+        if best_at is None or far < best_at:
+            best, best_at = option, far
+    return best
+
+
 def fold_keywords(name: str, argc: int, given: list[str],
                   pad_to: int = 0) -> list | None:
     """How to arrange `argc` positional and these named arguments, or None.
@@ -322,13 +398,37 @@ def fold_keywords(name: str, argc: int, given: list[str],
         raise KeywordError(f"{name}() takes no keyword arguments")
     index = {p: i for i, (p, _) in enumerate(params) if p is not None}
     slots: dict[int, tuple] = {i: ("pos", i) for i in range(argc)}
-    if argc > len(params):
-        raise KeywordError(f"{name}() takes at most {len(params)} arguments")
+    # THE ORDER OF THESE FOUR REFUSALS IS CPYTHON'S and is not the order they
+    # occur to a reader. A MISSING REQUIRED POSITIONAL BEATS EVERYTHING:
+    # `"aaa".replace(count=1)` reports the two positionals it did not get,
+    # not the keyword it did -- so the count check comes before the names are
+    # looked at all.
+    required = sum(1 for _, d in params if d is REQUIRED)
+    if argc < required:
+        raise KeywordError(
+            f"{name}() takes at least {required} positional "
+            f"argument{'' if required == 1 else 's'} ({argc} given)")
+    # THEN TOO MANY, counting the keywords in: `"a,b".split(",", None,
+    # maxsplit=1)` is three arguments for two parameters, and CPython says so
+    # rather than complaining that `maxsplit` was given twice. A call with no
+    # positionals at all is worded as KEYWORD arguments.
+    if argc + len(given) > len(params):
+        if argc == 0:
+            raise KeywordError(
+                f"{name}() takes at most {len(params)} keyword "
+                f"argument{'' if len(params) == 1 else 's'} "
+                f"({len(given)} given)")
+        raise KeywordError(
+            f"{name}() takes at most {len(params)} "
+            f"argument{'' if len(params) == 1 else 's'} "
+            f"({argc + len(given)} given)")
     for kw in given:
         at = index.get(kw)
         if at is None:
+            near = _suggest(kw, [p for p, _ in params if p is not None])
             raise KeywordError(
-                f"{name}() got an unexpected keyword argument {kw!r}")
+                f"{name}() got an unexpected keyword argument {kw!r}"
+                + (f". Did you mean {near!r}?" if near else ""))
         if at in slots:
             # CPYTHON'S OWN WORDING, position counted from one -- it names the
             # slot the caller already filled, which is the useful half.
@@ -349,7 +449,12 @@ def fold_keywords(name: str, argc: int, given: list[str],
             continue
         _, default = params[i]
         if default is REQUIRED:
+            # UNREACHABLE while the count check above stands, and kept as the
+            # backstop it is: the parameter may be POSITIONAL-ONLY, whose
+            # name is None, and a message naming None is what this used to
+            # say out loud.
             raise KeywordError(
-                f"{name}() missing required argument {params[i][0]!r}")
+                f"{name}() takes at least {required} positional "
+                f"argument{'' if required == 1 else 's'} ({argc} given)")
         plan.append(("default", default))
     return plan
