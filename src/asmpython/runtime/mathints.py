@@ -1108,6 +1108,12 @@ def apy_extreme_n(buf: ptr, n: i64, want_max: i64) -> ptr:
 
 def apy_extreme_of(seq: ptr, want_max: i64) -> ptr:
     """`max(xs)` and `min(xs)` over one sequence."""
+    # A USER ITERATOR IS DRAINED BEFORE THE WALK. The walk below is by index
+    # and a class whose `__iter__` answers an object with `__next__` has no
+    # index; `apy_iterable` turns one into a list, as it does a generator.
+    seq = apy_iterable(seq)
+    if not seq:
+        return ptr(0)
     n: i64 = apy_raw_len(seq)
     if apy_error_occurred():
         return ptr(0)
@@ -1144,6 +1150,10 @@ def apy_extreme_by_of(seq: ptr, keyfn: ptr,
     would mean recomputing `f` on every comparison, which a program can
     observe -- `f` may print, or count.
     """
+    # Drained first, so a user iterator can be walked -- see `apy_sorted`.
+    seq = apy_iterable(seq)
+    if not seq:
+        return ptr(0)
     n: i64 = apy_raw_len(seq)
     if apy_error_occurred():
         return ptr(0)
@@ -1195,6 +1205,12 @@ def apy_sorted(seq: ptr) -> ptr:
     program's `__lt__`, and the constant factor of the sort is small beside
     one of those. The C makes the same choice.
     """
+    # A USER ITERATOR IS DRAINED BEFORE THE WALK. The walk below is by index
+    # and a class whose `__iter__` answers an object with `__next__` has no
+    # index; `apy_iterable` turns one into a list, as it does a generator.
+    seq = apy_iterable(seq)
+    if not seq:
+        return ptr(0)
     n: i64 = apy_raw_len(seq)
     if apy_error_occurred():
         return ptr(0)
@@ -1381,6 +1397,10 @@ def apy_extreme_or(seq: ptr, keyfn: ptr, fallback: ptr,
     `max([])` raises -- which is the only reason the length is measured before
     anything else happens.
     """
+    # Drained first, so a user iterator can be walked -- see `apy_sorted`.
+    seq = apy_iterable(seq)
+    if not seq:
+        return ptr(0)
     n: i64 = apy_raw_len(seq)
     if apy_error_occurred():
         return ptr(0)

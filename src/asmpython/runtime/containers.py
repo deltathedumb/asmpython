@@ -899,6 +899,10 @@ def apy_dict_fromkeys(keys: ptr, value: ptr) -> ptr:
     appending through one appends through all. That is Python's behaviour and
     is reproduced rather than corrected.
     """
+    # Drained first, so a user iterator can be walked -- see `apy_sorted`.
+    keys = apy_iterable(keys)
+    if not keys:
+        return ptr(0)
     n: i64 = apy_raw_len(keys)
     if apy_error_occurred():
         return ptr(0)
@@ -926,6 +930,10 @@ def apy_sum(seq: ptr) -> ptr:
     THROUGH `apy_add`, so a total that outgrows an int64 becomes a big the
     same way `2 ** 100` does.
     """
+    # Drained first, so a user iterator can be walked -- see `apy_sorted`.
+    seq = apy_iterable(seq)
+    if not seq:
+        return ptr(0)
     n: i64 = apy_raw_len(seq)
     if apy_error_occurred():
         return ptr(0)
@@ -962,6 +970,10 @@ def apy_sum_from(seq: ptr, start: ptr) -> ptr:
             rodata(b"TypeError\0"),
             rodata(b"sum() can't sum bytes [use b''.join(seq) "
                    b"instead]\0"))
+    # Drained first, so a user iterator can be walked -- see `apy_sorted`.
+    seq = apy_iterable(seq)
+    if not seq:
+        return ptr(0)
     n: i64 = apy_raw_len(seq)
     if apy_error_occurred():
         return ptr(0)
@@ -1401,6 +1413,10 @@ def apy_set_from_of(kind: i64, src: ptr) -> ptr:
     element refuses the whole construction -- `set([1, [2]])` is a TypeError,
     not a one-element set.
     """
+    # Drained first, so a user iterator can be walked -- see `apy_sorted`.
+    src = apy_iterable(src)
+    if not src:
+        return ptr(0)
     n: i64 = apy_raw_len(src)
     if apy_error_occurred():
         return ptr(0)
@@ -1790,6 +1806,10 @@ def apy_set_update(target: ptr, src: ptr) -> ptr:
     the program may change, and the runtime uses this to fill sets a program
     cannot see yet.
     """
+    # Drained first, so a user iterator can be walked -- see `apy_sorted`.
+    src = apy_iterable(src)
+    if not src:
+        return ptr(0)
     n: i64 = apy_raw_len(src)
     if apy_error_occurred():
         return ptr(0)
@@ -2045,6 +2065,10 @@ def apy_to_dict(src: ptr) -> ptr:
         if held:
             if i64(load(i32, offset(held, 0))) == apy_dict_kind():
                 return apy_copy(held)
+    # Drained first, so a user iterator can be walked -- see `apy_sorted`.
+    src = apy_iterable(src)
+    if not src:
+        return ptr(0)
     n: i64 = apy_raw_len(src)
     if apy_error_occurred():
         return ptr(0)
@@ -2092,6 +2116,15 @@ def apy_update(target: ptr, src: ptr) -> ptr:
     unhashable element refuses the whole operation rather than being skipped.
     """
     if i64(load(i32, offset(target, 0))) == apy_dict_kind():
+        # A dict SUBCLASS UPDATES FROM ITS MAPPING, not from its keys.
+        # Iterating a dict yields keys, so the pair walk below read
+        # `d.update(Counter())` as a sequence of single keys and reported an
+        # element of length 1 -- about a perfectly good mapping.
+        if i64(load(i32, offset(src, 0))) == apy_inst_kind():
+            inner: ptr = ptr(load(u64, offset(src, apy_o_held_offset())))
+            if inner:
+                if i64(load(i32, offset(inner, 0))) == apy_dict_kind():
+                    src = inner
         if i64(load(i32, offset(src, 0))) == apy_dict_kind():
             dn: i64 = load(i64, offset(src, apy_d_n_offset()))
             keys: ptr = ptr(load(u64, offset(src, apy_d_keys_offset())))
@@ -2105,6 +2138,11 @@ def apy_update(target: ptr, src: ptr) -> ptr:
                     return ptr(0)
                 j = j + 1
             return apy_none()
+        # Drained first, so a user iterator can be walked -- see
+        # `apy_sorted`. `d.update(pairs())` is an ordinary spelling.
+        src = apy_iterable(src)
+        if not src:
+            return ptr(0)
         n: i64 = apy_raw_len(src)
         if apy_error_occurred():
             return ptr(0)
@@ -2134,6 +2172,10 @@ def apy_update(target: ptr, src: ptr) -> ptr:
             i = i + 1
         return apy_none()
     if not apy_mutable_set_of(rodata(b"update\0"), target):
+        return ptr(0)
+    # Drained first, so a user iterator can be walked -- see `apy_sorted`.
+    src = apy_iterable(src)
+    if not src:
         return ptr(0)
     sn: i64 = apy_raw_len(src)
     if apy_error_occurred():

@@ -413,8 +413,12 @@ APY_API apy_value apy_set_from_of(int64_t kind, apy_value src) {
     return apy_set_from((int)kind, src);
 }
 static apy_value apy_set_from(int kind, apy_value src) {
-    int64_t n = apy_raw_len(src), i;
+    int64_t n, i;
     apy_value out;
+    /* Drained first, so a user iterator can be walked -- see `apy_sorted`. */
+    src = apy_iterable(src);
+    if (!src) return 0;
+    n = apy_raw_len(src);
     if (apy_error_occurred()) return 0;
     out = apy_seq_new(kind, n + 1);
     for (i = 0; i < n; i++) {

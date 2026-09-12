@@ -392,6 +392,14 @@ APY_API apy_value apy_dict_get_or(apy_value d, apy_value key, apy_value fallback
 APY_API apy_value apy_update(apy_value target, apy_value src) {
     int64_t n, i;
     if (O(target)->kind == APY_DICT_K) {
+        /* A dict SUBCLASS UPDATES FROM ITS MAPPING, not from its keys.
+           Iterating a dict yields keys, so the pair walk below read
+           `d.update(Counter())` as a sequence of single keys and reported
+           an element of length 1 -- about a perfectly good mapping.
+           `apy_to_dict` unwraps the same way for the same reason. */
+        if (O(src)->kind == APY_INST_K && O(src)->v.o.held
+                && O(O(src)->v.o.held)->kind == APY_DICT_K)
+            src = O(src)->v.o.held;
         if (O(src)->kind == APY_DICT_K) {
             for (i = 0; i < O(src)->v.d.n; i++)
                 if (!apy_dict_set(target, O(src)->v.d.keys[i],
@@ -406,6 +414,10 @@ APY_API apy_value apy_update(apy_value target, apy_value src) {
            non-iterable argument names its kind, a non-iterable ELEMENT does
            not name anything, and an element of the wrong length is a
            ValueError giving its position and its length. */
+        /* Drained first, so a user iterator can be walked -- see
+           `apy_sorted`. `d.update(pairs())` is an ordinary spelling. */
+        src = apy_iterable(src);
+        if (!src) return 0;
         n = apy_raw_len(src);
         if (apy_error_occurred()) return 0;
         for (i = 0; i < n; i++) {
@@ -434,6 +446,9 @@ APY_API apy_value apy_update(apy_value target, apy_value src) {
         return apy_none();
     }
     if (!apy_mutable_set("update", target)) return 0;
+    /* Drained first, so a user iterator can be walked -- see `apy_sorted`. */
+    src = apy_iterable(src);
+    if (!src) return 0;
     n = apy_raw_len(src);
     if (apy_error_occurred()) return 0;
     for (i = 0; i < n; i++) {

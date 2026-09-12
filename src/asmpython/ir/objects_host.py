@@ -3130,6 +3130,20 @@ def _set_rhs(h, b, who):
     """The right operand as a set, or None if it cannot be one."""
     if isinstance(b, (set, frozenset)):
         return b
+    # A CLASS OF THIS FILE'S IS WALKED THROUGH THE FUNNEL, not handed to
+    # `set()`. An `Instance` is not a Python iterable however well a `for`
+    # loop walks it, so `s.union(obj)` and `s | obj` reported that it could
+    # not be one -- about a class whose `__iter__` plainly says how. The
+    # refusal `_seq_items` sets on the way out is PUT BACK THE WAY IT WAS
+    # FOUND, because both callers word their own: `|` says `unsupported
+    # operand type(s)` and `union` names the kind.
+    if isinstance(b, (Instance, Class, Gen, Iterator)):
+        keep = (h.err, h.err_value, h.pos_err)
+        got = _seq_items(h, b, who)
+        if got is None:
+            h.err, h.err_value, h.pos_err = keep
+            return None
+        b = got
     try:
         return set(b)
     except TypeError:
@@ -5520,6 +5534,12 @@ def _apy_update(h, a):
         return h._fail("AttributeError",
                        f"'{h.kind_name(target)}' object has no attribute "
                        f"'update'")
+    if isinstance(src, Instance) and isinstance(src.held, dict):
+        # A dict SUBCLASS UPDATES FROM ITS MAPPING, not from its keys.
+        # Iterating a dict yields keys, so the pair walk below read
+        # `d.update(Counter())` as a sequence of single keys and reported an
+        # element of length 1 -- about a perfectly good mapping.
+        src = src.held
     if isinstance(src, dict):
         for k, v in src.items():
             if _dict_set(h, target, k, v) == 0:
@@ -5529,15 +5549,23 @@ def _apy_update(h, a):
     if items is None:
         return 0
     for at, pair in enumerate(items):
-        got = list(pair) if isinstance(pair, (list, tuple, str)) else None
-        if got is None or len(got) != 2:
+        # TWO DIFFERENT ERRORS AND CPYTHON DISTINGUISHES THEM: an element
+        # that is not a sequence AT ALL is a TypeError naming nothing, and
+        # one that IS a sequence of the wrong length is a ValueError naming
+        # its position and its length. Reporting the second for both meant
+        # `d.update([5])` was told about a length an int does not have, and
+        # `except TypeError:` did not catch it. The compiled twin draws the
+        # line between the same kinds.
+        if not isinstance(pair, (list, tuple, str, set, frozenset, dict)):
+            return h._fail("TypeError", "object is not iterable")
+        got = list(pair)
+        if len(got) != 2:
             # THE INDEX IS PART OF THE MESSAGE, which CPython and the compiled
             # runtime both say and this did not -- a program with a long
             # sequence was told a length and not which element had it.
             return h._fail("ValueError",
                            f"dictionary update sequence element #{at} has "
-                           f"length {len(got) if got is not None else 1}; "
-                           "2 is required")
+                           f"length {len(got)}; 2 is required")
         if _dict_set(h, target, got[0], got[1]) == 0:
             return 0
     return h._none
@@ -7768,6 +7796,18 @@ def _made_set_fold(h, obj, want: str):
             h._fail("TypeError",
                     f"{h.kind_name(_o)}.{_w}() takes no keyword arguments")
             raise _UserFailed
+        # EACH ARGUMENT WALKED THROUGH THE FUNNEL FIRST. These six take any
+        # iterable, and a class of this file's is not a Python one however
+        # well a `for` loop walks it -- so `s.union(obj)` reported that a
+        # class whose `__iter__` says exactly how was not iterable.
+        walked = list(args)
+        for at, one in enumerate(walked):
+            if isinstance(one, (Instance, Class, Gen, Iterator)):
+                got = _seq_items(h, one, _w)
+                if got is None:
+                    raise _UserFailed
+                walked[at] = got
+        args = walked
         try:
             return getattr(_o, _w)(*args)
         except TypeError as exc:
@@ -9923,6 +9963,22 @@ def _seq_items(h, v, where: str):
         # READ WHEN WALKED, which is what makes a view live: the keys are the
         # ones the dict has now, not the ones it had when the view was made.
         return list(v)
+    if isinstance(v, Class):
+        # ITERATING A CLASS IS THE METACLASS'S BUSINESS: `for c in Color` is
+        # `type(Color).__iter__(Color)`, which is how an enum lists its
+        # members. `_apy_iterable` has known that all along; this funnel did
+        # not, so `sorted(Color)` and `",".join(Color)` refused what a `for`
+        # loop over the very same class walked.
+        walked = _apy_iterable(h, [h._new(v)])
+        if walked == 0:
+            return None
+        got = h._get(walked, where)
+        if got is v:
+            # No metaclass, or one that says nothing about walking -- and
+            # the refusal below is still the right answer for it.
+            h._fail("TypeError", f"'{h.kind_name(v)}' object is not iterable")
+            return None
+        return _seq_items(h, got, where)
     if isinstance(v, Instance):
         # THROUGH `_apy_iterable`, NOT A SECOND COPY OF THE RULES. It already
         # knows the whole protocol -- `__iter__`, the iterator check, the
@@ -11721,6 +11777,21 @@ def _apy_str_like(h, a):
     return a[1]
 
 
+def _joinable(v) -> bool:
+    """Whether `join` can walk `v`.
+
+    THE SAME THREE ROADS `for` TAKES -- `__iter__`, the older `__getitem__`
+    protocol, or a builtin underneath -- and for a class object, whatever its
+    metaclass says, which is how `",".join(Color)` walks an enum's members.
+    """
+    if isinstance(v, Instance):
+        return (v.held is not None or v.cls.find("__iter__") is not None
+                or v.cls.find("__getitem__") is not None)
+    if isinstance(v, Class):
+        return v.meta is not None and v.meta.lookup("__iter__") is not _ABSENT
+    return True
+
+
 def _make_str_method(symbol: str, method: str, argc: int):
     def binding(h, a, _m=method, _n=argc, _sym=symbol):
         receiver = h._get(a[0], _sym)
@@ -11752,6 +11823,20 @@ def _make_str_method(symbol: str, method: str, argc: int):
                 if drained is None:
                     return 0
                 args[at] = drained
+        # A CLASS IS WALKED FOR `join` ALONE. It is the only one of these
+        # methods that takes an iterable -- every other argument is a string,
+        # and draining one would replace Python's own complaint about it with
+        # a complaint about a list. Handing an `Instance` to `str.join` made
+        # Python object to a SUBSCRIPT, about a class a `for` loop walks;
+        # and for one that cannot be walked the refusal is `join`'s own,
+        # which names no kind where `_seq_items` names one.
+        if _m == "join" and isinstance(args[0], (Instance, Class)):
+            if not _joinable(args[0]):
+                return h._fail("TypeError", "can only join an iterable")
+            drained = _seq_items(h, args[0], _sym)
+            if drained is None:
+                return 0
+            args[0] = drained
         try:
             return h._value(getattr(receiver, _m)(*args))
         except _HOST_RAISES as exc:
@@ -11836,13 +11921,30 @@ def _make_set_op(symbol: str, method: str):
                 "AttributeError",
                 f"'{h.kind_name(left)}' object has no attribute '{_m}'")
         if not isinstance(right, (set, frozenset)):
-            try:
-                right = set(right)
-            except TypeError:
-                return h._fail(
-                    "TypeError",
-                    f"'{h.kind_name(right)}' object is not iterable")
-        result = getattr(left, _m)(right)
+            # THROUGH THE FUNNEL, not through `set()`. A class of this file's
+            # is not a Python iterable however well a `for` loop walks it, so
+            # `{1}.union(obj)` reported that a class whose `__iter__` says
+            # exactly how was not iterable -- and one with the OLDER protocol
+            # was worse than refused, because Python's own `set()` walked it
+            # and the user's IndexError came back as this file's internal
+            # failure instead of as the end of the walk. The in-place three
+            # below already read their operand this way. `_seq_items` words
+            # its refusal exactly as this one did, so nothing is reworded.
+            items = _seq_items(h, right, _sym)
+            if items is None:
+                return 0
+            # HANDED OVER AS A LIST, not made into a set first. Python's set
+            # methods take any iterable, and building a set here changed the
+            # ORDER the elements arrived in -- which is the order the answer
+            # iterates and prints in, so `{1}.union(obj)` printed its members
+            # in an order CPython's own `union` does not.
+            right = items
+        try:
+            result = getattr(left, _m)(right)
+        except TypeError as exc:
+            # An UNHASHABLE element, which is the method's own complaint and
+            # not a claim about the argument as a whole.
+            return h._fail_like(exc)
         # A frozenset operand keeps the LEFT operand's kind, as Python does.
         if isinstance(result, (set, frozenset)) and isinstance(left, frozenset):
             result = frozenset(result)
@@ -11877,11 +11979,13 @@ def _make_set_update(symbol: str, method: str):
             items = _seq_items(h, right, _sym)
             if items is None:
                 return 0
-            try:
-                right = set(items)
-            except TypeError as exc:
-                return h._fail_like(exc)
-        getattr(left, _m)(right)
+            # AS A LIST, for the reason `_make_set_op` gives: making a set of
+            # it first reorders what the answer holds.
+            right = items
+        try:
+            getattr(left, _m)(right)
+        except TypeError as exc:
+            return h._fail_like(exc)
         return h._none
     return binding
 

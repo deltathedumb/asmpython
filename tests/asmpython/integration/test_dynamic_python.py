@@ -2363,6 +2363,153 @@ PROGRAMS = {
         show("a bytearray from a str", lambda: _ext(bytearray(), ["a"]))
         show("a bytearray out of range", lambda: _ext(bytearray(), [256]))
     """,
+    "an_eager_consumer_walks_a_class_that_says_how_to_iterate": """
+        # THIRTEEN CONSUMERS COULD NOT WALK A USER ITERATOR, all for one
+        # reason: each asked `apy_raw_len` for a bound straight out instead of
+        # funnelling through `apy_iterable` first. `apy_raw_len` knows the
+        # OLDER protocol -- `__len__` plus `__getitem__` -- and nothing else,
+        # so a class whose `__iter__` answers an object with `__next__` was
+        # reported as not iterable by `sorted`, `sum`, `min`, `max`, `set`,
+        # `frozenset`, `bytes`, `dict.fromkeys` and `s.union`, while a `for`
+        # loop over the very same object walked it. `apy_iterable` had drained
+        # one all along; the consumers just never asked it.
+        #
+        # `join` IS THE SAME GAP BY ANOTHER ROAD. It funnelled, then refused
+        # every instance the funnel handed back -- which is exactly the class
+        # with `__len__` and `__getitem__`, whose walk IS the index walk.
+        #
+        # AND A CLASS OBJECT IS WALKED BY ITS METACLASS, which the interpreter
+        # funnel did not know: `for c in Color` worked and `sorted(Color)` did
+        # not.
+        def show(label, f):
+            try:
+                print(label, "->", f())
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        class Cursor:
+            # A REAL ITERATOR: `__iter__` answers itself and `__next__` ends
+            # on StopIteration.
+            def __init__(self, n):
+                self.i = 0
+                self.n = n
+            def __iter__(self):
+                return self
+            def __next__(self):
+                if self.i >= self.n:
+                    raise StopIteration
+                self.i = self.i + 1
+                return self.i * 10
+
+        class Steps:
+            # `__iter__` ANSWERS SOMETHING ELSE, which is the shape nothing
+            # here could read: the object walked is not the object handed in.
+            def __init__(self, n):
+                self.n = n
+            def __iter__(self):
+                return Cursor(self.n)
+
+        class Older:
+            # `__len__` AND `__getitem__`, the protocol the index walk IS.
+            def __len__(self):
+                return 2
+            def __getitem__(self, i):
+                if i >= 2:
+                    raise IndexError(i)
+                return "ab"[i]
+
+        class Bare:
+            pass
+
+        class Meta(type):
+            def __iter__(cls):
+                return iter(["x", "y"])
+
+        class Walkable(metaclass=Meta):
+            pass
+
+        show("sorted", lambda: sorted(Steps(3)))
+        show("sum", lambda: sum(Steps(3)))
+        show("sum from a start", lambda: sum(Steps(3), 100))
+        show("min", lambda: min(Steps(3)))
+        show("max", lambda: max(Steps(3)))
+        show("min by a key", lambda: min(Steps(3), key=lambda x: -x))
+        show("max by a key", lambda: max(Steps(3), key=lambda x: -x))
+        show("min of an empty one", lambda: min(Steps(0), default=-1))
+        show("sorted by a key", lambda: sorted(Steps(3), key=lambda x: -x))
+        show("set", lambda: sorted(set(Steps(3))))
+        show("frozenset", lambda: sorted(frozenset(Steps(3))))
+        show("bytes", lambda: bytes(Steps(3)))
+        show("fromkeys", lambda: dict.fromkeys(Steps(2), 0))
+        show("union", lambda: sorted({0}.union(Steps(2))))
+        show("update", lambda: sorted({0} | set(Steps(2))))
+        show("isdisjoint", lambda: {5}.isdisjoint(Steps(2)))
+        # THE LAZY ROADS ALREADY WORKED, and still do -- they are what made
+        # the eager ones look wrong rather than merely incomplete.
+        show("a for loop", lambda: [x for x in Steps(3)])
+        show("list", lambda: list(Steps(3)))
+        show("tuple", lambda: tuple(Steps(3)))
+        show("a display", lambda: [*Steps(3)])
+        show("in", lambda: 20 in Steps(3))
+        # `join` OVER THE OLDER PROTOCOL, which it refused by name.
+        show("join a class", lambda: ",".join(Older()))
+        show("join an iterator class", lambda: ",".join(Steps(0)))
+        show("join a generator", lambda: ",".join(str(x) for x in range(3)))
+        # `update` IS THE SAME GAP TWICE OVER -- once for the dict spelling
+        # and once for the set one, which are ONE runtime function.
+        def dupd(src):
+            d = {0: 0}
+            d.update(src)
+            return sorted(d.items())
+
+        def supd(src):
+            s = {0}
+            s.update(src)
+            return sorted(s)
+
+        class Pairs:
+            def __init__(self):
+                self.done = False
+            def __iter__(self):
+                return self
+            def __next__(self):
+                if self.done:
+                    raise StopIteration
+                self.done = True
+                return (1, 2)
+
+        class Sub(dict):
+            pass
+
+        show("dict update", lambda: dupd(Pairs()))
+        show("set update", lambda: supd(Steps(2)))
+        # AND A dict SUBCLASS UPDATES FROM ITS MAPPING, not from its keys:
+        # iterating a dict yields keys, so the pair walk read one key per
+        # element and reported a sequence element of length 1.
+        show("update from a subclass", lambda: dupd(Sub({5: 6})))
+        show("dict from a subclass", lambda: sorted(dict(Sub({5: 6})).items()))
+        # TWO DIFFERENT ERRORS AND THEY STAY DIFFERENT: an element that is
+        # not a sequence at all is a TypeError naming nothing, one of the
+        # wrong length a ValueError naming its position.
+        show("update a non-pair", lambda: dupd([5]))
+        show("update a long pair", lambda: dupd([(1, 2, 3)]))
+        show("update an int", lambda: dupd(5))
+        # A CLASS OBJECT, walked by whatever its metaclass says.
+        show("a metaclass walk", lambda: sorted(Walkable))
+        show("join a class object", lambda: ",".join(Walkable))
+        show("a metaclass set", lambda: sorted(set(Walkable)))
+        # AND THE REFUSALS STAY REFUSALS, each in its own words: `join` names
+        # no kind and everything else does.
+        show("sorted an int", lambda: sorted(5))
+        show("sorted a bare class", lambda: sorted(Bare()))
+        show("sum a bare class", lambda: sum(Bare()))
+        show("set a bare class", lambda: set(Bare()))
+        show("union a bare class", lambda: {0}.union(Bare()))
+        show("join a bare class", lambda: ",".join(Bare()))
+        show("join an int", lambda: ",".join(5))
+        show("join a class object", lambda: ",".join(Bare))
+        show("sorted a class object", lambda: sorted(Bare))
+    """,
     "a_generator_names_the_def_it_came_from": """
         # `repr(gen())` WAS `<generator object at 0x...>` -- CPython writes the
         # qualified name of the `def` between `object` and `at`, and a program

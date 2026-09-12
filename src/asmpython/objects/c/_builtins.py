@@ -265,8 +265,17 @@ APY_API apy_value apy_to_int_base(apy_value v, apy_value base) {
    satisfies exactly. */
 
 APY_API apy_value apy_sorted(apy_value seq) {
-    int64_t n = apy_raw_len(seq), i, j;
+    int64_t n, i, j;
     apy_value out;
+    /* A USER ITERATOR IS DRAINED BEFORE THE WALK. Everything below is by
+       index, and a class whose `__iter__` answers an object with `__next__`
+       has no index -- `apy_iterable` turns one into a list exactly as it does
+       a generator. Without this the walk asked `apy_raw_len` straight out and
+       was told the argument was not iterable, about something a `for` loop
+       over the very same object walked happily. */
+    seq = apy_iterable(seq);
+    if (!seq) return 0;
+    n = apy_raw_len(seq);
     if (apy_error_occurred()) return 0;
     out = apy_seq_new(APY_LIST_K, n + 1);
     for (i = 0; i < n; i++) apy_seq_push(out, apy_key_at(seq, i));
@@ -307,8 +316,12 @@ APY_API apy_value apy_sorted(apy_value seq) {
    implementation means the stability argument above only has to be right
    once. */
 static apy_value apy_sort_with(apy_value seq, apy_value keyfn, int reverse) {
-    int64_t n = apy_raw_len(seq), i, j;
+    int64_t n, i, j;
     apy_value out, keys;
+    /* Drained first, so a user iterator can be walked -- see `apy_sorted`. */
+    seq = apy_iterable(seq);
+    if (!seq) return 0;
+    n = apy_raw_len(seq);
     if (apy_error_occurred()) return 0;
     out = apy_seq_new(APY_LIST_K, n + 1);
     keys = apy_seq_new(APY_LIST_K, n + 1);
@@ -354,7 +367,11 @@ static apy_value apy_sort_with(apy_value seq, apy_value keyfn, int reverse) {
    appends and would let a duplicate through; the distinction is the whole
    difference between a set display and a list one. */
 APY_API apy_value apy_set_update(apy_value target, apy_value src) {
-    int64_t i, n = apy_raw_len(src);
+    int64_t i, n;
+    /* Drained first, so a user iterator can be walked -- see `apy_sorted`. */
+    src = apy_iterable(src);
+    if (!src) return 0;
+    n = apy_raw_len(src);
     if (apy_error_occurred()) return 0;
     for (i = 0; i < n; i++) {
         apy_value item = apy_key_at(src, i);
@@ -423,8 +440,12 @@ APY_API apy_value apy_bytes_of(apy_value args) {
    every key the same list, and appending through one key is visible through
    all of them. */
 APY_API apy_value apy_dict_fromkeys(apy_value keys, apy_value value) {
-    int64_t n = apy_raw_len(keys), i;
+    int64_t n, i;
     apy_value out;
+    /* Drained first, so a user iterator can be walked -- see `apy_sorted`. */
+    keys = apy_iterable(keys);
+    if (!keys) return 0;
+    n = apy_raw_len(keys);
     if (apy_error_occurred()) return 0;
     out = apy_dict_new(n + 1);
     for (i = 0; i < n; i++) {
@@ -482,6 +503,9 @@ APY_API apy_value apy_to_dict(apy_value src) {
     if (O(src)->kind == APY_INST_K && O(src)->v.o.held
             && O(O(src)->v.o.held)->kind == APY_DICT_K)
         return apy_copy(O(src)->v.o.held);
+    /* Drained first, so a user iterator can be walked -- see `apy_sorted`. */
+    src = apy_iterable(src);
+    if (!src) return 0;
     n = apy_raw_len(src);
     if (apy_error_occurred()) return 0;
     out = apy_dict_new(n + 1);
@@ -554,6 +578,9 @@ APY_API apy_value apy_to_bytes(apy_value src) {
           O(r)->kind = APY_BYTES_K;
           return r; }
     }
+    /* Drained first, so a user iterator can be walked -- see `apy_sorted`. */
+    src = apy_iterable(src);
+    if (!src) return 0;
     n = apy_raw_len(src);
     if (apy_error_occurred()) return 0;
     buf = (char *)malloc((size_t)(n ? n : 1) + 1);
@@ -934,8 +961,12 @@ APY_API apy_value apy_sorted_by(apy_value seq, apy_value keyfn,
    comparisons below are not symmetric. */
 APY_API apy_value apy_extreme_by_of(apy_value seq, apy_value keyfn,
                                    int64_t want_max) {
-    int64_t n = apy_raw_len(seq), i;
+    int64_t n, i;
     apy_value best = 0, best_key = 0;
+    /* Drained first, so a user iterator can be walked -- see `apy_sorted`. */
+    seq = apy_iterable(seq);
+    if (!seq) return 0;
+    n = apy_raw_len(seq);
     if (apy_error_occurred()) return 0;
     for (i = 0; i < n; i++) {
         apy_value item = apy_key_at(seq, i), k;
@@ -971,8 +1002,12 @@ APY_API apy_value apy_max_by(apy_value seq, apy_value keyfn) {
 }
 
 APY_API apy_value apy_extreme_of(apy_value seq, int64_t want_max) {
-    int64_t n = apy_raw_len(seq), i;
+    int64_t n, i;
     apy_value best;
+    /* Drained first, so a user iterator can be walked -- see `apy_sorted`. */
+    seq = apy_iterable(seq);
+    if (!seq) return 0;
+    n = apy_raw_len(seq);
     if (apy_error_occurred()) return 0;
     if (n == 0)
         return apy_fail(want_max ? "ValueError" : "ValueError",
@@ -1000,8 +1035,12 @@ APY_API apy_value apy_min(apy_value seq) { return apy_extreme(seq, 0); }
 APY_API apy_value apy_max(apy_value seq) { return apy_extreme(seq, 1); }
 
 APY_API apy_value apy_sum(apy_value seq) {
-    int64_t n = apy_raw_len(seq), i;
+    int64_t n, i;
     apy_value total;
+    /* Drained first, so a user iterator can be walked -- see `apy_sorted`. */
+    seq = apy_iterable(seq);
+    if (!seq) return 0;
+    n = apy_raw_len(seq);
     if (apy_error_occurred()) return 0;
     /* Starts at the INT zero, so `sum([])` is 0 and not 0.0, and so that a
        list of ints sums to an int. */
@@ -1029,6 +1068,9 @@ APY_API apy_value apy_sum_from(apy_value seq, apy_value start) {
     if (O(start)->kind == APY_BYTES_K)
         return apy_fail("TypeError",
                         "sum() can't sum bytes [use b''.join(seq) instead]");
+    /* Drained first, so a user iterator can be walked -- see `apy_sorted`. */
+    seq = apy_iterable(seq);
+    if (!seq) return 0;
     n = apy_raw_len(seq);
     if (apy_error_occurred()) return 0;
     for (i = 0; i < n; i++) {
@@ -1062,7 +1104,11 @@ APY_API apy_value apy_extreme_n(apy_value buf, int64_t n, int64_t want_max) {
    already reported a ValueError by then. */
 APY_API apy_value apy_extreme_or(apy_value seq, apy_value keyfn,
                                  apy_value fallback, int64_t want_max) {
-    int64_t n = apy_raw_len(seq);
+    int64_t n;
+    /* Drained first, so a user iterator can be walked -- see `apy_sorted`. */
+    seq = apy_iterable(seq);
+    if (!seq) return 0;
+    n = apy_raw_len(seq);
     if (apy_error_occurred()) return 0;
     if (n == 0) return fallback;
     if (O(keyfn)->kind == APY_NONE_K)

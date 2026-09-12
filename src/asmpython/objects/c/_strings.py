@@ -1224,18 +1224,13 @@ APY_API apy_value apy_str_join(apy_value sep, apy_value parts) {
     apy_value *got;
     char *buf;
     if (!apy_str_self("join", sep)) return 0;
-    /* ANY iterable, not just an indexable one. The walk below is by index, so
-       a generator has to be drained first -- and once generator expressions
-       became real generators, `sep.join(f(x) for x in xs)` started arriving
-       here as one. It reported "can only join an iterable" about something
-       that plainly was one. */
-    parts = apy_iterable(parts);
-    if (!parts) return 0;
-    /* The iterability check is written out rather than left to `apy_raw_len`,
-       whose message names the kind (`'int' object is not iterable`) where
-       `join`'s does not (`can only join an iterable`). Letting raw_len report
-       it would also mean clearing an already-set flag to replace the text,
-       which is exactly what the sticky-first-error rule forbids. */
+    /* THE CHECK COMES BEFORE THE FUNNEL, and is written out rather than left
+       to `apy_iterable` or `apy_raw_len`: their message names the kind
+       (`'int' object is not iterable`) where `join`'s names none (`can only
+       join an iterable`). Checking afterwards would mean clearing a flag the
+       funnel had already set in order to replace its text, which is exactly
+       what the sticky-first-error rule forbids -- so the kinds below are the
+       ARRIVING ones, before a generator has drained into a list. */
     if (O(parts)->kind != APY_STR_K && !apy_is_seq(parts)
         && !apy_is_set(parts) && O(parts)->kind != APY_DICT_K
         /* A CURSOR IS AN ITERABLE, and `apy_iterable` hands one straight
@@ -1247,8 +1242,30 @@ APY_API apy_value apy_str_join(apy_value sep, apy_value parts) {
            per-item message about the element rather than a claim about the
            argument. */
         && O(parts)->kind != APY_ITER_K && O(parts)->kind != APY_RANGE_K
-        && O(parts)->kind != APY_BYTES_K && O(parts)->kind != APY_MVIEW_K)
+        && O(parts)->kind != APY_BYTES_K && O(parts)->kind != APY_MVIEW_K
+        /* A GENERATOR AND A VIEW reach the walk as the list they drain into,
+           so the old check never saw either kind; it does now. */
+        && O(parts)->kind != APY_GEN_K && O(parts)->kind != APY_VIEW_K
+        /* A CLASS IS JOINABLE WHEN IT CAN BE WALKED: `__iter__`, the older
+           `__getitem__` protocol, or a builtin underneath. `for x in obj`
+           walks all three, and this refused every one of them. */
+        && !(O(parts)->kind == APY_INST_K
+             && (O(parts)->v.o.held
+                 || apy_class_find(O(parts)->v.o.cls, apy_name("__iter__"))
+                 || apy_class_find(O(parts)->v.o.cls,
+                                   apy_name("__getitem__"))))
+        /* A CLASS OBJECT whose METACLASS says how to walk it -- what makes
+           `",".join(Color)` an ordinary join over an enum's members. */
+        && !(O(parts)->kind == APY_TYPE_K && O(parts)->v.t.meta
+             && apy_class_find(O(parts)->v.t.meta, apy_name("__iter__"))))
         return apy_fail("TypeError", "can only join an iterable");
+    /* ANY iterable, not just an indexable one. The walk below is by index, so
+       a generator has to be drained first -- and once generator expressions
+       became real generators, `sep.join(f(x) for x in xs)` started arriving
+       here as one. It reported "can only join an iterable" about something
+       that plainly was one. */
+    parts = apy_iterable(parts);
+    if (!parts) return 0;
     n = apy_raw_len(parts);
     if (apy_error_occurred()) return 0;
     got = (apy_value *)malloc((size_t)(n ? n : 1) * sizeof(apy_value));
