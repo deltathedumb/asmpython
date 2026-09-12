@@ -32,9 +32,9 @@ from .analysis import (
     sem_type, span_of,
 )
 from .methods import (
-    DICT_PARTS, DYN_METHOD_TABLE, METHOD_KW_SYMBOL, METHOD_PARAMS,
-    CTOR_ANY_KEYWORD, CTOR_PARAMS, KeywordError, fold_ctor_keywords,
-    fold_keywords, method_symbol,
+    CTOR_ANY_KEYWORD, CTOR_PARAMS, DICT_PARTS, DYN_METHOD_TABLE,
+    METHOD_KW_SYMBOL, METHOD_PARAMS, REQUIRED, KeywordError,
+    fold_ctor_keywords, fold_keywords, method_symbol,
 )
 
 #: Methods whose keywords are read by a branch of their own in
@@ -5660,7 +5660,8 @@ class DynamicLowering:
             try:
                 args = self._dyn_arrange(
                     attr, args, [kw.arg for kw in node.keywords], lowered_kw,
-                    spreads, pad_to=3 if attr == "to_bytes" else 0)
+                    spreads, pad_to=3 if attr == "to_bytes" else 0,
+                    receiver=receiver)
             except KeywordError as exc:
                 # A REFUSAL ONLY WHERE THE BUILTIN WOULD HAVE ANSWERED.
                 # `METHOD_PARAMS` holds the eight whose signature was read
@@ -5767,7 +5768,7 @@ class DynamicLowering:
 
     def _dyn_arrange(self, attr: str, lowered_pos: list, names: list,
                      lowered_kw: dict, spreads: list = (),
-                     pad_to: int = 0) -> list:
+                     pad_to: int = 0, receiver: int = 0) -> list:
         """Already-lowered arguments in the order the runtime entry wants.
 
         RAISES `KeywordError` rather than emitting one: whether a refusal is
@@ -5776,20 +5777,29 @@ class DynamicLowering:
         exactly that keyword, so there the caller catches this and leaves the
         builtin half alone.
         """
+        if spreads and METHOD_PARAMS.get(attr) is not None:
+            # `**mapping` ON A METHOD WHOSE SIGNATURE IS KNOWN. What the
+            # mapping HOLDS is a run-time value, but which names it MAY hold
+            # is not -- `METHOD_PARAMS` has said so since the keyword round --
+            # so each parameter is read out of it by name at run time and the
+            # ordinary arity dispatch sees the call it should have seen all
+            # along. See `_dyn_spread_fold`.
+            return self._dyn_spread_fold(attr, lowered_pos, names,
+                                         lowered_kw, spreads)
         if spreads:
-            # `**mapping`. WHAT IT HOLDS IS A RUN-TIME QUESTION, so it cannot
-            # be folded into a slot here -- but it is usually EMPTY, and
-            # `f(*args, **kwargs)` forwarding through a wrapper is exactly
-            # that. So the empty case is answered, by checking at run time,
-            # and only a mapping with something in it is refused. Dropping it
-            # silently is what this whole change exists to stop.
+            # `**mapping` ON A METHOD WITH NO KEYWORD SIGNATURE, which means
+            # the mapping can only legally be EMPTY -- `f(*args, **kwargs)`
+            # forwarding through a wrapper is exactly that. So the empty case
+            # is answered, by checking at run time, and a mapping with
+            # something in it is refused. Dropping it silently is what this
+            # whole arrangement exists to stop.
             for name in names:
                 if name is not None:
                     raise KeywordError(
                         f"{attr}() cannot mix a ** mapping with the keyword "
                         f"{name!r} in this compiler")
             for mapping in spreads:
-                self._dyn_refuse_nonempty_mapping(attr, mapping)
+                self._dyn_refuse_nonempty_mapping(attr, mapping, receiver)
             # FALLS THROUGH WITH NO NAMES rather than returning: the
             # positional arguments may still need padding to the entry
             # point's arity, which is how `(5).to_bytes(2, "little", **{})`
@@ -5808,7 +5818,80 @@ class DynamicLowering:
                 out.append(self._dyn_constant(value))
         return out
 
-    def _dyn_refuse_nonempty_mapping(self, attr: str, mapping: int) -> None:
+    def _dyn_spread_fold(self, attr: str, lowered_pos: list, names: list,
+                         lowered_kw: dict, spreads: list) -> list:
+        """`"aaa".replace("a", "b", **opts)` -- every slot read at run time.
+
+        THE NAMES ARE KNOWN AND THE VALUES ARE NOT. `METHOD_PARAMS` says what
+        this method's parameters are called and what each defaults to, so a
+        slot no positional filled is one `apy_dict_get_or` against the
+        mapping -- and the call that comes out is the ordinary positional one,
+        padded to the entry point's full arity the way a written keyword
+        already pads it.
+
+        WHAT THE MAPPING MAY NOT HOLD is checked by `apy_kw_check`, which is
+        the half that cannot be decided here: an unknown name, or one naming
+        a slot a positional already filled. Its wordings are CPython's, the
+        same ones `fold_keywords` raises for the written spelling.
+
+        The two refusals that ARE decidable here are raised here, because the
+        positional count is all they need: too few for the parameters CPython
+        marks required, and more positionals than there are parameters.
+        """
+        params = METHOD_PARAMS[attr]
+        argc = len(lowered_pos)
+        required = sum(1 for _, d in params if d is REQUIRED)
+        if argc < required:
+            raise KeywordError(
+                f"{attr}() takes at least {required} positional "
+                f"argument{'' if required == 1 else 's'} ({argc} given)")
+        if argc > len(params):
+            raise KeywordError(
+                f"{attr}() takes at most {len(params)} "
+                f"argument{'' if len(params) == 1 else 's'} ({argc} given)")
+        # ONE BAG, in SOURCE ORDER, so a later key wins over one a `**`
+        # brought -- `f(**d, k=1)` and `f(k=1, **d)` are different calls and
+        # CPython keeps the difference. Built the way `dict(...)` is built,
+        # because it IS that: the keywords of a call collected into a mapping.
+        bag = self.b.call(T.PTR, "apy_dict_new",
+                          [self.b.const(T.I64, len(names) + 4)])
+        held = iter(spreads)
+        for name in names:
+            if name is None:
+                self.b.call(T.PTR, "apy_update", [bag, next(held)])
+            else:
+                self.b.call(T.PTR, "apy_dict_set",
+                            [bag, self._dyn_str_literal(name),
+                             lowered_kw[name]])
+            self._dyn_check()
+        # A PARAMETER CPYTHON MARKS POSITIONAL-ONLY IS AN EMPTY STRING here.
+        # A key can never name one, and leaving a hole would misalign every
+        # slot after it.
+        spelled = self.b.call(T.PTR, "apy_tuple_new",
+                              [self.b.const(T.I64, len(params) + 1)])
+        for pname, _ in params:
+            self.b.call(T.PTR, "apy_seq_push",
+                        [spelled, self._dyn_str_literal(pname or "")])
+        self.b.call(T.PTR, "apy_kw_check",
+                    [bag, spelled, self._dyn_str_literal(attr),
+                     self.b.const(T.I64, argc)])
+        self._dyn_check()
+        out = []
+        for i, (pname, default) in enumerate(params):
+            if i < argc:
+                out.append(lowered_pos[i])
+                continue
+            # UNREACHABLE FOR A REQUIRED SLOT while the count check above
+            # stands: every required parameter in the table is positional
+            # only, so `argc >= required` means all of them are filled.
+            out.append(self.b.call(
+                T.PTR, "apy_dict_get_or",
+                [bag, self._dyn_str_literal(pname or ""),
+                 self._dyn_constant(None if default is REQUIRED else default)]))
+        return out
+
+    def _dyn_refuse_nonempty_mapping(self, attr: str, mapping: int,
+                                     receiver: int = 0) -> None:
         """Let `f(**{})` through and refuse `f(**{'k': v})`, at run time.
 
         THE EMPTY CASE IS THE COMMON ONE. A wrapper forwarding `*args,
@@ -5816,7 +5899,17 @@ class DynamicLowering:
         and that call has an exact answer -- the positional one. What it
         HOLDS, when it holds anything, is not knowable at compile time and
         cannot be folded into a slot, so that is the case that is refused.
+
+        CPYTHON NAMES THE OWNER -- `str.upper() takes no keyword arguments` --
+        and the owner is the receiver's KIND, which only the runtime knows.
+        So the refusal is `apy_kw_none`'s wherever the receiver is in hand,
+        rather than a message admitting a limitation of this compiler.
         """
+        if receiver:
+            self.b.call(T.PTR, "apy_kw_none",
+                        [receiver, self._dyn_str_literal(attr), mapping])
+            self._dyn_check()
+            return
         bad = self.b.new_block("kwspread")
         fine = self.b.new_block("kwempty")
         self.b.branch(self.b.cmp(Op.NE, T.I64,

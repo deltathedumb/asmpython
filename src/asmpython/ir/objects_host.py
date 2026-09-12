@@ -1842,6 +1842,67 @@ def _ctor_call(h, tn, args, kwrest):
         raise _UserFailed
 
 
+def _apy_kw_none(h, a):
+    """`"abc".upper(**opts)` -- a method that takes no keyword at all, handed
+    a mapping that may hold one. CPython names the OWNER, which is the
+    receiver's kind and is not known until now."""
+    bag = h._get(a[2], "apy_kw_none")
+    if not bag:
+        return h._new(None)
+    recv = h._get(a[0], "apy_kw_none")
+    return h._fail("TypeError", f"{h.kind_name(recv)}."
+                                f"{h._get(a[1], 'apy_kw_none')}() takes no "
+                                f"keyword arguments")
+
+
+def _apy_kw_check(h, a):
+    """`"aaa".replace("a", "b", **opts)` -- what the mapping holds, checked
+    where it is finally known.
+
+    A `**` MAPPING CANNOT BE FOLDED AT COMPILE TIME: its keys are a run-time
+    value. The frontend emits one `apy_dict_get_or` per parameter against the
+    names `METHOD_PARAMS` records; this is the half that cannot be decided
+    there -- a key that names no parameter, or one naming a slot a positional
+    already filled. The wordings are CPython's, the same ones `fold_keywords`
+    raises for the written spelling.
+
+    A PARAMETER CPYTHON MARKS POSITIONAL-ONLY ARRIVES AS AN EMPTY STRING: a
+    key can never name one, and leaving a hole would misalign every slot
+    after it.
+    """
+    bag = h._get(a[0], "apy_kw_check")
+    known = list(h._get(a[1], "apy_kw_check"))
+    meth = h._get(a[2], "apy_kw_check")
+    argc = int(a[3])
+    # TOO MANY BEATS EVERY OTHER COMPLAINT, counting the keywords in. A call
+    # with no positionals at all is worded as KEYWORD arguments -- the same
+    # split `fold_keywords` makes for the written spelling.
+    if argc + len(bag) > len(known):
+        plural = "" if len(known) == 1 else "s"
+        if argc == 0:
+            return h._fail("TypeError",
+                           f"{meth}() takes at most {len(known)} keyword "
+                           f"argument{plural} ({len(bag)} given)")
+        return h._fail("TypeError",
+                       f"{meth}() takes at most {len(known)} argument{plural} "
+                       f"({argc + len(bag)} given)")
+    for key in bag:
+        if not isinstance(key, str):
+            return h._fail("TypeError", "keywords must be strings")
+        at = next((i for i, p in enumerate(known) if p and p == key), -1)
+        if at < 0:
+            near = _suggest(key, [p for p in known if p])
+            return h._fail("TypeError",
+                           f"{meth}() got an unexpected keyword argument "
+                           f"{key!r}"
+                           + (f". Did you mean {near!r}?" if near else ""))
+        if at < argc:
+            return h._fail("TypeError",
+                           f"argument for {meth}() given by name ({key!r}) "
+                           f"and position ({at + 1})")
+    return h._new(None)
+
+
 def _apy_ctor_call(h, a):
     """A BUILTIN TYPE REACHED AS A VALUE: `f = int` then `f("ff", 16)`,
     `map(int, xs)`, `defaultdict(list)`. The thunk the frontend synthesises
@@ -6904,7 +6965,8 @@ def _rich_compare(h, want: str, obj, other):
 #: so the two spellings cannot drift into two implementations. The generated
 #: C half reads the same table; see `objects/c/_gen_kindmeth.py`.
 from asmpython.frontends.python.methods import (  # noqa: E402
-    DYN_METHOD_TABLE, KeywordError, fold_ctor_keywords, method_symbol)
+    DYN_METHOD_TABLE, KeywordError, _suggest, fold_ctor_keywords,
+    method_symbol)
 
 #: The names that table answers -- the dunders are left out, because every
 #: one of them is a PROTOCOL name the arms above answer with their own

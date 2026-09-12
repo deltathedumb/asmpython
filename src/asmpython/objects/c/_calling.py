@@ -1438,10 +1438,11 @@ static int apy_edits(const char *a, const char *b, int max_cost) {
 
 /* The parameter CPython would propose for a misspelling, or null. NEAREST
    WINS AND TIES KEEP THE FIRST, which is the walk CPython makes. */
-static const char *apy_suggest(const char *wrong, const char *const *names) {
+static const char *apy_suggest_n(const char *wrong, const char *const *names,
+                                 int count) {
     const char *best = 0;
     int best_at = -1, i;
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < count; i++) {
         int limit, far;
         if (!names[i]) continue;
         limit = (int)((strlen(wrong) + strlen(names[i]) + 3)
@@ -1451,6 +1452,10 @@ static const char *apy_suggest(const char *wrong, const char *const *names) {
         if (best_at < 0 || far < best_at) { best = names[i]; best_at = far; }
     }
     return best;
+}
+
+static const char *apy_suggest(const char *wrong, const char *const *names) {
+    return apy_suggest_n(wrong, names, 3);
 }
 
 static const apy_ctor_shape *apy_ctor_find(const char *tn) {
@@ -1664,6 +1669,99 @@ static apy_value apy_builtin_ctor(const char *tn, apy_value *argv,
         if (!out && !apy_err_type) *handled = 0;
         return out;
     }
+}
+
+/* `"aaa".replace("a", "b", **opts)` -- WHAT THE MAPPING HOLDS, checked where
+   it is finally known.
+
+   A `**` MAPPING CANNOT BE FOLDED AT COMPILE TIME: its keys are a run-time
+   value, so the frontend used to refuse any mapping with something in it and
+   answer only the empty case. That refused `f(*args, **kwargs)` forwarding
+   through a wrapper, which is the shape the whole feature exists for.
+
+   THE FOLD IS THE FRONTEND'S STILL -- it emits one `apy_dict_get_or` per
+   parameter, against the names `METHOD_PARAMS` already records -- and this
+   is the half that cannot be: whether the mapping holds a key that is NOT a
+   parameter, or one naming a slot a positional already filled. The wordings
+   are CPython's, the same ones `fold_keywords` raises for the written form.
+
+   `names` IS THE PARAMETER LIST IN POSITIONAL ORDER, with an EMPTY STRING
+   standing for a parameter CPython marks positional-only: a key can never
+   name one of those, and leaving a hole in the tuple would misalign every
+   slot after it. */
+/* `"abc".upper(**opts)` -- a method that takes NO keyword at all, handed a
+   mapping that may hold one. CPython names the OWNER here -- `str.upper()
+   takes no keyword arguments` -- and the owner is the receiver's kind, which
+   is not known until now: the frontend used to say "does not take a
+   non-empty ** mapping in this compiler" instead, which is a limitation
+   admitted out loud rather than an answer.
+
+   THE EMPTY CASE IS THE COMMON ONE and passes straight through: a wrapper
+   forwarding `*args, **kwargs` passes an empty mapping nearly always. */
+APY_API apy_value apy_kw_none(apy_value recv, apy_value methv, apy_value bag) {
+    char buf[160];
+    if (!apy_truth(bag)) return apy_none();
+    snprintf(buf, sizeof buf, "%s.%s() takes no keyword arguments",
+             apy_kind_name(recv), APY_CSTR(methv));
+    return apy_fail("TypeError", buf);
+}
+
+APY_API apy_value apy_kw_check(apy_value bag, apy_value names,
+                               apy_value methv, int64_t argc) {
+    const char *meth = APY_CSTR(methv);
+    const char *known[8];
+    int64_t count = O(names)->v.q.n, i, j;
+    char buf[220];
+    if (count > 8) count = 8;
+    for (i = 0; i < count; i++) known[i] = APY_CSTR(O(names)->v.q.items[i]);
+    /* TOO MANY BEATS EVERY OTHER COMPLAINT, counting the keywords in:
+       `"a,b".split(",", 1, **{"maxsplit": 2})` is three arguments for two
+       parameters, and CPython says so rather than reporting that `maxsplit`
+       was given twice. A call with no positionals at all is worded as
+       KEYWORD arguments -- the same split `fold_keywords` makes. */
+    if (argc + O(bag)->v.d.n > count) {
+        const char *plural = count == 1 ? "" : "s";
+        if (argc == 0)
+            snprintf(buf, sizeof buf, "%s() takes at most %lld keyword "
+                     "argument%s (%lld given)", meth, (long long)count,
+                     plural, (long long)O(bag)->v.d.n);
+        else
+            snprintf(buf, sizeof buf, "%s() takes at most %lld argument%s "
+                     "(%lld given)", meth, (long long)count, plural,
+                     (long long)(argc + O(bag)->v.d.n));
+        return apy_fail("TypeError", buf);
+    }
+    for (i = 0; i < O(bag)->v.d.n; i++) {
+        apy_value k = O(bag)->v.d.keys[i];
+        const char *wrong;
+        int64_t at = -1;
+        if (O(k)->kind != APY_STR_K)
+            return apy_fail("TypeError", "keywords must be strings");
+        wrong = APY_CSTR(k);
+        for (j = 0; j < count; j++)
+            if (*known[j] && !strcmp(wrong, known[j])) at = j;
+        if (at < 0) {
+            const char *near = apy_suggest_n(wrong, known, (int)count);
+            /* A POSITIONAL-ONLY NAME IS NOT A SUGGESTION, and cannot be one:
+               its slot is the empty string above, so `apy_suggest_n` never
+               answers it. */
+            if (near && *near)
+                snprintf(buf, sizeof buf, "%s() got an unexpected keyword "
+                         "argument '%.60s'. Did you mean '%s'?",
+                         meth, wrong, near);
+            else
+                snprintf(buf, sizeof buf, "%s() got an unexpected keyword "
+                         "argument '%.60s'", meth, wrong);
+            return apy_fail("TypeError", buf);
+        }
+        if (at < argc) {
+            snprintf(buf, sizeof buf, "argument for %s() given by name "
+                     "('%.60s') and position (%lld)", meth, wrong,
+                     (long long)(at + 1));
+            return apy_fail("TypeError", buf);
+        }
+    }
+    return apy_none();
 }
 
 /* A BUILTIN TYPE REACHED AS A VALUE: `f = int` then `f("ff", 16)`,

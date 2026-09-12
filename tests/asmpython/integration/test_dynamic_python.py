@@ -991,6 +991,90 @@ PROGRAMS = {
         print(type(5) is int, type("") is str, isinstance(1, int))
         print(int is int, repr(int.__name__), type(5).__name__)
     """,
+    # A `**` MAPPING WITH ANYTHING IN IT WAS REFUSED. What it holds is a
+    # run-time value, so the frontend could not fold it into a slot and said
+    # so out loud: `replace() does not take a non-empty ** mapping in this
+    # compiler`. That refused `f(*args, **kwargs)` forwarding through a
+    # wrapper, which is the shape the feature exists for.
+    #
+    # WHICH NAMES IT MAY HOLD IS KNOWN even when the values are not --
+    # `METHOD_PARAMS` has said so since the keyword round -- so each
+    # parameter is read out of the mapping by name at run time and the
+    # ordinary arity dispatch sees the call it should have seen all along.
+    # `apy_kw_check` is the half that cannot be decided at compile time: a
+    # key naming no parameter, or one naming a slot a positional already
+    # filled. Its wordings are CPython's, and so is their order -- too many
+    # beats a slot given twice, which beats an unknown name.
+    #
+    # AND A METHOD WITH NO KEYWORD SIGNATURE now refuses in CPython's words
+    # too, naming the OWNER: `str.upper() takes no keyword arguments`, which
+    # the runtime can say because it has the receiver and the frontend did
+    # not.
+    "a_star_star_mapping_reaches_its_slots": """
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except TypeError as e:
+                print(label, "TypeError:", e)
+
+        opts = {"count": 1}
+        show("replace", lambda: "aaa".replace("a", "b", **opts))
+        show("split", lambda: "a,b,c".split(",", **{"maxsplit": 1}))
+        show("split sep", lambda: "a,b".split(**{"sep": ","}))
+        show("rsplit", lambda: "a,b,c".rsplit(",", **{"maxsplit": 1}))
+        show("encode", lambda: "a".encode(**{"encoding": "utf-8"}))
+        show("encode both",
+             lambda: "a".encode(**{"encoding": "ascii", "errors": "strict"}))
+        show("decode", lambda: b"a".decode(**{"encoding": "utf-8"}))
+        show("decode errors", lambda: b"a" .decode(**{"errors": "replace"}))
+        show("expandtabs", lambda: "a\\tb".expandtabs(**{"tabsize": 4}))
+        show("splitlines", lambda: "a\\nb".splitlines(**{"keepends": True}))
+        show("to_bytes", lambda: (258).to_bytes(
+            **{"length": 4, "byteorder": "little"}))
+        show("to_bytes signed", lambda: (-2).to_bytes(
+            **{"length": 2, "byteorder": "big", "signed": True}))
+        show("translate", lambda: b"abc".translate(None, **{"delete": b"b"}))
+        # MIXED WITH A WRITTEN KEYWORD, in source order: a later key wins
+        # over one a `**` brought, which is how CPython reads the two.
+        show("mixed", lambda: "a,b,c".split(",", maxsplit=1, **{}))
+        show("map first", lambda: "a,b,c".split(",", **{}, maxsplit=1))
+        show("two maps",
+             lambda: "aaa".replace("a", "b", **{"count": 1}, **{}))
+        # AND THE EMPTY MAPPING, which is what a forwarding wrapper passes
+        # nearly always, still reaches the positional call.
+        show("empty", lambda: "aaa".replace("a", "b", **{}))
+        show("empty plain", lambda: "abc".upper(**{}))
+        show("empty translate", lambda: b"abc".translate(**{}))
+        # THE REFUSALS, in CPython's order: too many first, then a slot given
+        # twice, then a name no parameter has -- with CPython's own edit
+        # distance deciding whether there is a suggestion to make.
+        show("too many", lambda: "a,b".split(",", 1, **{"maxsplit": 2}))
+        show("too many mixed",
+             lambda: "a,b,c".split(",", maxsplit=1, **{"sep": ","}))
+        show("keyword count",
+             lambda: "a".encode(**{"encoding": "a", "errors": "b", "x": "c"}))
+        show("twice", lambda: "a".encode("utf-8", **{"encoding": "ascii"}))
+        show("unknown", lambda: "aaa".replace("a", "b", **{"nope": 1}))
+        show("suggested", lambda: "aaa".replace("a", "b", **{"coun": 1}))
+        show("positional only", lambda: "aaa".replace(**{"old": "a"}))
+        show("non-str key", lambda: "aaa".replace("a", "b", **{1: 2}))
+        # A METHOD WITH NO KEYWORD SIGNATURE names its owner, and the owner
+        # is whatever the receiver turned out to be.
+        show("str", lambda: "abc".upper(**{"x": 1}))
+        show("bytes", lambda: b"abc".upper(**{"x": 1}))
+        show("list", lambda: [1].append(**{"x": 1}))
+        show("dict", lambda: {}.keys(**{"x": 1}))
+        show("int", lambda: (5).bit_length(**{"x": 1}))
+        # AND A USER METHOD IS UNTOUCHED by any of it. Its name is its own:
+        # a class writing `replace` puts the call on the COLLISION path,
+        # where the builtin half still drops what it was given -- which is a
+        # divergence of its own and not this one.
+        class C:
+            def shuffled(self, a, count=0):
+                return (a, count)
+        show("user", lambda: C().shuffled("a", **{"count": 3}))
+        show("user empty", lambda: C().shuffled("a", **{}))
+    """,
     "traceback_positions": """
         try:
             (1).missing
