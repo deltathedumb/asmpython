@@ -655,6 +655,48 @@ PROGRAMS = {
         # not a character and neither of them is whitespace.
         print(b"a\\xc2\\xa0b".split(), b"  a  b  ".rsplit(None, 1))
     """,
+    # A BOUND BUILTIN METHOD IS NOT A FUNCTION. `type([1].index).__name__` is
+    # `builtin_function_or_method` in Python and `method-wrapper` for a bound
+    # slot like `[1].__len__`; both compiled paths said `function` and the
+    # interpreter said `Native` -- the name of a class in objects_host.py, an
+    # implementation detail of this compiler in a string a program prints.
+    "the_type_of_a_builtin_method": """
+        print(type([1].index).__name__, type({}.keys).__name__)
+        print(type([].append).__name__, type([1].count).__name__)
+        # A DUNDER IS THE ONE THAT DIFFERS: a bound slot is a method-wrapper.
+        print(type([1].__len__).__name__, type([1].__eq__).__name__)
+        print(type("a".__hash__).__name__, type((5).__abs__).__name__)
+        # EXCEPT A DUNDER WITH A RANGE, which is not a slot at all: int
+        # writes `__round__` out, and an optional argument is exactly what a
+        # slot cannot carry.
+        print(type((5).__round__).__name__)
+        # AND THE THREE THAT WERE ALREADY RIGHT stay right.
+        print(type(print).__name__, type(len).__name__)
+        print(type(lambda: 1).__name__, type((5).__class__).__name__)
+        def written():
+            pass
+        print(type(written).__name__)
+    """,
+    # A NATIVE CARRIED ONE ARITY AND THE CALL MACHINERY TRUNCATED A SURPLUS,
+    # so `getattr([1], "__len__")(9)` answered 1 rather than refusing -- the
+    # count was capped to the expected number and then found to match. It
+    # also meant no method with an OPTIONAL argument could be reached by
+    # name: `__round__` was left out of the protocol set for exactly that
+    # reason, and is back now that a native can say it takes a range.
+    "a_builtin_method_counts_its_arguments": """
+        print((5).__round__(), (1234).__round__(-2))
+        print((1.55).__round__(), (1.55).__round__(1), True.__round__())
+        print(hasattr(5, "__round__"), hasattr(1j, "__round__"))
+        print(hasattr("a", "__round__"), round(1.55, 1))
+        for body in (lambda: getattr([1], "__iter__")(1, 2),
+                     lambda: getattr([1], "__len__")(9),
+                     lambda: getattr([1], "__contains__")(),
+                     lambda: (5).__round__(1, 2)):
+            try:
+                body()
+            except TypeError as e:
+                print("TypeError:", e)
+    """,
     "traceback_positions": """
         try:
             (1).missing

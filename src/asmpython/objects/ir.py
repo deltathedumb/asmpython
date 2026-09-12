@@ -306,7 +306,8 @@ REPLACES: dict[str, tuple[str, ...]] = {
                       "apy_member_descriptor", "apy_kind_class",
                       "apy_object_default", "apy_object_class",
                       "apy_descr_get_of", "apy_split_of",
-                      "apy_kind_method_of", "apy_kind_attr_of",
+                      "apy_kind_method_of", "apy_kind_method_opt",
+                      "apy_kind_attr_of",
                       # WHICH DUNDERS A VALUE HAS, as two tables of names.
                       # They are `apy_kind_attr_of`'s and live beside it: a
                       # builtin has no class dict to search, so the list of

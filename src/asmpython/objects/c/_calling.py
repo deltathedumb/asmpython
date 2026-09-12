@@ -398,6 +398,30 @@ APY_API apy_value apy_kind_method_of(apy_value obj, int64_t arity,
     apy_value fn = apy_native(APY_NAT_KIND, arity, name);
     return bind ? apy_bind(fn, obj) : fn;
 }
+
+/* THE SAME, WITH AN OPTIONAL TAIL: the method may be called with up to `nopt`
+   fewer arguments than it declares.
+
+   `x.find(sub)`, `x.find(sub, i)` and `x.find(sub, i, j)` are ONE METHOD, and
+   a cell carrying one arity could not say so: `apy_call_nk` truncates a
+   surplus argument (`take = byslot - n`) and then finds the count it expected,
+   so `getattr([1], "__len__")(9)` answered 1 rather than refusing, and no
+   method with an optional argument could be reached by name at all.
+
+   RECORDED AS `ndefaults` WITH A NULL `defaults`, which no other cell has:
+   there are no VALUES to fill a missing slot with -- the body dispatches on
+   how many it actually got. A separate entry point rather than a parameter
+   on the one above, because eighty-five call sites take a fixed arity and
+   say so. */
+APY_API apy_value apy_kind_method_opt(apy_value obj, int64_t arity,
+                                      int64_t nopt, apy_value namev,
+                                      int64_t bind) {
+    const char *name = (const char *)namev;
+    apy_value fn = apy_native(APY_NAT_KIND, arity, name);
+    O(fn)->v.fn.ndefaults = nopt;
+    O(fn)->v.fn.defaults = 0;
+    return bind ? apy_bind(fn, obj) : fn;
+}
 /* THE NAME ITS CALLERS USE, kept as a delegate: the body is IR's now,
    and the exported half above stands in when nothing is ported. */
 static apy_value apy_kind_method(apy_value obj, int64_t arity,
@@ -499,11 +523,10 @@ APY_API int64_t apy_number_arity(apy_value wantv, int64_t is_int,
     if (strcmp(want, "__trunc__") == 0) return 1;
     if (strcmp(want, "__floor__") == 0) return 1;
     if (strcmp(want, "__ceil__") == 0) return 1;
-    /* NOT `__round__`, though CPython's numbers have one: a native carries a
-       fixed arity and no defaults, so the optional `ndigits` would either be
-       dropped in silence or make the no-argument form an error. `round(x, n)`
-       is the spelling that works, and answering a wrong number to
-       `x.__round__(2)` is worse than not carrying the name. */
+    /* `__round__` IS NOT HERE because it is not a fixed arity: it takes an
+       OPTIONAL `ndigits`, which this table has no way to say. It is answered
+       in `apy_kind_attr_of` through `apy_kind_method_opt` instead -- the
+       entry point that exists for exactly this. */
     if (!is_int) return 0;
     /* AN INT'S OWN: the bit operations and `__index__`, which is the promise
        that this value may stand where a position is wanted. */
@@ -596,7 +619,14 @@ APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
                           || strcmp(want, "__rmul__") == 0))
         return apy_kind_method(obj, 2, want, bind);
     if (apy_is_num(obj) || k == APY_COMPLEX_K) {
-        int64_t arity = apy_number_arity(
+        int64_t arity;
+        /* `__round__` TAKES AN OPTIONAL `ndigits`, which the arity table
+           cannot say -- `(1.55).__round__()` and `(1.55).__round__(1)` are
+           one method. A COMPLEX HAS NONE: there is no rounding of one. */
+        if (k != APY_COMPLEX_K && strcmp(want, "__round__") == 0)
+            return apy_kind_method_opt(obj, 2, 1,
+                                       (apy_value)(uintptr_t)want, bind);
+        arity = apy_number_arity(
             (apy_value)(uintptr_t)want, apy_is_int_like(obj),
             k == APY_COMPLEX_K);
         if (arity) return apy_kind_method(obj, arity, want, bind);
@@ -963,6 +993,11 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
         if (strcmp(w, "__floor__") == 0) return apy_math_floor(a[0]);
         if (strcmp(w, "__ceil__") == 0) return apy_math_ceil(a[0]);
         if (strcmp(w, "__reversed__") == 0) return apy_reversed(a[0]);
+        /* `x.__round__()` and `x.__round__(n)` are ONE method, told apart by
+           the count that really arrived -- see `apy_kind_method_opt`. ABOVE
+           the guard below, because the no-argument form is one of the two. */
+        if (strcmp(w, "__round__") == 0)
+            return n >= 2 ? apy_round_to(a[0], a[1]) : apy_round(a[0]);
         if (n < 2) return apy_fail("TypeError",
                                    "builtin method takes an argument");
         /* THE RICH COMPARISONS, which answer `NotImplemented` for a pair
@@ -1154,6 +1189,40 @@ static apy_value apy_arity_error(apy_value f, int64_t got) {
                    - (O(f)->v.fn.vararg ? 1 : 0) - (O(f)->v.fn.kwarg ? 1 : 0)
                    - O(f)->v.fn.kwonly;
     if (want < 0) want = 0;
+    /* CPYTHON WORDS A BUILTIN DIFFERENTLY from a function it compiled:
+       `expected 0 arguments, got 2`, with no parentheses -- and it names the
+       method only when the method has a name a program wrote. A bound SLOT
+       (`[1].__len__`) is anonymous in the message, which is the same line
+       `type()` draws between `method-wrapper` and
+       `builtin_function_or_method`. */
+    if (O(f)->v.fn.native) {
+        const char *w = APY_CSTR(O(f)->v.fn.name);
+        size_t len = strlen(w);
+        /* A DUNDER WITH A FIXED ARITY IS A BOUND SLOT, and CPython leaves a
+           slot anonymous in this message. One with a RANGE is a method
+           CPython wrote out rather than a slot -- `(5).__round__` really is a
+           `builtin_function_or_method` there -- and those are named. */
+        int ranged = !O(f)->v.fn.defaults && O(f)->v.fn.ndefaults;
+        int dunder = !ranged && len >= 5 && w[0] == '_' && w[1] == '_'
+                     && w[len - 1] == '_' && w[len - 2] == '_';
+        int64_t least = ranged ? want - O(f)->v.fn.ndefaults : want;
+        if (least < 0) least = 0;
+        /* A FIXED ARITY IS SAID PLAINLY whichever way the count is wrong;
+           only a method with a RANGE says which end it missed. */
+        if (least == want)
+            snprintf(buf, sizeof buf, "%s%sexpected %lld argument%s, got %lld",
+                     dunder ? "" : w, dunder ? "" : " ", (long long)want,
+                     want == 1 ? "" : "s", (long long)got);
+        else if (got < least)
+            snprintf(buf, sizeof buf, "%s%sexpected at least %lld argument%s, "
+                     "got %lld", dunder ? "" : w, dunder ? "" : " ",
+                     (long long)least, least == 1 ? "" : "s", (long long)got);
+        else
+            snprintf(buf, sizeof buf, "%s%sexpected at most %lld argument%s, "
+                     "got %lld", dunder ? "" : w, dunder ? "" : " ",
+                     (long long)want, want == 1 ? "" : "s", (long long)got);
+        return apy_fail("TypeError", buf);
+    }
     snprintf(buf, sizeof buf,
              "%s() takes %lld positional argument%s but %lld %s given",
              APY_CSTR(O(f)->v.fn.name), (long long)want,
@@ -1421,7 +1490,7 @@ static apy_value apy_call_nk(apy_value f, apy_value *argv, int64_t argc,
         /* A missing trailing argument comes from the default the `def`
            evaluated, which lives in the function object -- see the comment on
            `fn` in `struct apy_obj`. */
-        while (n < declared) {
+        while (n < declared && O(f)->v.fn.defaults) {
             int64_t d = n - (declared - O(f)->v.fn.ndefaults);
             if (d < 0 || d >= O(f)->v.fn.ndefaults) break;
             slots[n++] = O(f)->v.fn.defaults[d];
@@ -1435,6 +1504,28 @@ static apy_value apy_call_nk(apy_value f, apy_value *argv, int64_t argc,
            f(**kw)` called as `f()` binds `{}`, not nothing. */
         if (O(f)->v.fn.kwarg && n < 17)
             slots[n++] = kwrest ? kwrest : apy_dict_new(1);
+    }
+    if (O(f)->v.fn.native == APY_NAT_KIND
+            || (O(f)->v.fn.native && !O(f)->v.fn.defaults
+                && O(f)->v.fn.ndefaults)) {
+        /* A BUILTIN METHOD TAKES A RANGE, and the body reads the count it
+           really got -- which is how ONE selector tells `find(x)` from
+           `find(x, i)`.
+
+           COUNTED FROM `argc` AND NOT FROM `n`, because the packing above
+           CAPS `n` at the declared arity: comparing the capped number is
+           exactly how a surplus argument came to be dropped in silence, so
+           `getattr([1], "__len__")(9)` answered 1 instead of refusing.
+
+           THE OTHER SELECTORS ARE LEFT ALONE. `__get__` is declared with two
+           and called with three, and the descriptor protocol has relied on
+           the capping since it was written; only the kind methods and any
+           native that DECLARES a tail are held to a count here. */
+        int64_t most = O(f)->v.fn.arity;
+        int64_t given = (O(f)->v.fn.bound ? 1 : 0) + argc;
+        if (given < most - O(f)->v.fn.ndefaults || given > most)
+            return apy_arity_error(f, argc);
+        return apy_invoke(f, slots, given);
     }
     if (n != O(f)->v.fn.arity) return apy_arity_error(f, argc);
     return apy_invoke(f, slots, n);

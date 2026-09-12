@@ -144,6 +144,28 @@ def apy_prop_staticmethod() -> i64:
     return 2
 
 
+def apy_name_is_dunder(name: ptr) -> i64:
+    """Whether this C string is spelled `__like_this__`.
+
+    FOUR UNDERSCORES AND AT LEAST ONE CHARACTER BETWEEN THEM, which is
+    Python's own rule for the names a bound slot wears.
+    """
+    n: i64 = 0
+    while load(u8, offset(name, n)) != u8(0):
+        n = n + 1
+    if n < 5:
+        return 0
+    if load(u8, offset(name, 0)) != u8(95):
+        return 0
+    if load(u8, offset(name, 1)) != u8(95):
+        return 0
+    if load(u8, offset(name, n - 1)) != u8(95):
+        return 0
+    if load(u8, offset(name, n - 2)) != u8(95):
+        return 0
+    return 1
+
+
 def apy_kind_name_of(v: ptr) -> ptr:
     """The type name a message would use for `v`, as a C string.
 
@@ -203,6 +225,24 @@ def apy_kind_name_of(v: ptr) -> ptr:
         if load(i32, offset(v, apy_fn_is_type_offset())):
             return rodata(b"type\0")
         if load(i32, offset(v, apy_fn_builtin_offset())):
+            return rodata(b"builtin_function_or_method\0")
+        # A NATIVE IS THE RUNTIME'S OWN CODE, not a compiled function --
+        # `[1].index` and `[1].__len__` are `builtin_function_or_method` and
+        # `method-wrapper` in Python, and both answered `function` here. The
+        # DUNDER is the one that differs: Python calls a bound slot a
+        # method-wrapper, whatever the slot is.
+        if load(i32, offset(v, apy_fn_native_offset())):
+            # A DUNDER WITH A RANGE IS NOT A SLOT. `(5).__round__` is a
+            # `builtin_function_or_method` in CPython because int writes the
+            # method out rather than filling a slot, and an optional argument
+            # is exactly what a slot cannot carry.
+            if load(i64, offset(v, apy_fn_ndefaults_offset())) != 0:
+                if not ptr(load(u64, offset(v, apy_fn_defaults_offset()))):
+                    return rodata(b"builtin_function_or_method\0")
+            if apy_name_is_dunder(ptr(load(u64, offset(
+                    ptr(load(u64, offset(v, apy_fn_name_offset()))),
+                    apy_str_ptr_offset())))):
+                return rodata(b"method-wrapper\0")
             return rodata(b"builtin_function_or_method\0")
         return rodata(b"function\0")
     if k == apy_cell_kind():

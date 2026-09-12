@@ -233,7 +233,27 @@ static const char *apy_kind_name(apy_value v) {
     case APY_TYPE_K:  return "type";
     case APY_FUNC_K:
         if (O(v)->v.fn.is_type) return "type";
-        return O(v)->v.fn.builtin ? "builtin_function_or_method" : "function";
+        if (O(v)->v.fn.builtin) return "builtin_function_or_method";
+        /* A NATIVE IS THE RUNTIME'S OWN CODE, not a compiled function --
+           `[1].index` and `[1].__len__` are `builtin_function_or_method` and
+           `method-wrapper` in Python, and both answered `function` here. The
+           DUNDER is the one that differs: Python calls a bound slot a
+           method-wrapper, whatever the slot is. */
+        if (O(v)->v.fn.native) {
+            const char *w = APY_CSTR(O(v)->v.fn.name);
+            size_t len = strlen(w);
+            /* A DUNDER WITH A RANGE IS NOT A SLOT. `(5).__round__` is a
+               `builtin_function_or_method` in CPython because int writes the
+               method out rather than filling a slot, and an optional argument
+               is exactly what a slot cannot carry. */
+            if (!O(v)->v.fn.defaults && O(v)->v.fn.ndefaults)
+                return "builtin_function_or_method";
+            if (len >= 5 && w[0] == '_' && w[1] == '_'
+                    && w[len - 1] == '_' && w[len - 2] == '_')
+                return "method-wrapper";
+            return "builtin_function_or_method";
+        }
+        return "function";
     case APY_CELL_K:  return "cell";
     case APY_SUPER_K: return "super";
     case APY_BYTES_K: return O(v)->v.s.mut ? "bytearray" : "bytes";

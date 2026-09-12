@@ -818,6 +818,33 @@ def apy_kind_method_of(obj: ptr, arity: i64, name: ptr, bind: i64) -> ptr:
     return fn
 
 
+def apy_kind_method_opt(obj: ptr, arity: i64, nopt: i64, name: ptr,
+                        bind: i64) -> ptr:
+    """The same, WITH AN OPTIONAL TAIL: the method may be called with up to
+    `nopt` fewer arguments than it declares.
+
+    `x.find(sub)`, `x.find(sub, i)` and `x.find(sub, i, j)` are ONE METHOD,
+    and a cell carrying one arity could not say so: the call machinery
+    TRUNCATES a surplus argument and then finds the count it expected, so
+    `getattr([1], "__len__")(9)` answered 1 rather than refusing, and no
+    method with an optional argument could be reached by name at all.
+
+    RECORDED AS `ndefaults` WITH A NULL `defaults`, which no other cell has:
+    there are no VALUES to fill a missing slot with -- the body dispatches on
+    how many it actually got. A separate entry point rather than a parameter
+    on the one above, because eighty-five call sites take a fixed arity and
+    say so.
+    """
+    fn: ptr = apy_native_of(apy_nat_kind(), arity, name)
+    if not fn:
+        return fn
+    store(i64, nopt, offset(fn, apy_fn_ndefaults_offset()))
+    store(u64, u64(0), offset(fn, apy_fn_defaults_offset()))
+    if bind:
+        return apy_bind_of(fn, obj)
+    return fn
+
+
 def apy_kind_is(obj: ptr, kind: i64) -> i64:
     """`obj`'s kind tag against one value, as an i64.
 
@@ -944,10 +971,10 @@ def apy_number_arity(want: ptr, is_int: i64, is_complex: i64) -> i64:
         return 1
     if apy_cstr_eq(want, rodata(b"__ceil__\0")):
         return 1
-    # NOT `__round__`, though CPython's numbers have one: a native carries a
-    # fixed arity and no defaults, so the optional `ndigits` would either be
-    # dropped in silence or make the no-argument form an error. `round(x, n)`
-    # is the spelling that works.
+    # `__round__` IS NOT HERE because it is not a fixed arity: it takes an
+    # OPTIONAL `ndigits`, which this table has no way to say. It is answered
+    # in `apy_kind_attr_of` through `apy_kind_method_opt` instead -- the
+    # entry point that exists for exactly this.
     if not is_int:
         return 0
     # AN INT'S OWN: the bit operations and `__index__`, which is the promise
@@ -1077,6 +1104,12 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
         if apy_name_is(want, rodata(b"__rmul__\0")):
             return apy_kind_method_of(obj, 2, want, bind)
     if num:
+        # `__round__` TAKES AN OPTIONAL `ndigits`, which the arity table
+        # cannot say -- `(1.55).__round__()` and `(1.55).__round__(1)` are
+        # one method. A COMPLEX HAS NONE: there is no rounding of one.
+        if is_complex == 0:
+            if apy_name_is(want, rodata(b"__round__\0")):
+                return apy_kind_method_opt(obj, 2, 1, want, bind)
         arity: i64 = apy_number_arity(want, is_int, is_complex)
         if arity != 0:
             return apy_kind_method_of(obj, arity, want, bind)

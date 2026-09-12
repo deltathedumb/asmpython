@@ -939,6 +939,21 @@ class ObjectHost:
         if isinstance(v, Class):
             # `type(C).__name__` IS THE METACLASS'S NAME when one made it.
             return v.meta.name if v.meta is not None else "type"
+        if isinstance(v, Native):
+            # A DUNDER WITH A RANGE IS NOT A SLOT: `(5).__round__` is a
+            # `builtin_function_or_method` in CPython, because int writes the
+            # method out rather than filling a slot and an optional argument
+            # is exactly what a slot cannot carry.
+            if v.ranged:
+                return "builtin_function_or_method"
+            # THE RUNTIME'S OWN CODE, and `Native` is a class in this file --
+            # `type([1].index).__name__` answered that name, an implementation
+            # detail of this compiler in a string the program prints. Python
+            # says `builtin_function_or_method`, or `method-wrapper` for a
+            # bound slot, which is what a dunder name means here.
+            return ("method-wrapper" if len(v.name) >= 5
+                    and v.name.startswith("__") and v.name.endswith("__")
+                    else "builtin_function_or_method")
         if isinstance(v, Func):
             # A BUILTIN reached as a value is not a plain function:
             # `type(print).__name__` is `builtin_function_or_method`.
@@ -1520,7 +1535,40 @@ class ObjectHost:
                 text = str(exc)
                 if not where or not text.startswith(where + "()"):
                     raise
-                self._fail("TypeError", f.name + text[len(where):])
+                # CPYTHON WORDS A BUILTIN DIFFERENTLY from a function it
+                # compiled: `expected 0 arguments, got 2`, with no
+                # parentheses -- and it names the method only when the method
+                # has a name a program wrote. A bound SLOT is anonymous, the
+                # same line `type()` draws between `method-wrapper` and
+                # `builtin_function_or_method`.
+                code = getattr(f.body, "__code__", None)
+                count = code.co_argcount if code else 0
+                ndef = len(getattr(f.body, "__defaults__", None) or ())
+                if f.ranged:
+                    most, least = count, count - ndef
+                else:
+                    # THE DEFAULTS IN THESE LAMBDAS ARE CLOSURE CAPTURES
+                    # (`lambda o, _w=want: ...`) and not optional parameters;
+                    # only a native that says it is ranged really has one.
+                    most = least = count - ndef
+                got = len(args)
+                # A FIXED ARITY IS SAID PLAINLY whichever way the count is
+                # wrong; only a method with a RANGE says which end it missed.
+                if least == most:
+                    how = (f"expected {most} "
+                           f"argument{'' if most == 1 else 's'}")
+                elif got < least:
+                    how = (f"expected at least {least} "
+                           f"argument{'' if least == 1 else 's'}")
+                else:
+                    how = (f"expected at most {most} "
+                           f"argument{'' if most == 1 else 's'}")
+                # A DUNDER WITH A FIXED ARITY IS A BOUND SLOT, and CPython
+                # leaves a slot anonymous here. One with a RANGE is a method
+                # CPython wrote out rather than a slot, and those are named.
+                lead = ("" if f.name.startswith("__") and least == most
+                        else f.name + " ")
+                self._fail("TypeError", f"{lead}{how}, got {got}")
                 raise _UserFailed
         slots = [f.bound] if f.bound is not None else []
         declared = f.arity - (1 if f.vararg else 0) - (1 if f.kwarg else 0)
@@ -2182,6 +2230,20 @@ def _apy_descr_get_of(h, a):
     raise RuntimeError(
         "apy_descr_get_of has no host equivalent: the interpreter reads "
         "through a descriptor inside its own getattr")
+
+
+def _apy_kind_method_opt(h, a):
+    """One builtin method as a value, with an OPTIONAL TAIL.
+
+    THE HOST NEEDS NO RANGE OF ITS OWN: a Native here wraps a Python callable
+    and Python checks the count, so the declared arity never mattered. The
+    binding exists because the runtime names this and a name the table does
+    not carry is a link error rather than a fallback -- and it is never
+    reached, for the reason `_apy_kind_method_of` beside it gives.
+    """
+    raise RuntimeError(
+        "apy_kind_method_opt has no host equivalent: the interpreter answers "
+        "Python's own bound method, which carries its own arity")
 
 
 def _apy_kind_class(h, a):
@@ -6460,15 +6522,22 @@ class Native:
     twice is the same object, as any other attribute would be.
     """
 
-    __slots__ = ("name", "body", "bound")
+    __slots__ = ("name", "body", "bound", "ranged")
 
-    def __init__(self, name: str, body) -> None:
+    def __init__(self, name: str, body, ranged: bool = False) -> None:
         self.name = name
         self.body = body
         self.bound = None
+        #: Whether the method really takes a RANGE of argument counts.
+        #: NOT DERIVABLE FROM THE BODY: nearly every lambda in `_kind_attr`
+        #: carries a default (`lambda o, _w=want: ...`) as a CLOSURE CAPTURE,
+        #: which looks exactly like an optional parameter and is not one.
+        #: Only `__round__` and its like say so here, and the difference
+        #: decides both what `type()` answers and how a wrong count is worded.
+        self.ranged = ranged
 
     def bind(self, receiver) -> "Native":
-        out = Native(self.name, self.body)
+        out = Native(self.name, self.body, self.ranged)
         out.bound = receiver
         return out
 
@@ -6508,9 +6577,8 @@ _OBJECT_ARITY = {"__eq__": 2, "__ne__": 2, "__lt__": 2, "__le__": 2,
 
 #: What every number has, what an int and a float share, and what only an
 #: int carries. See `runtime/slots.py`'s `apy_number_arity`, which is the
-#: same three sets. NOT `__round__`, though CPython's numbers have one: a
-#: native carries a fixed arity and no defaults, so its optional `ndigits`
-#: would either be dropped in silence or make the no-argument form an error.
+#: same three sets. `__round__` IS NOT HERE because it is not a fixed
+#: arity -- it takes an optional `ndigits`, and is answered separately.
 _NUM_ANY = {"__add__": 2, "__radd__": 2, "__sub__": 2, "__rsub__": 2,
             "__mul__": 2, "__rmul__": 2, "__truediv__": 2, "__rtruediv__": 2,
             "__pow__": 2, "__rpow__": 2, "__neg__": 1, "__pos__": 1,
@@ -6679,6 +6747,14 @@ def _kind_attr(h, obj, want: str):
     # attribute is absent, not a method that refuses.
     if (seq or text) and want in ("__add__", "__mul__", "__rmul__"):
         return made(want, lambda o, _w=want: getattr(obj, _w)(o))
+    # `__round__` TAKES AN OPTIONAL `ndigits`, which the arity table cannot
+    # say -- `(1.55).__round__()` and `(1.55).__round__(1)` are one method.
+    # A COMPLEX HAS NONE: there is no rounding of one.
+    if num and not is_complex and want == "__round__":
+        return h._new(Native("__round__",
+                             lambda nd=None: (obj.__round__() if nd is None
+                                              else obj.__round__(nd)),
+                             ranged=True))
     if num and _number_arity(want, is_int, is_complex):
         return made(want, lambda *r, _w=want: getattr(obj, _w)(*r))
     if rng and want == "__bool__":
