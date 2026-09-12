@@ -828,6 +828,12 @@ def apy_kind_bit_of(v: ptr) -> i64:
     k: i64 = i64(load(i32, offset(v, 0)))
     if k == apy_str_kind():
         return 1
+    # A VIEW IS IN THE PAIRING FOR THE WRITTEN TABLE ALONE -- which is about
+    # what `type()` calls a bound method -- and has no row in the arity one:
+    # its methods are hand-written above, because several of them mean
+    # something a bytes receiver would answer differently for.
+    if k == apy_mview_kind():
+        return 4096
     if k == apy_bytes_kind():
         if i64(load(i32, offset(v, apy_s_mut_offset()))) != 0:
             return 4
@@ -1368,6 +1374,17 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
             return apy_kind_method_of(obj, 2, want, bind)
         if apy_name_is(want, rodata(b"__setitem__\0")):
             return apy_kind_method_of(obj, 3, want, bind)
+        # HANDING THE BUFFER BACK, and the `with` block that does it for a
+        # program. `__exit__` takes the three exception slots whether or not
+        # there was one, which is why it declares four.
+        if apy_name_is(want, rodata(b"release\0")):
+            return apy_kind_method_of(obj, 1, want, bind)
+        if apy_name_is(want, rodata(b"toreadonly\0")):
+            return apy_kind_method_of(obj, 1, want, bind)
+        if apy_name_is(want, rodata(b"__enter__\0")):
+            return apy_kind_method_of(obj, 1, want, bind)
+        if apy_name_is(want, rodata(b"__exit__\0")):
+            return apy_kind_method_of(obj, 4, want, bind)
     if is_mview:
         if apy_name_is(want, rodata(b"tobytes\0")):
             return apy_kind_method_of(obj, 1, rodata(b"tobytes\0"), bind)

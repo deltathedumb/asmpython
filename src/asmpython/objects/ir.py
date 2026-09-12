@@ -180,6 +180,12 @@ REPLACES: dict[str, tuple[str, ...]] = {
     "makers.py": ("apy_func_new", "apy_gen_new",
                   # FOUR MORE CELLS the fixed survey turned up.
                   "apy_range", "apy_super", "apy_memoryview",
+                  # AND WHAT A VIEW'S BORROW IS. `release` drops it and every
+                  # reader has to ask whether it still holds, so the test and
+                  # the two methods that change it are ported together with
+                  # the cell they read.
+                  "apy_mview_live", "apy_mview_release",
+                  "apy_mview_readonly",
                   # WHAT A VIEW SHOWS, AS BYTES. Ported because the ported
                   # runtime has to DEFINE everything it calls -- see
                   # `test_the_allocator_asks_the_floor_and_nothing_else` --

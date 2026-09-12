@@ -2810,7 +2810,36 @@ class Analyzer:
                 else:
                     self._bind(item.optional_vars.id, OBJ, node)
                     self.assigned.add(item.optional_vars.id)
-        return self._block(node.body)
+        # THE BODY IS NOT GUARANTEED TO FINISH, which is the whole of what an
+        # `__exit__` returning true means: the exception is swallowed and the
+        # statement after the `with` runs having skipped the rest of the
+        # body. So a name the body binds may be UNBOUND there --
+        #
+        #     with C():          # whose __exit__ answers True
+        #         raise ValueError
+        #         held = 1
+        #     return held        # UnboundLocalError in CPython
+        #
+        # -- and treating the body's bindings as definite made the lowering
+        # emit a read the verifier refused as "reads %1 before any path
+        # writes it", which the driver reports as an internal compiler error.
+        # An ordinary `with` that binds a name and reads it afterwards would
+        # not compile at all.
+        #
+        # THE `as` NAMES ARE DEFINITE and stay so: `__enter__` has already
+        # returned on every path that reaches the body, and one that raises
+        # propagates rather than arriving past the statement.
+        before = set(self.assigned)
+        self._block(node.body)
+        self.assigned = before
+        # AND THE STATEMENT AFTER A `with` IS ALWAYS REACHABLE, however the
+        # body ends: a body that only raises still falls through here when
+        # `__exit__` swallows. Reporting it unreachable stopped the analysis
+        # at the `with`, so the code past it was never walked -- and the
+        # LOWERING walked it anyway, emitting a read of a register nothing
+        # had seeded. Whether a given `__exit__` swallows is a run-time
+        # question, so the answer here is the one that is safe either way.
+        return True
 
     def _class_statement(self, node: ast.ClassDef) -> None:
         """Check a `class` statement where it is WRITTEN.

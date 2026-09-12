@@ -9,7 +9,10 @@ nothing in a later one. Sections, in order:
   * repr and str
 """
 
-C = r"""/* --- extraction -------------------------------------------------------- */
+C = r"""
+/* Defined in a LATER part; see `apy_mview_live` there. */
+APY_API int64_t apy_mview_live(apy_value v);
+/* --- extraction -------------------------------------------------------- */
 /* The frontend calls these only where it has proved the kind, so they do not
    check. A wrong call here is a compiler bug, not a user error, and a check
    would hide it behind a plausible zero. */
@@ -457,7 +460,10 @@ APY_API apy_value apy_len(apy_value v) {
        taking one when it was made is what a snapshot does. */
     if (O(v)->kind == APY_VIEW_K)
         return apy_from_int(O(O(v)->v.vw.dict)->v.d.n);
-    if (O(v)->kind == APY_MVIEW_K) return apy_from_int(O(v)->v.mv.n);
+    if (O(v)->kind == APY_MVIEW_K) {
+        if (!apy_mview_live(v)) return 0;
+        return apy_from_int(O(v)->v.mv.n);
+    }
     if (O(v)->kind == APY_RANGE_K) return apy_from_int(apy_range_len(v));
     if (O(v)->kind == APY_DICT_K) return apy_from_int(O(v)->v.d.n);
     if (apy_is_seq(v) || apy_is_set(v)) return apy_from_int(O(v)->v.q.n);

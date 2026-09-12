@@ -41,7 +41,14 @@ import sys
 #: NAMES are what `apy_kind_attr_of` already computes for the receiver in
 #: hand; the bits are private to the generated pair.
 KINDS = ["str", "bytes", "bytearray", "list", "tuple", "dict", "set",
-         "frozenset", "int", "float", "range", "complex"]
+         "frozenset", "int", "float", "range", "complex", "memoryview"]
+
+#: A view is in `KINDS` for the WRITTEN table alone -- which is about what
+#: `type()` calls a bound method -- and not for the ARITY table, whose entries
+#: say which runtime symbol serves a name. Its methods are hand-written in
+#: `apy_kind_attr_of`, because several of them mean something a bytes receiver
+#: would answer differently for.
+NOT_IN_THE_METHOD_TABLE = {"memoryview"}
 
 #: One value of each kind, to ask CPython about. Written out rather than
 #: built from the name, because `range` and `complex` take arguments and an
@@ -49,7 +56,8 @@ KINDS = ["str", "bytes", "bytearray", "list", "tuple", "dict", "set",
 SAMPLES = {"str": '""', "bytes": 'b""', "bytearray": "bytearray()",
            "list": "[]", "tuple": "()", "dict": "{}", "set": "set()",
            "frozenset": "frozenset()", "int": "5", "float": "1.5",
-           "range": "range(3)", "complex": "1j"}
+           "range": "range(3)", "complex": "1j",
+           "memoryview": 'memoryview(b"ab")'}
 
 #: Names the generated table must NOT claim, because something above it
 #: answers them first and differently. `index` and `count` reach
@@ -75,12 +83,14 @@ def owners():
     types = {"str": str, "bytes": bytes, "bytearray": bytearray,
              "list": list, "tuple": tuple, "dict": dict, "set": set,
              "frozenset": frozenset, "int": int, "float": float,
-             "range": range, "complex": complex}
+             "range": range, "complex": complex,
+             "memoryview": memoryview}
     out = []
     for name in sorted(DYN_METHOD_TABLE):
         if name.startswith("__") or name in SKIP:
             continue
-        kinds = [k for k in KINDS if hasattr(types[k], name)]
+        kinds = [k for k in KINDS if k not in NOT_IN_THE_METHOD_TABLE
+                 and hasattr(types[k], name)]
         if not kinds:
             continue
         syms = DYN_METHOD_TABLE[name]
@@ -361,7 +371,7 @@ def emit_ir(rows) -> str:
 #: The kinds a VALUE can be whose type carries a docstring. Wider than
 #: `KINDS`, because `True.__doc__`, `None.__doc__` and a view's are the same
 #: question and none of the three is in the method table.
-DOC_KINDS = KINDS + ["bool", "NoneType", "memoryview"]
+DOC_KINDS = KINDS + ["bool", "NoneType"]
 
 
 def c_string(text: str) -> str:

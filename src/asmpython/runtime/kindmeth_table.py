@@ -359,7 +359,7 @@ def apy_kind_meth_written_of(w: ptr, bit: i64) -> i64:
             return 1
         return 0
     if apy_cstr_eq(w, rodata(b"__class_getitem__\0")):
-        if bit & 248:
+        if bit & 4344:
             return 1
         return 0
     if apy_cstr_eq(w, rodata(b"__complex__\0")):
@@ -371,7 +371,15 @@ def apy_kind_meth_written_of(w: ptr, bit: i64) -> i64:
             return 1
         return 0
     if apy_cstr_eq(w, rodata(b"__dir__\0")):
-        if bit & 4095:
+        if bit & 8191:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__enter__\0")):
+        if bit & 4096:
+            return 1
+        return 0
+    if apy_cstr_eq(w, rodata(b"__exit__\0")):
+        if bit & 4096:
             return 1
         return 0
     if apy_cstr_eq(w, rodata(b"__floor__\0")):
@@ -379,7 +387,7 @@ def apy_kind_meth_written_of(w: ptr, bit: i64) -> i64:
             return 1
         return 0
     if apy_cstr_eq(w, rodata(b"__format__\0")):
-        if bit & 4095:
+        if bit & 8191:
             return 1
         return 0
     if apy_cstr_eq(w, rodata(b"__getformat__\0")):
@@ -395,23 +403,23 @@ def apy_kind_meth_written_of(w: ptr, bit: i64) -> i64:
             return 1
         return 0
     if apy_cstr_eq(w, rodata(b"__getstate__\0")):
-        if bit & 4095:
+        if bit & 8191:
             return 1
         return 0
     if apy_cstr_eq(w, rodata(b"__init_subclass__\0")):
-        if bit & 4095:
+        if bit & 8191:
             return 1
         return 0
     if apy_cstr_eq(w, rodata(b"__new__\0")):
-        if bit & 4095:
+        if bit & 8191:
             return 1
         return 0
     if apy_cstr_eq(w, rodata(b"__reduce__\0")):
-        if bit & 4095:
+        if bit & 8191:
             return 1
         return 0
     if apy_cstr_eq(w, rodata(b"__reduce_ex__\0")):
-        if bit & 4095:
+        if bit & 8191:
             return 1
         return 0
     if apy_cstr_eq(w, rodata(b"__reversed__\0")):
@@ -423,11 +431,11 @@ def apy_kind_meth_written_of(w: ptr, bit: i64) -> i64:
             return 1
         return 0
     if apy_cstr_eq(w, rodata(b"__sizeof__\0")):
-        if bit & 4095:
+        if bit & 8191:
             return 1
         return 0
     if apy_cstr_eq(w, rodata(b"__subclasshook__\0")):
-        if bit & 4095:
+        if bit & 8191:
             return 1
         return 0
     if apy_cstr_eq(w, rodata(b"__trunc__\0")):

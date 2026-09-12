@@ -719,6 +719,20 @@ static const char *apy_mview_buf(apy_value v) {
     return O(O(v)->v.mv.src)->v.s.p;
 }
 
+/* WHETHER THE VIEW STILL HAS ITS BUFFER. `m.release()` -- and the `with`
+   block that calls it -- drops the borrow so the object underneath can be
+   resized again, and every operation on the view from then on is refused.
+   A RELEASED VIEW IS ONE WHOSE `src` IS 0, which needs no field of its own
+   and is what makes this one test. Answers 1 while live, 0 having raised. */
+APY_API int64_t apy_mview_live(apy_value v) {
+    if (O(v)->kind == APY_MVIEW_K && !O(v)->v.mv.src) {
+        apy_fail("ValueError",
+                 "operation forbidden on released memoryview object");
+        return 0;
+    }
+    return 1;
+}
+
 /* The offset in the underlying buffer of the view's `i`th byte. THE STRIDE IS
    APPLIED HERE and nowhere else, so a reversed view indexes, assigns and
    converts through the same arithmetic. */
@@ -732,7 +746,9 @@ APY_API apy_value apy_memoryview(apy_value src) {
        `src` made `memoryview(m) is m` True where Python says False. The
        window is copied so that a slice handed here keeps its bounds. */
     if (O(src)->kind == APY_MVIEW_K) {
-        apy_obj *w = apy_alloc(APY_MVIEW_K);
+        apy_obj *w;
+        if (!apy_mview_live(src)) return 0;
+        w = apy_alloc(APY_MVIEW_K);
         w->v.mv = O(src)->v.mv;
         return V(w);
     }
@@ -758,6 +774,38 @@ static apy_value apy_mview_slice(apy_value v, int64_t off, int64_t n,
     o->v.mv.off = off;
     o->v.mv.n = n;
     o->v.mv.step = step;
+    /* A SLICE OF A READ-ONLY VIEW IS READ-ONLY. The flag is the view's, not
+       the buffer's, so it has to travel with every window cut from it. */
+    o->v.mv.ro = O(v)->v.mv.ro;
+    return V(o);
+}
+
+/* `m.release()` -- HAND THE BUFFER BACK. A view borrows its source and stops
+   that source being resized; releasing drops the borrow, and every operation
+   on the view afterwards is refused. Releasing twice is not an error, which
+   is what lets a `with` block close a view a program already closed. */
+APY_API apy_value apy_mview_release(apy_value v) {
+    if (O(v)->kind != APY_MVIEW_K)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'release'%s",
+                         apy_kind_name(v), "");
+    O(v)->v.mv.src = 0;
+    return apy_none();
+}
+
+/* `m.toreadonly()` -- THE SAME WINDOW, WRITES REFUSED. The flag is the
+   VIEW's and not the buffer's: this hands out one that refuses over a
+   bytearray that accepts, which is the whole point of handing one out. */
+APY_API apy_value apy_mview_readonly(apy_value v) {
+    apy_obj *o;
+    if (O(v)->kind != APY_MVIEW_K)
+        return apy_fail2("AttributeError",
+                         "'%s' object has no attribute 'toreadonly'%s",
+                         apy_kind_name(v), "");
+    if (!apy_mview_live(v)) return 0;
+    o = apy_alloc(APY_MVIEW_K);
+    o->v.mv = O(v)->v.mv;
+    o->v.mv.ro = 1;
     return V(o);
 }
 
@@ -765,7 +813,10 @@ static apy_value apy_mview_slice(apy_value v, int64_t off, int64_t n,
    wanting a sequence goes through here -- the same shape as
    `apy_view_items`, and live for the same reason. */
 APY_API apy_value apy_mview_bytes(apy_value v) {
-    int64_t i, n = O(v)->v.mv.n;
+    int64_t i, n;
+    if (!apy_mview_live(v)) return 0;
+    n = O(v)->v.mv.n;
+    {
     const char *buf = apy_mview_buf(v);
     char *out = (char *)malloc((size_t)(n ? n : 1) + 1);
     if (!out) { fputs("asmpython: out of memory\n", stderr); exit(1); }
@@ -774,6 +825,7 @@ APY_API apy_value apy_mview_bytes(apy_value v) {
     { apy_value r = apy_str_take(out, n);
       O(r)->kind = APY_BYTES_K;
       return r; }
+    }
 }
 
 APY_API apy_value apy_dict_view(apy_value d, int64_t part) {

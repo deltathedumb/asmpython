@@ -1919,6 +1919,86 @@ PROGRAMS = {
         print([type(getattr(view, n)).__name__ for n in
                ("hex", "count", "index", "__setitem__", "__delitem__")])
     """,
+    "a_view_hands_its_buffer_back": """
+        def show(label, f):
+            try:
+                print(label, f())
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        # A VIEW BORROWS ITS SOURCE, and `release` hands the borrow back so the object
+        # underneath can be resized again. Every operation on the view afterwards is
+        # refused -- which is not the same as the view being empty.
+        held = bytearray(b"abcd")
+        view = memoryview(held)
+        show("readonly view", lambda: view.toreadonly().readonly)
+        show("the source still accepts", lambda: view.readonly)
+        show("writing through it", lambda: view.toreadonly().__setitem__(0, 65))
+        show("reading through it", lambda: view.toreadonly().tolist())
+        show("a slice of it", lambda: view.toreadonly()[1:].readonly)
+        show("release", lambda: view.release())
+        show("releasing twice", lambda: view.release())
+        show("then tolist", lambda: view.tolist())
+        show("then len", lambda: len(view))
+        show("then a subscript", lambda: view[0])
+        show("then a field", lambda: view.readonly)
+        show("then hex", lambda: view.hex())
+        show("then wrapping it", lambda: memoryview(view))
+        # THE `with` BLOCK IS THE SAME RELEASE, and what it binds is the view itself.
+        def in_a_block():
+            one = memoryview(bytearray(b"xy"))
+            with one as got:
+                inside = got.tolist(), got is one
+            return inside, one
+        show("inside the block", lambda: in_a_block()[0])
+        show("released on the way out", lambda: in_a_block()[1].tolist())
+        print([type(getattr(memoryview(b"ab"), n)).__name__ for n in
+               ("release", "toreadonly", "__enter__", "__exit__")])
+
+        # AND A NAME A `with` BODY BINDS IS READABLE AFTER IT. A with body is not a
+        # scope: what it binds belongs to the enclosing function, exactly as an `if`
+        # body's binding does.
+        class Swallows:
+            def __enter__(self):
+                return 7
+            def __exit__(self, *rest):
+                return True
+        class Propagates:
+            def __enter__(self):
+                return 7
+            def __exit__(self, *rest):
+                return None
+        def bound_inside():
+            with Propagates() as got:
+                seen = got + 1
+            return seen
+        # THE BODY IS NOT GUARANTEED TO FINISH, which is the whole of what a true
+        # `__exit__` means: the statement after the `with` runs having skipped the
+        # rest of the body, so a name the body binds may be unbound there.
+        def skipped_by_a_swallow():
+            with Swallows():
+                raise ValueError("x")
+                never = 1
+            return never
+        def the_as_name_survives():
+            with Swallows() as got:
+                raise ValueError("x")
+            return got
+        def two_managers():
+            with Propagates() as a, Propagates() as b:
+                both = a + b
+            return both
+        def a_loop_inside():
+            with Propagates():
+                for i in (1, 2, 3):
+                    last = i
+            return last
+        show("bound inside a with", bound_inside)
+        show("skipped by a swallow", skipped_by_a_swallow)
+        show("the as name survives", the_as_name_survives)
+        show("two managers", two_managers)
+        show("a loop inside", a_loop_inside)
+    """,
     "traceback_positions": """
         try:
             (1).missing

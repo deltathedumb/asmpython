@@ -4196,6 +4196,20 @@ def _apy_bytes_fromhex(h, a):
     return h._new(bytearray(got) if isinstance(held, bytearray) else got)
 
 
+def _mview_live(h, view) -> bool:
+    """Whether the view still has its buffer, raising here if it does not.
+
+    `release` drops the borrow so the object underneath can be resized again,
+    and every operation on the view from then on is refused.
+    """
+    try:
+        view.nbytes
+    except ValueError as exc:
+        h._fail_like(exc)
+        return False
+    return True
+
+
 def _mview_call(h, view, name, args):
     """One of a view's methods, with Python's own failures passed through.
 
@@ -6946,7 +6960,11 @@ _NO_OWNER = object()
 #: own object, and asking Python about one would answer about the wrong
 #: thing entirely.
 _KIND_SAMPLES = (str, bytes, bytearray, list, tuple, dict, set, frozenset,
-                 int, float, range, complex)
+                 int, float, range, complex,
+                 # A VIEW TOO, for the same question: `type(m.release)` is a
+                 # `builtin_function_or_method` in CPython and this is the
+                 # oracle that says so.
+                 memoryview)
 
 
 class Native:
@@ -7898,6 +7916,14 @@ def _apy_enter(h, a):
     the reader which half of the protocol to write.
     """
     cm = h._get(a[0], "apy_enter")
+    # A MEMORYVIEW IS THE ONE BUILTIN THAT IS A CONTEXT MANAGER, and its two
+    # halves are this runtime's own code reached BY KIND -- the instance
+    # lookup below would never find them. What the block binds is the view
+    # itself; what leaving it does is release.
+    if isinstance(cm, memoryview):
+        if not _mview_live(h, cm):
+            return 0
+        return a[0]
     if not isinstance(cm, Instance) or cm.cls.find("__enter__") is None:
         return h._fail("TypeError",
                        f"'{h.kind_name(cm)}' object does not support the "
@@ -7915,6 +7941,10 @@ def _apy_exit(h, a):
     """
     cm = h._get(a[0], "apy_exit")
     exc = h._get(a[1], "apy_exit")
+    # THE VIEW HANDS ITS BUFFER BACK on the way out, and swallows nothing.
+    if isinstance(cm, memoryview):
+        cm.release()
+        return h._none
     if not isinstance(cm, Instance) or cm.cls.find("__exit__") is None:
         return h._fail("TypeError",
                        f"'{h.kind_name(cm)}' object does not support the "
@@ -8521,6 +8551,22 @@ def _apy_default_getattr(h, a):
         if name == "hex":
             return h._new(Native("hex", lambda *r, _o=obj: _o.hex(*r),
                                  ranged=True, owner=obj))
+        # HANDING THE BUFFER BACK, and the `with` block that does it for a
+        # program. A RELEASED VIEW STILL ANSWERS ITS METHOD NAMES -- CPython
+        # raises when one is CALLED, not when it is looked up.
+        if name == "__enter__":
+            # THE RECEIVER'S OWN HANDLE, because identity here is handle
+            # equality: `m.__enter__() is m` has to hold, and a fresh handle
+            # over the same view would answer False.
+            def _enter(_o=obj, _at=a[0]):
+                if not _mview_live(h, _o):
+                    raise _UserFailed
+                return h._get(_at, "__enter__")
+            return h._new(Native("__enter__", _enter, owner=obj))
+        if name in ("release", "toreadonly", "__exit__"):
+            return h._new(Native(
+                name, lambda *r, _n=name, _o=obj: _mview_call(h, _o, _n, r),
+                ranged=name == "__exit__", owner=obj))
         if name in ("count", "index", "__setitem__", "__delitem__",
                     "__getitem__", "__len__", "__iter__",
                     "__release_buffer__"):
@@ -13821,10 +13867,50 @@ def _apy_to_bytearray(h, a):
     return h._new(bytearray(h._get(frozen, "apy_to_bytearray")))
 
 
+def _apy_mview_live(h, a):
+    """Whether the view still has its buffer.
+
+    `release` drops the borrow so the object underneath can be resized again,
+    and every operation on the view from then on is refused. Answers 1 while
+    live, 0 having raised.
+    """
+    return h._int(1 if _mview_live(h, h._get(a[0], "apy_mview_live")) else 0)
+
+
+def _apy_mview_release(h, a):
+    """`m.release()` -- HAND THE BUFFER BACK. Releasing twice is not an
+    error, which is what lets a `with` block close a view a program already
+    closed."""
+    view = h._get(a[0], "apy_mview_release")
+    if not isinstance(view, memoryview):
+        return h._fail("AttributeError",
+                       f"'{h.kind_name(view)}' object has no attribute "
+                       f"'release'")
+    view.release()
+    return h._none
+
+
+def _apy_mview_readonly(h, a):
+    """`m.toreadonly()` -- the same window, writes refused."""
+    view = h._get(a[0], "apy_mview_readonly")
+    if not isinstance(view, memoryview):
+        return h._fail("AttributeError",
+                       f"'{h.kind_name(view)}' object has no attribute "
+                       f"'toreadonly'")
+    if not _mview_live(h, view):
+        return 0
+    return h._new(view.toreadonly())
+
+
 def _apy_memoryview(h, a):
     src = h._get(a[0], "apy_memoryview")
     if isinstance(src, memoryview):
-        return h._new(src)
+        # A RELEASED VIEW HAS NO BUFFER TO WRAP. Python's own `memoryview(m)`
+        # over one raises, and answering a second released view instead hands
+        # back something every use of it refuses.
+        if not _mview_live(h, src):
+            return 0
+        return h._new(memoryview(src))
     if not isinstance(src, (bytes, bytearray)):
         return h._fail("TypeError",
                        "memoryview: a bytes-like object is required, not "

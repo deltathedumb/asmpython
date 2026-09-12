@@ -403,7 +403,12 @@ struct apy_obj {
         struct { apy_value origin, args; } ga;
         /* What a memoryview looks at, and where. `step` is signed: -1 is
            `mv[::-1]`, which reads the same bytes backwards. */
-        struct { apy_value src; int64_t off, n, step; } mv;
+        /* `ro` IS NOT DERIVED FROM THE SOURCE. `m.toreadonly()` hands out
+           a view that cannot be written over a buffer that can, so the
+           answer to `m.readonly` has to live on the VIEW. A RELEASED view
+           is one whose `src` is 0, which needs no field of its own and is
+           what every reader tests. */
+        struct { apy_value src; int64_t off, n, step, ro; } mv;
         /* The dict a view looks at, and WHICH of the three it is. */
         struct { apy_value dict; int part; } vw;
         /* One closure variable's box. A captured local lives HERE instead of

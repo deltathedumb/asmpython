@@ -573,6 +573,11 @@ APY_API int64_t apy_number_arity(apy_value wantv, int64_t is_int,
 static unsigned apy_kind_bit(apy_value v) {
     switch (O(v)->kind) {
     case APY_STR_K:    return APY_MK_STR;
+    /* A VIEW IS IN THE PAIRING FOR THE WRITTEN TABLE ALONE -- which is about
+       what `type()` calls a bound method -- and has no row in the arity one:
+       its methods are hand-written above, because several of them mean
+       something a bytes receiver would answer differently for. */
+    case APY_MVIEW_K:  return APY_MK_MEMORYVIEW;
     case APY_BYTES_K:  return O(v)->v.s.mut ? APY_MK_BYTEARRAY : APY_MK_BYTES;
     case APY_LIST_K:   return APY_MK_LIST;
     case APY_TUPLE_K:  return APY_MK_TUPLE;
@@ -830,6 +835,14 @@ APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
             return apy_kind_method(obj, 2, want, bind);
         if (strcmp(want, "__setitem__") == 0)
             return apy_kind_method(obj, 3, want, bind);
+        /* HANDING THE BUFFER BACK, and the `with` block that does it for a
+           program. `__exit__` takes the three exception slots whether or
+           not there was one, which is why it declares four. */
+        if (strcmp(want, "release") == 0 || strcmp(want, "toreadonly") == 0
+                || strcmp(want, "__enter__") == 0)
+            return apy_kind_method(obj, 1, want, bind);
+        if (strcmp(want, "__exit__") == 0)
+            return apy_kind_method(obj, 4, want, bind);
     }
     if (k == APY_RANGE_K) {
         /* THE THREE NUMBERS A RANGE IS, read back. */
@@ -1160,6 +1173,16 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
                    ? apy_complex_from_number(a[0], a[1])
                    : apy_float_from_number(a[0], a[1]);
         }
+        if (strcmp(w, "release") == 0) return apy_mview_release(a[0]);
+        if (strcmp(w, "toreadonly") == 0) return apy_mview_readonly(a[0]);
+        if (strcmp(w, "__enter__") == 0) {
+            /* THE VIEW ITSELF is what `with memoryview(b) as m` binds, and
+               entering a released one is refused rather than silently
+               handing back something every use will refuse. */
+            if (!apy_mview_live(a[0])) return 0;
+            return a[0];
+        }
+        if (strcmp(w, "__exit__") == 0) return apy_mview_release(a[0]);
         if (strcmp(w, "tobytes") == 0) return apy_mview_bytes(a[0]);
         if (strcmp(w, "tolist") == 0) {
             apy_value bytes = apy_mview_bytes(a[0]);
@@ -2868,6 +2891,14 @@ APY_API apy_value apy_aexit(apy_value cm, apy_value exc) {
 
 APY_API apy_value apy_enter(apy_value cm) {
     apy_value m;
+    /* A MEMORYVIEW IS THE ONE BUILTIN THAT IS A CONTEXT MANAGER, and its
+       two halves are this runtime's own code reached BY KIND -- `apy_dunder`
+       below serves an instance and would never find them. What the block
+       binds is the view itself; what leaving it does is release. */
+    if (O(cm)->kind == APY_MVIEW_K) {
+        if (!apy_mview_live(cm)) return 0;
+        return cm;
+    }
     /* `__exit__` FIRST, which is CPython's order and shows in the message:
        `with 5:` reports the missing `__exit__` rather than the missing
        `__enter__`, even though both are absent. */
@@ -2897,7 +2928,14 @@ APY_API apy_value apy_enter(apy_value cm) {
    is an exception would make `et.__name__` fail in a manager that logs it. */
 APY_API apy_value apy_exit(apy_value cm, apy_value exc) {
     apy_value argv[3];
-    apy_value m = apy_dunder(cm, "__exit__");
+    apy_value m;
+    /* THE VIEW HANDS ITS BUFFER BACK on the way out, and answers a false
+       `__exit__` -- it swallows nothing. */
+    if (O(cm)->kind == APY_MVIEW_K) {
+        (void)exc;
+        return apy_mview_release(cm);
+    }
+    m = apy_dunder(cm, "__exit__");
     if (!m)
         return apy_fail2("TypeError",
                          "'%s' object does not support the context manager "

@@ -218,6 +218,7 @@ static int64_t apy_mview_at(apy_value v, int64_t i);
 static apy_value apy_mview_slice(apy_value v, int64_t off, int64_t n,
                                  int64_t step);
 APY_API apy_value apy_mview_bytes(apy_value v);
+APY_API int64_t apy_mview_live(apy_value v);
 /* Cycle detection for `repr`, used by the dict renderer well above where the
    sequence one defines it. */
 APY_API int64_t apy_repr_entered(apy_value v);
@@ -530,6 +531,7 @@ static apy_value apy_bytes_repeat(apy_value v, apy_value count) {
 APY_API apy_value apy_getitem(apy_value seq, apy_value index) {
     int64_t i, n;
     if (O(seq)->kind == APY_MVIEW_K) {
+        if (!apy_mview_live(seq)) return 0;
         if (apy_is_int_like(index)) {
             if (!apy_index_arg(index, &i, APY_IDX_SUB)) return 0;
             n = O(seq)->v.mv.n;
@@ -902,7 +904,10 @@ APY_API apy_value apy_setitem(apy_value seq, apy_value index, apy_value item) {
     }
     if (O(seq)->kind == APY_MVIEW_K) {
         int64_t byte;
-        if (!O(O(seq)->v.mv.src)->v.s.mut)
+        if (!apy_mview_live(seq)) return 0;
+        /* THE FLAG IS THE VIEW'S, not the buffer's: `m.toreadonly()` hands
+           out one that refuses over a bytearray that accepts. */
+        if (O(seq)->v.mv.ro || !O(O(seq)->v.mv.src)->v.s.mut)
             return apy_fail("TypeError", "cannot modify read-only memory");
         if (!apy_index_arg(index, &i, APY_IDX_SUB)) return 0;
         n = O(seq)->v.mv.n;
@@ -959,7 +964,10 @@ APY_API apy_value apy_setitem(apy_value seq, apy_value index, apy_value item) {
 APY_API int64_t apy_raw_len(apy_value v) {
     if (O(v)->kind == APY_VIEW_K)
         return O(O(v)->v.vw.dict)->v.d.n;
-    if (O(v)->kind == APY_MVIEW_K) return O(v)->v.mv.n;
+    if (O(v)->kind == APY_MVIEW_K) {
+        if (!apy_mview_live(v)) return 0;
+        return O(v)->v.mv.n;
+    }
     if (O(v)->kind == APY_RANGE_K) return apy_range_len(v);
     if (O(v)->kind == APY_DICT_K) return O(v)->v.d.n;
     if (apy_is_seq(v) || apy_is_set(v)) return O(v)->v.q.n;

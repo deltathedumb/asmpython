@@ -160,6 +160,15 @@ def apy_mv_step_offset() -> i64:
     return 32
 
 
+def apy_mv_ro_offset() -> i64:
+    """Whether the VIEW refuses writes, which is not the buffer's answer.
+
+    `m.toreadonly()` hands out a view that cannot be written over a buffer
+    that can, so this cannot be derived from the source's mutability flag.
+    """
+    return 40
+
+
 def apy_mview_at_of(v: ptr, i: i64) -> i64:
     """Where the view's `i`th byte sits in the buffer underneath.
 
@@ -170,6 +179,70 @@ def apy_mview_at_of(v: ptr, i: i64) -> i64:
             + i * load(i64, offset(v, apy_mv_step_offset())))
 
 
+def apy_mview_live(v: ptr) -> i64:
+    """Whether the view still has its buffer.
+
+    `m.release()` -- and the `with` block that calls it -- drops the borrow so
+    the object underneath can be resized again, and every operation on the
+    view from then on is refused. A RELEASED VIEW IS ONE WHOSE SOURCE IS
+    NULL, which needs no field of its own and is what makes this one test.
+    Answers 1 while live, 0 having raised.
+    """
+    if i64(load(i32, offset(v, 0))) == apy_mview_kind():
+        if not ptr(load(u64, offset(v, apy_mv_src_offset()))):
+            apy_raise_at(
+                rodata(b"ValueError\0"),
+                rodata(b"operation forbidden on released memoryview "
+                       b"object\0"))
+            return 0
+    return 1
+
+
+def apy_mview_release(v: ptr) -> ptr:
+    """`m.release()` -- HAND THE BUFFER BACK.
+
+    A view borrows its source and stops that source being resized; releasing
+    drops the borrow. RELEASING TWICE IS NOT AN ERROR, which is what lets a
+    `with` block close a view a program already closed.
+    """
+    if i64(load(i32, offset(v, 0))) != apy_mview_kind():
+        return apy_raise_fmt(
+            rodata(b"AttributeError\0"),
+            rodata(b"'%s' object has no attribute 'release'%s\0"),
+            apy_kind_name_of(v), rodata(b"\0"))
+    store(u64, u64(0), offset(v, apy_mv_src_offset()))
+    return apy_none()
+
+
+def apy_mview_readonly(v: ptr) -> ptr:
+    """`m.toreadonly()` -- THE SAME WINDOW, WRITES REFUSED.
+
+    The flag is the VIEW's and not the buffer's: this hands out one that
+    refuses over a bytearray that accepts, which is the whole point of
+    handing one out.
+    """
+    if i64(load(i32, offset(v, 0))) != apy_mview_kind():
+        return apy_raise_fmt(
+            rodata(b"AttributeError\0"),
+            rodata(b"'%s' object has no attribute 'toreadonly'%s\0"),
+            apy_kind_name_of(v), rodata(b"\0"))
+    if not apy_mview_live(v):
+        return ptr(0)
+    o: ptr = apy_obj_alloc(apy_mview_kind())
+    if not o:
+        return o
+    store(u64, load(u64, offset(v, apy_mv_src_offset())),
+          offset(o, apy_mv_src_offset()))
+    store(i64, load(i64, offset(v, apy_mv_off_offset())),
+          offset(o, apy_mv_off_offset()))
+    store(i64, load(i64, offset(v, apy_mv_n_offset())),
+          offset(o, apy_mv_n_offset()))
+    store(i64, load(i64, offset(v, apy_mv_step_offset())),
+          offset(o, apy_mv_step_offset()))
+    store(i64, 1, offset(o, apy_mv_ro_offset()))
+    return o
+
+
 def apy_mview_bytes(v: ptr) -> ptr:
     """What the view shows right now, as bytes.
 
@@ -178,6 +251,8 @@ def apy_mview_bytes(v: ptr) -> ptr:
     COPIED rather than aliased: a view can be a stride over somebody else's
     buffer, so its bytes are not contiguous and there is nothing to point at.
     """
+    if not apy_mview_live(v):
+        return ptr(0)
     n: i64 = load(i64, offset(v, apy_mv_n_offset()))
     src: ptr = ptr(load(u64, offset(v, apy_mv_src_offset())))
     buf: ptr = apy_str_data(src)
@@ -270,8 +345,14 @@ def apy_memoryview(src: ptr) -> ptr:
     if not o:
         return o
     if k == apy_mview_kind():
+        if not apy_mview_live(src):
+            return ptr(0)
         store(u64, load(u64, offset(src, apy_mv_src_offset())),
               offset(o, apy_mv_src_offset()))
+        # A COPY OF A READ-ONLY VIEW IS READ-ONLY. The flag is the view's,
+        # not the buffer's, so it has to travel with the window.
+        store(i64, load(i64, offset(src, apy_mv_ro_offset())),
+              offset(o, apy_mv_ro_offset()))
         store(i64, load(i64, offset(src, apy_mv_off_offset())),
               offset(o, apy_mv_off_offset()))
         store(i64, load(i64, offset(src, apy_mv_n_offset())),

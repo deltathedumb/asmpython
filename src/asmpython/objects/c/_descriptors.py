@@ -175,6 +175,21 @@ static int apy_slot_declares(apy_value cls, apy_value name) {
 /* Generated, and spliced into a LATER part -- see `_gen_kindmeth.py`. */
 static const char *apy_kind_doc(const char *kind);
 
+/* WHICH OF A VIEW'S NAMES IS A FIELD rather than a method. Only these are
+   read off the cell, and only these are refused once the view is released:
+   CPython raises when a method is CALLED on a released view, not when it is
+   looked up. */
+static int apy_mview_field(const char *want) {
+    return strcmp(want, "readonly") == 0 || strcmp(want, "nbytes") == 0
+        || strcmp(want, "itemsize") == 0 || strcmp(want, "format") == 0
+        || strcmp(want, "obj") == 0 || strcmp(want, "ndim") == 0
+        || strcmp(want, "shape") == 0 || strcmp(want, "strides") == 0
+        || strcmp(want, "suboffsets") == 0
+        || strcmp(want, "c_contiguous") == 0
+        || strcmp(want, "f_contiguous") == 0
+        || strcmp(want, "contiguous") == 0;
+}
+
 APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
     const char *want = APY_CSTR(name);
     /* PEP 257 FOR THE BUILTINS. `"".__doc__` IS `str.__doc__` -- the text
@@ -753,8 +768,16 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
             return apy_bind(apy_native(APY_NAT_GEN_CLOSE, 1, "close"), obj);
         return apy_no_attribute(obj, name);
     case APY_MVIEW_K:
+        /* A RELEASED VIEW STILL ANSWERS ITS METHOD NAMES -- CPython raises
+           when one is CALLED, not when it is looked up -- so the check
+           guards the FIELDS alone, which really are read here. */
+        if (apy_mview_field(want) && !apy_mview_live(obj)) return 0;
+        /* THE FLAG IS THE VIEW'S, and falls back to the buffer's: a view
+           handed out by `toreadonly` refuses writes over a source that
+           accepts them. */
         if (strcmp(want, "readonly") == 0)
-            return apy_from_bool(!O(O(obj)->v.mv.src)->v.s.mut);
+            return apy_from_bool(O(obj)->v.mv.ro
+                                 || !O(O(obj)->v.mv.src)->v.s.mut);
         if (strcmp(want, "nbytes") == 0) return apy_from_int(O(obj)->v.mv.n);
         /* One byte per element, unsigned -- the only format a bytes-like
            source produces, and the only one this constructs. A view over an

@@ -187,6 +187,14 @@ def apy_enter(cm: ptr) -> ptr:
     lookup leaves one pending and the report built below would otherwise be
     the second error raised while the first still stood.
     """
+    # A MEMORYVIEW IS THE ONE BUILTIN THAT IS A CONTEXT MANAGER, and its two
+    # halves are this runtime's own code reached BY KIND -- `apy_dunder_of`
+    # serves an instance and would never find them. What the block binds is
+    # the view itself; what leaving it does is release.
+    if i64(load(i32, offset(cm, 0))) == apy_mview_kind():
+        if not apy_mview_live(cm):
+            return ptr(0)
+        return cm
     if not apy_dunder_of(cm, rodata(b"__exit__\0")):
         apy_error_clear()
         return apy_cm_missing(cm, rodata(b"__exit__\0"))
@@ -205,6 +213,9 @@ def apy_exit(cm: ptr, exc: ptr) -> ptr:
     is None because there are none here. Passing None for the type when there
     IS an exception would make `et.__name__` fail in a manager that logs it.
     """
+    # THE VIEW HANDS ITS BUFFER BACK on the way out, and swallows nothing.
+    if i64(load(i32, offset(cm, 0))) == apy_mview_kind():
+        return apy_mview_release(cm)
     m: ptr = apy_dunder_of(cm, rodata(b"__exit__\0"))
     if not m:
         return apy_raise_fmt(

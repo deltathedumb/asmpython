@@ -25,6 +25,7 @@ KINDMETH_C = r"""/* WHICH BUILTIN METHODS A KIND HAS, and which runtime entry po
 #define APY_MK_FLOAT 512u
 #define APY_MK_RANGE 1024u
 #define APY_MK_COMPLEX 2048u
+#define APY_MK_MEMORYVIEW 4096u
 
 /* The arity of `w` on a receiver of kind `bit`, packed as
    `(most << 8) | nopt`, or 0 for a name that kind does not have. */
@@ -270,17 +271,21 @@ static int64_t apy_kind_meth_written(const char *w, unsigned bit) {
     if (strcmp(w, "__ceil__") == 0)
         return (bit & 768u) ? 1 : 0;
     if (strcmp(w, "__class_getitem__") == 0)
-        return (bit & 248u) ? 1 : 0;
+        return (bit & 4344u) ? 1 : 0;
     if (strcmp(w, "__complex__") == 0)
         return (bit & 2048u) ? 1 : 0;
     if (strcmp(w, "__contains__") == 0)
         return (bit & 224u) ? 1 : 0;
     if (strcmp(w, "__dir__") == 0)
-        return (bit & 4095u) ? 1 : 0;
+        return (bit & 8191u) ? 1 : 0;
+    if (strcmp(w, "__enter__") == 0)
+        return (bit & 4096u) ? 1 : 0;
+    if (strcmp(w, "__exit__") == 0)
+        return (bit & 4096u) ? 1 : 0;
     if (strcmp(w, "__floor__") == 0)
         return (bit & 768u) ? 1 : 0;
     if (strcmp(w, "__format__") == 0)
-        return (bit & 4095u) ? 1 : 0;
+        return (bit & 8191u) ? 1 : 0;
     if (strcmp(w, "__getformat__") == 0)
         return (bit & 512u) ? 1 : 0;
     if (strcmp(w, "__getitem__") == 0)
@@ -288,23 +293,23 @@ static int64_t apy_kind_meth_written(const char *w, unsigned bit) {
     if (strcmp(w, "__getnewargs__") == 0)
         return (bit & 2835u) ? 1 : 0;
     if (strcmp(w, "__getstate__") == 0)
-        return (bit & 4095u) ? 1 : 0;
+        return (bit & 8191u) ? 1 : 0;
     if (strcmp(w, "__init_subclass__") == 0)
-        return (bit & 4095u) ? 1 : 0;
+        return (bit & 8191u) ? 1 : 0;
     if (strcmp(w, "__new__") == 0)
-        return (bit & 4095u) ? 1 : 0;
+        return (bit & 8191u) ? 1 : 0;
     if (strcmp(w, "__reduce__") == 0)
-        return (bit & 4095u) ? 1 : 0;
+        return (bit & 8191u) ? 1 : 0;
     if (strcmp(w, "__reduce_ex__") == 0)
-        return (bit & 4095u) ? 1 : 0;
+        return (bit & 8191u) ? 1 : 0;
     if (strcmp(w, "__reversed__") == 0)
         return (bit & 1064u) ? 1 : 0;
     if (strcmp(w, "__round__") == 0)
         return (bit & 768u) ? 1 : 0;
     if (strcmp(w, "__sizeof__") == 0)
-        return (bit & 4095u) ? 1 : 0;
+        return (bit & 8191u) ? 1 : 0;
     if (strcmp(w, "__subclasshook__") == 0)
-        return (bit & 4095u) ? 1 : 0;
+        return (bit & 8191u) ? 1 : 0;
     if (strcmp(w, "__trunc__") == 0)
         return (bit & 768u) ? 1 : 0;
     return 0;
@@ -709,14 +714,14 @@ static const char *apy_kind_doc(const char *kind) {
                "If a single number is given, convert it to a complex number.\n"
                "If the 'real' or 'imag' arguments are given, create a complex number\n"
                "with the specified real and imaginary components.";
+    if (strcmp(kind, "memoryview") == 0)
+        return "Create a new memoryview object which references the given object.";
     if (strcmp(kind, "bool") == 0)
         return "Returns True when the argument is true, False otherwise.\n"
                "The builtins True and False are the only two instances of the class bool.\n"
                "The class bool is a subclass of the class int, and cannot be subclassed.";
     if (strcmp(kind, "NoneType") == 0)
         return "The type of the None singleton.";
-    if (strcmp(kind, "memoryview") == 0)
-        return "Create a new memoryview object which references the given object.";
     return 0;
 }
 """
