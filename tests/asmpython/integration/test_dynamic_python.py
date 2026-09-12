@@ -634,6 +634,27 @@ PROGRAMS = {
         print(list(zip(bytearray(b"ab"), "xy")))
         print(list(reversed(bytearray(b"ab"))), 97 in bytearray(b"abc"))
     """,
+    # `s.split()` SPLITS ON WHITESPACE and knew only the six ASCII bytes, so
+    # every Unicode space was an ordinary character to split around:
+    # `"\u00a0".split()` answered `["\u00a0"]` where Python answers `[]`.
+    # `strip()` was fixed by asking the character table and `split()` was
+    # not. The backward walk `rsplit` does is the only new piece -- stepping
+    # UTF-8 in reverse means finding the lead byte behind the continuations.
+    "splitting_on_unicode_whitespace": """
+        print("\\u00a0".split(), "\\u2003x".split())
+        print("a\\u00a0b c".split(), "a\\u00a0b c".rsplit())
+        print("a\\u2003b\\u2003c".rsplit(None, 1))
+        print("a\\u2003b\\u2003c".split(None, 1))
+        print("x\\u00a0".split(), "\\u00a0x".split())
+        # THE ASCII CASES ARE UNTOUCHED, including where the remainder keeps
+        # the whitespace the limit stopped at.
+        print("  a  b  ".split(), "  a  b  ".rsplit())
+        print("  a  b  ".split(None, 1), "  a  b  ".rsplit(None, 1))
+        print("".split(), " \\t\\n ".split())
+        # AND A BYTES RECEIVER KEEPS THE ASCII ANSWER: those two bytes are
+        # not a character and neither of them is whitespace.
+        print(b"a\\xc2\\xa0b".split(), b"  a  b  ".rsplit(None, 1))
+    """,
     "traceback_positions": """
         try:
             (1).missing

@@ -126,6 +126,73 @@ def apy_seq_reverse_of(out: ptr) -> ptr:
     return out
 
 
+def apy_utf8_width_of(wide: i64, p: ptr, n: i64, i: i64) -> i64:
+    """The bytes of the character starting at `i`, at least one.
+
+    THE FORWARD STEP over a non-space run. `apy_utf8_at_of` writes the width
+    back through a pointer and this is the only thing that wants it, so the
+    code point it also answers is dropped.
+    """
+    if wide == 0:
+        return 1
+    slot: ptr = apy_space_slot()
+    apy_utf8_at_of(p, n, i, slot)
+    w: i64 = load(i64, slot)
+    if w < 1:
+        return 1
+    return w
+
+
+def apy_space_slot() -> ptr:
+    """One word, for the width `apy_utf8_at_of` writes back."""
+    return reserve("apy_space_width_ir", 8)
+
+
+def apy_space_at_of(wide: i64, p: ptr, n: i64, i: i64) -> i64:
+    """The bytes of the whitespace CHARACTER starting at `i`, or 0.
+
+    `apy_c_space` KNOWS THE SIX ASCII BYTES AND NOTHING ELSE, so
+    `"\u00a0".split()` answered `["\u00a0"]` where Python answers `[]`:
+    every Unicode space was an ordinary character to split around. `strip()`
+    was fixed by asking the character table; this is the same fix for the
+    other splitter.
+
+    A BYTES RECEIVER KEEPS THE ASCII ANSWER, which is the same split every
+    shared text body now makes: `b"\xc2\xa0"` is two bytes and neither is
+    whitespace.
+
+    ANSWERING A WIDTH RATHER THAN A FLAG is what lets the caller advance: a
+    space character may be two or three bytes, and stepping one at a time
+    would ask about its continuation bytes.
+    """
+    if wide == 0:
+        if apy_c_space(i64(load(u8, offset(p, i)))) != 0:
+            return 1
+        return 0
+    slot: ptr = apy_space_slot()
+    cp: i64 = apy_utf8_at_of(p, n, i, slot)
+    if (apy_char_class_of(cp) & apy_uc_space()) != 0:
+        return load(i64, slot)
+    return 0
+
+
+def apy_char_start_of(wide: i64, p: ptr, i: i64) -> i64:
+    """Where the character ENDING at `i` begins.
+
+    THE BACKWARD STEP `rsplit` NEEDS. A continuation byte is `10xxxxxx`, so
+    the lead is the first byte at or before `i - 1` that is not one -- and
+    four bytes is the most a character can take, which bounds the walk over
+    malformed input rather than letting it run to the start.
+    """
+    if wide == 0:
+        return i - 1
+    at: i64 = i - 1
+    while at > 0 and i - at < 4 and (load(u8, offset(p, at))
+                                     & u8(192)) == u8(128):
+        at = at - 1
+    return at
+
+
 def apy_split_ws_of(s: ptr, maxsplit: i64, from_right: i64) -> ptr:
     """Split on RUNS of whitespace, dropping the empty ends.
 
@@ -144,12 +211,18 @@ def apy_split_ws_of(s: ptr, maxsplit: i64, from_right: i64) -> ptr:
         return out
     n: i64 = load(i64, offset(s, apy_str_len_offset()))
     p: ptr = ptr(load(u64, offset(s, apy_str_ptr_offset())))
+    # BY CHARACTER, NOT BY BYTE, for a str receiver -- see `apy_space_at_of`.
+    wide: i64 = 0
+    if i64(load(i32, offset(s, 0))) == apy_str_kind():
+        wide = 1
     if not from_right:
         i: i64 = 0
         going: i64 = 1
         while going:
-            while i < n and apy_c_space(i64(load(u8, offset(p, i)))) != 0:
-                i = i + 1
+            skip: i64 = 1
+            while i < n and skip > 0:
+                skip = apy_space_at_of(wide, p, n, i)
+                i = i + skip
             if i >= n:
                 going = 0
             else:
@@ -159,9 +232,11 @@ def apy_split_ws_of(s: ptr, maxsplit: i64, from_right: i64) -> ptr:
                     going = 0
                 else:
                     j: i64 = i
-                    while j < n and apy_c_space(
-                            i64(load(u8, offset(p, j)))) == 0:
-                        j = j + 1
+                    step: i64 = 0
+                    while j < n and step == 0:
+                        step = apy_space_at_of(wide, p, n, j)
+                        if step == 0:
+                            j = j + apy_utf8_width_of(wide, p, n, j)
                     apy_q_append_of(out, apy_str_slice_of(s, i, j))
                     i = j
         return out
@@ -170,8 +245,12 @@ def apy_split_ws_of(s: ptr, maxsplit: i64, from_right: i64) -> ptr:
     k: i64 = n
     walking: i64 = 1
     while walking:
-        while k > 0 and apy_c_space(i64(load(u8, offset(p, k - 1)))) != 0:
-            k = k - 1
+        back: i64 = 1
+        while k > 0 and back > 0:
+            at: i64 = apy_char_start_of(wide, p, k)
+            back = apy_space_at_of(wide, p, n, at)
+            if back > 0:
+                k = at
         if k <= 0:
             walking = 0
         else:
@@ -181,9 +260,12 @@ def apy_split_ws_of(s: ptr, maxsplit: i64, from_right: i64) -> ptr:
                 walking = 0
             else:
                 m: i64 = k
-                while m > 0 and apy_c_space(
-                        i64(load(u8, offset(p, m - 1)))) == 0:
-                    m = m - 1
+                held: i64 = 0
+                while m > 0 and held == 0:
+                    was: i64 = apy_char_start_of(wide, p, m)
+                    held = apy_space_at_of(wide, p, n, was)
+                    if held == 0:
+                        m = was
                 apy_q_append_of(out, apy_str_slice_of(s, m, k))
                 k = m
     return apy_seq_reverse_of(out)

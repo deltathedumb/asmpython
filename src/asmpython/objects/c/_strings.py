@@ -887,14 +887,47 @@ APY_API apy_value apy_str_removesuffix(apy_value s, apy_value p) {
    ['a', 'b']; with `' '` it splits on each single space and keeps them, giving
    ['', '', 'a', '', 'b', '', '']. A default of `' '` would answer the second
    to both. */
+/* The bytes of the whitespace CHARACTER starting at `i`, or 0.
+
+   `apy_c_space` KNOWS THE SIX ASCII BYTES AND NOTHING ELSE, so
+   `"\u00a0".split()` answered `["\u00a0"]` where Python answers `[]`: every
+   Unicode space was an ordinary character to split around. `strip()` was
+   fixed by asking the character table; this is the same fix for the other
+   splitter. A BYTES RECEIVER KEEPS THE ASCII ANSWER.
+
+   ANSWERING A WIDTH RATHER THAN A FLAG is what lets the caller advance: a
+   space character may be two or three bytes, and stepping one at a time
+   would ask about its continuation bytes. */
+static int64_t apy_space_at(int wide, const unsigned char *p, int64_t n,
+                            int64_t i) {
+    uint32_t cp;
+    int64_t used = apy_text_step(wide, p, n, i, &cp);
+    if (used <= 0) return 0;
+    return (apy_text_class(wide, cp) & APY_UC_SPACE) ? used : 0;
+}
+
+/* Where the character ENDING at `i` begins -- the backward step `rsplit`
+   needs. A continuation byte is `10xxxxxx`, so the lead is the first byte at
+   or before `i - 1` that is not one; four bytes is the most a character can
+   take, which bounds the walk over malformed input. */
+static int64_t apy_char_start(int wide, const unsigned char *p, int64_t i) {
+    int64_t at = i - 1;
+    if (!wide) return at;
+    while (at > 0 && i - at < 4 && (p[at] & 0xC0) == 0x80) at--;
+    return at;
+}
+
 APY_API apy_value apy_split_ws_of(apy_value s, int64_t maxsplit,
                                  int64_t from_right) {
     apy_value out = apy_seq_new(APY_LIST_K, 8);
     int64_t n = O(s)->v.s.n, i, j;
+    const unsigned char *q = (const unsigned char *)O(s)->v.s.p;
+    int wide = O(s)->kind == APY_STR_K;
     if (!from_right) {
         i = 0;
         while (i < n) {
-            while (i < n && apy_c_space((unsigned char)O(s)->v.s.p[i])) i++;
+            int64_t skip;
+            while (i < n && (skip = apy_space_at(wide, q, n, i)) > 0) i += skip;
             if (i >= n) break;
             if (maxsplit >= 0 && O(out)->v.q.n == maxsplit) {
                 /* The remainder goes in WHOLE, INCLUDING its trailing
@@ -908,7 +941,11 @@ APY_API apy_value apy_split_ws_of(apy_value s, int64_t maxsplit,
                 return out;
             }
             j = i;
-            while (j < n && !apy_c_space((unsigned char)O(s)->v.s.p[j])) j++;
+            while (j < n && !apy_space_at(wide, q, n, j)) {
+                uint32_t cp;
+                int64_t used = apy_text_step(wide, q, n, j, &cp);
+                j += used > 0 ? used : 1;
+            }
             apy_q_append(out, apy_str_slice_of(s, i, j));
             i = j;
         }
@@ -916,7 +953,9 @@ APY_API apy_value apy_split_ws_of(apy_value s, int64_t maxsplit,
     }
     i = n;
     while (i > 0) {
-        while (i > 0 && apy_c_space((unsigned char)O(s)->v.s.p[i - 1])) i--;
+        int64_t at;
+        while (i > 0 && apy_space_at(wide, q, n,
+                                     at = apy_char_start(wide, q, i))) i = at;
         if (i <= 0) break;
         if (maxsplit >= 0 && O(out)->v.q.n == maxsplit) {
             /* Mirror image of the forward case: the remainder keeps its
@@ -926,7 +965,8 @@ APY_API apy_value apy_split_ws_of(apy_value s, int64_t maxsplit,
             break;
         }
         j = i;
-        while (j > 0 && !apy_c_space((unsigned char)O(s)->v.s.p[j - 1])) j--;
+        while (j > 0 && !apy_space_at(wide, q, n,
+                                      at = apy_char_start(wide, q, j))) j = at;
         apy_q_append(out, apy_str_slice_of(s, j, i));
         i = j;
     }
