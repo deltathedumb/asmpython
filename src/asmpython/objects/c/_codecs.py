@@ -53,15 +53,149 @@ static int apy_codec_of(apy_value name) {
     return APY_ENC_UNKNOWN;
 }
 
-/* The error handler, as a small code. Only the three that can be honoured
-   without a callback registry. */
-enum { APY_ERR_STRICT = 0, APY_ERR_REPLACE, APY_ERR_IGNORE };
+/* THE ERROR HANDLER, as a small code. Every handler CPython answers without
+   a registered callback -- `namereplace` is the one left out, because it
+   spells a character by its UNICODE NAME and the name table is a bundled
+   module rather than something the runtime carries.
+
+   THREE OF THESE ARE WHY A SURROGATE HAD NOWHERE TO GO. The cell holds one
+   as WTF-8 since the surrogate-literal round, so `"a\udcffb".encode(...)`
+   finally has something real to work from -- and every compiled path used to
+   hand the raw bytes back whatever the handler said, which is five wrong
+   answers wearing one shape. */
+enum { APY_ERR_STRICT = 0, APY_ERR_REPLACE, APY_ERR_IGNORE,
+       APY_ERR_BACKSLASH, APY_ERR_XMLCHARREF, APY_ERR_SURROGATEESCAPE,
+       APY_ERR_SURROGATEPASS };
 
 static int apy_errors_of(apy_value name) {
     if (!name || O(name)->kind != APY_STR_K) return APY_ERR_STRICT;
     if (!strcmp(APY_CSTR(name), "replace")) return APY_ERR_REPLACE;
     if (!strcmp(APY_CSTR(name), "ignore")) return APY_ERR_IGNORE;
+    if (!strcmp(APY_CSTR(name), "backslashreplace")) return APY_ERR_BACKSLASH;
+    if (!strcmp(APY_CSTR(name), "xmlcharrefreplace"))
+        return APY_ERR_XMLCHARREF;
+    if (!strcmp(APY_CSTR(name), "surrogateescape"))
+        return APY_ERR_SURROGATEESCAPE;
+    if (!strcmp(APY_CSTR(name), "surrogatepass"))
+        return APY_ERR_SURROGATEPASS;
     return APY_ERR_STRICT;
+}
+
+/* A CODE POINT AS CPYTHON WRITES IT IN AN ERROR MESSAGE: `'\xe9'`,
+   `'\udcff'`, `'\U0001f600'` -- ASCII-safe whatever the terminal is, which
+   is what the exception text uses rather than the terminal-aware repr. */
+static int64_t apy_cp_shown(char *out, uint32_t cp) {
+    if (cp >= 0x20 && cp < 0x7F) { out[0] = (char)cp; return 1; }
+    if (cp < 0x100) return snprintf(out, 12, "\\x%02x", (unsigned)cp);
+    if (cp < 0x10000) return snprintf(out, 12, "\\u%04x", (unsigned)cp);
+    return snprintf(out, 12, "\\U%08x", (unsigned)cp);
+}
+
+/* `'utf-8' codec can't encode character '\udcff' in position 1: surrogates
+   not allowed` -- the whole sentence, which used to stop after `character`.
+   The POSITION IS COUNTED IN CHARACTERS, not in the bytes the cell holds.
+
+   A RUN IS ONE COMPLAINT AND LOSES THE CHARACTER. CPython reports
+   consecutive unencodable characters together -- `can't encode characters in
+   position 0-1` -- and names none of them, which is why `run` decides the
+   shape of the sentence rather than only its numbers. */
+static apy_value apy_encode_failed(const char *codec, uint32_t cp,
+                                   int64_t at, int64_t run,
+                                   const char *why) {
+    char shown[16], buf[200];
+    int64_t used;
+    if (run > 1) {
+        snprintf(buf, sizeof buf, "'%s' codec can't encode characters in "
+                 "position %lld-%lld: %s", codec, (long long)at,
+                 (long long)(at + run - 1), why);
+        return apy_fail("UnicodeEncodeError", buf);
+    }
+    used = apy_cp_shown(shown, cp);
+    shown[used] = 0;
+    snprintf(buf, sizeof buf, "'%s' codec can't encode character '%s' in "
+             "position %lld: %s", codec, shown, (long long)at, why);
+    return apy_fail("UnicodeEncodeError", buf);
+}
+
+/* `'utf-8' codec can't decode byte 0xed in position 1: invalid continuation
+   byte` -- the same sentence from the other side, and the same split: a
+   MAXIMAL SUBPART longer than one byte is `bytes in position 1-2` and names
+   none of them. */
+static apy_value apy_decode_failed(const char *codec, unsigned byte,
+                                   int64_t at, int64_t run,
+                                   const char *why) {
+    char buf[200];
+    if (run > 1)
+        snprintf(buf, sizeof buf, "'%s' codec can't decode bytes in "
+                 "position %lld-%lld: %s", codec, (long long)at,
+                 (long long)(at + run - 1), why);
+    else
+        snprintf(buf, sizeof buf, "'%s' codec can't decode byte 0x%02x in "
+                 "position %lld: %s", codec, byte, (long long)at, why);
+    return apy_fail("UnicodeDecodeError", buf);
+}
+
+/* HOW MANY BYTES AT `i` ARE A PREFIX OF A SEQUENCE AND STILL WRONG -- the
+   MAXIMAL SUBPART, which is what decides how many U+FFFD a `replace` puts
+   and what range a refusal names. Never less than one.
+
+   THE CONTINUATION RANGES ARE NOT ALL 80..BF, and that is the whole of the
+   subtlety: `E0` needs `A0..BF`, `ED` needs `80..9F` -- which is what makes
+   a WTF-8 surrogate three separate one-byte errors rather than one three-
+   byte one -- `F0` needs `90..BF` and `F4` needs `80..8F`. */
+static int64_t apy_utf8_subpart(const unsigned char *p, int64_t n,
+                                int64_t i, const char **why) {
+    unsigned char c = p[i], lo = 0x80, hi = 0xBF;
+    int64_t need, k;
+    *why = "invalid start byte";
+    if (c < 0xC2 || c > 0xF4) return 1;
+    need = c < 0xE0 ? 1 : c < 0xF0 ? 2 : 3;
+    if (c == 0xE0) lo = 0xA0;
+    else if (c == 0xED) hi = 0x9F;
+    else if (c == 0xF0) lo = 0x90;
+    else if (c == 0xF4) hi = 0x8F;
+    for (k = 1; k <= need; k++) {
+        unsigned char want_lo = k == 1 ? lo : 0x80;
+        unsigned char want_hi = k == 1 ? hi : 0xBF;
+        if (i + k >= n) { *why = "unexpected end of data"; return k; }
+        if (p[i + k] < want_lo || p[i + k] > want_hi) {
+            *why = "invalid continuation byte";
+            return k;
+        }
+    }
+    /* A COMPLETE AND VALID SEQUENCE, which only reaches here when the caller
+       rejected it for what it MEANS rather than how it is spelled. */
+    *why = "invalid continuation byte";
+    return 1;
+}
+
+/* HOW MANY CHARACTERS FROM `i` THIS CODEC CANNOT ENCODE, in a row. CPython
+   reports consecutive ones as ONE complaint naming a range, and stops at the
+   first character it can encode. */
+static int64_t apy_bad_run(const unsigned char *p, int64_t n, int64_t i,
+                           int codec) {
+    int64_t run = 0;
+    while (i < n) {
+        uint32_t cp;
+        int64_t used = apy_utf8_step(p, n, i, &cp);
+        if (!used) break;
+        if (codec == APY_ENC_ASCII) { if (cp < 0x80) break; }
+        else if (codec == APY_ENC_LATIN1) { if (cp < 0x100) break; }
+        else if (cp < 0xD800 || cp > 0xDFFF) break;
+        run++;
+        i += used;
+    }
+    return run ? run : 1;
+}
+
+/* `\udcff` and `&#56575;` -- the two handlers that WRITE THE CHARACTER OUT
+   rather than dropping it. Answers how many bytes it put. */
+static int64_t apy_escape_put(char *out, int handler, uint32_t cp) {
+    if (handler == APY_ERR_XMLCHARREF)
+        return snprintf(out, 16, "&#%u;", (unsigned)cp);
+    if (cp < 0x100) return snprintf(out, 16, "\\x%02x", (unsigned)cp);
+    if (cp < 0x10000) return snprintf(out, 16, "\\u%04x", (unsigned)cp);
+    return snprintf(out, 16, "\\U%08x", (unsigned)cp);
 }
 
 /* One code point out of UTF-8. Answers how many bytes it consumed, or 0 for
@@ -127,7 +261,7 @@ APY_API apy_value apy_str_encode(apy_value s, apy_value encoding,
                                  apy_value errors) {
     int codec, handler;
     const unsigned char *p;
-    int64_t n, i, at = 0;
+    int64_t n, i, at = 0, shown = 0;
     char *buf;
     apy_value out;
     if (O(s)->kind != APY_STR_K)
@@ -139,14 +273,78 @@ APY_API apy_value apy_str_encode(apy_value s, apy_value encoding,
     if (codec == APY_ENC_UNKNOWN)
         return apy_fail2("LookupError", "unknown encoding: %s%s",
                          APY_CSTR(encoding), "");
-    if (codec == APY_ENC_UTF8) {
-        /* ALREADY THE INTERNAL FORM: a copy, re-tagged. */
-        out = apy_str_copy(O(s)->v.s.p, O(s)->v.s.n);
-        O(out)->kind = APY_BYTES_K;
-        return out;
-    }
     p = (const unsigned char *)O(s)->v.s.p;
     n = O(s)->v.s.n;
+    if (codec == APY_ENC_UTF8) {
+        /* ALMOST THE INTERNAL FORM: the cell is UTF-8 except where it holds a
+           SURROGATE, which it keeps as WTF-8 so that `"a\udcffb"` can exist
+           at all. UTF-8 has no such character, so the handler decides -- and
+           a straight copy answered the raw bytes for every one of the seven,
+           which is six wrong answers and one right one by accident. */
+        int64_t seen = 0;
+        for (i = 0; i < n; ) {
+            uint32_t cp;
+            int64_t used = apy_utf8_step(p, n, i, &cp);
+            if (!used) { i++; continue; }
+            if (cp >= 0xD800 && cp <= 0xDFFF) break;
+            i += used;
+            seen++;
+        }
+        if (i >= n) {
+            out = apy_str_copy(O(s)->v.s.p, n);
+            O(out)->kind = APY_BYTES_K;
+            return out;
+        }
+        /* FOUR BYTES PER CHARACTER covers `\Uxxxxxxxx`, the widest thing any
+           handler writes for one. */
+        buf = (char *)malloc((size_t)(n * 10 + 16));
+        if (!buf) { fputs("asmpython: out of memory\n", stderr); exit(1); }
+        memcpy(buf, p, (size_t)i);
+        at = i;
+        for (; i < n; ) {
+            uint32_t cp;
+            int64_t used = apy_utf8_step(p, n, i, &cp);
+            if (!used) { buf[at++] = (char)p[i++]; continue; }
+            if (cp < 0xD800 || cp > 0xDFFF) {
+                memcpy(buf + at, p + i, (size_t)used);
+                at += used;
+                i += used;
+                seen++;
+                continue;
+            }
+            if (handler == APY_ERR_SURROGATEPASS) {
+                /* THE WTF-8 BYTES, WHICH IS WHAT THE CELL ALREADY HOLDS.
+                   `surrogatepass` is the handler that says "write it anyway",
+                   and the internal form is exactly that encoding. */
+                memcpy(buf + at, p + i, (size_t)used);
+                at += used;
+            } else if (handler == APY_ERR_SURROGATEESCAPE
+                       && cp >= 0xDC80 && cp <= 0xDCFF) {
+                /* THE LOW BYTE BACK. PEP 383: a byte that would not decode
+                   was parked at U+DC80 + byte, and this is the way out. Only
+                   that range -- a surrogate from anywhere else was never a
+                   byte and CPython refuses it. */
+                buf[at++] = (char)(cp - 0xDC00);
+            } else if (handler == APY_ERR_IGNORE) {
+                /* nothing */
+            } else if (handler == APY_ERR_REPLACE) {
+                buf[at++] = '?';
+            } else if (handler == APY_ERR_BACKSLASH
+                       || handler == APY_ERR_XMLCHARREF) {
+                at += apy_escape_put(buf + at, handler, cp);
+            } else {
+                free(buf);
+                return apy_encode_failed("utf-8", cp, seen,
+                                         apy_bad_run(p, n, i, codec),
+                                         "surrogates not allowed");
+            }
+            i += used;
+            seen++;
+        }
+        out = apy_bytes_copy(buf, at);
+        free(buf);
+        return out;
+    }
     /* Four bytes per code point covers every target, and a code point is at
        least one byte of the source -- so `4 * n` can never be short. */
     buf = (char *)malloc((size_t)(n * 4 + 8));
@@ -166,18 +364,41 @@ APY_API apy_value apy_str_encode(apy_value s, apy_value encoding,
         i += used;
         if (codec == APY_ENC_ASCII || codec == APY_ENC_LATIN1) {
             uint32_t limit = codec == APY_ENC_ASCII ? 0x80u : 0x100u;
+            const char *named = codec == APY_ENC_ASCII ? "ascii" : "latin-1";
             if (cp >= limit) {
-                if (handler == APY_ERR_IGNORE) continue;
-                if (handler == APY_ERR_REPLACE) { buf[at++] = '?'; continue; }
+                if (handler == APY_ERR_IGNORE) { shown++; continue; }
+                if (handler == APY_ERR_REPLACE) {
+                    buf[at++] = '?';
+                    shown++;
+                    continue;
+                }
+                if (handler == APY_ERR_BACKSLASH
+                        || handler == APY_ERR_XMLCHARREF) {
+                    at += apy_escape_put(buf + at, handler, cp);
+                    shown++;
+                    continue;
+                }
+                /* PEP 383 AGAIN, and it reaches every narrow codec: a byte
+                   parked at U+DC80 comes back out as that byte whatever the
+                   encoding was, which is what makes a filename read from the
+                   system writable again. */
+                if (handler == APY_ERR_SURROGATEESCAPE
+                        && cp >= 0xDC80 && cp <= 0xDCFF) {
+                    buf[at++] = (char)(cp - 0xDC00);
+                    shown++;
+                    continue;
+                }
                 free(buf);
-                return apy_fail2("UnicodeEncodeError",
-                                 "'%s' codec can't encode character%s",
-                                 codec == APY_ENC_ASCII ? "ascii" : "latin-1",
-                                 "");
+                return apy_encode_failed(
+                    named, cp, shown, apy_bad_run(p, n, i - used, codec),
+                    codec == APY_ENC_ASCII ? "ordinal not in range(128)"
+                                           : "ordinal not in range(256)");
             }
             buf[at++] = (char)cp;
+            shown++;
             continue;
         }
+        shown++;
         if (codec == APY_ENC_UTF32 || codec == APY_ENC_UTF32LE
             || codec == APY_ENC_UTF32BE) {
             int be = codec == APY_ENC_UTF32BE;
@@ -234,24 +455,45 @@ APY_API apy_value apy_bytes_decode(apy_value b, apy_value encoding,
     n = O(b)->v.s.n;
     /* Three bytes of UTF-8 per input byte is the worst case for every codec
        here -- one latin-1 byte becomes at most two, one UTF-16 unit at most
-       three -- so this cannot be short. */
+       three, and a byte parked at U+DC80 by `surrogateescape` exactly three
+       -- so this cannot be short. */
     buf = (char *)malloc((size_t)(n * 3 + 8));
     if (!buf) { fputs("asmpython: out of memory\n", stderr); exit(1); }
     if (codec == APY_ENC_UTF8) {
         for (i = 0; i < n; ) {
             uint32_t cp;
             int64_t used = apy_utf8_step(p, n, i, &cp);
-            if (!used) {
-                if (handler == APY_ERR_IGNORE) { i++; continue; }
+            /* A WTF-8 SURROGATE IS NOT UTF-8. The step accepts one because
+               the cell stores text that way, but a byte string that spells
+               ED B3 BF is malformed input -- CPython refuses it byte by byte
+               and only `surrogatepass` lets it through. */
+            int bad = !used || (cp >= 0xD800 && cp <= 0xDFFF
+                                && handler != APY_ERR_SURROGATEPASS);
+            if (bad) {
+                /* THE MAXIMAL SUBPART, which is one U+FFFD however long it
+                   is: a truncated four-byte sequence is ONE error and a
+                   WTF-8 surrogate is three, because `ED` accepts only
+                   `80..9F` and the bytes after it start nothing. */
+                const char *why;
+                int64_t part = apy_utf8_subpart(p, n, i, &why), k;
+                if (handler == APY_ERR_IGNORE) { i += part; continue; }
                 if (handler == APY_ERR_REPLACE) {
                     at += apy_utf8_put(buf + at, 0xFFFD);
-                    i++;
+                    i += part;
+                    continue;
+                }
+                if (handler == APY_ERR_SURROGATEESCAPE) {
+                    /* PEP 383: each byte is parked at U+DC80 + byte, so it
+                       can be handed back unchanged when the text is encoded.
+                       EVERY BYTE OF THE SUBPART, not one per subpart --
+                       nothing could come back otherwise. */
+                    for (k = 0; k < part; k++)
+                        at += apy_utf8_put(buf + at, 0xDC00u + p[i + k]);
+                    i += part;
                     continue;
                 }
                 free(buf);
-                return apy_fail2("UnicodeDecodeError",
-                                 "'utf-8' codec can't decode byte%s%s",
-                                 "", "");
+                return apy_decode_failed("utf-8", p[i], i, part, why);
             }
             memcpy(buf + at, p + i, (size_t)used);
             at += used;
@@ -267,10 +509,13 @@ APY_API apy_value apy_bytes_decode(apy_value b, apy_value encoding,
                     at += apy_utf8_put(buf + at, 0xFFFD);
                     continue;
                 }
+                if (handler == APY_ERR_SURROGATEESCAPE) {
+                    at += apy_utf8_put(buf + at, 0xDC00u + p[i]);
+                    continue;
+                }
                 free(buf);
-                return apy_fail2("UnicodeDecodeError",
-                                 "'ascii' codec can't decode byte%s%s",
-                                 "", "");
+                return apy_decode_failed("ascii", p[i], i, 1,
+                                         "ordinal not in range(128)");
             }
             /* EVERY BYTE IS A CODE POINT in latin-1, which is what makes it
                the round-trip encoding for arbitrary octets. */

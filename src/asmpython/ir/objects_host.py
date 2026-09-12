@@ -4028,7 +4028,13 @@ def _codec_args(h, a, who):
     err = h._get(a[2], who) if len(a) > 2 else None
     name = _CODECS.get(str(enc).lower().replace("_", "-")) if enc is not None         else "utf-8"
     handler = str(err) if err is not None else "strict"
-    if handler not in ("strict", "replace", "ignore"):
+    # EVERY HANDLER CPYTHON ANSWERS WITHOUT A REGISTERED CALLBACK, which is
+    # the same set `apy_errors_of` knows. `namereplace` is the one left out:
+    # it spells a character by its UNICODE NAME, and the name table is a
+    # bundled module rather than something the runtime carries.
+    if handler not in ("strict", "replace", "ignore", "backslashreplace",
+                       "xmlcharrefreplace", "surrogateescape",
+                       "surrogatepass"):
         handler = "strict"
     return (name, handler)
 
@@ -4044,9 +4050,12 @@ def _apy_str_encode(h, a):
                        f"unknown encoding: {h._get(a[1], 'encode')}")
     try:
         return h._new(v.encode(name, handler))
-    except UnicodeEncodeError:
-        return h._fail("UnicodeEncodeError",
-                       f"'{name}' codec can't encode character")
+    except UnicodeEncodeError as exc:
+        # CPYTHON'S OWN SENTENCE, character, position and reason included:
+        # `'utf-8' codec can't encode character '\udcff' in position 1:
+        # surrogates not allowed`. It used to stop after `character`, which
+        # is the half that says nothing.
+        return h._fail("UnicodeEncodeError", str(exc))
 
 
 def _codec_arg(h, who, slot, handle):
@@ -4118,9 +4127,10 @@ def _apy_bytes_decode(h, a):
                        f"unknown encoding: {h._get(a[1], 'decode')}")
     try:
         return h._new(bytes(v).decode(name, handler))
-    except UnicodeDecodeError:
-        return h._fail("UnicodeDecodeError",
-                       f"'{name}' codec can't decode byte")
+    except UnicodeDecodeError as exc:
+        # CPYTHON'S OWN SENTENCE again -- the byte, the position and which of
+        # its three reasons it was. See `apy_utf8_why` for the C's copy.
+        return h._fail("UnicodeDecodeError", str(exc))
 
 
 #: str, bytes and bytearray -- the three receivers that walk TEXT rather than

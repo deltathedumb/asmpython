@@ -1319,6 +1319,91 @@ PROGRAMS = {
         show("tuple out of range", lambda: (1, 2)[9])
         show("str out of range", lambda: "ab"[9])
     """,
+    # ENCODING A STRING HOLDING A SURROGATE SPLIT THREE WAYS. CPython gives
+    # seven different answers for `"a\udcffb".encode("utf-8", errors)`; the
+    # interpreter refused the first three and both compiled runtimes handed
+    # back the raw WTF-8 bytes for ALL of them, which is six wrong answers
+    # wearing one shape. The cell has held a surrogate as WTF-8 since the
+    # surrogate-literal round, so the encoder finally has something real to
+    # work from.
+    #
+    # EVERY HANDLER CPYTHON ANSWERS WITHOUT A REGISTERED CALLBACK is here --
+    # `namereplace` is the one left out, because it spells a character by its
+    # Unicode NAME and the name table is a bundled module rather than
+    # something the runtime carries.
+    #
+    # AND THE MESSAGES ARE WHOLE SENTENCES NOW. They used to stop after
+    # `can't encode character`, saying nothing about which character, where,
+    # or why. CPython names all three, reports a RUN of them together, and
+    # from the other side counts MAXIMAL SUBPARTS: a truncated four-byte
+    # sequence is one error and a WTF-8 surrogate is three, because `ED`
+    # accepts only `80..9F` and the bytes after it start nothing.
+    "a_surrogate_survives_every_error_handler": """
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except (UnicodeEncodeError, UnicodeDecodeError) as e:
+                print(label, type(e).__name__ + ":", e)
+
+        low = "a\\udcffb"
+        high = "a\\ud800b"
+        handlers = ("strict", "replace", "ignore", "backslashreplace",
+                    "xmlcharrefreplace", "surrogateescape", "surrogatepass")
+        for how in handlers:
+            show("encode " + how, lambda h=how: low.encode("utf-8", h))
+        show("encode default", lambda: low.encode("utf-8"))
+        show("high pass", lambda: high.encode("utf-8", "surrogatepass"))
+        show("high escape", lambda: high.encode("utf-8", "surrogateescape"))
+        show("escape out of range",
+             lambda: "a\\udc00b".encode("utf-8", "surrogateescape"))
+        # THE CELL IS UNCHANGED BY ANY OF IT: the surrogate is one character
+        # and reads back as one.
+        print("held", len(low), ord(low[1]), repr(low))
+        # THE NARROW CODECS take the same seven.
+        for how in handlers:
+            show("ascii " + how, lambda h=how: "caf\\u00e9".encode("ascii", h))
+        show("ascii default", lambda: "caf\\u00e9".encode("ascii"))
+        show("latin-1 wide", lambda: "\\u0100".encode("latin-1"))
+        show("latin-1 escape", lambda: low.encode("latin-1", "surrogateescape"))
+        show("emoji backslash",
+             lambda: "\\U0001F600".encode("ascii", "backslashreplace"))
+        show("emoji xml",
+             lambda: "\\U0001F600".encode("ascii", "xmlcharrefreplace"))
+        # A RUN OF UNENCODABLE CHARACTERS IS ONE COMPLAINT, naming a range
+        # and none of them; one on its own is named.
+        show("run", lambda: "a\\udcff\\udcffb".encode("utf-8"))
+        show("ascii run", lambda: "\\u00e9\\u00e9x".encode("ascii"))
+        show("ascii apart", lambda: "\\u00e9x\\u00e9".encode("ascii"))
+        # AND FROM THE OTHER SIDE. A byte string spelling a surrogate is not
+        # UTF-8, whatever the cell does internally.
+        pairs = [(b"a\\xed\\xb3\\xbfb", "wtf8"), (b"a\\xffb", "lone byte"),
+                 (b"a\\xc3", "truncated 2"), (b"\\xf0\\x9f\\x98", "truncated 4"),
+                 (b"a\\xc3(", "bad continuation"), (b"\\x80", "bad start"),
+                 (b"\\xc0\\x80", "overlong"), (b"\\xe0\\x80", "short range"),
+                 (b"\\xf4\\x90\\x80\\x80", "past the top")]
+        for raw, name in pairs:
+            for how in ("strict", "replace", "ignore", "surrogateescape",
+                        "surrogatepass"):
+                show(name + " " + how,
+                     lambda r=raw, h=how: r.decode("utf-8", h))
+        show("ascii decode", lambda: b"a\\xffb".decode("ascii"))
+        show("ascii decode escape",
+             lambda: b"a\\xffb".decode("ascii", "surrogateescape"))
+        show("ascii decode replace",
+             lambda: b"a\\xffb".decode("ascii", "replace"))
+        # THE ROUND TRIP IS THE POINT OF PEP 383: a byte that would not
+        # decode comes back out as that byte.
+        show("roundtrip", lambda: b"a\\xffb".decode("utf-8", "surrogateescape")
+             .encode("utf-8", "surrogateescape"))
+        show("roundtrip wide",
+             lambda: b"\\xf0\\x9f\\x98".decode("utf-8", "surrogateescape")
+             .encode("utf-8", "surrogateescape"))
+        # AND ORDINARY TEXT IS UNTOUCHED by every one of them.
+        for how in handlers:
+            show("plain " + how, lambda h=how: "caf\\u00e9".encode("utf-8", h))
+        print("empty", "".encode("utf-8"), b"".decode("utf-8"))
+        print("round", "caf\\u00e9".encode("utf-8").decode("utf-8"))
+    """,
     "traceback_positions": """
         try:
             (1).missing
