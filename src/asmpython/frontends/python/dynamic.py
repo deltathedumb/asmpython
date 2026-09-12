@@ -1048,12 +1048,23 @@ class DynamicLowering:
             self._pending_thunks.append((key, symbol))
         code = self.b.reg(T.PTR)
         self.b.emit(Instruction(Op.FUNC_ADDR, T.PTR, dst=code, sym=symbol))
-        return self.b.call(T.PTR, "apy_func_new",
+        # THE BARE NAME AND THE QUALIFIED ONE, as CPython keeps them:
+        # `str.upper.__name__` is `upper` and its `__qualname__` is
+        # `str.upper`. The thunk used to carry the dotted key as its plain
+        # name, so both read `str.upper`.
+        made = self.b.call(T.PTR, "apy_func_new",
                            [code, self.b.const(T.I64, 1),
-                            self._dyn_str_literal(key),
+                            self._dyn_str_literal(attr),
                             self.b.const(T.I64, 0),
                             self.b.const(T.I64, 0),
                             self.b.const(T.I64, 0)])
+        self.b.call(T.PTR, "apy_func_qualname",
+                    [made, self._dyn_str_literal(key)])
+        # REACHED OFF THE TYPE MAKES IT A DESCRIPTOR. `type(str.upper)` is
+        # `method_descriptor` in CPython, not `function`, and it prints as
+        # `<method 'upper' of 'str' objects>`; see `apy_func_descr`.
+        self.b.call(T.PTR, "apy_func_descr", [made])
+        return made
 
     def _dyn_annotate_thunk(self, key: str, info) -> int | None:
         """PEP 649: the zero-argument function that BUILDS `__annotations__`.

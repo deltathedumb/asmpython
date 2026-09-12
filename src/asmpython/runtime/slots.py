@@ -1568,7 +1568,39 @@ def apy_no_attribute(obj: ptr, name: ptr) -> ptr:
             if proto:
                 found = apy_kind_attr_of(proto, want, 0)
                 if found:
+                    # REACHED OFF THE TYPE MAKES IT A DESCRIPTOR, which
+                    # CPython names, reprs and qualifies differently from a
+                    # function: `list.append` is a `method_descriptor`,
+                    # prints as `<method 'append' of 'list' objects>` and
+                    # answers `list.append` to `__qualname__`. This is the
+                    # only place that knows WHICH type handed it over, and
+                    # the cell `apy_kind_attr_of` builds is fresh per call.
+                    if i64(load(i32, offset(found, 0))) == apy_func_kind():
+                        buf: ptr = apy_fmt_scratch()
+                        at: i64 = apy_cstr_into(
+                            buf, 0, 200,
+                            ptr(load(u64, offset(
+                                ptr(load(u64, offset(
+                                    obj, apy_fn_name_offset()))),
+                                apy_str_ptr_offset()))))
+                        at = apy_cstr_into(buf, at, 200, rodata(b".\0"))
+                        at = apy_cstr_into(buf, at, 200, want)
+                        store(u64, u64(apy_str_copy_bytes(buf, at)),
+                              offset(found, apy_fn_qualname_offset()))
+                        store(i32, 1, offset(found, apy_fn_descr_offset()))
                     return found
+    # A TYPE IS NAMED, NOT DESCRIBED. CPython says `type object 'list' has no
+    # attribute 'nope'` where a VALUE gets `'int' object has no attribute
+    # 'nope'` -- the type's own name is what the reader needs, and
+    # `apy_kind_name_of` one is only ever the word `type`.
+    if i64(load(i32, offset(obj, 0))) == apy_func_kind():
+        if load(i32, offset(obj, apy_fn_is_type_offset())):
+            return apy_raise_fmt(
+                rodata(b"AttributeError\0"),
+                rodata(b"type object '%s' has no attribute '%s'\0"),
+                ptr(load(u64, offset(
+                    ptr(load(u64, offset(obj, apy_fn_name_offset()))),
+                    apy_str_ptr_offset()))), want)
     return apy_raise_fmt(
         rodata(b"AttributeError\0"),
         rodata(b"'%s' object has no attribute '%s'\0"),

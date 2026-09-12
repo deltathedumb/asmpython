@@ -952,6 +952,14 @@ class ObjectHost:
             # is exactly what a slot cannot carry.
             if v.ranged:
                 return "builtin_function_or_method"
+            # REACHED OFF THE TYPE, which CPython calls a DESCRIPTOR and not
+            # a function or a bound method: `list.append` is a
+            # `method_descriptor` and `list.__len__` a `wrapper_descriptor`.
+            # Asked of CPython -- see `_descr_of`.
+            if getattr(v, "descr", ""):
+                named = type(_descr_of(v)).__name__
+                return (named if named.endswith("_descriptor")
+                        else "method_descriptor")
             # THE RUNTIME'S OWN CODE, and `Native` is a class in this file --
             # `type([1].index).__name__` answered that name, an implementation
             # detail of this compiler in a string the program prints. Python
@@ -979,7 +987,21 @@ class ObjectHost:
             # `type(print).__name__` is `builtin_function_or_method`.
             if getattr(v, "is_type", False):
                 return "type"
-            return "builtin_function_or_method"                 if getattr(v, "builtin", False) else "function"
+            # REACHED OFF THE TYPE, which CPython calls a DESCRIPTOR and not
+            # a function: `list.append` is a `method_descriptor` and
+            # `list.__len__` a `wrapper_descriptor`, and which of the two is
+            # whether the type writes the method out or fills a slot with it.
+            # Asked of CPython -- see `_descr_of`.
+            if getattr(v, "descr", False):
+                named = type(_descr_of(v)).__name__
+                return (named if named.endswith("_descriptor")
+                        else "method_descriptor")
+            if getattr(v, "builtin", False):
+                return "builtin_function_or_method"
+            # A BOUND ONE IS A `method`, a type of its own in CPython:
+            # `type(C().m).__name__` is `method` where `type(C.m).__name__`
+            # is `function`. The receiver is the whole difference.
+            return "method" if v.bound is not None else "function"
         if isinstance(v, Cell):
             return "cell"
         if isinstance(v, Super):
@@ -1060,6 +1082,14 @@ class ObjectHost:
             # flag -- not the kind -- decides what it is called.
             if getattr(v, "is_type", False):
                 return f"<class '{v.name}'>"
+            # A DESCRIPTOR NAMES THE TYPE IT CAME OFF and carries no address:
+            # `<method 'append' of 'list' objects>`, and `<slot wrapper
+            # '__len__' of 'list' objects>` for one the type fills a slot
+            # with. Taken from CPython's own -- see `_descr_of`.
+            if getattr(v, "descr", False):
+                got = _descr_of(v)
+                if got is not None:
+                    return repr(got)
             # A BUILTIN REACHED AS A VALUE HAS NO ADDRESS IN ITS REPR.
             # `repr(len)` is `<built-in function len>` -- CPython writes no
             # address for one, because there is only ever the one. The flag
@@ -1075,7 +1105,10 @@ class ObjectHost:
                             f"0x{id(v.bound):x}>")
                 return (f"<bound method {self.kind_name(v.bound)}.{v.name} "
                         f"of {self._text(v.bound, True)}>")
-            return f"<function {v.name} at 0x{id(v):x}>"
+            # THE QUALIFIED NAME, which is what CPython writes: `repr(C.m)`
+            # is `<function C.m at 0x...>` and not `<function m at 0x...>`.
+            return (f"<function {v.qualname if v.qualname is not None else v.name}"
+                    f" at 0x{id(v):x}>")
         if isinstance(v, Instance):
             # A TYPING FORM PRINTS AS `typing.Name`. It is an instance with no
             # `__repr__`, so the default `<_SpecialForm object at 0x...>` came
@@ -1224,10 +1257,26 @@ class ObjectHost:
             # bound to. It answered `<asmpython.ir.objects_host.Native object
             # at 0x...>` -- a name from inside the compiler, in text a
             # program prints.
+            # A DESCRIPTOR NAMES THE TYPE IT CAME OFF and carries no
+            # address: `<method 'append' of 'list' objects>`. Taken from
+            # CPython's own -- see `_descr_of`.
+            if getattr(v, "descr", ""):
+                got = _descr_of(v)
+                if got is not None:
+                    return repr(got)
             held = (v.bound if v.bound is not None
                     else v.owner if v.owner is not _NO_OWNER else None)
             if held is None:
                 return f"<built-in function {v.name}>"
+            # A BOUND SLOT SAYS `method-wrapper` AND QUOTES THE NAME:
+            # `[].__len__` is `<method-wrapper '__len__' of list object at
+            # 0x...>` where `[].append` is `<built-in method append of list
+            # object at 0x...>`. Which of the two it is, is the question
+            # `type()` already answers -- so it is asked rather than
+            # restated.
+            if self.kind_name(v) == "method-wrapper":
+                return (f"<method-wrapper '{v.name}' of "
+                        f"{self.kind_name(held)} object at 0x{id(held):x}>")
             return (f"<built-in method {v.name} of "
                     f"{self.kind_name(held)} object at 0x{id(held):x}>")
         if isinstance(v, Gen):
@@ -1333,7 +1382,16 @@ class ObjectHost:
                 # `dict.keys(d)` is how it is called -- binding it to the
                 # prototype would answer for an empty dict, and a mutating
                 # method would write into the prototype itself.
-                return self._new(Native(name, _unbound_kind(self, name)))
+                return self._new(Native(name, _unbound_kind(self, name),
+                                        descr=obj.name))
+        # A TYPE IS NAMED, NOT DESCRIBED. CPython says `type object 'list'
+        # has no attribute 'nope'` where a VALUE gets `'int' object has no
+        # attribute 'nope'` -- the type's own name is what the reader needs,
+        # and `kind_name` of one is only ever the word `type`.
+        if isinstance(obj, Func) and getattr(obj, "is_type", False):
+            return self._fail("AttributeError",
+                              f"type object '{obj.name}' has no "
+                              f"attribute '{name}'")
         return self._fail("AttributeError",
                           f"'{self.kind_name(obj)}' object has no "
                           f"attribute '{name}'")
@@ -7210,8 +7268,8 @@ class Func:
     never saw, and every method call is one of those.
     """
 
-    __slots__ = ("annotate", "qualname", "module", "code", "arity", "name",
-                 "cells",
+    __slots__ = ("annotate", "qualname", "module", "descr", "code", "arity",
+                 "name", "cells",
                  "bound",
                  "defaults",
                  "vararg", "pnames", "kwarg", "kwonly", "posonly", "doc",
@@ -7262,6 +7320,11 @@ class Func:
         self.module = None
         #: WHETHER THIS IS A BUILTIN reached as a value -- `print`, `len`.
         self.builtin = False
+        #: WHETHER THIS WAS REACHED OFF A TYPE rather than off a value.
+        #: `list.append` is a `method_descriptor` in CPython and
+        #: `list.__len__` a `wrapper_descriptor`; the qualname carries which
+        #: type. See the C's `apy_func_descr`.
+        self.descr = False
 
     def __eq__(self, other) -> bool:
         """A BOUND METHOD IS A FRESH OBJECT PER ACCESS -- `c.m is c.m` is
@@ -7321,6 +7384,26 @@ _KIND_SAMPLES = (str, bytes, bytearray, list, tuple, dict, set, frozenset,
                  # oracle that says so.
                  memoryview)
 
+#: THE SAME ORACLE, REACHED BY NAME. A descriptor carries its owner as the
+#: head of its qualname -- `list` out of `list.append` -- where a bound
+#: method carries a receiver, so this is how the owner becomes a type CPython
+#: can be asked about. The C's twin walks `apy_kind_prototype`.
+_KIND_BY_NAME = {one.__name__: one for one in _KIND_SAMPLES}
+
+
+def _descr_of(v):
+    """What CPython's own type answers for the name a DESCRIPTOR carries, or
+    None when the owner is not a builtin kind.
+
+    Asking CPython is exact where a table is a copy: whether `list.__len__`
+    is a `wrapper_descriptor` or a `method_descriptor`, and what its repr
+    says, are both read straight off the real thing.
+    """
+    owner = (getattr(v, "descr", "") if isinstance(v, Native)
+             else (v.qualname or "").split(".")[0])
+    kind = _KIND_BY_NAME.get(owner)
+    return None if kind is None else getattr(kind, v.name, None)
+
 
 class Native:
     """A callable the RUNTIME owns, standing for one of `object`'s defaults.
@@ -7334,11 +7417,20 @@ class Native:
     twice is the same object, as any other attribute would be.
     """
 
-    __slots__ = ("name", "body", "bound", "ranged", "owner", "variadic")
+    __slots__ = ("name", "body", "bound", "ranged", "owner", "variadic",
+                 "descr")
 
     def __init__(self, name: str, body, ranged: bool = False,
-                 owner=_NO_OWNER, variadic: bool = False) -> None:
+                 owner=_NO_OWNER, variadic: bool = False,
+                 descr: str = "") -> None:
         self.name = name
+        #: THE TYPE THIS WAS REACHED OFF, by name, or "" for one reached off
+        #: a value. `list.append` is a `method_descriptor` in CPython and not
+        #: a function: it names the type in its repr, qualifies its own name
+        #: with it, answers it to `__objclass__` and has no `__self__`. The
+        #: compiled halves carry the same fact as a flag plus the qualname;
+        #: see the C's `apy_func_descr`.
+        self.descr = descr
         self.body = body
         self.bound = None
         #: THE RECEIVER, FOR A MESSAGE AND NOTHING ELSE. A builtin method
@@ -9206,6 +9298,16 @@ def _apy_default_getattr(h, a):
             # name and not its enclosing scope's -- so the plain one is what
             # there is.
             return h._new(obj.name)
+        # `list.append.__objclass__` is `list` -- the type a DESCRIPTOR came
+        # off, which is how `inspect` and every `functools` wrapper finds out
+        # what a method belongs to. Absent on anything else, as in CPython.
+        if name == "__objclass__":
+            owner = ((obj.qualname or "").split(".")[0]
+                     if getattr(obj, "descr", False) else "")
+            found = _KIND_BY_NAME.get(owner)
+            if found is None:
+                return h._no_attr(obj, name)
+            return _apy_kind_class(h, [h._new(found())])
         # `m.__self__` is the RECEIVER of a bound method, and its absence is
         # how a program tells a bound method from a plain function.
         if name == "__self__":
@@ -9246,7 +9348,8 @@ def _apy_default_getattr(h, a):
             return _user(h, lambda: h._value(h._invoke(obj.annotate, [])))
         return h._no_attr(obj, name)
     if isinstance(obj, Native) and name in ("__name__", "__qualname__",
-                                            "__self__", "__module__"):
+                                            "__self__", "__module__",
+                                            "__objclass__"):
         # A BUILTIN METHOD REACHED AS A VALUE, which had none of these here
         # while both compiled runtimes answered them from the FUNC arm.
         # CPython splits the four by whether there is a receiver:
@@ -9257,16 +9360,34 @@ def _apy_default_getattr(h, a):
         # NOT A FULL ARM: anything else about a Native -- `__class__` above
         # all -- is answered by the generic paths below, and swallowing the
         # rest here would cut this kind off from them.
-        if name in ("__name__", "__qualname__"):
-            return h._new(obj.name)
         # THE RECEIVER TRAVELS IN `owner` for a method built from the kind
         # table -- its body closes over the value, so `bound` is empty -- and
         # in `bound` for one `apy_bind` made. Either is a receiver.
         held = obj.bound if obj.bound is not None else (
             None if obj.owner is _NO_OWNER else obj.owner)
+        if name == "__name__":
+            return h._new(obj.name)
+        if name == "__qualname__":
+            # QUALIFIED BY THE TYPE IT WAS DEFINED ON, which is the same text
+            # bound or unbound: `[].append.__qualname__` and
+            # `list.append.__qualname__` are both `list.append` in CPython,
+            # because binding does not change where a method was defined.
+            owner = getattr(obj, "descr", "") or (
+                h.kind_name(held) if held is not None else "")
+            return h._new(f"{owner}.{obj.name}" if owner else obj.name)
+        if name == "__objclass__":
+            # `list.append.__objclass__` is `list` -- the type a DESCRIPTOR
+            # came off, and absent on anything else as it is in CPython.
+            found = _KIND_BY_NAME.get(getattr(obj, "descr", ""))
+            if found is None:
+                return h._no_attr(obj, name)
+            return _apy_kind_class(h, [h._new(found())])
         if name == "__self__":
-            return h._value(held) if held is not None \
-                else h._no_attr(obj, name)
+            # A DESCRIPTOR HAS NONE: it was reached off the type, so there is
+            # no receiver to answer with.
+            if getattr(obj, "descr", "") or held is None:
+                return h._no_attr(obj, name)
+            return h._value(held)
         return h._none if held is not None else h._no_attr(obj, name)
     if isinstance(obj, Exc):
         # WHAT THE PROGRAM STORED WINS over what the kind offers.
@@ -10875,6 +10996,16 @@ def _alias_part(x) -> str:
 def _apy_alias_new(h, a):
     return h._new(Alias(h._get(a[0], "apy_alias_new"),
                         h._get(a[1], "apy_alias_new")))
+
+
+def _apy_func_descr(h, a):
+    """Mark this as REACHED OFF A TYPE: `list.append` and `str.upper` are
+    DESCRIPTORS in CPython and not functions, and the qualname carries which
+    type. See the C's `apy_func_descr`."""
+    f = h._get(a[0], "apy_func_descr")
+    if isinstance(f, Func):
+        f.descr = True
+    return a[0]
 
 
 def _apy_func_module(h, a):
@@ -14869,6 +15000,7 @@ _TABLE.update({
     "apy_func_annotate": _apy_func_annotate,
     "apy_func_qualname": _apy_func_qualname,
     "apy_func_module": _apy_func_module,
+    "apy_func_descr": _apy_func_descr,
     "apy_func_builtin": _apy_func_builtin,
     "apy_call_spread_kw": _apy_call_spread_kw,
     "apy_str_like": _apy_str_like,

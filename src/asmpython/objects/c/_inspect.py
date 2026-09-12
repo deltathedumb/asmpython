@@ -31,6 +31,7 @@ APY_API int64_t apy_index(apy_value v);
    spliced into `_calling.py` -- see `apy_kind_name_of` for what they decide. */
 static int64_t apy_kind_meth_written(const char *w, unsigned bit);
 static unsigned apy_kind_bit(apy_value v);
+APY_API apy_value apy_kind_prototype(apy_value type_name);
 
 /* A SLICE BOUND, WHICH IS NOT AN INDEX. `xs[2 ** 100]` is a request this
    runtime cannot serve and CPython refuses it too; `xs[:2 ** 100]` is the
@@ -232,6 +233,36 @@ APY_API apy_value apy_kind_name_of(apy_value v) {
    byte" is the same question as "no byte has its high bit set" -- asked here,
    where nothing reads the answer in a loop, rather than paid for on every
    `for c in s`. */
+/* THE TYPE A DESCRIPTOR CAME OFF, as a value of that kind. A descriptor
+   carries its owner as the HEAD OF ITS QUALNAME -- `list` out of
+   `list.append` -- where a bound method carries a receiver; both questions
+   below want a value to ask `apy_kind_bit` about, and this is where one
+   comes from. 0 for a name no builtin kind answers to. */
+static apy_value apy_descr_owner(apy_value v) {
+    char owner[64];
+    const char *q = O(v)->v.fn.qualname ? APY_CSTR(O(v)->v.fn.qualname) : 0;
+    const char *dot = q ? strchr(q, '.') : 0;
+    size_t n;
+    if (!dot) return 0;
+    n = (size_t)(dot - q);
+    if (n == 0 || n >= sizeof owner) return 0;
+    memcpy(owner, q, n);
+    owner[n] = 0;
+    return apy_kind_prototype((apy_value)(uintptr_t)owner);
+}
+
+/* Does the owner WRITE this dunder out, or fill a slot with it? That is the
+   whole difference between a `method_descriptor` and a `wrapper_descriptor`,
+   and nothing in the signature says which: `list.__getitem__` is written out
+   and `tuple.__getitem__` is slotted. Read out of CPython per kind and per
+   name -- see `apy_kind_meth_written`, which the bound half asks too. */
+static int apy_descr_written(apy_value v) {
+    apy_value proto = apy_descr_owner(v);
+    if (!proto) return 0;
+    return apy_kind_meth_written(APY_CSTR(O(v)->v.fn.name),
+                                 apy_kind_bit(proto)) != 0;
+}
+
 static const char *apy_cursor_name(apy_value v) {
     apy_value src = O(v)->v.it.src;
     /* REVERSEDNESS IS IN `named` AND NOT IN THE MODE, because a length query
@@ -301,6 +332,20 @@ static const char *apy_kind_name(apy_value v) {
     case APY_TYPE_K:  return "type";
     case APY_FUNC_K:
         if (O(v)->v.fn.is_type) return "type";
+        /* REACHED OFF THE TYPE, which CPython calls a DESCRIPTOR and not a
+           function: `list.append` is a `method_descriptor` and `list.__len__`
+           a `wrapper_descriptor`. The two differ by whether the type WRITES
+           the method out or fills a slot with it -- the same question the
+           bound half asks below, and answered from the same table. */
+        if (O(v)->v.fn.descr) {
+            const char *w = APY_CSTR(O(v)->v.fn.name);
+            size_t len = strlen(w);
+            if (len >= 5 && w[0] == '_' && w[1] == '_'
+                    && w[len - 1] == '_' && w[len - 2] == '_'
+                    && !apy_descr_written(v))
+                return "wrapper_descriptor";
+            return "method_descriptor";
+        }
         if (O(v)->v.fn.builtin) return "builtin_function_or_method";
         /* A NATIVE IS THE RUNTIME'S OWN CODE, not a compiled function --
            `[1].index` and `[1].__len__` are `builtin_function_or_method` and
@@ -333,6 +378,10 @@ static const char *apy_kind_name(apy_value v) {
             }
             return "builtin_function_or_method";
         }
+        /* A BOUND ONE IS A `method`, a type of its own in CPython:
+           `type(C().m).__name__` is `method` where `type(C.m).__name__` is
+           `function`. The receiver is the whole difference. */
+        if (O(v)->v.fn.bound) return "method";
         return "function";
     case APY_CELL_K:  return "cell";
     case APY_SUPER_K: return "super";
@@ -914,6 +963,29 @@ APY_API apy_value apy_text_of(apy_value v, int64_t quoted) {
                      APY_CSTR(O(v)->v.fn.name));
             return apy_str_copy(buf, (int64_t)strlen(buf));
         }
+        /* A DESCRIPTOR NAMES THE TYPE IT CAME OFF and carries no address,
+           for the same reason a builtin does: `<method 'append' of 'list'
+           objects>`, and `<slot wrapper '__len__' of 'list' objects>` for
+           one the type fills a slot with. The owner is the head of the
+           qualname -- see `apy_descr_owner`. */
+        if (O(v)->v.fn.descr) {
+            const char *q = O(v)->v.fn.qualname
+                ? APY_CSTR(O(v)->v.fn.qualname) : 0;
+            const char *dot = q ? strchr(q, '.') : 0;
+            const char *w = APY_CSTR(O(v)->v.fn.name);
+            size_t len = strlen(w);
+            int slot = len >= 5 && w[0] == '_' && w[1] == '_'
+                && w[len - 1] == '_' && w[len - 2] == '_'
+                && !apy_descr_written(v);
+            if (dot)
+                snprintf(buf, sizeof buf, "<%s '%s' of '%.*s' objects>",
+                         slot ? "slot wrapper" : "method", w,
+                         (int)(dot - q), q);
+            else
+                snprintf(buf, sizeof buf, "<%s '%s'>",
+                         slot ? "slot wrapper" : "method", w);
+            return apy_str_copy(buf, (int64_t)strlen(buf));
+        }
         /* A BUILTIN REACHED AS A VALUE HAS NO ADDRESS IN ITS REPR.
            `repr(len)` is `<built-in function len>` -- CPython writes no
            address for one, because there is only ever the one. The flag is
@@ -931,10 +1003,22 @@ APY_API apy_value apy_text_of(apy_value v, int64_t quoted) {
         if (O(v)->v.fn.bound) {
             apy_value held = O(v)->v.fn.bound;
             if (O(v)->v.fn.native || O(v)->v.fn.builtin) {
-                snprintf(buf, sizeof buf,
-                         "<built-in method %s of %s object at 0x%llx>",
-                         APY_CSTR(O(v)->v.fn.name), apy_kind_name(held),
-                         (unsigned long long)held);
+                /* A BOUND SLOT SAYS `method-wrapper` AND QUOTES THE NAME:
+                   `[].__len__` is `<method-wrapper '__len__' of list object
+                   at 0x...>` where `[].append` is `<built-in method append
+                   of list object at 0x...>`. Which of the two it is, is the
+                   question `type()` already answers -- so it is asked here
+                   rather than restated. */
+                if (strcmp(apy_kind_name(v), "method-wrapper") == 0)
+                    snprintf(buf, sizeof buf,
+                             "<method-wrapper '%s' of %s object at 0x%llx>",
+                             APY_CSTR(O(v)->v.fn.name), apy_kind_name(held),
+                             (unsigned long long)held);
+                else
+                    snprintf(buf, sizeof buf,
+                             "<built-in method %s of %s object at 0x%llx>",
+                             APY_CSTR(O(v)->v.fn.name), apy_kind_name(held),
+                             (unsigned long long)held);
                 return apy_str_copy(buf, (int64_t)strlen(buf));
             }
             {
@@ -951,8 +1035,12 @@ APY_API apy_value apy_text_of(apy_value v, int64_t quoted) {
                 return apy_str_take(big, (int64_t)strlen(big));
             }
         }
+        /* THE QUALIFIED NAME, which is what CPython writes: `repr(C.m)` is
+           `<function C.m at 0x...>` and not `<function m at 0x...>`. */
         snprintf(buf, sizeof buf, "<function %s at 0x%llx>",
-                 APY_CSTR(O(v)->v.fn.name), (unsigned long long)v);
+                 APY_CSTR(O(v)->v.fn.qualname ? O(v)->v.fn.qualname
+                                              : O(v)->v.fn.name),
+                 (unsigned long long)v);
         return apy_str_copy(buf, (int64_t)strlen(buf));
     /* A STRING IS THE ONLY KIND THE QUOTING BELOW IS FOR. */
     case APY_STR_K: break;

@@ -353,6 +353,16 @@ struct apy_obj {
                be told which mistake it made -- but the matcher skips them,
                which is the whole of `/`. */
             int posonly;
+            /* WHETHER THIS WAS REACHED OFF A TYPE RATHER THAN OFF A VALUE.
+               `list.append` is a `method_descriptor` in CPython and
+               `list.__len__` a `wrapper_descriptor`; both print as `<method
+               'append' of 'list' objects>` rather than as a function, both
+               qualify their name with the type, and neither has a
+               `__self__`. What says so is not the SHAPE -- a user method
+               reached as `C.m` is an ordinary function -- so the type that
+               handed it over marks it, and the qualname carries which type.
+               Sits in the padding after `posonly`, so no later field moves. */
+            int descr;
             /* PARAMETER NAMES, in declaration order and including `self`.
                Only a KEYWORD argument needs them, and only a call through a
                value does -- a direct call matches names at compile time. They

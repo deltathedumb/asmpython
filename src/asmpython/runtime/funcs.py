@@ -87,6 +87,10 @@ def apy_fn_module_offset() -> i64:
     return 152
 
 
+def apy_fn_descr_offset() -> i64:
+    return 92
+
+
 # ── the two that index an array ────────────────────────────────────────────
 #
 # BOUNDS-CHECKED AND SILENT, exactly as the C is. An out-of-range index does
@@ -157,6 +161,15 @@ def apy_func_qualname(f: ptr, name: ptr) -> ptr:
     """`__qualname__` -- the dotted path, so a method reports `C.m`."""
     if i64(load(i32, offset(f, 0))) == apy_func_kind():
         store(u64, u64(name), offset(f, apy_fn_qualname_offset()))
+    return f
+
+
+def apy_func_descr(f: ptr) -> ptr:
+    """Mark this as REACHED OFF A TYPE: `list.append` and `str.upper` are
+    DESCRIPTORS in CPython and not functions, and the qualname carries which
+    type. See the C's `apy_func_descr`."""
+    if i64(load(i32, offset(f, 0))) == apy_func_kind():
+        store(i32, 1, offset(f, apy_fn_descr_offset()))
     return f
 
 

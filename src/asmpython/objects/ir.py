@@ -436,7 +436,7 @@ REPLACES: dict[str, tuple[str, ...]] = {
     # smaller half by risk.
     "funcs.py": ("apy_func_cell", "apy_func_default", "apy_func_kwdefaults",
                  "apy_func_kwarg", "apy_func_kwonly", "apy_func_posonly",
-                 "apy_func_qualname", "apy_func_module",
+                 "apy_func_qualname", "apy_func_module", "apy_func_descr",
                  "apy_func_annotate", "apy_func_builtin",
                  "apy_func_coro", "apy_func_doc", "apy_func_param"),
     # THE GENERATOR FRAME'S accessors -- slots, resume point, what crossed

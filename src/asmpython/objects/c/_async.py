@@ -118,6 +118,13 @@ APY_API apy_value apy_func_qualname(apy_value f, apy_value name) {
     return f;
 }
 
+/* REACHED OFF A TYPE: `list.append` and `str.upper` are DESCRIPTORS in
+   CPython and not functions. The qualname carries which type; see the field. */
+APY_API apy_value apy_func_descr(apy_value f) {
+    if (O(f)->kind == APY_FUNC_K) O(f)->v.fn.descr = 1;
+    return f;
+}
+
 /* WHERE THE `def` WAS WRITTEN, for `__module__`. Emitted only for a spliced
    definition: see the field. */
 APY_API apy_value apy_func_module(apy_value f, apy_value name) {

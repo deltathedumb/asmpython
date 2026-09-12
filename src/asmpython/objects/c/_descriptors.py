@@ -671,9 +671,23 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
            qualified name -- `C.m`, `outer.<locals>.inner` -- so it is handed
            over at construction. A function built without one (a synthesised
            thunk) answers its plain name, which is what it is. */
-        if (strcmp(want, "__qualname__") == 0)
+        if (strcmp(want, "__qualname__") == 0) {
+            /* A BOUND BUILTIN METHOD IS QUALIFIED BY ITS RECEIVER'S KIND.
+               `[].append.__qualname__` is `list.append` in CPython, the same
+               text the unbound descriptor answers -- binding does not change
+               where a method was defined. Derived rather than recorded,
+               because the receiver already says it. */
+            if (O(obj)->v.fn.native && O(obj)->v.fn.bound
+                    && !O(obj)->v.fn.qualname) {
+                char qual[128];
+                snprintf(qual, sizeof qual, "%s.%s",
+                         apy_kind_name(O(obj)->v.fn.bound),
+                         APY_CSTR(O(obj)->v.fn.name));
+                return apy_str_copy(qual, (int64_t)strlen(qual));
+            }
             return O(obj)->v.fn.qualname ? O(obj)->v.fn.qualname
                                          : O(obj)->v.fn.name;
+        }
         /* `f.__module__` -- WHERE THE `def` WAS WRITTEN. Six shapes reach
            here and CPython answers each of them differently:
 
@@ -696,6 +710,16 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
                 return apy_lit("builtins");
             return O(obj)->v.fn.module ? O(obj)->v.fn.module
                                        : apy_lit("__main__");
+        }
+        /* `list.append.__objclass__` is `list` -- the type a DESCRIPTOR came
+           off, which is how `inspect` and every `functools` wrapper finds
+           out what a method belongs to. Absent on anything else, as it is in
+           CPython. The owner is the head of the qualname; see
+           `apy_descr_owner`. */
+        if (strcmp(want, "__objclass__") == 0) {
+            apy_value proto = O(obj)->v.fn.descr ? apy_descr_owner(obj) : 0;
+            if (!proto) return apy_no_attribute(obj, name);
+            return apy_kind_class(proto);
         }
         /* `m.__self__` is the RECEIVER of a bound method, and its absence is
            how a program tells a bound method from a plain function. */

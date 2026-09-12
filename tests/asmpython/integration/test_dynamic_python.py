@@ -1980,6 +1980,101 @@ PROGRAMS = {
         show("a view's method", lambda: shape(repr(memoryview(b"ab").tobytes)))
         show("printed, not repred", lambda: shape(str(len)))
     """,
+    "a_method_reached_off_its_type_is_a_descriptor": """
+        # REACHED OFF THE TYPE IS NOT THE SAME THING AS REACHED OFF A VALUE, and
+        # CPython has four names for the two: `list.append` is a
+        # `method_descriptor` and `list.__len__` a `wrapper_descriptor`, while
+        # `[].append` is a `builtin_function_or_method` and `[].__len__` a
+        # `method-wrapper`. Both unbound forms answered `function` or
+        # `builtin_function_or_method` here, printed as one, and qualified their
+        # name with nothing.
+        #
+        # TWO ROUTES REACH THE SAME PLACE: `str.upper` is a thunk the frontend
+        # synthesises and `list.append` a native the type's prototype hands
+        # over. Both are marked where they are built, and the qualname carries
+        # which type -- see `apy_func_descr`.
+        def show(label, f):
+            try:
+                print(label, "->", f())
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        def shape(text):
+            out, i = "", 0
+            while i < len(text):
+                if text[i:i + 2] == "0x":
+                    out += "0x_"
+                    i += 2
+                    while i < len(text) and text[i] in "0123456789abcdef":
+                        i += 1
+                    continue
+                out += text[i]
+                i += 1
+            return out
+
+        show("a native", lambda: type(list.append).__name__)
+        show("its repr", lambda: repr(list.append))
+        show("its qualname", lambda: list.append.__qualname__)
+        show("its name", lambda: list.append.__name__)
+        show("its objclass", lambda: list.append.__objclass__)
+        show("it has no self", lambda: list.append.__self__)
+        show("a thunk", lambda: type(str.upper).__name__)
+        show("its repr", lambda: repr(str.upper))
+        show("its qualname", lambda: str.upper.__qualname__)
+        show("its name", lambda: str.upper.__name__)
+        show("a dict method", lambda: type(dict.get).__name__)
+        show("its repr", lambda: repr(dict.get))
+        show("an int method", lambda: type(int.to_bytes).__name__)
+        show("its qualname", lambda: int.to_bytes.__qualname__)
+        show("a bytes method", lambda: repr(bytes.hex))
+        show("a set method", lambda: repr(set.add))
+        # A SLOT IS A `wrapper_descriptor` AND PRINTS AS ONE. Which of the two
+        # it is, is whether the type WRITES the method out or fills a slot with
+        # it: `list.__getitem__` is written out and `tuple.__getitem__` slotted,
+        # and nothing in either signature says so.
+        show("a slot", lambda: type(list.__len__).__name__)
+        show("its repr", lambda: repr(list.__len__))
+        show("its qualname", lambda: list.__len__.__qualname__)
+        show("a written dunder", lambda: type(list.__getitem__).__name__)
+        show("a slotted one", lambda: type(tuple.__getitem__).__name__)
+        # A BOUND ONE KEEPS ITS OWN NAMES, and is qualified by its receiver's
+        # kind -- the same text the descriptor answers, because binding does not
+        # change where a method was defined.
+        show("bound", lambda: type([].append).__name__)
+        show("its repr", lambda: shape(repr([].append)))
+        show("its qualname", lambda: [].append.__qualname__)
+        show("its name", lambda: [].append.__name__)
+        show("its self", lambda: [1].append.__self__)
+        show("a bound slot", lambda: type([].__len__).__name__)
+        show("its repr", lambda: shape(repr([].__len__)))
+        # A USER METHOD IS NOT A DESCRIPTOR. `C.m` is an ordinary function and
+        # `C().m` a `method`, which is a type of its own.
+        class C:
+            def m(self):
+                pass
+        show("a user method", lambda: type(C.m).__name__)
+        show("its repr", lambda: shape(repr(C.m)))
+        show("its qualname", lambda: C.m.__qualname__)
+        show("bound", lambda: type(C().m).__name__)
+        show("its repr", lambda: shape(repr(C().m)))
+        show("a plain def", lambda: type(show).__name__)
+        show("its repr", lambda: shape(repr(show)))
+        show("a builtin", lambda: type(len).__name__)
+        show("its repr", lambda: repr(len))
+        show("a type", lambda: type(int).__name__)
+        # AND THE REFUSAL NAMES THE TYPE rather than describing it.
+        show("missing on a type", lambda: list.nope)
+        show("missing on a value", lambda: (5).nope)
+        show("missing on a class", lambda: C.nope)
+        show("missing on an instance", lambda: C().nope)
+        # CALLING ONE STILL WORKS, which is what a descriptor is for.
+        def pushed():
+            xs = [1]
+            list.append(xs, 2)
+            return xs
+        show("called", lambda: str.upper("ab"))
+        show("its effect", pushed)
+    """,
     "an_iterator_is_named_after_what_it_walks": """
         # EVERY PLAIN CURSOR WAS AN `iterator`, where CPython names it after its
         # source: `list_iterator`, `dict_valueiterator`, `str_ascii_iterator`.

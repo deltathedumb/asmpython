@@ -259,6 +259,14 @@ def apy_kind_name_of(v: ptr) -> ptr:
         # sets, and a program asking `type(C).__name__` must see `type`.
         if load(i32, offset(v, apy_fn_is_type_offset())):
             return rodata(b"type\0")
+        # A DESCRIPTOR GOES TO THE SLOW HALF, like an exception. `list.append`
+        # is a `method_descriptor` and `list.__len__` a `wrapper_descriptor`,
+        # and telling those two apart means taking the owner out of the
+        # qualname and finding a value of that kind to ask about -- a string
+        # slice and a lookup, which is the C's `apy_descr_owner` and not
+        # something worth a second copy here.
+        if load(i32, offset(v, apy_fn_descr_offset())):
+            return apy_kind_name_of_slow(v)
         if load(i32, offset(v, apy_fn_builtin_offset())):
             return rodata(b"builtin_function_or_method\0")
         # A NATIVE IS THE RUNTIME'S OWN CODE, not a compiled function --
@@ -291,6 +299,11 @@ def apy_kind_name_of(v: ptr) -> ptr:
                         return rodata(b"builtin_function_or_method\0")
                 return rodata(b"method-wrapper\0")
             return rodata(b"builtin_function_or_method\0")
+        # A BOUND ONE IS A `method`, a type of its own in CPython:
+        # `type(C().m).__name__` is `method` where `type(C.m).__name__` is
+        # `function`. The receiver is the whole difference.
+        if ptr(load(u64, offset(v, apy_fn_bound_offset()))):
+            return rodata(b"method\0")
         return rodata(b"function\0")
     if k == apy_cell_kind():
         return rodata(b"cell\0")

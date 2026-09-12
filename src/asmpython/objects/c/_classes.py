@@ -135,6 +135,7 @@ APY_API apy_value apy_func_new(apy_value code, int64_t arity, apy_value name,
     o->v.fn.is_type = 0;
     o->v.fn.dict = 0;
     o->v.fn.module = 0;
+    o->v.fn.descr = 0;
     return V(o);
 }
 
@@ -659,9 +660,33 @@ APY_API apy_value apy_no_attribute(apy_value obj, apy_value name) {
         if (proto) {
             found = apy_kind_attr_of(
                 proto, (apy_value)(uintptr_t)APY_CSTR(name), 0);
+            /* REACHED OFF THE TYPE MAKES IT A DESCRIPTOR, which CPython
+               names, reprs and qualifies differently from a function:
+               `list.append` is a `method_descriptor`, prints as `<method
+               'append' of 'list' objects>` and answers `list.append` to
+               `__qualname__`. This is the only place that knows WHICH type
+               handed it over, so it is where both facts are recorded -- the
+               cell `apy_kind_attr_of` builds is fresh per call, so writing
+               to it cannot reach another type's copy. */
+            if (found && O(found)->kind == APY_FUNC_K) {
+                char qual[128];
+                snprintf(qual, sizeof qual, "%s.%s",
+                         APY_CSTR(O(obj)->v.fn.name), APY_CSTR(name));
+                O(found)->v.fn.qualname =
+                    apy_str_copy(qual, (int64_t)strlen(qual));
+                O(found)->v.fn.descr = 1;
+            }
             if (found) return found;
         }
     }
+    /* A TYPE IS NAMED, NOT DESCRIBED. CPython says `type object 'list' has
+       no attribute 'nope'` where a VALUE gets `'int' object has no attribute
+       'nope'` -- the type's own name is what the reader needs, and
+       `apy_kind_name` of one is only ever the word `type`. */
+    if (O(obj)->kind == APY_FUNC_K && O(obj)->v.fn.is_type)
+        return apy_fail2("AttributeError",
+                         "type object '%s' has no attribute '%s'",
+                         APY_CSTR(O(obj)->v.fn.name), APY_CSTR(name));
     return apy_fail2("AttributeError", "'%s' object has no attribute '%s'",
                      apy_kind_name(obj), APY_CSTR(name));
 }
