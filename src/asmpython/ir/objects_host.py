@@ -217,6 +217,13 @@ class ObjectHost:
         #: `_value`: the C compares pointers, so one object must be one
         #: handle or the two paths disagree about identity.
         self._identity: dict = {}
+        #: WHICH COMPARISON A CONSUMER IS DRIVING -- `<` for `sorted`, `min`
+        #: and `list.sort`, `>` for `max`. It cannot be read off the dunder
+        #: Python reaches, because `Instance.__gt__` is `max`'s own
+        #: comparison and also the REFLECTED half of the `<` a sort drives,
+        #: and a refusal names its operands the other way round in each case.
+        #: See `_make_order`, which words that refusal.
+        self.order_driver = "<"
         self._small: dict[int, int] = {}
         #: `type(x)` results, interned by kind name -- see `_type_of`.
         self._types: dict = {}
@@ -4191,11 +4198,11 @@ def _apy_list_sort(h, a):
     rev = bool(h._get(a[2], "apy_list_sort"))
     try:
         if key is None:
-            seq.sort(reverse=rev)
+            _driving(h, "<", lambda: seq.sort(reverse=rev))
         else:
-            return _user(h, lambda: (
+            return _user(h, lambda: _driving(h, "<", lambda: (
                 seq.sort(key=lambda v: h._invoke(key, [v]), reverse=rev)
-                or h._none))
+                or h._none)))
     except _HOST_RAISES as exc:
         return h._fail_like(exc)
     return h._none
@@ -6523,6 +6530,10 @@ def _cmpop(name, op):
     def run(h, a):
         x = h._get(a[0], name)
         y = h._get(a[1], name)
+        # WHAT THE PROGRAM COMPARED, kept for the refusal below: `x` and `y`
+        # are replaced by the builtin a class extends before the comparison,
+        # and naming those said `'int' and 'tuple'` about a namedtuple.
+        wrote = (x, y)
         # A USER CLASS ANSWERS WITH WHATEVER ITS DUNDER RETURNS, not with a
         # bool: `__lt__` returning a string is legal and its result is the
         # value of `<`. Coercing it -- which `h._bool` does -- turned every
@@ -6549,8 +6560,8 @@ def _cmpop(name, op):
         except _UserFailed:
             return 0
         except TypeError as e:
-            if name in _CMP_SYMBOL and (isinstance(x, Instance)
-                                        or isinstance(y, Instance)):
+            if name in _CMP_SYMBOL and (isinstance(wrote[0], Instance)
+                                        or isinstance(wrote[1], Instance)):
                 # PYTHON'S MESSAGE NAMES `Instance`, which is THIS FILE'S class
                 # and not the program's type. Every user object shares it, so a
                 # dataclass whose `__lt__` answered NotImplemented reported
@@ -6561,7 +6572,8 @@ def _cmpop(name, op):
                 return h._fail(
                     "TypeError",
                     f"'{_CMP_SYMBOL[name]}' not supported between instances "
-                    f"of '{h.kind_name(x)}' and '{h.kind_name(y)}'")
+                    f"of '{h.kind_name(wrote[0])}' and "
+                    f"'{h.kind_name(wrote[1])}'")
             return h._fail_like(e)
     return run
 
@@ -8316,11 +8328,66 @@ for _op, _rop in (("add", "radd"), ("sub", "rsub"), ("mul", "rmul"),
     setattr(Instance, f"__{_op}__", _f)
     setattr(Instance, f"__{_rop}__", _rf)
 
-for _op, _mirror in (("lt", "gt"), ("le", "ge"), ("gt", "lt"), ("ge", "le")):
-    # The reflected form of a comparison is the MIRRORED operator, not an
-    # `__r`-prefixed one: `a < b` retries as `b.__gt__(a)`. Python's own
-    # protocol does that for us as long as both sides are defined here.
-    setattr(Instance, f"__{_op}__", _make_binary(f"__{_op}__", f"__{_mirror}__")[0])
+#: The four orderings, their MIRRORED reflection and the symbol each spells.
+#: The reflected form of a comparison is the mirrored operator and not an
+#: `__r`-prefixed one: `a < b` retries as `b.__gt__(a)`, because what b is
+#: asked is the comparison as seen from its side.
+_ORDERINGS = (("lt", "gt", "<"), ("le", "ge", "<="),
+              ("gt", "lt", ">"), ("ge", "le", ">="))
+
+
+def _make_order(name, mirror, symbol):
+    """One ordering dunder, WITH ITS OWN REFUSAL.
+
+    THE REFLECTION IS TRIED HERE rather than left to Python, and the refusal
+    is worded here rather than left to Python, because Python words it from
+    `type(a).__name__` -- which for every user object is `Instance`, this
+    file's class. `sorted([Bare(), Bare()])` reported `'<' not supported
+    between instances of 'Instance' and 'Instance'` about two objects of a
+    class the program named itself, while `Bare() < Bare()` -- which goes
+    through `_cmpop`, and which rewrites the same message -- named it right.
+
+    Returning the sentinel and letting Python raise is what could not be
+    kept: by the time Python raises, both sides have refused and there is
+    nowhere left to correct the text.
+    """
+    def run(self, other):
+        got = self._send(name, other)
+        if got is not NotImplemented:
+            return got
+        got = _held_binary(self, name, other)
+        if got is not NotImplemented:
+            return got
+        if not isinstance(other, Instance):
+            # AGAINST ANYTHING ELSE THIS MAY BE THE REFLECTED CALL -- Python
+            # reaches `__gt__` both as `max`'s own comparison and as the
+            # mirror of the `<` a sort drives -- so which operator the
+            # program would see, and in which order its operands, comes from
+            # the consumer rather than from the dunder that was reached.
+            # Letting Python word it kept both right and named this file's
+            # `Instance` as the type; wording it from the dunder alone named
+            # the program's type and flipped the comparison.
+            driver = self.h.order_driver
+            first, second = ((self, other) if symbol == driver
+                             else (other, self))
+            raise TypeError(f"'{driver}' not supported between instances of "
+                            f"'{self.h.kind_name(first)}' and "
+                            f"'{self.h.kind_name(second)}'")
+        back = other._send(mirror, self)
+        if back is not NotImplemented:
+            return back
+        back = _held_binary(other, mirror, self)
+        if back is not NotImplemented:
+            return back
+        raise TypeError(f"'{symbol}' not supported between instances of "
+                        f"'{self.h.kind_name(self)}' and "
+                        f"'{self.h.kind_name(other)}'")
+    return run
+
+
+for _op, _mirror, _symbol in _ORDERINGS:
+    setattr(Instance, f"__{_op}__", _make_order(f"__{_op}__", f"__{_mirror}__",
+                                                _symbol))
 
 _UNARY_SYMBOL = {"__neg__": "-", "__pos__": "+", "__invert__": "~"}
 
@@ -10014,12 +10081,28 @@ def _seq_items(h, v, where: str):
     return None
 
 
+def _driving(h, symbol, run):
+    """`run()`, with `symbol` recorded as the comparison being driven.
+
+    EVERY EAGER CONSUMER THAT COMPARES SAYS WHICH OPERATOR IT USES, because
+    the refusal a program sees names that one -- `sorted` and `min` name `<`
+    and `max` names `>` -- and the dunder Python reaches cannot say which,
+    since the mirror of one is the other. See `_make_order`.
+    """
+    was = h.order_driver
+    h.order_driver = symbol
+    try:
+        return run()
+    finally:
+        h.order_driver = was
+
+
 def _apy_sorted(h, a):
     items = _seq_items(h, h._get(a[0], "apy_sorted"), "apy_sorted")
     if items is None:
         return 0
     try:
-        return h._new(sorted(items))
+        return h._new(_driving(h, "<", lambda: sorted(items)))
     except TypeError as exc:
         return h._fail_like(exc)
 
@@ -10029,7 +10112,7 @@ def _apy_min(h, a):
     if items is None:
         return 0
     try:
-        return h._value(min(items))
+        return h._value(_driving(h, "<", lambda: min(items)))
     except _HOST_RAISES as exc:
         return h._fail_like(exc)
 
@@ -10039,7 +10122,7 @@ def _apy_max(h, a):
     if items is None:
         return 0
     try:
-        return h._value(max(items))
+        return h._value(_driving(h, ">", lambda: max(items)))
     except _HOST_RAISES as exc:
         return h._fail_like(exc)
 
@@ -13079,9 +13162,10 @@ def _apy_sorted_by(h, a):
     reverse = bool(h._get(a[2], "apy_sorted_by"))
     try:
         if keyfn is None:
-            return h._new(sorted(items, reverse=reverse))
-        return h._new(sorted(items, key=lambda v: _call_key(h, keyfn, v),
-                             reverse=reverse))
+            return h._new(_driving(h, "<",
+                                   lambda: sorted(items, reverse=reverse)))
+        return h._new(_driving(h, "<", lambda: sorted(
+            items, key=lambda v: _call_key(h, keyfn, v), reverse=reverse)))
     except TypeError as exc:
         return h._fail_like(exc)
 
@@ -13091,10 +13175,12 @@ def _extreme_by(h, a, which, name):
     if items is None:
         return 0
     keyfn = h._get(a[1], name)
+    symbol = ">" if which is max else "<"
     try:
         if keyfn is None:
-            return h._value(which(items))
-        return h._value(which(items, key=lambda v: _call_key(h, keyfn, v)))
+            return h._value(_driving(h, symbol, lambda: which(items)))
+        return h._value(_driving(h, symbol, lambda: which(
+            items, key=lambda v: _call_key(h, keyfn, v))))
     except _HOST_RAISES as exc:
         return h._fail_like(exc)
 

@@ -288,7 +288,7 @@ APY_API apy_value apy_sorted(apy_value seq) {
         while (j >= 0) {
             int c = apy_order_rich(key, O(out)->v.q.items[j]);
             if (c == 2) {
-                apy_binop_error("<", key, O(out)->v.q.items[j]);
+                apy_order_error(0, key, O(out)->v.q.items[j]);
                 return 0;
             }
             if (c >= 0) break;
@@ -344,7 +344,14 @@ static apy_value apy_sort_with(apy_value seq, apy_value keyfn, int reverse) {
         while (j >= 0) {
             int c = apy_order_rich(k, O(keys)->v.q.items[j]);
             if (c == 2) {
-                apy_binop_error("<", k, O(keys)->v.q.items[j]);
+                /* REVERSED, THE PAIR IS NAMED THE OTHER WAY ROUND. CPython
+                   sorts in reverse by reversing the list, sorting it
+                   ascending and reversing it back -- so the comparison a
+                   program sees refused is still an ascending one, over the
+                   two elements in the opposite order from the one this loop
+                   (which flips the test instead) reached them in. */
+                if (reverse) apy_order_error(0, O(keys)->v.q.items[j], k);
+                else apy_order_error(0, k, O(keys)->v.q.items[j]);
                 return 0;
             }
             if (reverse ? c <= 0 : c >= 0) break;
@@ -976,7 +983,7 @@ APY_API apy_value apy_extreme_by_of(apy_value seq, apy_value keyfn,
         if (!best) { best = item; best_key = k; continue; }
         {
             int c = apy_order_rich(k, best_key);
-            if (c == 2) { apy_binop_error("<", k, best_key); return 0; }
+            if (c == 2) { apy_order_error((int)want_max, k, best_key); return 0; }
             if (want_max ? c > 0 : c < 0) { best = item; best_key = k; }
         }
     }
@@ -1017,7 +1024,7 @@ APY_API apy_value apy_extreme_of(apy_value seq, int64_t want_max) {
     for (i = 1; i < n; i++) {
         apy_value item = apy_key_at(seq, i);
         int c = apy_order_rich(item, best);
-        if (c == 2) { apy_binop_error("<", item, best); return 0; }
+        if (c == 2) { apy_order_error((int)want_max, item, best); return 0; }
         /* Strict, so that on a tie the EARLIER element wins -- which is what
            CPython does and is observable when the elements are equal but
            distinguishable. */
@@ -1092,7 +1099,7 @@ APY_API apy_value apy_extreme_n(apy_value buf, int64_t n, int64_t want_max) {
     best = argv[0];
     for (i = 1; i < n; i++) {
         int c = apy_order_rich(argv[i], best);
-        if (c == 2) { apy_binop_error("<", argv[i], best); return 0; }
+        if (c == 2) { apy_order_error((int)want_max, argv[i], best); return 0; }
         if (want_max ? c > 0 : c < 0) best = argv[i];
     }
     return best;

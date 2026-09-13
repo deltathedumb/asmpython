@@ -2510,6 +2510,98 @@ PROGRAMS = {
         show("join a class object", lambda: ",".join(Bare))
         show("sorted a class object", lambda: sorted(Bare))
     """,
+    "an_ordering_names_the_pair_it_actually_stopped_on": """
+        # `(1,) < ("a",)` SAID `'tuple' and 'tuple'`, about a comparison
+        # tuples support perfectly well. CPython compares two sequences
+        # lexicographically and names the first pair of ELEMENTS it could not
+        # order -- int and str -- at whatever depth the walk reached. The
+        # ordering answers a number and has nowhere to carry a witness out,
+        # so the pair is found by walking again on the failure path.
+        #
+        # AND `sorted` WORDED IT AS AN OPERATOR. `sorted([1, "a"])` reported
+        # `unsupported operand type(s) for <`, which is what `+` says about a
+        # pair it cannot add; a comparison failing is worded differently, and
+        # the operator itself already said so. `max` names `>` where `min`
+        # and `sorted` name `<`, so which one it was travels with the
+        # refusal.
+        #
+        # A CLASS EXTENDING A BUILTIN ORDERS AS THE BUILTIN, which equality
+        # has always done and the ordering did not: `sorted` over two
+        # namedtuples reported that two of them could not be compared, while
+        # `==` between the same two answered.
+        from collections import namedtuple
+
+        P = namedtuple("P", "a b")
+
+        class Sub(tuple):
+            pass
+
+        class Own(tuple):
+            def __lt__(self, other):
+                return self[0] > other[0]
+
+        class Bare:
+            pass
+
+        class Num:
+            def __init__(self, v):
+                self.v = v
+            def __lt__(self, other):
+                return self.v < other.v
+
+        def show(label, f):
+            try:
+                print(label, "->", f())
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        def srt(xs):
+            out = list(xs)
+            out.sort()
+            return out
+
+        show("two tuples", lambda: (1,) < ("a",))
+        show("two lists", lambda: [1] < ["a"])
+        show("past an equal head", lambda: (0, 1) < (0, "a"))
+        show("nested", lambda: ((1,),) < (("a",),))
+        show("and the answers", lambda: [(1, 2) < (1, 3), [1] < [1, 2]])
+        show("sorted", lambda: sorted([1, "a"]))
+        show("sorted of tuples", lambda: sorted([(0, 0), ("a", "b")]))
+        show("sorted reversed", lambda: sorted([1, "a"], reverse=True))
+        show("sorted by a key", lambda: sorted([1, "a"], key=lambda x: x))
+        show("list.sort", lambda: srt([1, "a"]))
+        show("min", lambda: min([1, "a"]))
+        show("max", lambda: max([1, "a"]))
+        show("min of several", lambda: min(1, "a"))
+        show("max of several", lambda: max((1,), ("a",)))
+        show("min by a key", lambda: min([1, "a"], key=lambda x: x))
+        show("max by a key", lambda: max([1, "a"], key=lambda x: x))
+        # A CLASS EXTENDING A BUILTIN, and one that writes its own order --
+        # which must win over the builtin underneath it.
+        show("a namedtuple", lambda: sorted([P(2, 1), P(1, 9)]))
+        show("its min", lambda: min([P(2, 1), P(1, 9)]))
+        show("its max", lambda: max([P(2, 1), P(1, 9)]))
+        show("its sort", lambda: srt([P(2, 1), P(1, 9)]))
+        show("a tuple subclass", lambda: Sub((1,)) < Sub((2,)))
+        # AND THE MESSAGE STAYS THE ORIGINAL PAIR'S: unwrapping is how the
+        # comparison is made, not what the program compared.
+        show("against an int", lambda: sorted([P(1, 1), 5]))
+        show("its operator", lambda: 5 < P(1, 1))
+        show("sorted", lambda: [tuple(x) for x in sorted([Sub((2,)), Sub((1,))])])
+        show("its own order wins", lambda: [tuple(x) for x in sorted([Own((1,)), Own((2,))])])
+        show("and its operator", lambda: Own((1,)) < Own((2,)))
+        # A CLASS WITH NO ORDER AT ALL names itself, not this file's class.
+        show("two bare classes", lambda: sorted([Bare(), Bare()]))
+        show("its operator", lambda: Bare() < Bare())
+        show("its max", lambda: max([Bare(), Bare()]))
+        show("against an int", lambda: sorted([Bare(), 5]))
+        show("its max", lambda: max([Bare(), 5]))
+        # AND A CLASS THAT DOES ORDER still orders.
+        show("a user order", lambda: [x.v for x in sorted([Num(3), Num(1)])])
+        show("its min", lambda: min([Num(3), Num(1)]).v)
+        show("a nan", lambda: sorted([1.0, 0.5]))
+        show("two sets", lambda: {1} < {1, 2})
+    """,
     "a_generator_names_the_def_it_came_from": """
         # `repr(gen())` WAS `<generator object at 0x...>` -- CPython writes the
         # qualified name of the `def` between `object` and `at`, and a program

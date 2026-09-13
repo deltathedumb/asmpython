@@ -902,6 +902,57 @@ def apy_binary_dunder_of(a: ptr, b: ptr, name: ptr, rname: ptr) -> ptr:
     return ptr(0)
 
 
+def apy_order_held(v: ptr, name: ptr, mirror: ptr) -> ptr:
+    """The builtin a class extends, when its own body writes neither ordering
+    dunder -- and 0 for anything else, which is every caller's "no".
+
+    A CLASS EXTENDING A BUILTIN ORDERS AS THE BUILTIN, the rule equality has
+    always followed. `sorted([P(2, 1), P(1, 9)])` on a namedtuple compares two
+    TUPLES; without this the walk gave up where the dunders did and reported
+    that two of them could not be ordered at all, while `P(2, 1) ==
+    P(1, 9)` answered.
+
+    A CLASS THAT WROTE EITHER DUNDER IS LEFT ALONE, because it has already had
+    its say and must not be read as its builtin behind its own back.
+    """
+    if i64(load(i32, offset(v, 0))) != apy_inst_kind():
+        return ptr(0)
+    held: ptr = ptr(load(u64, offset(v, apy_o_held_offset())))
+    if not held:
+        return ptr(0)
+    cls: ptr = ptr(load(u64, offset(v, apy_o_cls_offset())))
+    if apy_class_find_of(cls, apy_name_of(name)):
+        return ptr(0)
+    if apy_class_find_of(cls, apy_name_of(mirror)):
+        return ptr(0)
+    return held
+
+
+def apy_order_error_of(greater: i64, a: ptr, b: ptr) -> ptr:
+    """The refusal `sorted`, `min` and `max` report for a pair they could not
+    order.
+
+    THE OPERATOR ITSELF WORDS IT. `sorted` and `min` compare with `<` and
+    `max` with `>`, and asking that very operator to compare the pair again is
+    what keeps this message identical to the one the operator produces -- the
+    ELEMENTS two sequences stopped on included, which only `apy_cmp` knows how
+    to find. The comparison cannot succeed: `apy_order_rich_of` has already
+    answered 2 for this very pair, so what it does is set the error.
+
+    AN ERROR ALREADY SET IS LEFT ALONE. `apy_order_rich_of` answers 2 for a
+    `__lt__` that RAISED as well as for one that is missing, and comparing
+    again would run the raising method a second time over the first one's
+    report.
+    """
+    if apy_error_occurred():
+        return ptr(0)
+    if greater:
+        apy_gt(a, b)
+    else:
+        apy_lt(a, b)
+    return ptr(0)
+
+
 def apy_order_rich_of(a: ptr, b: ptr) -> i64:
     """`apy_order_of` with the program\'s own `__lt__` behind it.
 
@@ -923,7 +974,26 @@ def apy_order_rich_of(a: ptr, b: ptr) -> i64:
     r: ptr = apy_binary_dunder_of(a, b, rodata(b"__lt__\0"),
                                  rodata(b"__gt__\0"))
     if not r:
-        return 2
+        # A FAILURE IS NOT A MISSING DUNDER: a `__lt__` that raised has
+        # already reported, and reading the builtin underneath would run a
+        # second comparison over the first one's error.
+        if apy_error_occurred():
+            return 2
+        # AND THEN THE BUILTIN THE CLASS EXTENDS -- see `apy_order_held`.
+        ha: ptr = apy_order_held(a, rodata(b"__lt__\0"),
+                                 rodata(b"__gt__\0"))
+        hb: ptr = apy_order_held(b, rodata(b"__lt__\0"),
+                                 rodata(b"__gt__\0"))
+        if not ha:
+            if not hb:
+                return 2
+        left: ptr = a
+        if ha:
+            left = ha
+        right: ptr = b
+        if hb:
+            right = hb
+        return apy_order_rich_of(left, right)
     if apy_truth(r):
         return -1
     r2: ptr = apy_binary_dunder_of(b, a, rodata(b"__lt__\0"),
@@ -1094,7 +1164,7 @@ def apy_extreme_n(buf: ptr, n: i64, want_max: i64) -> ptr:
         item: ptr = ptr(load(u64, offset(buf, i * apy_value_size())))
         c: i64 = apy_order_rich_of(item, best)
         if c == 2:
-            apy_binop_error_of(rodata(b"<\0"), item, best)
+            apy_order_error_of(want_max, item, best)
             return ptr(0)
         if want_max:
             if c > 0:
@@ -1129,7 +1199,7 @@ def apy_extreme_of(seq: ptr, want_max: i64) -> ptr:
             return ptr(0)
         c: i64 = apy_order_rich_of(item, best)
         if c == 2:
-            apy_binop_error_of(rodata(b"<\0"), item, best)
+            apy_order_error_of(want_max, item, best)
             return ptr(0)
         if want_max:
             if c > 0:
@@ -1177,7 +1247,7 @@ def apy_extreme_by_of(seq: ptr, keyfn: ptr,
         else:
             c: i64 = apy_order_rich_of(k, best_key)
             if c == 2:
-                apy_binop_error_of(rodata(b"<\0"), k, best_key)
+                apy_order_error_of(want_max, k, best_key)
                 return ptr(0)
             if want_max:
                 if c > 0:
@@ -1235,7 +1305,7 @@ def apy_sorted(seq: ptr) -> ptr:
                     items, j * apy_value_size())))
                 c: i64 = apy_order_rich_of(key, prev)
                 if c == 2:
-                    apy_binop_error_of(rodata(b"<\0"), key, prev)
+                    apy_order_error_of(0, key, prev)
                     return ptr(0)
                 if c >= 0:
                     going = 0

@@ -71,6 +71,12 @@ _HELPERS_THE_HOST_OWNS_WHOLE = {
     "apy_names_object",
     "apy_num_f_of",
     "apy_num_order_of",
+    # `apy_order_error_of` and `apy_order_held` are the ordering's two: the
+    # host words the refusal in `_cmpop` and `_make_order`, and reads the
+    # builtin a class extends in `_held_binary`, so neither name is ever
+    # reached from here.
+    "apy_order_error_of",
+    "apy_order_held",
     "apy_order_of",
     "apy_order_rich_of",
     "apy_repr_entered",

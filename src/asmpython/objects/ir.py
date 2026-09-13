@@ -392,7 +392,14 @@ REPLACES: dict[str, tuple[str, ...]] = {
                     # AND THE SIX THAT WERE WAITING ON IT.
                     "apy_math_isnan", "apy_math_isinf", "apy_math_isfinite",
                     "apy_math_degrees", "apy_math_radians",
-                    "apy_conjugate"),
+                    "apy_conjugate",
+                    # THE ORDERING'S TWO. Both had to be PORTED rather than
+                    # left in the C and called: the ported runtime reaches
+                    # for the floor and its own fallbacks and nothing else,
+                    # which `test_the_allocator_asks_the_floor_and_nothing_
+                    # else` is there to keep true -- and an unported C name
+                    # called from here is neither.
+                    "apy_order_held", "apy_order_error_of"),
     "tasks.py": ("apy_str_like", "apy_meta_for", "apy_asyncio_gather",
                  "apy_task_done", "apy_task_cancelled",
                  "apy_task_cancel"),

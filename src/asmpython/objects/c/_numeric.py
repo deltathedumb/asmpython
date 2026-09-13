@@ -1533,6 +1533,40 @@ APY_API apy_value apy_contains(apy_value needle, apy_value hay) {
    2 for "these kinds cannot be ordered at all" (a TypeError). */
 static int apy_order(apy_value a, apy_value b);
 
+/* A CLASS EXTENDING A BUILTIN ORDERS AS THE BUILTIN, unless its own body says
+   otherwise -- the rule equality has always followed, written out for the
+   ordering. `sorted([P(2, 1), P(1, 9)])` on a namedtuple compares two TUPLES;
+   without this the walk gave up where the dunders did and reported that two
+   of them could not be ordered at all, while `P(2, 1) == P(1, 9)` answered.
+   The interpreter's `_held_binary` is the same rule on the other path.
+
+   WHAT IT HOLDS, OR 0 -- and 0 for a class that writes EITHER ordering
+   dunder, because such a class has already had its say and must not be read
+   as its builtin behind its own back.
+
+   THE MIRROR COUNTING AS ITS SAY IS A DIVERGENCE, and a known one: in
+   CPython a class extending list INHERITS `list.__lt__`, and an inherited
+   slot wins outright over a `__gt__` the class wrote, so `a < b` never
+   consults the reflected method at all. Here the dunder walk runs before
+   this function and takes the written mirror first. Correcting it means
+   splitting `apy_binary_dunder`'s two halves so the builtin can be read
+   between them -- at every comparison AND arithmetic call site, in all
+   three arrangements -- which is a larger change than the one this is. */
+APY_API apy_value apy_order_held(apy_value v, apy_value name,
+                                 apy_value mirror) {
+    if (O(v)->kind != APY_INST_K || !O(v)->v.o.held) return 0;
+    if (apy_class_find(O(v)->v.o.cls, apy_name((const char *)name))) return 0;
+    if (apy_class_find(O(v)->v.o.cls, apy_name((const char *)mirror)))
+        return 0;
+    return O(v)->v.o.held;
+}
+/* THE NAME ITS CALLERS USE, which spells the two dunders as C strings. */
+static apy_value apy_held_for(apy_value v, const char *name,
+                              const char *mirror) {
+    return apy_order_held(v, (apy_value)(uintptr_t)name,
+                          (apy_value)(uintptr_t)mirror);
+}
+
 /* `apy_order` WITH THE USER'S `__lt__` BEHIND IT.
 
    `apy_order` answers 2 for "these are not orderable to me", which is the
@@ -1551,7 +1585,18 @@ APY_API int64_t apy_order_rich_of(apy_value a, apy_value b) {
     apy_value r;
     if (c != 2 || !apy_either_inst(a, b)) return c;
     r = apy_binary_dunder(a, b, "__lt__", "__gt__");
-    if (!r) return 2;
+    if (!r) {
+        apy_value ha, hb;
+        /* A FAILURE IS NOT A MISSING DUNDER. A `__lt__` that raised has
+           already reported; reading the builtin underneath would run a
+           second comparison over the first one's error. */
+        if (apy_error_occurred()) return 2;
+        ha = apy_held_for(a, "__lt__", "__gt__");
+        hb = apy_held_for(b, "__lt__", "__gt__");
+        if (ha || hb)
+            return apy_order_rich_of(ha ? ha : a, hb ? hb : b);
+        return 2;
+    }
     if (apy_truth(r)) return -1;
     r = apy_binary_dunder(b, a, "__lt__", "__gt__");
     if (!r) return 2;
@@ -1613,6 +1658,67 @@ static int apy_order(apy_value a, apy_value b) {
     return (int)apy_order_of(a, b);
 }
 
+/* THE PAIR AN ORDERING ACTUALLY STOPPED ON, which for two sequences is not
+   the sequences. CPython compares them lexicographically and reports the
+   first pair of ELEMENTS it could not order: `(1,) < ("a",)` names int and
+   str, at whatever depth the walk reached. Naming the arguments instead said
+   `'tuple' and 'tuple'` about a comparison tuples support perfectly well.
+
+   FOUND BY WALKING AGAIN rather than by carrying a witness out of
+   `apy_order`, which answers a number and has nowhere to put one. The second
+   walk happens only on the failure path, and it stops at the same pair the
+   first one did -- everything before that pair compared equal, which is the
+   only way the walk reached it. */
+static void apy_order_blame(apy_value *a, apy_value *b) {
+    for (;;) {
+        int64_t i, n;
+        apy_value ea = 0, eb = 0;
+        if (!apy_is_seq(*a) || !apy_is_seq(*b) || O(*a)->kind != O(*b)->kind)
+            return;
+        n = O(*a)->v.q.n < O(*b)->v.q.n ? O(*a)->v.q.n : O(*b)->v.q.n;
+        for (i = 0; i < n; i++) {
+            int c = apy_order_rich(O(*a)->v.q.items[i], O(*b)->v.q.items[i]);
+            if (c == 2) {
+                ea = O(*a)->v.q.items[i];
+                eb = O(*b)->v.q.items[i];
+                break;
+            }
+            if (c) return;
+        }
+        if (!ea) return;
+        *a = ea;
+        *b = eb;
+    }
+}
+
+/* AN ORDERING REFUSED, worded as one. `sorted`, `min` and `max` reported
+   `unsupported operand type(s) for <`, which is what `+` says about a pair it
+   cannot add -- CPython words a comparison failure differently, and every one
+   of these is a comparison. The operator itself already said so; only the
+   consumers that call `apy_order_rich` straight out did not. */
+APY_API apy_value apy_order_error_of(int64_t greater, apy_value a,
+                                     apy_value b) {
+    char buf[256];
+    /* AN ERROR ALREADY SET IS LEFT ALONE. `apy_order_rich` answers 2 for a
+       `__lt__` that RAISED as well as for one that is missing, and the first
+       report is the one that says what actually went wrong. */
+    if (apy_error_occurred()) return 0;
+    apy_order_blame(&a, &b);
+    /* THE OPERATOR IS THE ONE THE CONSUMER WAS USING, and `max` uses `>`
+       where `min` and `sorted` use `<` -- CPython names it, so a flag
+       arrives rather than the caller being assumed to compare one way. */
+    snprintf(buf, sizeof buf,
+             "'%s' not supported between instances of '%s' and '%s'",
+             greater ? ">" : "<", apy_kind_name(a), apy_kind_name(b));
+    return apy_fail("TypeError", buf);
+}
+/* THE NAME ITS C CALLERS USE. The exported half is what the PORTED consumers
+   call -- `mathints.py`'s sort and extremes reach this by name rather than
+   restating the message, so the two arrangements cannot word it differently. */
+static apy_value apy_order_error(int greater, apy_value a, apy_value b) {
+    return apy_order_error_of((int64_t)greater, a, b);
+}
+
 static apy_value apy_cmp(const char *op, apy_value a, apy_value b, int lt, int eq, int gt) {
     int c = apy_order(a, b);
     /* A nan is not less than, equal to, or greater than anything -- including
@@ -1641,10 +1747,33 @@ static apy_value apy_cmp(const char *op, apy_value a, apy_value b, int lt, int e
                 if (strcmp(REFLECT[i][0], op) == 0) {
                     apy_value r = apy_binary_dunder(a, b, REFLECT[i][1],
                                                     REFLECT[i][2]);
+                    apy_value ha, hb;
                     if (r || apy_error_occurred()) return r;
+                    /* AND THEN THE BUILTIN IT EXTENDS -- see
+                       `apy_order_held`. `Sub((1,)) < Sub((2,))` on a class
+                       extending tuple was a TypeError about two objects
+                       whose contents order perfectly well.
+
+                       THE ANSWER IS TAKEN AND THE MESSAGE IS NOT. Unwrapping
+                       is how the comparison is MADE; it is not what the
+                       program compared, so a pair that still refuses is
+                       reported as the ORIGINAL two -- `5 < P(1, 1)` on a
+                       namedtuple said `'int' and 'tuple'`, naming something
+                       the program never wrote. */
+                    ha = apy_held_for(a, REFLECT[i][1], REFLECT[i][2]);
+                    hb = apy_held_for(b, REFLECT[i][1], REFLECT[i][2]);
+                    if (ha || hb) {
+                        int c2 = apy_order(ha ? ha : a, hb ? hb : b);
+                        if (c2 == APY_UNORD) return apy_from_bool(0);
+                        if (c2 != 2)
+                            return apy_from_bool(c2 < 0 ? lt
+                                                 : (c2 == 0 ? eq : gt));
+                    }
                     break;
                 }
         }
+        /* THE ELEMENTS, NOT THE SEQUENCES -- see `apy_order_blame`. */
+        apy_order_blame(&a, &b);
         snprintf(buf, sizeof buf,
                  "'%s' not supported between instances of '%s' and '%s'",
                  op, apy_kind_name(a), apy_kind_name(b));
