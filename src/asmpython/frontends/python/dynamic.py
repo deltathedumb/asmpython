@@ -2077,6 +2077,64 @@ class DynamicLowering:
             out = self.b.call(T.PTR, symbol, args)
             self._dyn_check()
             return out
+        if isinstance(node.func, ast.Attribute) \
+                and isinstance(node.func.value, ast.Name) \
+                and node.func.value.id in _BUILTIN_TYPE_VALUES \
+                and node.func.value.id not in self.info.locals \
+                and node.func.value.id not in self.infos \
+                and node.func.value.id not in self.class_names \
+                and not any(isinstance(one, ast.Starred)
+                            for one in node.args[:1]):
+            # `dict.get(d, 1)` -- AN UNBOUND METHOD CALLED WITH ITS RECEIVER
+            # FIRST, which is all `str.upper(x)` has ever meant and what the
+            # VALUE form already builds a thunk for. Rewritten to the bound
+            # spelling rather than dispatched here, so one implementation
+            # serves both and the keyword folding, the name-collision test and
+            # the arity table are the ones the ordinary call site uses.
+            #
+            # WITHOUT IT THE RECEIVER WAS THE TYPE. `_dyn_method` picks its
+            # symbol by NAME AND ARGUMENT COUNT, and the count it saw included
+            # the receiver -- so `dict.get(d, 1)` matched the two-argument
+            # `get` row and handed `apy_dict_get_or` the `dict` type object,
+            # which reported that a type has no attribute `get`. Eight of the
+            # thirteen types were unreachable this way; the five that worked
+            # did so only because their method has no row at the shifted
+            # count and fell through to `apy_getattr`, which finds the
+            # descriptor on the type's prototype and applies it.
+            base = node.func.value.id
+            if not node.args:
+                # NO RECEIVER TO APPLY IT TO. CPython refuses the CALL rather
+                # than the attribute, and names the method: `unbound method
+                # str.upper() needs an argument`.
+                self.b.call(T.PTR, "apy_raise",
+                            [self.b.call(
+                                T.PTR, "apy_make_exc",
+                                [self._dyn_str_literal("TypeError"),
+                                 self._dyn_str_literal(
+                                     f"unbound method {base}."
+                                     f"{node.func.attr}() needs an "
+                                     f"argument")])])
+                self._dyn_check()
+                return self.b.call(T.PTR, "apy_none", [])
+            # THE RECEIVER IS CHECKED AGAINST THE TYPE IT WAS REACHED OFF.
+            # `str.upper(5)` is `descriptor 'upper' for 'str' objects doesn't
+            # apply to a 'int' object` in CPython, which is the DESCRIPTOR
+            # complaining; rewriting alone made it `(5).upper()` and reported
+            # a missing attribute, true of the int and not what the program
+            # got wrong. See `apy_descr_applies`.
+            checked = self.b.call(
+                T.PTR, "apy_descr_applies",
+                [self._dyn_expr(node.args[0]),
+                 self._dyn_str_literal(base),
+                 self._dyn_str_literal(node.func.attr)])
+            self._dyn_check()
+            inner = ast.Call(
+                func=ast.copy_location(
+                    ast.Attribute(value=node.args[0], attr=node.func.attr,
+                                  ctx=ast.Load()), node.func),
+                args=node.args[1:], keywords=node.keywords)
+            return self._dyn_method(ast.copy_location(inner, node),
+                                    recv=checked)
         if isinstance(node.func, ast.Attribute):
             return self._dyn_method(node)
         if not isinstance(node.func, ast.Name):
@@ -5635,8 +5693,14 @@ class DynamicLowering:
         return self.b.load(T.PTR, out_slot)
 
     # ── methods and slicing ─────────────────────────────────────────────────
-    def _dyn_method(self, node: ast.Call) -> int:
+    def _dyn_method(self, node: ast.Call, recv: int | None = None) -> int:
         """`obj.method(args)`, dispatched on the NAME at compile time.
+
+        `recv` IS THE RECEIVER ALREADY EVALUATED, which the unbound spelling
+        needs: `str.upper(x)` is rewritten to `x.upper()` and the receiver is
+        checked against the type the descriptor came off before the call --
+        so the value is in hand before this is reached, and evaluating
+        `node.func.value` again would run it twice.
 
         The receiver's kind is not known here -- that is what dynamic means --
         so the symbol is chosen by the method name and the argument count
@@ -5671,7 +5735,8 @@ class DynamicLowering:
             # call, which is the only place a suspension cannot lose it.
             bound = self._spill_across_await(
                 self.b.call(T.PTR, "apy_getattr",
-                            [self._dyn_expr(node.func.value),
+                            [recv if recv is not None
+                             else self._dyn_expr(node.func.value),
                              self._dyn_attr_literal(attr)]),
                 node.args)
             self._dyn_check()
@@ -5684,7 +5749,8 @@ class DynamicLowering:
                                                         node.args[i + 1:]))
             return self._dyn_indirect(bound(), [r() for r in readers],
                                       node.keywords)
-        receiver = self._dyn_expr(node.func.value)
+        receiver = (recv if recv is not None
+                    else self._dyn_expr(node.func.value))
         if attr == "format" and not any(isinstance(a, ast.Starred)
                                         for a in node.args):
             # `"{} {k}".format(a, k=v)`. The positional arguments travel as a

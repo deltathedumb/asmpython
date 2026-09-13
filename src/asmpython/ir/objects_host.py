@@ -8739,6 +8739,31 @@ def _apy_super(h, a):
     return h._new(Super(frm, h._get(a[1], "apy_super")))
 
 
+def _apy_descr_applies(h, a):
+    """`str.upper(5)` -- an unbound method applied to the wrong kind.
+
+    CPython checks the receiver against the type the descriptor was found on
+    before it runs, and words the refusal as the DESCRIPTOR's. Without the
+    check the call went through as `(5).upper()` and reported a missing
+    attribute -- true of the int, and not what the program got wrong.
+
+    THE RECEIVER COMES BACK, so the check sits in the expression rather than
+    beside it. `apy_isinstance` and not a kind comparison, because a SUBCLASS
+    passes: `int.bit_length(True)` is 1 and a bool is an int.
+    """
+    recv = h._get(a[0], "apy_descr_applies")
+    want = str(h._get(a[1], "apy_descr_applies"))
+    method = str(h._get(a[2], "apy_descr_applies"))
+    ok = _apy_isinstance(h, (a[0], a[1]))
+    if ok == 0:
+        return 0
+    if h._get(ok, "apy_descr_applies"):
+        return a[0]
+    return h._fail("TypeError",
+                   f"descriptor '{method}' for '{want}' objects doesn't "
+                   f"apply to a '{h.kind_name(recv)}' object")
+
+
 def _apy_is_instance(h, a):
     return 1 if isinstance(h._get(a[0], "apy_is_instance"), Instance) else 0
 
@@ -12353,6 +12378,7 @@ _TABLE.update({
     "apy_default_delattr": _apy_default_delattr,
     "apy_setattr": _apy_setattr,
     "apy_super": _apy_super,
+    "apy_descr_applies": _apy_descr_applies,
 })
 
 

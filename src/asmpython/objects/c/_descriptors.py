@@ -1655,6 +1655,33 @@ APY_API apy_value apy_default_setattr(apy_value obj, apy_value name,
                      apy_kind_name(obj), APY_CSTR(name));
 }
 
+/* `str.upper(5)` -- AN UNBOUND METHOD APPLIED TO THE WRONG KIND.
+
+   CPython checks the receiver against the type the descriptor was found on
+   before it runs, and words the refusal as the DESCRIPTOR's: `descriptor
+   'upper' for 'str' objects doesn't apply to a 'int' object`. Without the
+   check the call went straight through as `(5).upper()` and reported a
+   missing attribute -- true of the int, and not what the program got wrong.
+
+   THE RECEIVER COMES BACK so the check sits in the expression rather than
+   beside it: the call site is `apy_descr_applies(recv, "str", "upper")` where
+   it would otherwise be `recv`.
+
+   `apy_isinstance` AND NOT A KIND COMPARISON, because a SUBCLASS passes:
+   `int.bit_length(True)` is 1 in CPython and a bool is an int. */
+APY_API apy_value apy_descr_applies(apy_value recv, apy_value type_name,
+                                    apy_value method_name) {
+    apy_value ok = apy_isinstance(recv, type_name);
+    char buf[256];
+    if (!ok) return 0;
+    if (apy_truth(ok)) return recv;
+    snprintf(buf, sizeof buf,
+             "descriptor '%s' for '%s' objects doesn't apply to a "
+             "'%s' object", APY_CSTR(method_name),
+             APY_CSTR(type_name), apy_kind_name(recv));
+    return apy_fail("TypeError", buf);
+}
+
 APY_API apy_value apy_super(apy_value from, apy_value self) {
     apy_obj *o;
     if (O(from)->kind != APY_TYPE_K)

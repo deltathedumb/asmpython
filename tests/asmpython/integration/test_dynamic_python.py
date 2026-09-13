@@ -2602,6 +2602,89 @@ PROGRAMS = {
         show("a nan", lambda: sorted([1.0, 0.5]))
         show("two sets", lambda: {1} < {1, 2})
     """,
+    "an_unbound_builtin_method_is_called_with_its_receiver_first": """
+        # `dict.get(d, 1)` RAISED `'type' object has no attribute 'get'`, for
+        # a call `list.append([1], 2)` answered. `_dyn_method` picks its
+        # symbol by NAME AND ARGUMENT COUNT, and the count it saw included the
+        # receiver -- so the two-argument `get` row matched and
+        # `apy_dict_get_or` was handed the `dict` type object. The five that
+        # worked did so only because their method has no row at the shifted
+        # count and fell through to `apy_getattr`, which finds the descriptor
+        # on the type's prototype and applies it. Naming the same methods as
+        # VALUES worked everywhere, which is what made the gap a lowering one.
+        #
+        # REWRITTEN TO THE BOUND SPELLING, so one implementation serves both
+        # and the keyword folding, the name-collision test and the arity table
+        # are the ones an ordinary call site uses.
+        class Box:
+            # A USER CLASS WITH THE SAME METHOD NAMES, which is what the
+            # collision test is for: `Box().get(2)` must stay Box's.
+            def __init__(self, v):
+                self.v = v
+            def get(self, k):
+                return ("box", k)
+            def upper(self):
+                return "BOX"
+
+        class MyList(list):
+            pass
+
+        def show(label, f):
+            try:
+                print(label, "->", f())
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        def srt(xs):
+            out = list(xs)
+            list.sort(out)
+            return out
+
+        def shadowed(dict):
+            return dict.get(1)
+
+        show("dict.get", lambda: dict.get({1: 2}, 1))
+        show("int.to_bytes", lambda: int.to_bytes(258, 2, "little"))
+        show("bytes.hex", lambda: bytes.hex(b"ab"))
+        show("tuple.count", lambda: tuple.count((1, 1), 1))
+        show("str.split", lambda: str.split("a b"))
+        show("bytearray.hex", lambda: bytearray.hex(bytearray(b"ab")))
+        show("complex.conjugate", lambda: complex.conjugate(2 + 3j))
+        show("memoryview.tobytes", lambda: memoryview.tobytes(memoryview(b"ab")))
+        show("float.is_integer", lambda: float.is_integer(2.0))
+        show("bool.bit_length", lambda: bool.bit_length(True))
+        show("set.union", lambda: srt(set.union({1}, {2})))
+        show("frozenset.copy", lambda: srt(frozenset.copy(frozenset({2, 1}))))
+        show("list.append", lambda: list.append([1], 2))
+        show("str.upper", lambda: str.upper("ab"))
+        show("list.__len__", lambda: list.__len__([1, 2]))
+        show("dict.items", lambda: srt(dict.items({1: 2})))
+        show("str.__contains__", lambda: str.__contains__("abc", "b"))
+        # A KEYWORD TRAVELS WITH THE REST, folded into the slot it names --
+        # the rewrite hands the ordinary call site its own arguments.
+        show("a keyword", lambda: str.split("a b c", maxsplit=1))
+        show("three of them", lambda: str.replace("aaa", "a", "b", 1))
+        show("sort in place", lambda: srt([3, 1, 2]))
+        # THE CONSTRUCTORS ON A TYPE are a different shape and keep theirs.
+        show("fromkeys", lambda: srt(dict.fromkeys([2, 1], 0).items()))
+        show("from_bytes", lambda: int.from_bytes(b"\x01\x02", "big"))
+        show("fromhex", lambda: bytes.fromhex("6162"))
+        # AND THE VALUE FORM, which always worked and still does.
+        show("as a key", lambda: sorted(["B", "a"], key=str.lower))
+        show("through map", lambda: list(map(str.upper, ["a", "b"])))
+        # A SUBCLASS PASSES, because the check is `isinstance` and not a kind
+        # comparison: a bool is an int and a bytearray is bytes-like.
+        show("a list subclass", lambda: list.append(MyList([1]), 2))
+        show("a bool as an int", lambda: int.bit_length(True))
+        # THE REFUSALS ARE THE DESCRIPTOR'S OWN, which naming the method on
+        # the receiver could not produce.
+        show("no receiver", lambda: str.upper())
+        show("the wrong kind", lambda: str.upper(5))
+        show("another", lambda: dict.get([1], 1))
+        # AND A NAME THE PROGRAM TOOK BACK is the program's.
+        show("a user method", lambda: Box([1]).get(2))
+        show("a parameter", lambda: shadowed({1: 5}))
+    """,
     "a_generator_names_the_def_it_came_from": """
         # `repr(gen())` WAS `<generator object at 0x...>` -- CPython writes the
         # qualified name of the `def` between `object` and `at`, and a program
