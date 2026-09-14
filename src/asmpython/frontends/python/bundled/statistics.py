@@ -74,7 +74,7 @@ already had the correct one-step shape). `quantiles(data, method='inclusive')`
 was this module's first call to `divmod` that inspected both of its results,
 which is how it turned up here -- and independently, the same run, in
 `bundled/datetime.py`'s own `divmod`-heavy normalization, which landed the
-fix (`ir/objects_host.py`, plus a second, unrelated `__divmod__`/
+fix (`objects/host.py`, plus a second, unrelated `__divmod__`/
 `__rdivmod__` dispatch gap `timedelta` needed and this module does not) just
 ahead of this one; both are commits (see `git log`) rather than one, and
 this module's own test is what INDEPENDENTLY re-confirmed the fix rather
@@ -102,7 +102,7 @@ does not write either, relying on the SAME "ask `held`" fallback `len()`
 itself already has) and, finding neither, answered `True` unconditionally
 -- `_apy_len` already asks `held` before walking the dunder; `__bool__`'s
 fallback to `__len__` had not learned the same trick. Fixed in both
-`Instance.__bool__` (`ir/objects_host.py`) and `apy_truth`'s `APY_INST_K`
+`Instance.__bool__` (`objects/host.py`) and `apy_truth`'s `APY_INST_K`
 case (`objects/c/_inspect.py`), mirroring `apy_len`'s own "ask held before
 the dunder walk" order in each.
 

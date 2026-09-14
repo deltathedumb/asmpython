@@ -88,7 +88,7 @@ bound by hand.** Everything above happens at COMPILE and LINK time; the
 interpreter has no linker, so a declared symbol trapped there with `call to
 undefined function`. Since the interpreter is the oracle the C backend is
 measured against, that left any module using `ctypes` with no check on its
-compiled behaviour at all. `ir/natives_host.py` binds the symbols the bundled
+compiled behaviour at all. `objects/natives_host.py` binds the symbols the bundled
 library declares, through `os`, marshalling each pointer between a host object
 and interpreter memory. It grows when the standard library does; it is not an
 attempt to bind libc.

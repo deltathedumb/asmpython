@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-from asmpython.ir.objects_host import _TABLE
+from asmpython.objects.host import _TABLE
 from asmpython.objects.csource import OBJECT_NAMES, OBJECTS_C
 
 #: Symbols with no host binding yet. A RATCHET, not a permission: the test
@@ -93,7 +93,7 @@ def test_every_runtime_symbol_has_a_host_binding():
     unbound = set(OBJECT_NAMES) - set(_TABLE)
     added = sorted(unbound - UNBOUND)
     assert not added, (
-        "runtime symbols with no binding in ir/objects_host.py:\n  "
+        "runtime symbols with no binding in objects/host.py:\n  "
         + "\n  ".join(added)
         + "\n\nA compiled program can call these and `asmpython run` cannot. "
           "Add a binding, or add the name to UNBOUND with the feature it "
@@ -128,7 +128,7 @@ def test_every_exported_symbol_has_a_host_binding():
     missing = sorted(exported - set(_TABLE) - UNBOUND
                      - _HELPERS_THE_HOST_OWNS_WHOLE)
     assert not missing, (
-        "exported by objects/csource.py with no binding in ir/objects_host.py:\n  "
+        "exported by objects/csource.py with no binding in objects/host.py:\n  "
         + "\n  ".join(missing)
         + "\n\nA compiled program can call these and `asmpython run` cannot.")
 

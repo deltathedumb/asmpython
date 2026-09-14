@@ -53,7 +53,7 @@ def run_only(tmp_path: Path, source: str) -> subprocess.CompletedProcess:
 
     THE TWO HAVE TO AGREE and they reach a native symbol by completely
     different routes -- the compiled one through an `extern` the system linker
-    resolves, this one through `ir/natives_host.py`. A test that only built
+    resolves, this one through `objects/natives_host.py`. A test that only built
     would not notice the interpreter answering something else, or refusing to
     answer at all, which is what it did until `natives_host` existed.
     """

@@ -2,7 +2,7 @@
 
 COVERAGE: `ref` -- `ref(obj)`, `ref(obj, callback)`, calling it to get `obj`
 back (or `None` once `obj` is gone); the callback fires at most once,
-exactly when `obj`'s own last reference drops (`ir/objects_host.py`'s
+exactly when `obj`'s own last reference drops (`objects/host.py`'s
 `ObjectHost._finalize`), and receives the `ref` OBJECT ITSELF as its one
 argument, matching CPython's own documented convention -- not `obj`, which
 is gone by the time anything could receive it. CALLBACK-FREE REFS ARE
@@ -26,7 +26,7 @@ rather than at the statement. `r() is None` specifically is exact, since
 about.
 
 INTERPRETER-ONLY. `apy_weakref_register`/`apy_weakref_deref`
-(`ir/objects_host.py`) read and are read by the shadow reference count
+(`objects/host.py`) read and are read by the shadow reference count
 this whole runtime's `__del__` timing is built on
 (`docs/STDLIB.md`/`ir/interpreter.py`), which only the reference
 interpreter keeps -- a compiled build has no such count and these two

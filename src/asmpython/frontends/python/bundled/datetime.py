@@ -113,7 +113,7 @@ WHAT WRITING THIS MODULE FOUND IN THE COMPILER:
 under the interpreter (`asmpython run`) alone.** `divmod(7, 3)` printed
 `(36, 26)` instead of `(2, 1)`, and the same expression evaluated twice
 printed two DIFFERENT wrong answers -- the signature of a handle leak, not
-an arithmetic bug. `ir/objects_host.py`'s `_apy_divmod` built its result
+an arithmetic bug. `objects/host.py`'s `_apy_divmod` built its result
 tuple as `(h._value(q), h._value(r))`: `h._value()` mints a HANDLE (an
 index into the interpreter's cell table) for a computed result, which is
 exactly right for the tuple's own return value but wrong for elements
@@ -128,7 +128,7 @@ found on the first arithmetic test written for this module and would have
 produced wrong answers -- silently, and differently on every run, since
 the handle numbers `divmod` was leaking depend on how many other objects
 the interpreter had already allocated -- for every future module using it
-too. Fixed in `ir/objects_host.py:_apy_divmod`; not touched: the C
+too. Fixed in `objects/host.py:_apy_divmod`; not touched: the C
 backend's own separate `apy_divmod` (`objects/c/_builtins.py`), which
 `asmpython run` does not use and which was not observed to have the
 matching fault.

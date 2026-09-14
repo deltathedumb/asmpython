@@ -77,7 +77,7 @@ set grows -- and it grows every stage from here.
 | --- | --- | --- | --- |
 | `objects/c/` | 16,284 | C, in nineteen parts concatenated in source order | the C backend, and the machine backends via a C toolchain |
 | `objects/c/unicode_table.py` | 909 | C, generated | spliced into the above at `/* @UNICODE_TABLE@ */` |
-| `ir/objects_host.py` | 8,583 | Python | the IR interpreter |
+| `objects/host.py` | 8,583 | Python | the IR interpreter |
 | a JVM equivalent | 0 | — | nothing; `BackendUnsupported` |
 
 **The runtime is written twice and needed a third time.** That is not an
@@ -176,7 +176,7 @@ which held: not one opcode was added for any of stages 1 to 4.
 ### And it deletes `objects_host.py` -- but not the way this said
 
 This was the argument that decided it. If the runtime is IR, the IR interpreter
-runs THE SAME RUNTIME the C backend runs. `ir/objects_host.py`'s 8,583 lines
+runs THE SAME RUNTIME the C backend runs. `objects/host.py`'s 8,583 lines
 stop existing, and every drift class listed above becomes structurally
 impossible rather than something a corpus has to keep catching.
 
@@ -447,7 +447,7 @@ them; dispatching on one does, and that is stage 5's first requirement.
 
 The splice was going to fix the IR interpreter for free -- define the function,
 and it runs the same IR the C backend compiles. **It cannot.**
-`ir/objects_host.py` represents an `apy_value` as a HANDLE into a Python-side
+`objects/host.py` represents an `apy_value` as a HANDLE into a Python-side
 table; the ported code represents one as an ADDRESS. A ported `apy_from_int`
 hands back something every unported function rejects:
 

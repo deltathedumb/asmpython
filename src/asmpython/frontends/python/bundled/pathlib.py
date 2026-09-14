@@ -52,7 +52,7 @@ POSIX-flavoured, so `str()` renders `/`; see above. That is a question about
 what a path MEANS, which no host service can answer.
 
 THE INTERPRETER RUNS THIS TOO, which is not free and is the reason it can be
-trusted. `ir/hostsvc_host.py` answers the same names through Python's `os`,
+trusted. `objects/hostsvc_host.py` answers the same names through Python's `os`,
 marshalling each buffer across the boundary between a host object and
 interpreter memory -- including the WRITE-BACK, without which a read fills a
 copy and `read_bytes` answers the right number of zero bytes. Without the

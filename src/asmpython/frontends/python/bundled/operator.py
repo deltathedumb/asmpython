@@ -61,7 +61,7 @@ directly. Fixed on both runtimes this compiler has, following exactly the
 shape `__abs__` already uses: `apy_index_obj` (`objects/c/_builtins.py`,
 mirroring `apy_to_int`'s numeric branch -- a big answers itself, a bool
 answers a genuine `int`) for the C runtime, and `_apy_index_obj`
-(`ir/objects_host.py`, beside `_apy_abs`) for the interpreter this compiler's
+(`objects/host.py`, beside `_apy_abs`) for the interpreter this compiler's
 own `run` uses by default. Neither is a new capability: `apy_index` already
 existed for a subscript's unboxed machine word (`runtime/mathints.py`); this
 is that same dispatch, boxed, reached by one more spelling.
@@ -118,7 +118,7 @@ exactly correct for them) and the wrong one for a class that defines
 `__imatmul__`, `__itruediv__`, `__ifloordiv__`, `__imod__`, `__ipow__`,
 `__ilshift__` or `__irshift__` of its own. NOT FIXED HERE: closing it
 means widening `_INPLACE` and the interpreter's matching `_IOP_DUNDER` and
-op-to-symbol tables (`ir/objects_host.py`, `_apy_iop`) for all seven at
+op-to-symbol tables (`objects/host.py`, `_apy_iop`) for all seven at
 once, which is more than the one-line, fully-understood fix `__index__`
 above got, and this module's own reach for `matmul` is one class in one
 test rather than the whole surface that gap touches. So `tests/stdlib/

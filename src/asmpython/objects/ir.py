@@ -2,7 +2,7 @@
 
 STAGE 3 OF `docs/INERT-RUNTIME.md`. The object runtime is 15,560 lines of C
 (`objects/csource.py`) plus an 8,583-line Python re-implementation for the IR
-interpreter (`ir/objects_host.py`), and a backend that wants dynamic Python has
+interpreter (`objects/host.py`), and a backend that wants dynamic Python has
 to find 229 `apy_*` symbols -- which is why exactly one backend has them. The
 way out is to write the runtime in the machine subset and let it be IR, so that
 every backend gets it for free and the two copies become one.
@@ -35,7 +35,7 @@ central promise.
 
 It cannot, and the reason is worth more than the feature would have been:
 **the two runtimes disagree about what an `apy_value` IS.**
-`ir/objects_host.py` represents one as a HANDLE into a Python-side table; the
+`objects/host.py` represents one as a HANDLE into a Python-side table; the
 ported code represents one as an ADDRESS in the interpreter's flat memory. So a
 ported `apy_from_int` hands back something every unported function rejects --
 observed as `apy_is: 2248 is not a runtime value handle`, a message naming

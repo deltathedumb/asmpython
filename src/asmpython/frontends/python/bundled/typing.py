@@ -129,7 +129,7 @@ native pair reads them off an instance when the value is not the alias kind,
 which adds the user generic without changing one answer for the builtin one.
 That way a program wanting only `get_origin` still pays nothing: rewriting
 them in this module would have spliced the whole of `typing` into it. See
-`runtime/alias.py`, `objects/c/_classes.py` and `ir/objects_host.py`, each
+`runtime/alias.py`, `objects/c/_classes.py` and `objects/host.py`, each
 of which has the same two-line instance branch.
 
 ## `Protocol` covers method-based structural protocols, not attribute ones

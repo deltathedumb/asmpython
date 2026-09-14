@@ -16,7 +16,7 @@ THE THREE SPELLINGS, all of the same semantics, and the reason they must agree:
   * `ir` -- the part rewritten in asmpython's own machine subset, so a backend
     gets dynamic Python without defining 229 `apy_*` symbols by hand. See
     `docs/INERT-RUNTIME.md`.
-  * `asmpython.ir.objects_host` -- the same runtime backed by real Python
+  * `asmpython.objects.host` -- the same runtime backed by real Python
     objects, for the reference interpreter. It stays in `ir/` because it is
     the INTERPRETER's, and mutually recursive with it.
 

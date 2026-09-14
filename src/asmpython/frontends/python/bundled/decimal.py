@@ -154,7 +154,7 @@ values past 2**64; this module's own `_int_divide` and `__truediv__`
 use exactly that spelling and NEVER call `divmod()` themselves, which
 is the whole workaround. Root-caused only partway: `_TABLE["apy_divmod"]`
 genuinely is bound to the interpreter's own `_apy_divmod`
-(`ir/objects_host.py`), and that function's own body is an ordinary,
+(`objects/host.py`), and that function's own body is an ordinary,
 correct three-line `divmod(x, y)` on the host's real Python ints -- so
 the fault is upstream of it, in how the CALL reaches that function or
 how its result is read back, not in the arithmetic itself; that upstream

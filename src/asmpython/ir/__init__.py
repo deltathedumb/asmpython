@@ -7,6 +7,17 @@ after the compiler it ships in would have made the claim and then quietly
 contradicted it. The four letters are the container's magic bytes too -- see
 `backends/apir/emit.py`, where they were already written down.
 
+WHAT IS NOT IN HERE IS THE CLAIM. This package held the Python object model's
+host implementation -- 16,168 lines against 1,568 lines of actual IR, and one
+of them importing `asmpython.frontends.python.methods`, the bottom layer of the
+compiler reaching for the top. Those live under `objects/` now, beside the C
+and subset arrangements of the same runtime, and
+`tests/asmpython/unit/test_ir_is_agnostic.py` is what keeps them out: the IR
+imports `diagnostics` and nothing else, and never names the object runtime's
+symbol prefix. The interpreter is the one exemption and that test says so --
+including, as it happens, catching an earlier draft of this very paragraph for
+quoting the prefix it was describing.
+
 Read `opcodes.py` first: it is the whole instruction set and the single source
 of truth for the verifier, the printer, the parser, the interpreter and the
 docs. A backend author should need no second document.

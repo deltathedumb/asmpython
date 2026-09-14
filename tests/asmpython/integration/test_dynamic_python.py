@@ -1924,7 +1924,7 @@ PROGRAMS = {
         # union's other half -- so `repr(map(len, xs))` walked a wild pointer and DIED
         # on both compiled runtimes while `repr(property(f))` answered the empty
         # string. The interpreter did not crash and leaked its own class names
-        # instead: `<asmpython.ir.objects_host.Iterator object at 0x...>`.
+        # instead: `<asmpython.objects.host.Iterator object at 0x...>`.
         #
         # AN ADDRESS CANNOT MATCH CPYTHON, so what is checked here is the shape: the
         # kind CPython names and the punctuation around it.

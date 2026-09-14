@@ -173,12 +173,12 @@ class TestTheModuleListIsTheCs:
     def test_the_host_is_what_the_build_has(self):
         sys.path.insert(0, SRC)
         try:
-            from asmpython.ir.objects_host import _KNOWN_MODULES
+            from asmpython.objects.host import _KNOWN_MODULES
         finally:
             del sys.path[0]
         host, truth = set(_KNOWN_MODULES), _truth()
         assert host == truth, (
-            "`_KNOWN_MODULES` in ir/objects_host.py is not what this build "
+            "`_KNOWN_MODULES` in objects/host.py is not what this build "
             "bundles.\n"
             f"  claims but does not have: {sorted(host - truth)}\n"
             f"  has but denies:           {sorted(truth - host)}")

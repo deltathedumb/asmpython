@@ -20,7 +20,7 @@ the exact ones.
 
 INTERPRETER-ONLY. Finding a cycle means subtracting the references its
 members make to each other from their reference COUNTS
-(`ir/objects_host.py`'s `_apy_gc_collect` -- CPython's own algorithm),
+(`objects/host.py`'s `_apy_gc_collect` -- CPython's own algorithm),
 and only the reference interpreter keeps those counts. A compiled build
 refuses BY NAME rather than answering `0`, which would read as "nothing
 was collectable" and be false.

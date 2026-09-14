@@ -54,7 +54,7 @@ import builtins
 import math
 import sys
 
-from . import types as _ir_types
+from ..ir import types as _ir_types
 
 #: Returned by `call` for a name this file does not provide, so the
 #: interpreter's own host table keeps its `putchar`/`put_int`/... bindings and
@@ -1261,7 +1261,7 @@ class ObjectHost:
                     f"{self._text(v.get, True)})>")
         if isinstance(v, Native):
             # A RUNTIME METHOD IS A `built-in method`, named after what it is
-            # bound to. It answered `<asmpython.ir.objects_host.Native object
+            # bound to. It answered `<asmpython.objects.host.Native object
             # at 0x...>` -- a name from inside the compiler, in text a
             # program prints.
             # A DESCRIPTOR NAMES THE TYPE IT CAME OFF and carries no
@@ -1301,7 +1301,7 @@ class ObjectHost:
         if isinstance(v, (Iterator, Gen, Cell, Super)):
             # THE KIND, NOT THIS FILE'S CLASS NAME. Python's own `repr` of an
             # internal object here answered
-            # `<asmpython.ir.objects_host.Iterator object at 0x...>` -- a
+            # `<asmpython.objects.host.Iterator object at 0x...>` -- a
             # name from inside the compiler, in text a program prints. The
             # compiled runtimes say `<map object at 0x...>`.
             return f"<{self.kind_name(v)} object at 0x{id(v):x}>"
@@ -1871,7 +1871,7 @@ class ObjectHost:
 # Imported late so this module can be read without chasing the interpreter's
 # own definitions; `Trap` is the interpreter's "the program did something
 # undefined" signal and this file raises exactly one kind of it.
-from .interpreter import Trap as _Trap, _FUNC_TAG  # noqa: E402
+from ..ir.interpreter import Trap as _Trap, _FUNC_TAG  # noqa: E402
 
 #: "not a builtin type" -- distinct from every value a constructor can
 #: answer, including None and 0, which `bool()` and `int()` really do give.
@@ -3938,7 +3938,7 @@ def _apy_setitem(h, a):
 # A USER OBJECT IS THE EXCEPTION, and the reason is that the message names a
 # TYPE: Python sees the key as an `objects_host.Instance` and says so, leaking
 # this file's internals into a message a program prints -- `cannot use
-# 'asmpython.ir.objects_host.Instance' as a dict key`, where a compiled binary
+# 'asmpython.objects.host.Instance' as a dict key`, where a compiled binary
 # says `OnlyEq2`. So instances are checked here, with the C's wording.
 
 

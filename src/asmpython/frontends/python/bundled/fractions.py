@@ -36,7 +36,7 @@ never ask the object anything -- so `round(x)`, `abs(x)`, `-x`, `+x` and
 the only rounding a `Fraction` could get was by calling `f.__floor__()`
 directly. Writing this module is what found it; the fix went where it
 belonged, to `math`'s three functions (`objects/c/_math.py`,
-`runtime/mathints.py` and `ir/objects_host.py`'s `_math1`), so every module
+`runtime/mathints.py` and `objects/host.py`'s `_math1`), so every module
 with a real number of its own gets it. `bundled/decimal.py` gained
 `__floor__`/`__ceil__` at the same time and for the same reason.
 
@@ -49,7 +49,7 @@ warning is about the SELF-HOSTED runtime a compiled build links in
 Checked rather than assumed: `math.gcd` on operands past 2**63 (a random
 30-digit pair, and `2**100`) answers identically to CPython under `-P`,
 because that path's native calls are the INTERPRETER's own
-(`ir/objects_host.py`), which hands `math.gcd` two genuine Python ints on
+(`objects/host.py`), which hands `math.gcd` two genuine Python ints on
 the host and takes whatever host Python answers.
 """
 import math

@@ -5,7 +5,7 @@ named `host_net_connect`/`listen`/`accept`/`read`/`write`/`close` since it
 was written, with a comment saying streams only and blocking, and no
 backend answered any of them -- so `docs/STDLIB.md` listed `socket` under
 "NEEDS THE FLOOR TO GROW" and the floor already had the shape of the
-answer. It is now implemented twice: `ir/hostsvc_host.py` calls CPython's
+answer. It is now implemented twice: `objects/hostsvc_host.py` calls CPython's
 `socket`, and `objects/hostsvc.py`'s `C_SOURCE["net"]` calls BSD sockets
 (and Winsock). One operation was added to the group to make it usable at
 all -- `host_net_port`, so a program that asks for an ephemeral port with

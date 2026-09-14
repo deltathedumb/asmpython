@@ -200,7 +200,7 @@ class Interpreter:
         # explicit: a name it does not claim reaches the bindings below and,
         # failing those, the trap at the end.
         if name.startswith("apy_"):
-            from .objects_host import NOT_MINE, ObjectHost
+            from ..objects.host import NOT_MINE, ObjectHost
             if self.objects is None:
                 self.objects = ObjectHost(self)
             result = self.objects.call(name, args)
@@ -288,7 +288,8 @@ class Interpreter:
         # is a backend like any other in that respect. Before the ctypes
         # bindings below, because these are the arrangement those exist to
         # replace and a name should mean the portable one where both exist.
-        from .hostsvc_host import NOT_MINE as _HS_NOT_MINE, call as _hs_call
+        from ..objects.hostsvc_host import (
+            NOT_MINE as _HS_NOT_MINE, call as _hs_call)
         result = _hs_call(self, name, args)
         if result is not _HS_NOT_MINE:
             return result
@@ -299,7 +300,7 @@ class Interpreter:
         # -- the declaration is resolved by the LINKER, and this path has no
         # linker -- so the oracle would have nothing to say about the compiled
         # behaviour of `pathlib`. See `natives_host.py`.
-        from .natives_host import NOT_MINE, call as native_call
+        from ..objects.natives_host import NOT_MINE, call as native_call
         result = native_call(self, name, args)
         if result is not NOT_MINE:
             return result
@@ -313,7 +314,7 @@ class Interpreter:
 
     def _objects_own(self, name: str) -> bool:
         """Whether the host object runtime implements `name`. See `_call`."""
-        from .objects_host import _TABLE
+        from ..objects.host import _TABLE
         return name in _TABLE
 
     def _plat_write(self, fd: int, addr: int, n: int) -> int:
@@ -1340,7 +1341,7 @@ _CMP = (Op.EQ, Op.NE, Op.LT, Op.LE, Op.GT, Op.GE)
 #:   * a DATA DESCRIPTOR's `__set__` is a user method, so the same
 #:     argument covers it -- except when the setter is a `Native`, which
 #:     no program is known to write and which `_pin_for_native`
-#:     (`ir/objects_host.py`) pins rather than certifies;
+#:     (`objects/host.py`) pins rather than certifies;
 #:   * an `Instance`, an `Exc`, a `Class` and a `Func` all store through
 #:     `_attr_store`, which increfs the new value and decrefs the old,
 #:     exactly as `_dict_set` does for a dict;

@@ -261,7 +261,7 @@ class TestTheTableItself:
         sys.path.insert(0, str(SRC))
         try:
             from asmpython.objects import hostsvc
-            from asmpython.ir import hostsvc_host
+            from asmpython.objects import hostsvc_host
         finally:
             del sys.path[0]
         for group in hostsvc_host.GROUPS:
