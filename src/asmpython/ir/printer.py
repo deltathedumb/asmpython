@@ -1,11 +1,16 @@
-"""The textual IR: printing and parsing.
+"""APIR text: printing and parsing.
 
-The text form is the IR's user interface. It is what `irc build --emit-ir`
-writes, what a backend author reads while debugging, and -- because it parses
-back -- what you can hand-write to test a backend without running a frontend at
-all. That last use is the reason the parser exists: writing twenty lines of IR
-by hand is a far better first test of a new backend than compiling a Python
-program and hoping.
+`.apir` IS THE TEXT AND `.apirc` IS THE CONTAINER, the way `.wat` is to
+`.wasm` -- the shorthand goes to the form you read and the full-length one to
+the artifact you ship. A file in this format is APIR whoever wrote it, which
+is why the extension carries no frontend's name.
+
+The text form is the IR's user interface. It is what `asmpython build
+--emit-ir` writes, what a backend author reads while debugging, and -- because
+it parses back -- what you can hand-write to test a backend without running a
+frontend at all. That last use is the reason the parser exists: writing twenty
+lines of APIR by hand is a far better first test of a new backend than
+compiling a Python program and hoping.
 
     module demo
 
@@ -32,9 +37,11 @@ being compared, not the result -- comparisons always produce i1, so printing
 need.
 
 Round-tripping is a test, not a nicety: `parse(print(m))` must equal `m`. It is
-checked in `tests/test_text.py`, and it is what lets the printer be trusted as a
-debugging tool -- a printer that quietly loses a field produces output that
-looks right and misleads for hours.
+checked by `test_hand_written_ir_round_trips` and by
+`test_ir_text_round_trips_and_still_runs`, which reparses every corpus program
+and RUNS it -- and it is what lets the printer be trusted as a debugging tool.
+A printer that quietly loses a field produces output that looks right and
+misleads for hours.
 """
 from __future__ import annotations
 

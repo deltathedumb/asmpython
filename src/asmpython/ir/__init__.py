@@ -1,4 +1,11 @@
-"""A small, language-independent IR.
+"""APIR -- A Portable Intermediate Representation.
+
+THE NAME EXPANDS TO NOTHING ABOUT PYTHON, and that is the point rather than a
+coincidence. This IR is small, typed and language-independent; the Python
+frontend is its first client and is not meant to be its only one, so naming it
+after the compiler it ships in would have made the claim and then quietly
+contradicted it. The four letters are the container's magic bytes too -- see
+`backends/apir/emit.py`, where they were already written down.
 
 Read `opcodes.py` first: it is the whole instruction set and the single source
 of truth for the verifier, the printer, the parser, the interpreter and the

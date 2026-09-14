@@ -1,12 +1,12 @@
-"""The opcode table.
+"""The APIR opcode table.
 
 This is the whole instruction set, and it is the single source of truth for
 four consumers that would otherwise drift apart:
 
-    verify.py   checks operand counts and types against these specs
-    text.py     prints and parses using these names
-    interp.py   executes them
-    docs        `irc ops` prints this table; no separate reference to maintain
+    verifier.py     checks operand counts and types against these specs
+    printer.py      prints and parses using these names
+    interpreter.py  executes them
+    docs            `asmpython ops` prints this table; no separate reference
 
 A backend author reads this file and nothing else. That is the design target:
 if implementing a backend requires understanding a second document, the second
@@ -39,7 +39,14 @@ Values are mutable virtual registers: a register may be assigned many times.
 Where SSA would place a phi at a join, a frontend simply assigns the same
 register on both incoming paths. This removes the single hardest concept from a
 backend author's path, at the cost of making some optimisations rebuild SSA
-themselves if they want it (`passes/mem2reg.py` does exactly that, locally).
+themselves if they want it.
+
+THAT COST IS UNPAID. The pre-rewrite compiler had a `mem2reg` and this file
+used to point at it; there is no such pass in `passes/`, which holds four
+(constfold, copyprop, dce, simplifycfg) and no SSA construction at all. The
+llvm backend says the same thing from the other side -- it cannot emit until
+the mutable registers are rebuilt into SSA or spilled to an alloca each. So
+read the paragraph above as a decision whose bill has not come in yet.
 """
 from __future__ import annotations
 

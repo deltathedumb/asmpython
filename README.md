@@ -1,8 +1,10 @@
 # asmpython — a retargetable compiler
 
-A language-independent IR with pluggable frontends, backends, targets and
-toolchains. Python in, a native executable out, and no half knows about
-another.
+**APIR** -- *A Portable Intermediate Representation* -- with pluggable
+frontends, backends, targets and toolchains. Python in, a native executable
+out, and no half knows about another. The IR is written `.apir` and shipped
+as `.apirc`; neither spelling mentions Python, because nothing about the IR
+does.
 
 ```
 asmpython build prog.py                   # -> prog.exe, ready to run
