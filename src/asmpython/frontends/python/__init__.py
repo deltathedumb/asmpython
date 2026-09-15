@@ -45,7 +45,7 @@ from ...frontend import Frontend, register
 from ...ir import Module
 from .analysis import Analyzer, span_of
 from . import cffi
-from .bundled import splice
+from .bundled import _bound_locally, splice
 from .imports import splice as user_splice
 from .lower import Lowerer
 
@@ -97,11 +97,8 @@ def _warn_about_runtime_compilation(tree, source, sink):
                 if isinstance(target, ast.Name):
                     bound.add(target.id)
     said = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Name) or node.id in bound:
-            continue
-        if node.id not in _RUNTIME_COMPILER or node.id in said:
-            continue
+
+    def report(node):
         said.add(node.id)
         note = ("it answers whether source is valid Python, through the "
                 "parser bundled into this binary -- not through the compiler "
@@ -115,6 +112,25 @@ def _warn_about_runtime_compilation(tree, source, sink):
             .at(span_of(source, node))
             .note(note)
             .help("prefer a function the compiler can see and call directly"))
+
+    def walk(node, shadowed):
+        # SCOPE BY SCOPE, not `ast.walk`. The module-level `bound` above is
+        # not the whole of shadowing: a program with its own `def eval` INSIDE
+        # a function was told its own function is not recommended, naming a
+        # line that has nothing to do with the builtin. A nested scope's
+        # bindings are added on the way in and dropped on the way out, so a
+        # genuine `eval()` elsewhere in the module still gets the warning.
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.Lambda, ast.ClassDef)):
+                walk(child, shadowed | _bound_locally(child))
+                continue
+            if isinstance(child, ast.Name) and child.id in _RUNTIME_COMPILER \
+                    and child.id not in shadowed and child.id not in said:
+                report(child)
+            walk(child, shadowed)
+
+    walk(tree, bound)
 
 
 def _stringifies(tree: ast.Module) -> bool:

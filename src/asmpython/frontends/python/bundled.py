@@ -79,10 +79,25 @@ def _mangled(module: str, name: str, prefix: str = None) -> str:
     return f"{prefix or _MANGLE}{len(escaped)}_{escaped}_{name}"
 
 
-#: The builtins that need a compiler at run time, and the bundled module
-#: that provides them. A program naming one gets it spliced in.
-_RUNTIME_COMPILER = {"compile": "_pycompile",
-                     "eval": "_pyrun", "exec": "_pyrun"}
+#: BUILTINS A BUNDLED MODULE PROVIDES, and the module that provides each. A
+#: program naming one gets that module spliced in, which is the whole
+#: mechanism: nothing imports a builtin, so the name APPEARING is the only
+#: signal there is.
+#:
+#: `open` IS HERE BECAUSE THE FILE OBJECTS ALREADY EXISTED. `io.open` and
+#: everything under it -- `_RawFile`, `_TextReader`, `_TextWriter`, the modes,
+#: the context manager, the line iteration -- were written and correct, and
+#: the builtin name was simply never pointed at them, so `open(p)` was
+#: `call to unknown function 'open'` while `io.open(p)` worked. Files were
+#: reachable only through `pathlib`'s whole-file `read_text`/`write_text`.
+#:
+#: WHAT IT COSTS is `io` spliced into any program that says `open` -- the same
+#: bargain `eval` already makes for `_pyrun`, and a better one, because a
+#: program that opens a file was always going to want the module that opens
+#: files.
+_BUNDLED_BUILTINS = {"compile": "_pycompile",
+                     "eval": "_pyrun", "exec": "_pyrun",
+                     "open": "io"}
 
 
 def module_of(mangled: str) -> str | None:
@@ -255,8 +270,31 @@ def _bound_locally(node) -> set:
         if isinstance(inner, ast.Name) and isinstance(inner.ctx,
                                                       (ast.Store, ast.Del)):
             out.add(inner.id)
+        elif isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                ast.ClassDef)):
+            # A NESTED `def` OR `class` BINDS ITS NAME, and this did not
+            # collect one -- so `def f(): def open(p): ...` left `open`
+            # looking like the builtin and the body was rewritten to the
+            # bundled `io.open`, calling something else entirely. The walk
+            # starts AT `node`, so this adds the function's own name too;
+            # `_Rename` already subtracts it, which is what that subtraction
+            # was for.
+            out.add(inner.name)
         elif isinstance(inner, ast.arg):
             out.add(inner.arg)
+        elif isinstance(inner, ast.ExceptHandler) and inner.name:
+            # THE BINDINGS THAT ARE PLAIN STRINGS, which a walk over `Name`
+            # nodes cannot see: `except E as open`, `import io as open`, and
+            # `case _ as open`. Each binds the name as surely as `open = ...`
+            # does, and each was invisible here.
+            out.add(inner.name)
+        elif isinstance(inner, (ast.Import, ast.ImportFrom)):
+            for alias in inner.names:
+                out.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(inner, ast.MatchAs) and inner.name:
+            out.add(inner.name)
+        elif isinstance(inner, ast.MatchStar) and inner.name:
+            out.add(inner.name)
         elif isinstance(inner, (ast.Global, ast.Nonlocal)):
             # DECLARED TO BE THE OUTER ONE, so it is not local after all.
             out.difference_update(inner.names)
@@ -300,9 +338,9 @@ def _dependencies(wanted, have):
         # `compile` from being rewritten to somebody else's.
         own = _module_bindings(tree)
         for node in ast.walk(tree):
-            if isinstance(node, ast.Name) and node.id in _RUNTIME_COMPILER \
+            if isinstance(node, ast.Name) and node.id in _BUNDLED_BUILTINS \
                     and node.id not in own:
-                visit(_RUNTIME_COMPILER[node.id])
+                visit(_BUNDLED_BUILTINS[node.id])
         order.append(name)
 
     for one in dict.fromkeys(wanted):
@@ -353,7 +391,7 @@ class _Rename(ast.NodeTransformer):
             node.id = _mangled(self.module, node.id, self.prefix)
         elif node.id in self.borrowed:
             node.id = self.borrowed[node.id]
-        elif node.id in _RUNTIME_COMPILER and self.members is not None:
+        elif node.id in _BUNDLED_BUILTINS and self.members is not None:
             # `eval`, `exec` AND `compile` IN A BUNDLED MODULE'S OWN BODY.
             # They are builtins, so nothing imports them and neither
             # `defined` nor `borrowed` has them -- the name went through
@@ -369,7 +407,7 @@ class _Rename(ast.NodeTransformer):
             # that names `eval` in a program where `_pyrun` was somehow not
             # brought in keeps the builtin's own refusal rather than being
             # rewritten to a name that does not exist.
-            provider = _RUNTIME_COMPILER[node.id]
+            provider = _BUNDLED_BUILTINS[node.id]
             if node.id in self.members.get(provider, ()):
                 node.id = _mangled(provider, node.id, self.prefix)
         return node
@@ -449,6 +487,33 @@ class _Rewrite(ast.NodeTransformer):
         self.members = members
         #: local name -> mangled, for `from functools import reduce`
         self.names = names
+        #: Names the enclosing function bodies bind, as `_Rename` keeps for
+        #: the other half of the same job. Only the BUILTIN rewrites below
+        #: consult it, and they have to: a program with its own `open` in a
+        #: function means its own, and the rewrite sent the call to `io`
+        #: without saying so. A module-level binding was already safe by a
+        #: different road -- it stops the provider being spliced at all, so
+        #: `members` is empty and the branch never fires -- which is why this
+        #: only ever went wrong one scope down.
+        self.shadowed: set = set()
+
+    def _scoped(self, node):
+        """Visit a function body with the names it binds held aside."""
+        outer = self.shadowed
+        self.shadowed = outer | _bound_locally(node)
+        try:
+            self.generic_visit(node)
+        finally:
+            self.shadowed = outer
+        return node
+
+    def visit_FunctionDef(self, node):
+        return self._scoped(node)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_Lambda(self, node):
+        return self._scoped(node)
 
     def visit_Name(self, node: ast.Name) -> ast.Name:
         # REWRITTEN, not bound to a variable. Binding `wraps = <mangled>` made
@@ -462,6 +527,10 @@ class _Rewrite(ast.NodeTransformer):
         # rather than by convention. Rewritten only when the program brought
         # `sys` in -- without it there is nothing to have replaced the hook,
         # and the builtin's own no-op is the whole behaviour.
+        if node.id in self.shadowed:
+            # THE PROGRAM'S OWN, in this scope. Every rewrite below replaces a
+            # BUILTIN name, and a name the body binds is not one.
+            return node
         if node.id == "breakpoint"                 and "breakpointhook" in self.members.get("sys", ()):
             node.id = _mangled("sys", "breakpointhook")
         # `print` GOES THROUGH `sys.stdout` ONLY FOR A PROGRAM THAT REPLACES
@@ -470,11 +539,10 @@ class _Rewrite(ast.NodeTransformer):
         # of what they need.
         if node.id == "print" and self.redirects:
             node.id = _mangled("sys", "_print")
-        # `compile()` IS THE BUNDLED ONE, and so are `eval` and `exec`.
-        # See `_RUNTIME_COMPILER`: the names are builtins, so nothing
-        # imports them, and the module is spliced because the name
-        # appears at all.
-        module = _RUNTIME_COMPILER.get(node.id)
+        # `open()`, `compile()`, `eval()` and `exec()` ARE THE BUNDLED ONES.
+        # See `_BUNDLED_BUILTINS`: the names are builtins, so nothing imports
+        # them, and the module is spliced because the name appears at all.
+        module = _BUNDLED_BUILTINS.get(node.id)
         if module is not None and node.id in self.members.get(module, ()):
             node.id = _mangled(module, node.id, self.prefix)
         return node
@@ -514,11 +582,11 @@ def splice(tree: ast.Module, source, sink) -> ast.Module:
     # silently send it somewhere else.
     bound = _module_bindings(tree)
     uses = {name for node in ast.walk(tree)
-            if isinstance(node, ast.Name) and node.id in _RUNTIME_COMPILER
+            if isinstance(node, ast.Name) and node.id in _BUNDLED_BUILTINS
             and node.id not in bound
             for name in (node.id,)}
     for one in sorted(uses):
-        wanted.append(_RUNTIME_COMPILER[one])
+        wanted.append(_BUNDLED_BUILTINS[one])
     if uses:
         at = at or next((n for n in ast.walk(tree)
                          if isinstance(n, ast.Name) and n.id in uses), None)

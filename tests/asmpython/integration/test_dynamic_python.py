@@ -2685,6 +2685,86 @@ PROGRAMS = {
         show("a user method", lambda: Box([1]).get(2))
         show("a parameter", lambda: shadowed({1: 5}))
     """,
+    "a_builtin_a_bundled_module_provides_is_still_shadowable": """
+        # `open`, `eval`, `exec` and `compile` ARE BUNDLED MODULES' FUNCTIONS
+        # here: nothing imports a builtin, so the name APPEARING is the only
+        # signal there is, and `_BUNDLED_BUILTINS` rewrites it to the spliced
+        # definition. A program that binds the name itself means its own --
+        # and one scope down, it did not get it.
+        #
+        # A MODULE-LEVEL BINDING WAS ALREADY SAFE, by a different road: it
+        # stops the provider being spliced at all, so the members table is
+        # empty and the rewrite cannot fire. A binding inside a function had
+        # no such luck, and `open` is the name programs shadow most.
+        #
+        # THE BINDINGS THAT ARE PLAIN STRINGS were the last to be found:
+        # `except E as open`, `import io as open` and `case _ as open` bind
+        # the name as surely as an assignment, and none of them is a `Name`
+        # node for a walk to see.
+        def show(label, f):
+            try:
+                print(label, "->", f())
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        def a_parameter(open):
+            return open("p")
+
+        def an_assignment():
+            open = lambda x: "assigned:" + x
+            return open("a")
+
+        def a_nested_def():
+            def open(x):
+                return "nested:" + x
+            return open("n")
+
+        def a_loop_target():
+            seen = []
+            for open in ["x", "y"]:
+                seen.append(open)
+            return seen
+
+        def a_lambda_parameter():
+            return (lambda open: open * 2)("z")
+
+        def an_except_name():
+            try:
+                raise ValueError("caught")
+            except ValueError as open:
+                return str(open)
+
+        def a_with_name():
+            class Held:
+                def __enter__(self):
+                    return "held"
+                def __exit__(self, *rest):
+                    return False
+            with Held() as open:
+                return open
+
+        def its_own_eval():
+            def eval(text):
+                return "mine:" + text
+            return eval("1+1")
+
+        def its_own_compile():
+            compile = 5
+            return compile + 1
+
+        show("a parameter", lambda: a_parameter(lambda x: "param:" + x))
+        show("an assignment", an_assignment)
+        show("a nested def", a_nested_def)
+        show("a loop target", a_loop_target)
+        show("a lambda parameter", a_lambda_parameter)
+        show("an except name", an_except_name)
+        show("a with name", a_with_name)
+        show("its own eval", its_own_eval)
+        show("its own compile", its_own_compile)
+        # AND THE BUILTIN IS STILL THE BUILTIN where nothing took the name --
+        # the shadowing is per scope, not per module.
+        show("still the builtin", lambda: open("no-such-file-here-at-all"))
+    """,
     "a_generator_names_the_def_it_came_from": """
         # `repr(gen())` WAS `<generator object at 0x...>` -- CPython writes the
         # qualified name of the `def` between `object` and `at`, and a program

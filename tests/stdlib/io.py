@@ -232,5 +232,40 @@ try:
 except FileNotFoundError:
     print("open missing rb+: FileNotFoundError")
 
+# ---- the BUILTIN `open` ------------------------------------------------------
+# It is `io.open`, and it was unbound: `open(p)` was `call to unknown function
+# 'open'` while every line above worked. The file objects existed the whole
+# time; only the name pointing at them was missing.
+
+with open(_PATH, "w") as f:
+    f.write("builtin one\nbuiltin two\n")
+with open(_PATH) as f:
+    print("builtin read:", repr(f.read()))
+with open(_PATH) as f:
+    print("builtin lines:", [line.rstrip("\n") for line in f])
+with open(_PATH) as f:
+    print("builtin readlines:", f.readlines())
+with open(_PATH, "rb") as f:
+    print("builtin binary:", f.read())
+with open(_PATH, "a") as f:
+    f.write("builtin three\n")
+with open(_PATH) as f:
+    print("builtin appended:", len(f.readlines()))
+
+# `open` IS `io.open`, not a second implementation beside it.
+print("same function:", open is io.open)
+
+# AN UNKNOWN MODE LETTER IS INVALID, not unimplemented -- CPython checks the
+# letters before anything else.
+try:
+    open(_PATH, "q")
+except ValueError as exc:
+    print("bad mode:", exc)
+
+try:
+    open("apy-io-case-missing.txt")
+except FileNotFoundError:
+    print("builtin missing: FileNotFoundError")
+
 _cleanup()
 print("done")

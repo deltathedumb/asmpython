@@ -748,6 +748,14 @@ def open(file, mode="r", buffering=-1, encoding=None, errors=None,
     if newline is not None:
         _refuse("open(newline=" + repr(newline) + ")")
 
+    # AN UNKNOWN MODE LETTER IS INVALID, not unimplemented, and CPython says
+    # so before it looks at anything else: `open(p, "q")` is
+    # `ValueError: invalid mode: 'q'`. Refusing it as unimplemented claimed
+    # this module might grow a mode Python does not have.
+    for letter in mode:
+        if letter not in "rwxabt+":
+            raise ValueError("invalid mode: " + repr(mode))
+
     binary = "b" in mode
     plus = "+" in mode
     base = mode.replace("b", "").replace("t", "").replace("+", "")
