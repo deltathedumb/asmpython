@@ -317,21 +317,35 @@ class Parser:
                 self.sema.error("E1202", "sizeof of a function", t.span,
                                 note="a function has no size")
                 return self.sema.poison(t.span)
+            if isinstance(operand, S.MemberAccess) and operand.path \
+                    and operand.path[-1].is_bitfield:
+                # A BIT-FIELD IS NOT AN OBJECT of its declared type: it is
+                # some bits inside one, and the answer would have to be the
+                # container's size, which is not what anybody asking means.
+                # C forbids the question rather than picking an answer.
+                self.sema.error(
+                    "E1226", "`sizeof` of a bit-field", t.span,
+                    note="a bit-field is part of an object, not one of its "
+                         "own", help="ask for the width you declared")
+                return self.sema.poison(t.span)
             return self._sizeof_type(operand.type, t.span, False, operand)
         return self.postfix(self.primary())
 
     def _sizeof_type(self, ty: CType, span: Span, alignment: bool,
                      operand: S.Expr | None = None) -> S.Expr:
         if ty.unqualified().is_void:
-            # ANOTHER GNU EXTENSION KEPT WITH A DIAGNOSTIC: `void` is an
-            # incomplete type that can never be completed, so C makes this a
-            # constraint violation; gcc answers 1 so that `p + 1` on a
-            # `void *` means what everybody writes it to mean, and so does
-            # this. The warning is the diagnostic C requires.
-            self.sema.warn(
-                "W1202", f"`{'_Alignof' if alignment else 'sizeof'}` of "
+            # REFUSED, AND NOT WARNED ABOUT. gcc answers 1 here as an
+            # extension, and the reason it is worth having is that it makes
+            # `p + 1` on a `void *` mean something -- which this frontend
+            # refuses outright (E1419), as C says to. Allowing half of the
+            # extension would leave `sizeof(void)` an answer with nothing to
+            # do: the two decisions have to be the same one.
+            self.sema.error(
+                "E1203", f"`{'_Alignof' if alignment else 'sizeof'}` of "
                          f"`void`", span,
-                note="C gives `void` no size; this answers 1, as gcc does")
+                note="`void` is an incomplete type and has no size",
+                help="did you mean `sizeof(void *)`?")
+            return self.sema.poison(span)
         node = S.SizeofType(span, C.SIZE_T, False, ty, None, alignment)
         if ty.is_vla and not alignment:
             node.dynamic = self.sema.vla_size(ty, span)
@@ -384,15 +398,7 @@ class Parser:
                 e = self.sema.build_member(e, name.text, arrow, t.span)
             elif self.at("++", "--"):
                 self.next()
-                if not self.sema.modifiable(
-                        e, "increment" if t.text == "++" else "decrement"):
-                    return self.sema.poison(t.span)
-                scale = (self.sema.scale_of(e.type.of, t.span)
-                         if e.type.is_pointer else 1)
-                node = S.Unary(t.span, e.type.unqualified(), False, t.text, e,
-                               True)
-                node.scale = scale
-                e = node
+                e = self.sema.build_incdec(t.text, e, t.span, postfix=True)
             else:
                 return e
 
@@ -1468,6 +1474,12 @@ class Parser:
 
             def build_array(base: CType, count=count, vla=vla) -> CType:
                 inner = rest(base)
+                if inner.unqualified().is_void:
+                    self.sema.error(
+                        "E1238", "an array of `void`", open_tok.span,
+                        note="every element of an array has a size, and "
+                             "`void` has not got one")
+                    return C.array_of(C.CHAR, count)
                 if inner.is_function:
                     self.sema.error("E1237", "an array of functions", open_tok.span,
                                     help="use an array of function pointers")

@@ -309,11 +309,13 @@ anonymous members, `_Generic`, designated initialisers, compound literals
 (including at file scope, where one is a static object whose address is a
 constant), `__VA_OPT__`, K&R definitions, statement expressions, and GNU's
 `__typeof__` and `__restrict` spellings because real headers use them —
-along with three that C forbids and gcc allows, each kept *with the
-diagnostic C requires* rather than silently: a zero-length array,
-a structure with no members, and `sizeof(void)`, which is 1 so that `p + 1`
-on a `void *` means what everybody writes it to mean. The program still
-compiles; a warning is a diagnostic — and
+along with two that C forbids and gcc allows, each kept *with the
+diagnostic C requires* rather than silently: a zero-length array, because
+real headers use the struct hack, and a structure with no members. The
+program still compiles; a warning is a diagnostic. `void *` arithmetic and
+`sizeof(void)` are the extensions *not* kept, and the two decisions are one:
+gcc's `sizeof(void)` of 1 is only worth having to make `p + 1` mean
+something, so allowing half of it would leave an answer with nothing to do — and
 C23's own: `_BitInt(N)` up to `BITINT_MAXWIDTH`, which is 64 — what C23
 requires and no more — and which is *not* promoted, so `a + b` on two
 `_BitInt(4)`s wraps at four bits; `constexpr` objects whose name is a

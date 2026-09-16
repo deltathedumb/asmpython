@@ -174,6 +174,23 @@ class TestItRefusesWithAReason:
         ("int f(double restrict d){ return (int)d; }", "E1218"),
         # A BIT-FIELD HAS NO ADDRESS for an alignment to be a property of.
         ("struct s { _Alignas(8) int b : 3; };", "E1225"),
+        # `void` HAS NO SIZE, and gcc's extension answering 1 is only worth
+        # having to make `void *` arithmetic work -- which this refuses, as
+        # C says to. Half an extension would be an answer with nothing to do.
+        ("int n = sizeof(void);", "E1203"),
+        ("int n = _Alignof(void);", "E1203"),
+        ("void f(void a[3]);", "E1238"),
+        # A BIT-FIELD IS PART OF AN OBJECT and not one of its own.
+        ("struct s{int b:3;}; int n(struct s v){ return (int)sizeof v.b; }",
+         "E1226"),
+        # AND THE TWO SPELLINGS OF ONE OPERATOR AGREE. The postfix form had
+        # its own copy of the checks, missing two of them.
+        ("void f(void *p){ p++; }", "E1413"),
+        ("void f(void){ _Complex double z = 0; z++; }", "E1414"),
+        # 6.10.9.3: the seven predefined names and `defined`.
+        ("#define __LINE__ 5", "E1124"),
+        ("#undef __STDC_VERSION__", "E1124"),
+        ("#undef defined", "E1123"),
     ])
     def test_a_constraint_violation_with_no_sensible_reading(self, source,
                                                              code):
@@ -189,10 +206,14 @@ class TestItRefusesWithAReason:
         ("int a[0];", "W1236"),
         ("struct s { };", "W1221"),
         ("union u { };", "W1221"),
-        ("int n = sizeof(void);", "W1202"),
-        ("int n = _Alignof(void);", "W1202"),
-        # And this one C asks for outright.
+        # And these C asks for outright.
         ("int a[2] = {1, 2, 3};", "W1243"),
+        # UNDEFINED RATHER THAN A VIOLATION, so C asks for nothing -- but a
+        # constant that can only be wrong is worth a word.
+        ("int f(int x){ return x / 0; }", "W1417"),
+        ("int f(int x){ return x % 0; }", "W1417"),
+        ("int f(int x){ return x << -1; }", "W1418"),
+        ("int f(int x){ return x << 40; }", "W1418"),
     ])
     def test_an_extension_is_diagnosed_and_still_compiles(self, source, code):
         module, sink = compile_c(source + "\nint main(void){ return 0; }\n")
@@ -209,6 +230,13 @@ class TestItRefusesWithAReason:
         "int a[3];",
         "int n = sizeof(int);",
         "int a[2] = {1, 2};",
+        "int f(int x){ return x << 3; }",
+        "long f(long x){ return x << 40; }",
+        "int f(int x, int y){ return x / y; }",
+        "int f(int *p){ return *p++; }",
+        "struct s{int b;}; int n(struct s v){ return (int)sizeof v.b; }",
+        "#define Q 1\n#undef Q\nint q = 1;",
+        "#define __STDC_WANT_LIB_EXT1__ 1\nint q = 1;",
     ])
     def test_and_the_valid_spellings_stay_quiet(self, source):
         module, sink = compile_c(source + "\nint main(void){ return 0; }\n")

@@ -459,6 +459,19 @@ class Sema:
             return e
         return S.Unary(span, target, True, "*", e)
 
+    def build_incdec(self, op: str, operand: S.Expr, span: Span, *,
+                     postfix: bool) -> S.Expr:
+        """`x++` and `++x`, both through here.
+
+        THE PARSER USED TO HAVE ITS OWN COPY of this for the postfix form,
+        with the modifiable check and without the other two -- so `p++` on
+        a `void *` and `z++` on a `_Complex` were accepted where `++p` and
+        `++z` were refused. Two spellings of one operator cannot disagree
+        about what they accept, and the only way to be sure of that is for
+        there to be one of it.
+        """
+        return self._incdec(op, operand, span, postfix)
+
     def _incdec(self, op: str, operand: S.Expr, span: Span,
                 postfix: bool) -> S.Expr:
         what = "increment" if op == "++" else "decrement"
@@ -514,6 +527,8 @@ class Sema:
         if op in ("*", "/"):
             if not (a.type.is_arithmetic and b.type.is_arithmetic):
                 return self._operand_error(op, a, b, span, "arithmetic")
+            if op == "/":
+                self._check_divisor(op, b, span)
             t = C.usual_arithmetic(a.type, b.type)
             return S.Binary(span, t, False, op,
                             self.convert(a, t, "usual arithmetic"),
@@ -521,6 +536,7 @@ class Sema:
         if op == "%":
             if not (a.type.is_integer and b.type.is_integer):
                 return self._operand_error(op, a, b, span, "integer")
+            self._check_divisor(op, b, span)
             t = C.usual_arithmetic(a.type, b.type)
             return S.Binary(span, t, False, op,
                             self.convert(a, t, "usual arithmetic"),
@@ -540,6 +556,7 @@ class Sema:
             # usual arithmetic conversions do not apply to a shift, and using
             # them here silently widens a mask.
             t = C.promote(a.type)
+            self._check_shift(op, t, b, span)
             return S.Binary(span, t, False, op,
                             self.convert(a, t, "promotion"),
                             self.convert(b, C.promote(b.type), "promotion"))
@@ -548,6 +565,34 @@ class Sema:
         if op in ("==", "!="):
             return self._equality(op, a, b, span)
         raise AssertionError(op)
+
+    def _check_divisor(self, op: str, b: S.Expr, span: Span) -> None:
+        """`x / 0`. UNDEFINED RATHER THAN A CONSTRAINT VIOLATION, so C asks
+        for nothing -- but a constant zero divisor is never what anybody
+        meant, and it is the sort of thing a macro produces by accident."""
+        from .fold import fold
+        got = fold(b)
+        if isinstance(got, (int, float)) and not isinstance(got, bool) \
+                and got == 0:
+            self.warn("W1417", f"the right operand of `{op}` is zero", b.span,
+                      note="the behaviour of a division by zero is undefined")
+
+    def _check_shift(self, op: str, t: CType, b: S.Expr, span: Span) -> None:
+        """A shift count outside `[0, width)`. Undefined again, and again
+        worth a word: it is a whole-number answer that cannot be right."""
+        from .fold import fold_int
+        got = fold_int(b)
+        if got is None:
+            return
+        width = t.bits
+        if got < 0:
+            self.warn("W1418", f"the shift count of `{op}` is negative",
+                      b.span, note="the behaviour is undefined")
+        elif got >= width:
+            self.warn("W1418",
+                      f"the shift count of `{op}` is {got}, and "
+                      f"{C.spell(t)} is {width} bits wide", b.span,
+                      note="the behaviour is undefined")
 
     def _operand_error(self, op: str, a: S.Expr, b: S.Expr, span: Span,
                        want: str) -> S.Expr:

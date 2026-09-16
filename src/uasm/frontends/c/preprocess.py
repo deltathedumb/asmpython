@@ -526,6 +526,21 @@ class Preprocessor:
         return self._find(name, angled, at) is not None, i
 
     # ── #define / #undef ────────────────────────────────────────────────────
+    #: THE NAMES A PROGRAM MAY NOT REDEFINE. C lists these seven and the
+    #: identifier `defined` in 6.10.9.3; `defined` is a "shall not" and so a
+    #: constraint violation, and the seven are undefined behaviour, which is
+    #: worse rather than better. Both are refused, because the program that
+    #: writes `#define __LINE__ 5` has confused itself and every diagnostic
+    #: after it would point at the wrong line.
+    #:
+    #: NOT THE WHOLE `__STDC_` NAMESPACE, which is reserved but not
+    #: protected: a program that defines `__STDC_WANT_LIB_EXT1__` before
+    #: including a header is doing what C tells it to.
+    _PROTECTED = frozenset({
+        "__DATE__", "__FILE__", "__LINE__", "__STDC__", "__STDC_HOSTED__",
+        "__STDC_VERSION__", "__TIME__",
+    })
+
     def _define(self, rest: list[Token], at: Token) -> None:
         if not rest or rest[0].kind is not Kind.IDENT:
             self.sink.report(
@@ -537,6 +552,13 @@ class Preprocessor:
             self.sink.report(
                 error("E1123", "`defined` cannot be used as a macro name")
                 .at(name_tok.span))
+            return
+        if name in self._PROTECTED:
+            self.sink.report(
+                error("E1124", f"`{name}` is predefined and cannot be "
+                               f"redefined").at(name_tok.span)
+                .note("C reserves the seven predefined macro names and "
+                      "`defined` from `#define` and `#undef`"))
             return
         params: list[str] | None = None
         variadic = False
@@ -623,7 +645,20 @@ class Preprocessor:
             self.sink.report(
                 error("E1130", "#undef needs a macro name").at(at.span))
             return
-        self.macros.pop(rest[0].text, None)
+        name = rest[0].text
+        if name == "defined":
+            self.sink.report(
+                error("E1123", "`defined` cannot be used as a macro name")
+                .at(rest[0].span))
+            return
+        if name in self._PROTECTED:
+            self.sink.report(
+                error("E1124", f"`{name}` is predefined and cannot be "
+                               f"undefined").at(rest[0].span)
+                .note("C reserves the seven predefined macro names and "
+                      "`defined` from `#define` and `#undef`"))
+            return
+        self.macros.pop(name, None)
         self._expect_end(rest[1:], "#undef")
 
     # ── #include ────────────────────────────────────────────────────────────
