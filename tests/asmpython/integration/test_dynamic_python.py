@@ -8752,6 +8752,116 @@ PROGRAMS = {
         show("only getitem unpack",
              lambda: (lambda a, b, c: (a, b, c))(*OnlyGet()))
     """,
+    "a_surplus_positional_argument_is_refused_and_not_dropped": """
+        # A CALL WITH MORE POSITIONAL ARGUMENTS THAN THE FUNCTION DECLARES
+        # answered, silently, from the first few. `two(0, 1, 2)` gave
+        # `(0, 1)` on the interpreter and on both compiled runtimes -- a
+        # WRONG ANSWER where CPython raises, and the one shape of mistake a
+        # caller is least likely to catch by reading the output.
+        #
+        # THE PACKING CAPS WHAT IT COPIES at the positional capacity, so the
+        # count compared afterwards could only ever come out too SMALL: every
+        # surplus was gone before anything looked. The count is taken from
+        # what the CALL WROTE instead, ahead of the packing.
+        #
+        # AND THE FOUR WORDINGS ARE ONE FAMILY. Which end the count fell off,
+        # and whether a default makes the low end a range:
+        #
+        #     f() takes 2 positional arguments but 3 were given
+        #     f() takes from 1 to 2 positional arguments but 3 were given
+        #     f() missing 1 required positional argument: 'b'
+        #     f() missing 2 required keyword-only arguments: 'k' and 'j'
+        #
+        # `self` IS COUNTED AT BOTH ENDS of the `takes` message and at
+        # neither end of the `missing` one, and the function is named by its
+        # QUALNAME -- `C.m()`, `outer.<locals>.inner()` -- which is what sent
+        # a reader of `__init__() missing ...` looking for a free function.
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except TypeError as e:
+                print(label, "TypeError:", e)
+
+        def two(a, b):
+            return (a, b)
+
+        def one(a):
+            return a
+
+        def withdef(a, b=9):
+            return (a, b)
+
+        def withrest(a, *rest):
+            return (a, rest)
+
+        def kwonly(a, *, k=1):
+            return (a, k)
+
+        def needskw(a, *, k):
+            return (a, k)
+
+        def needstwokw(a, *, k, j):
+            return (a, k, j)
+
+        def dfl(a, b=1, *, k=0):
+            return (a, b, k)
+
+        def kwrest(a, **kw):
+            return (a, kw)
+
+        def outer():
+            def inner(a, b):
+                return (a, b)
+            return inner
+
+        class C:
+            def m(self, a):
+                return a
+
+        class D:
+            def __init__(self, a, *, k):
+                self.a = a
+
+        class E:
+            def __init__(self, a, b=2):
+                self.a = a
+
+        # A SURPLUS IS REFUSED, written out and splatted alike.
+        show("surplus", lambda: two(0, 1, 2))
+        show("surplus splat", lambda: two(*[0, 1, 2]))
+        show("surplus two over", lambda: two(*[0, 1, 2, 3]))
+        show("surplus of one", lambda: one(1, 2))
+        show("surplus lambda", lambda: (lambda a, b: (a, b))(*[0, 1, 2]))
+        # A DEFAULT MAKES THE LOW END A RANGE.
+        show("surplus with default", lambda: withdef(0, 1, 2))
+        # A KEYWORD-ONLY PARAMETER IS NOT A POSITION.
+        show("surplus past kwonly", lambda: kwonly(0, 1))
+        # `*rest` IS WHAT A SURPLUS IS FOR.
+        show("rest takes it", lambda: withrest(0, 1, 2))
+        # `self` IS COUNTED, AND THE METHOD IS NAMED BY ITS CLASS.
+        show("surplus on a method", lambda: C().m(1, 2))
+        show("surplus on a class", lambda: E(1, 2, 3))
+        # TOO FEW IS SAID IN NAMES.
+        show("one short", lambda: two(0))
+        show("two short", lambda: two())
+        show("short with default", lambda: withdef())
+        show("short method", lambda: C().m())
+        show("short class", lambda: E())
+        show("short nested", lambda: outer()(1))
+        # A KEYWORD-ONLY PARAMETER IS MISSED BY NAME, never by count.
+        show("kwonly short", lambda: needskw(1))
+        show("kwonly two short", lambda: needstwokw(1))
+        # A SURPLUS ALONGSIDE KEYWORDS COUNTS THEM SEPARATELY.
+        show("surplus and kwonly", lambda: needskw(1, 2, k=3))
+        show("surplus range and kwonly", lambda: dfl(1, 2, 3, k=1))
+        show("surplus and kwrest", lambda: kwrest(1, 2, x=1))
+        show("surplus class and kwonly", lambda: D(1, 2, k=1))
+        # AND A CALL THAT FITS STILL ANSWERS.
+        show("exact", lambda: two(0, 1))
+        show("default taken", lambda: withdef(0))
+        show("kwonly named", lambda: needskw(1, k=2))
+        show("kwrest fits", lambda: kwrest(1, x=1))
+    """,
     "fstrings": """
         n = 42
         s = 'ab'

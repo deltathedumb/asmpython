@@ -1780,18 +1780,22 @@ class ObjectHost:
         # f(**kw)` called as `f()` gets `{}`, not nothing.
         if f.kwarg:
             slots.append(dict(kwrest) if kwrest else {})
+        # A SURPLUS POSITIONAL IS AN ERROR, not something to drop. The
+        # packing above CAPS what it copies at the positional capacity, so
+        # the length compared below can only ever come out too SMALL -- which
+        # is exactly how `two(0, 1, 2)` answered `(0, 1)` instead of
+        # refusing, on every path there is. A `*rest` is what a surplus is
+        # FOR, and `bound` says the caller matched names to slots and counted
+        # them itself, so neither is one.
+        if not bound and not f.vararg:
+            byslot = f.arity - (1 if f.kwarg else 0) - f.kwonly
+            if (1 if f.bound is not None else 0) + len(args) > byslot:
+                _fn_arity_failure(
+                    self, f, (1 if f.bound is not None else 0) + len(args), 0)
+                raise _UserFailed
         if len(slots) != f.arity:
-            # POSITIONS, not declared slots: a keyword-only parameter cannot
-            # be filled by position, so counting it told the caller to pass
-            # more positional arguments than the function accepts.
-            want = max(0, f.arity - (1 if f.bound is not None else 0)
-                       - (1 if f.vararg else 0) - (1 if f.kwarg else 0)
-                       - f.kwonly)
-            got = len(args)
-            self._fail("TypeError",
-                       f"{f.name}() takes {want} positional argument"
-                       f"{'' if want == 1 else 's'} but {got} "
-                       f"{'was' if got == 1 else 'were'} given")
+            _fn_arity_failure(self, f,
+                              (1 if f.bound is not None else 0) + len(args), 0)
             raise _UserFailed
         fn = self._interp.module.functions[f.code & ~_FUNC_TAG]
         # THE INTERNED HANDLE FOR AN UNBOUND FUNCTION, a fresh one only for a
@@ -7854,6 +7858,104 @@ def _meth_kind(v) -> str:
     return _METH_KIND.get(type(v), type(v).__name__)
 
 
+def _name_list(names, start: int, stop: int) -> str:
+    """CPython's list of parameter names: `'a'`, `'a' and 'b'`, then
+    `'a', 'b', and 'c'`. The Oxford comma appears only from three on, which
+    is why the separator cannot be chosen from the position alone."""
+    got = [f"'{names[i] or '?'}'" for i in range(start, stop)]
+    if len(got) < 3:
+        return " and ".join(got)
+    return ", ".join(got[:-1]) + ", and " + got[-1]
+
+
+def _fn_arity_failure(h, f, given: int, kwo: int) -> None:
+    """Word the arity of a function the program wrote as CPython words it.
+
+    Four messages, and they are one family: which end the count fell off, and
+    whether a default makes the low end a RANGE rather than a number.
+
+        f() takes 2 positional arguments but 3 were given
+        f() takes from 1 to 2 positional arguments but 3 were given
+        f() missing 1 required positional argument: 'b'
+        f() missing 2 required keyword-only arguments: 'k' and 'j'
+
+    `given` COUNTS THE RECEIVER, because CPython does: `C().m(1, 2)` is
+    `C.m() takes 2 positional arguments but 3 were given`, self included at
+    both ends. The caller adds it, because only the caller knows whether the
+    receiver is on the function (a bound method) or still ahead of it (a
+    class being instantiated).
+
+    `kwo` is how many keywords landed on KEYWORD-ONLY parameters, which
+    CPython names in the surplus message and nowhere else.
+
+    NAMED BY ITS QUALNAME -- `C.m()`, `outer.<locals>.inner()` -- with the
+    plain name for a function that never got one. Fails through `h._fail`
+    and leaves the raise to the caller, the same shape `_meth_positional`
+    has.
+    """
+    who = f.qualname or f.name
+    declared = f.arity - (1 if f.vararg else 0) - (1 if f.kwarg else 0)
+    bypos = max(0, declared - f.kwonly)
+    # ONLY A POSITIONAL PARAMETER'S DEFAULT widens the low end. The
+    # keyword-only defaults sit past `bypos`, and counting those said
+    # `takes from 0 to 1 positional arguments` for `def f(a, *, k=0)`.
+    ndef = max(0, len(f.defaults) - (getattr(f, "nkwdefault", 0) or 0))
+    least = max(0, bypos - ndef)
+
+    if given > bypos and not f.vararg:
+        if least == bypos:
+            lead = (f"{who}() takes {bypos} positional "
+                    f"argument{'' if bypos == 1 else 's'}")
+        else:
+            lead = (f"{who}() takes from {least} to {bypos} "
+                    f"positional arguments")
+        # A KEYWORD-ONLY ARGUMENT IS COUNTED SEPARATELY OR NOT AT ALL --
+        # CPython switches the whole tail of the sentence on whether one was
+        # passed, rather than adding a clause to it.
+        if kwo > 0:
+            h._fail("TypeError",
+                    f"{lead} but {given} positional "
+                    f"argument{'' if given == 1 else 's'} (and {kwo} "
+                    f"keyword-only argument{'' if kwo == 1 else 's'}) "
+                    f"were given")
+        else:
+            h._fail("TypeError", f"{lead} but {given} "
+                                 f"{'was' if given == 1 else 'were'} given")
+        return
+    # TOO FEW IS SAID IN NAMES, not in a count of what the function takes.
+    # The names still wanted start where the arguments ran out -- and that
+    # index already skips a receiver, which is why `given` counts it.
+    if given < least and f.pnames and least <= len(f.pnames):
+        n = least - given
+        h._fail("TypeError",
+                f"{who}() missing {n} required positional "
+                f"argument{'' if n == 1 else 's'}: "
+                f"{_name_list(f.pnames, given, least)}")
+        return
+    # A REQUIRED KEYWORD-ONLY PARAMETER IS MISSED BY NAME and never by count:
+    # no position could have reached it, so a message about how many
+    # positional arguments the function takes sends the reader to the wrong
+    # half of the signature. They are the parameters past `bypos` that the
+    # trailing keyword defaults do not cover.
+    end = declared - (getattr(f, "nkwdefault", 0) or 0)
+    if f.kwonly and f.pnames and bypos < end <= len(f.pnames):
+        n = end - bypos
+        h._fail("TypeError",
+                f"{who}() missing {n} required keyword-only "
+                f"argument{'' if n == 1 else 's'}: "
+                f"{_name_list(f.pnames, bypos, end)}")
+        return
+    # NOTHING THE FAMILY ABOVE COVERS -- a function whose parameter names the
+    # frontend never recorded, or a count wrong in some way the signature does
+    # not explain. The plainer wording, with the receiver taken back out of
+    # the number because that wording never counted it.
+    got = given - (1 if f.bound is not None else 0)
+    h._fail("TypeError",
+            f"{f.name}() takes {bypos} positional argument"
+            f"{'' if bypos == 1 else 's'} but {got} "
+            f"{'was' if got == 1 else 'were'} given")
+
+
 def _meth_positional(h, f, args) -> bool:
     """Refuse this many POSITIONAL arguments to a bound builtin method, for
     the two whose positional bound is narrower than their total.
@@ -10141,6 +10243,11 @@ def _call_kwargs(h, f, args, kwargs):
     # is the layout `_invoke(bound=True)` reads.
     extra = args[bypos:]
     rest = {} if target.kwarg else None
+    # COUNTED FOR THE REFUSAL AND NOTHING ELSE. A surplus positional
+    # alongside these is worded by CPython as `3 positional arguments (and 1
+    # keyword-only argument)`, and this loop is the only place that can tell
+    # a keyword-only landing from any other.
+    kwonly_given = 0
     for name, value in kwargs.items():
         try:
             at = target.pnames.index(name) - skip
@@ -10180,14 +10287,29 @@ def _call_kwargs(h, f, args, kwargs):
         while len(slots) <= at:
             slots.append(_MISSING)
         slots[at] = value
+        if at >= bypos:
+            kwonly_given += 1
+    # A SURPLUS POSITIONAL IS AN ERROR, not something to hand on. Appending
+    # it to `slots` sent it to `_invoke`, whose packing CAPS what it copies
+    # and dropped it in silence -- and by then `slots` is the width of the
+    # array the NAMES filled, so nothing downstream could say how the call
+    # was written. `*rest` is what a surplus is for; anything else refuses.
+    if extra and not target.vararg:
+        _fn_arity_failure(h, target, skip + len(args), kwonly_given)
+        return 0
     for i, value in enumerate(slots):
         if value is not _MISSING:
             continue
         d = (i + skip) - (declared - len(target.defaults))
         if d < 0 or d >= len(target.defaults):
             pname = target.pnames[i + skip] or "?"
-            return h._fail("TypeError", f"{target.name}() missing 1 required "
-                                        f"positional argument: '{pname}'")
+            # PAST `bypos` IS KEYWORD-ONLY, and CPython says so: no position
+            # could have filled the slot, so calling it positional sends the
+            # reader to the wrong half of the signature.
+            which = "keyword-only" if i >= bypos else "positional"
+            who = target.qualname or target.name
+            return h._fail("TypeError", f"{who}() missing 1 required "
+                                        f"{which} argument: '{pname}'")
         slots[i] = target.defaults[d]
     try:
         return h._value(h._invoke(f, slots + extra, kwrest=rest, bound=True))

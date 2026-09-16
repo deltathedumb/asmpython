@@ -1901,6 +1901,120 @@ static apy_value apy_arity_error(apy_value f, int64_t got) {
     return apy_fail("TypeError", buf);
 }
 
+/* CPYTHON'S LIST OF NAMES -- `'a'`, then `'a' and 'b'`, then `'a', 'b', and
+   'c'`. The Oxford comma appears only from three on, which is why the
+   separator cannot be chosen from the position alone. Truncated rather than
+   overrun: a signature wide enough to fill this is one no message was going
+   to rescue anyway. */
+static void apy_name_list(char *out, size_t cap, apy_value *names,
+                          int64_t from, int64_t to) {
+    int64_t i, n = to - from;
+    size_t at = 0;
+    out[0] = 0;
+    for (i = from; i < to; i++) {
+        const char *nm = (names && names[i]) ? APY_CSTR(names[i]) : "?";
+        const char *sep = "";
+        if (i > from) sep = (i == to - 1) ? (n > 2 ? ", and " : " and ") : ", ";
+        if (at + strlen(sep) + strlen(nm) + 3 >= cap) break;
+        at += (size_t)snprintf(out + at, cap - at, "%s'%s'", sep, nm);
+    }
+}
+
+/* THE ARITY OF A FUNCTION THE PROGRAM WROTE, worded as CPython words it.
+   Four messages, and they are one family: which end the count fell off, and
+   whether a default makes the low end a RANGE rather than a number.
+
+       f() takes 2 positional arguments but 3 were given
+       f() takes from 1 to 2 positional arguments but 3 were given
+       f() missing 1 required positional argument: 'b'
+       f() missing 2 required keyword-only arguments: 'k' and 'j'
+
+   `given` COUNTS THE RECEIVER, because CPython does: `C().m(1, 2)` is
+   `C.m() takes 2 positional arguments but 3 were given`, self included at
+   both ends. The caller adds it, because only the caller knows whether the
+   receiver is on the function (a bound method) or still ahead of it (a class
+   being instantiated).
+
+   `kwo` is how many of the keywords landed on KEYWORD-ONLY parameters, which
+   CPython names in the surplus message and nowhere else. Zero from the plain
+   positional path, which has no keywords to land.
+
+   NAMED BY ITS QUALNAME. `C.m()` and `outer.<locals>.inner()` are what
+   CPython prints, and the plain name is the fallback for a function that
+   never got one. */
+static apy_value apy_fn_arity_error(apy_value f, int64_t given, int64_t kwo) {
+    char buf[352], names[224], lead[176];
+    apy_value q = O(f)->v.fn.qualname;
+    const char *who = APY_CSTR(q ? q : O(f)->v.fn.name);
+    int64_t declared = O(f)->v.fn.arity - (O(f)->v.fn.vararg ? 1 : 0)
+                                        - (O(f)->v.fn.kwarg ? 1 : 0);
+    int64_t bypos = declared - O(f)->v.fn.kwonly;
+    /* ONLY A POSITIONAL PARAMETER'S DEFAULT widens the low end. The
+       keyword-only defaults sit past `bypos` and counting them said `takes
+       from 0 to 1 positional arguments` for `def f(a, *, k=0)`. */
+    int64_t ndef = O(f)->v.fn.ndefaults - O(f)->v.fn.nkwdefault;
+    int64_t least;
+    if (bypos < 0) bypos = 0;
+    if (ndef < 0) ndef = 0;
+    least = bypos - ndef;
+    if (least < 0) least = 0;
+
+    if (given > bypos && !O(f)->v.fn.vararg) {
+        if (least == bypos)
+            snprintf(lead, sizeof lead,
+                     "%s() takes %lld positional argument%s", who,
+                     (long long)bypos, bypos == 1 ? "" : "s");
+        else
+            snprintf(lead, sizeof lead,
+                     "%s() takes from %lld to %lld positional arguments",
+                     who, (long long)least, (long long)bypos);
+        /* A KEYWORD-ONLY ARGUMENT IS COUNTED SEPARATELY OR NOT AT ALL --
+           CPython switches the whole tail of the sentence on whether one was
+           passed, rather than adding a clause to it. */
+        if (kwo > 0)
+            snprintf(buf, sizeof buf, "%s but %lld positional argument%s "
+                     "(and %lld keyword-only argument%s) were given", lead,
+                     (long long)given, given == 1 ? "" : "s",
+                     (long long)kwo, kwo == 1 ? "" : "s");
+        else
+            snprintf(buf, sizeof buf, "%s but %lld %s given", lead,
+                     (long long)given, given == 1 ? "was" : "were");
+        return apy_fail("TypeError", buf);
+    }
+    /* TOO FEW IS SAID IN NAMES, not in a count of what the function takes.
+       The names still wanted start where the arguments ran out -- and that
+       index already skips a receiver, which is why `given` counts it. */
+    if (given < least && O(f)->v.fn.pnames) {
+        apy_name_list(names, sizeof names, O(f)->v.fn.pnames, given, least);
+        snprintf(buf, sizeof buf,
+                 "%s() missing %lld required positional argument%s: %s", who,
+                 (long long)(least - given), least - given == 1 ? "" : "s",
+                 names);
+        return apy_fail("TypeError", buf);
+    }
+    /* A REQUIRED KEYWORD-ONLY PARAMETER IS MISSED BY NAME and never by
+       count: no position could have reached it, so a message about how many
+       positional arguments the function takes sends the reader to the wrong
+       half of the signature. They are the parameters past `bypos` that the
+       trailing keyword defaults do not cover. */
+    if (O(f)->v.fn.kwonly && O(f)->v.fn.pnames) {
+        int64_t end = declared - O(f)->v.fn.nkwdefault;
+        if (end > bypos) {
+            apy_name_list(names, sizeof names, O(f)->v.fn.pnames, bypos, end);
+            snprintf(buf, sizeof buf,
+                     "%s() missing %lld required keyword-only argument%s: %s",
+                     who, (long long)(end - bypos),
+                     end - bypos == 1 ? "" : "s", names);
+            return apy_fail("TypeError", buf);
+        }
+    }
+    /* NOTHING THE FAMILY ABOVE COVERS -- a function whose parameter names the
+       frontend never recorded, or a count wrong in some way the signature
+       does not explain. The plainer wording, with the receiver taken back out
+       of the number because that wording never counted it. */
+    return apy_arity_error(f, given - (O(f)->v.fn.bound ? 1 : 0));
+}
+
 /* One call, with the `**kw` dict the caller resolved (or 0 for none).
 
    Threaded as a parameter rather than appended to `argv` by the caller,
@@ -2746,7 +2860,22 @@ static apy_value apy_call_nk(apy_value f, apy_value *argv, int64_t argc,
             return apy_arity_error(f, argc);
         return apy_invoke(f, slots, given);
     }
-    if (n != O(f)->v.fn.arity) return apy_arity_error(f, argc);
+    /* A SURPLUS POSITIONAL IS AN ERROR, not something to drop. The packing
+       above CAPS what it copies at the positional capacity, so `n` below can
+       only ever come out too SMALL -- which is exactly how `two(0, 1, 2)`
+       answered `(0, 1)` instead of refusing, on every path there is. A
+       `*rest` is what a surplus is FOR, and `bound` says the caller matched
+       names to slots and counted them itself, so neither is one. */
+    if (!bound && !O(f)->v.fn.vararg) {
+        int64_t byslot = O(f)->v.fn.arity - (O(f)->v.fn.kwarg ? 1 : 0)
+                         - O(f)->v.fn.kwonly;
+        int64_t given = (O(f)->v.fn.bound ? 1 : 0) + argc;
+        if (given > byslot) return apy_fn_arity_error(f, given, 0);
+    }
+    if (n != O(f)->v.fn.arity)
+        return bound ? apy_arity_error(f, argc)
+                     : apy_fn_arity_error(f, (O(f)->v.fn.bound ? 1 : 0) + argc,
+                                          0);
     return apy_invoke(f, slots, n);
 }
 
@@ -2819,6 +2948,7 @@ APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
     apy_value slots[17], rest = 0;
     char filled[17];
     int64_t skip = 0, declared, want, bypos, i, k, kwn;
+    int64_t kwonly_given = 0;
     apy_value target = apy_call_target(f, &skip);
 
     if (!target)
@@ -2972,6 +3102,11 @@ APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
         if (at >= 0 && !filled[at]) {
             slots[at] = val;
             filled[at] = 1;
+            /* COUNTED FOR THE REFUSAL AND NOTHING ELSE. A surplus positional
+               alongside these is worded by CPython as `3 positional
+               arguments (and 1 keyword-only argument)`, and this is the only
+               place that can tell a keyword-only landing from any other. */
+            if (at >= bypos) kwonly_given++;
             continue;
         }
         if (at >= 0) {
@@ -3009,12 +3144,16 @@ APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
         d = (i + skip) - (declared - O(target)->v.fn.ndefaults);
         if (d < 0 || d >= O(target)->v.fn.ndefaults) {
             char b[160];
+            apy_value q = O(target)->v.fn.qualname;
             const char *pn = (O(target)->v.fn.pnames
                               && O(target)->v.fn.pnames[i + skip])
                 ? APY_CSTR(O(target)->v.fn.pnames[i + skip]) : "?";
-            snprintf(b, sizeof b,
-                     "%s() missing 1 required positional argument: '%s'",
-                     APY_CSTR(O(target)->v.fn.name), pn);
+            /* PAST `bypos` IS KEYWORD-ONLY, and CPython says so: no position
+               could have filled the slot, so calling it positional sends the
+               reader to the wrong half of the signature. */
+            snprintf(b, sizeof b, "%s() missing 1 required %s argument: '%s'",
+                     APY_CSTR(q ? q : O(target)->v.fn.name),
+                     i >= bypos ? "keyword-only" : "positional", pn);
             return apy_fail("TypeError", b);
         }
         slots[i] = O(target)->v.fn.defaults[d];
@@ -3032,10 +3171,12 @@ APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
                 slots[want + j] = raw[bypos + j];
             want += j;
         } else {
-            /* No `*rest` to swallow them, so this is an arity error -- left
-               to `apy_call_nk`, which words it. */
-            for (i = bypos; i < argc && i < 9; i++) slots[i] = raw[i];
-            want = argc < 9 ? argc : 9;
+            /* NO `*rest` TO SWALLOW THEM, so this is an arity error -- and it
+               is worded HERE rather than passed on, because past this point
+               `want` is the WIDTH OF THE SLOT ARRAY the names filled and
+               `apy_call_nk` would have to guess back from it how the call was
+               written. `skip` is the receiver CPython counts. */
+            return apy_fn_arity_error(target, skip + argc, kwonly_given);
         }
     }
     return apy_call_nk(f, slots, want, rest, 1);
