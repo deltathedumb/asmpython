@@ -1259,6 +1259,33 @@ APY_API apy_value apy_str_join(apy_value sep, apy_value parts) {
         && !(O(parts)->kind == APY_TYPE_K && O(parts)->v.t.meta
              && apy_class_find(O(parts)->v.t.meta, apy_name("__iter__"))))
         return apy_fail("TypeError", "can only join an iterable");
+    /* AND WHAT `__iter__` GIVES BACK IS `join`'S QUESTION TOO. `apy_iterable`
+       asks it as well, but its refusal names the kind -- `iter() returned
+       non-iterator of type 'int'` -- where `join`'s names none. CPython
+       reaches iteration through `PySequence_Fast(seq, "can only join an
+       iterable")`, which REPLACES every TypeError that comes out of GETTING
+       the iterator and lets the ones raised while WALKING through; the check
+       above already covers the other way of failing to get one, and this is
+       the last.
+
+       NOT BY CLEARING THE FUNNEL'S FLAG afterwards, which is the other way
+       to write this and is wrong: `apy_iterable` gets the iterator AND
+       drains it, so a cleared TypeError would also swallow one raised inside
+       a user's `__next__`, which CPython propagates.
+
+       `__iter__` IS CALLED ONCE. What it answered is what goes on to the
+       funnel, so a class whose `__iter__` has a side effect does not have it
+       twice. */
+    if (O(parts)->kind == APY_INST_K
+        && apy_class_find(O(parts)->v.o.cls, apy_name("__iter__"))) {
+        apy_value it = apy_unary_dunder(parts, "__iter__");
+        if (apy_error_occurred()) return 0;
+        if (it) {
+            if (!apy_is_iterator(it))
+                return apy_fail("TypeError", "can only join an iterable");
+            parts = it;
+        }
+    }
     /* ANY iterable, not just an indexable one. The walk below is by index, so
        a generator has to be drained first -- and once generator expressions
        became real generators, `sep.join(f(x) for x in xs)` started arriving

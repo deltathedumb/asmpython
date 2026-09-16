@@ -309,6 +309,9 @@ APY_API apy_value apy_gen_next(apy_value g, apy_value fallback,
 APY_API apy_value apy_gen_drain(apy_value g);
 static apy_value apy_gen_step(apy_value g, apy_value sent, int *done);
 APY_API apy_value apy_iterable(apy_value v);
+/* The rule `__iter__`'s ANSWER has to satisfy, which `str.join` asks for
+   itself so it can word the refusal its own way. See `apy_is_iterator_of`. */
+static int apy_is_iterator(apy_value it);
 APY_API apy_value apy_isinstance(apy_value v, apy_value type_name);
 APY_API int64_t apy_error_matches(apy_value handler);
 APY_API void apy_error_clear(void);

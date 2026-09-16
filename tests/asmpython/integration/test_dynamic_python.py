@@ -8269,6 +8269,110 @@ PROGRAMS = {
         show("too few", lambda: "%s %s" % ("one",))
         show("too many", lambda: "%s" % ("one", "two"))
     """,
+    "join_words_a_broken_iter_as_join_does": """
+        # `",".join(obj)` WHERE `obj.__iter__` ANSWERS A NON-ITERATOR
+        # reported `iter() returned non-iterator of type 'int'` -- the
+        # FUNNEL's message, naming the kind. CPython reaches iteration
+        # through `PySequence_Fast(seq, "can only join an iterable")`, which
+        # REPLACES every TypeError that comes out of GETTING the iterator
+        # with that one sentence and names no kind.
+        #
+        # ERRORS FROM WALKING STILL PROPAGATE, which is why this is not done
+        # by clearing the funnel's flag afterwards: the funnel gets the
+        # iterator AND drains it, so a cleared TypeError would also swallow
+        # one raised inside a user's `__next__`. `join` asks the question
+        # itself instead, calling `__iter__` ONCE and handing what it
+        # answered on -- a class whose `__iter__` has a side effect must not
+        # have it twice.
+        log = []
+
+        class BadIter:
+            def __iter__(self):
+                return 42
+
+        class NoNext:
+            def __iter__(self):
+                return self
+
+        class RaisesValue:
+            def __iter__(self):
+                raise ValueError("boom")
+
+        class NextRaisesType:
+            def __init__(self):
+                self.n = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.n = self.n + 1
+                if self.n == 1:
+                    return "a"
+                raise TypeError("from next")
+
+        class GenRaisesType:
+            def __iter__(self):
+                def gen():
+                    yield "a"
+                    raise TypeError("from gen")
+                return gen()
+
+        class Counts:
+            def __iter__(self):
+                log.append("iter")
+                return iter(["a", "b"])
+
+        class Seq:
+            def __getitem__(self, i):
+                if i < 3:
+                    return "s" + str(i)
+                raise IndexError
+
+        class Meta(type):
+            def __iter__(cls):
+                return iter(["m1", "m2"])
+
+        class Members(metaclass=Meta):
+            pass
+
+        class SubList(list):
+            pass
+
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except TypeError as e:
+                print(label, "TypeError:", e)
+            except ValueError as e:
+                print(label, "ValueError:", e)
+
+        # GETTING THE ITERATOR FAILED -- join's own wording, naming no kind.
+        show("non-iterator", lambda: ",".join(BadIter()))
+        show("no next", lambda: ",".join(NoNext()))
+        # NOT A TypeError, so it is not replaced.
+        show("raises value", lambda: ",".join(RaisesValue()))
+        # WALKING FAILED, and those propagate whatever they are.
+        show("next raises", lambda: ",".join(NextRaisesType()))
+        show("gen raises", lambda: ",".join(GenRaisesType()))
+        # `__iter__` ONCE, not twice.
+        show("counts", lambda: ",".join(Counts()))
+        print("iter calls", len(log))
+        # AND EVERY WAY OF BEING JOINABLE STILL IS.
+        show("getitem", lambda: ",".join(Seq()))
+        show("sublist", lambda: ",".join(SubList(["x", "y"])))
+        show("metaclass", lambda: ",".join(Members))
+        show("genexp", lambda: ",".join(str(x) for x in range(3)))
+        show("map", lambda: ",".join(map(str, range(3))))
+        show("list", lambda: ",".join(["a", "b"]))
+        show("tuple", lambda: ",".join(("a", "b")))
+        show("dict", lambda: ",".join({"a": 1, "b": 2}))
+        show("str", lambda: ",".join("abc"))
+        show("empty", lambda: ",".join([]))
+        # AND THE REFUSALS THAT WERE ALREADY RIGHT.
+        show("int", lambda: ",".join(5))
+        show("ints inside", lambda: ",".join([1, 2]))
+    """,
     "fstrings": """
         n = 42
         s = 'ab'

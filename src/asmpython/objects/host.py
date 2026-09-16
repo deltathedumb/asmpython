@@ -12080,6 +12080,22 @@ def _apy_str_like(h, a):
     return a[1]
 
 
+def _is_iterator(got) -> bool:
+    """Is this an ITERATOR -- the rule `__iter__`'s ANSWER has to satisfy.
+
+    A generator or a cursor is one; a str is not, however walkable it looks,
+    and accepting one turned a broken class into a working one that iterated
+    something else entirely. `_apy_iterable` enforces the same rule where it
+    walks, and `str.join` asks it HERE so it can word the refusal its own way
+    -- see the call site for why clearing the funnel's error instead would
+    swallow more than CPython does.
+    """
+    return (isinstance(got, (Gen, Iterator, list, tuple, set, frozenset,
+                             dict))
+            or (isinstance(got, Instance)
+                and got.cls.find("__next__") is not None))
+
+
 def _joinable(v) -> bool:
     """Whether `join` can walk `v`.
 
@@ -12136,6 +12152,31 @@ def _make_str_method(symbol: str, method: str, argc: int):
         if _m == "join" and isinstance(args[0], (Instance, Class)):
             if not _joinable(args[0]):
                 return h._fail("TypeError", "can only join an iterable")
+            # AND WHAT `__iter__` GIVES BACK IS `join`'S QUESTION TOO.
+            # `_seq_items` asks it as well, but its refusal names the kind --
+            # `iter() returned non-iterator of type 'int'` -- where `join`'s
+            # names none. CPython reaches iteration through
+            # `PySequence_Fast(seq, "can only join an iterable")`, which
+            # REPLACES every TypeError that comes out of GETTING the iterator
+            # and lets the ones raised while WALKING through; `_joinable`
+            # above already covers the other way of failing to get one.
+            #
+            # NOT BY CLEARING THE FUNNEL'S ERROR afterwards: `_seq_items`
+            # gets the iterator AND drains it, so that would also swallow a
+            # TypeError raised inside a user's `__next__`, which CPython
+            # propagates. `__iter__` IS CALLED ONCE, and what it answered is
+            # what goes on to the funnel.
+            if isinstance(args[0], Instance) \
+                    and args[0].cls.find("__iter__") is not None:
+                got = _user(h, lambda: args[0]._send("__iter__"),
+                            fail=_FAILED)
+                if got is _FAILED or h.err is not None:
+                    return 0
+                if got is not NotImplemented:
+                    if not _is_iterator(got):
+                        return h._fail("TypeError",
+                                       "can only join an iterable")
+                    args[0] = got
             drained = _seq_items(h, args[0], _sym)
             if drained is None:
                 return 0
@@ -13569,11 +13610,12 @@ def _apy_iterable(h, a):
             out.append(item)
         return h._new(out)
     if not isinstance(got, Instance) or got.cls.find("__next__") is None:
-        # WHAT `__iter__` RETURNS MUST BE AN ITERATOR. A generator or a cursor
-        # is one; a str is not, however walkable it looks. Recursing into it
-        # turned a broken class into a working one that iterated something
-        # else entirely, which is a wrong answer rather than a refusal.
-        if isinstance(got, (Gen, Iterator, list, tuple, set, frozenset, dict)):
+        # WHAT `__iter__` RETURNS MUST BE AN ITERATOR -- see `_is_iterator`,
+        # which is the rule itself and which `str.join` asks for its own
+        # wording. Recursing into something that is not one turned a broken
+        # class into a working one that iterated something else entirely,
+        # which is a wrong answer rather than a refusal.
+        if _is_iterator(got):
             return _apy_iterable(h, [h._value(got)])
         return h._fail("TypeError", f"iter() returned non-iterator of type "
                                     f"'{h.kind_name(got)}'")

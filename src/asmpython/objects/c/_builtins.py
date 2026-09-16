@@ -835,6 +835,30 @@ APY_API apy_value apy_iter(apy_value v) {
    Called once where a loop begins, so the cost is one pass and not one per
    element -- and so a class with `__len__` and `__getitem__` is left alone
    entirely, because the index walk below already IS its protocol. */
+/* IS THIS AN ITERATOR -- the rule `__iter__`'s ANSWER has to satisfy. A str
+   is not one however walkable it looks, and accepting one turned a broken
+   class into a working one that iterated something else entirely.
+
+   FACTORED OUT so `str.join` can ask the same question and word the refusal
+   its own way: CPython reaches iteration through `PySequence_Fast(seq, "can
+   only join an iterable")`, which REPLACES any TypeError that comes out of
+   GETTING the iterator with that one sentence and names no kind, while
+   errors raised while WALKING still propagate. Asking here rather than
+   clearing `apy_iterable`'s flag afterwards is what keeps that distinction:
+   this funnel gets the iterator AND drains it, so a cleared flag would also
+   swallow a TypeError from a user's `__next__`. */
+APY_API int64_t apy_is_iterator_of(apy_value it) {
+    return O(it)->kind == APY_GEN_K || O(it)->kind == APY_ITER_K
+        || apy_is_seq(it) || apy_is_set(it) || O(it)->kind == APY_DICT_K
+        || (O(it)->kind == APY_INST_K
+            && apy_class_find(O(it)->v.o.cls, apy_name("__next__")) != 0);
+}
+/* THE NAME ITS CALLERS USE, kept as a delegate: the body is IR's now,
+   and the exported half above stands in when nothing is ported. */
+static int apy_is_iterator(apy_value it) {
+    return (int)apy_is_iterator_of(it);
+}
+
 APY_API apy_value apy_iterable(apy_value v) {
     apy_value it, out;
     int64_t guard;
@@ -868,14 +892,9 @@ APY_API apy_value apy_iterable(apy_value v) {
     if (apy_error_occurred()) return 0;
     if (it) {
         /* WHAT `__iter__` RETURNS MUST BE AN ITERATOR -- see `apy_getiter`,
-           which enforces the same rule on the lazy path. A str is not one
-           however walkable it looks, and accepting it turned a broken class
-           into a working one that iterated something else entirely. */
-        if (O(it)->kind != APY_GEN_K && O(it)->kind != APY_ITER_K
-            && !apy_is_seq(it) && !apy_is_set(it)
-            && O(it)->kind != APY_DICT_K
-            && !(O(it)->kind == APY_INST_K
-                 && apy_class_find(O(it)->v.o.cls, apy_name("__next__"))))
+           which enforces the same rule on the lazy path, and
+           `apy_is_iterator_of`, which is the rule itself. */
+        if (!apy_is_iterator(it))
             return apy_fail2("TypeError",
                              "iter() returned non-iterator of type '%s'%s",
                              apy_kind_name(it), "");
