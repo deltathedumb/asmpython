@@ -6590,7 +6590,15 @@ def _cmpop(name, op):
                     bx = _as_builtin(x, (direct,))
                     by = y.held if isinstance(y, Instance) \
                         and y.held is not None else y
-                    if bx is x and by is y:
+                    if isinstance(bx, Instance) or isinstance(by, Instance):
+                        # NOT A BUILTIN COMPARISON AFTER ALL. One side is
+                        # still an object the builtin knows nothing about, so
+                        # `list.__lt__` would answer NotImplemented -- which
+                        # is exactly when CPython goes on to the mirror, AND
+                        # gives it the operands the PROGRAM wrote. Comparing
+                        # the unwrapped pair here instead reached the mirror
+                        # with a bare list where `Sub([1]) < Watcher()` should
+                        # hand `Watcher.__gt__` the Sub.
                         continue
                     try:
                         return h._bool(op(bx, by))

@@ -1606,9 +1606,13 @@ static int apy_order_lt(apy_value a, apy_value b) {
                twice. The right side is not gated: it is only an operand. */
             apy_value ha = apy_held_for(a, "__lt__", "__lt__");
             apy_value hb = apy_held_value(b);
+            apy_value ua = ha ? ha : a, ub = hb ? hb : b;
             int c2;
-            if (!ha && !hb) continue;
-            c2 = apy_order_rich(ha ? ha : a, hb ? hb : b);
+            /* STILL AN INSTANCE MEANS NOT A BUILTIN COMPARISON -- see the
+               same guard in `apy_cmp`, which this has to agree with. */
+            if (O(ua)->kind == APY_INST_K || O(ub)->kind == APY_INST_K)
+                continue;
+            c2 = apy_order_rich(ua, ub);
             if (c2 == APY_UNORD) return 0;
             /* NOT ORDERABLE AS THE BUILTINS EITHER, which is when CPython
                goes on to the mirror rather than giving up. */
@@ -1817,9 +1821,19 @@ static apy_value apy_cmp(const char *op, apy_value a, apy_value b, int lt, int e
                                wrote. */
                             apy_value ha = apy_held_for(a, direct, direct);
                             apy_value hb = apy_held_value(b);
+                            apy_value ua = ha ? ha : a, ub = hb ? hb : b;
                             int c2;
-                            if (!ha && !hb) continue;
-                            c2 = apy_order(ha ? ha : a, hb ? hb : b);
+                            /* NOT A BUILTIN COMPARISON AFTER ALL when either
+                               side is still an instance: `list.__lt__` would
+                               answer NotImplemented, which is when CPython
+                               goes on to the mirror AND gives it the operands
+                               the PROGRAM wrote. Comparing the half-unwrapped
+                               pair reached the mirror with a bare list where
+                               `Sub([1]) < Watcher()` owes `Watcher.__gt__`
+                               the Sub. */
+                            if (O(ua)->kind == APY_INST_K
+                                    || O(ub)->kind == APY_INST_K) continue;
+                            c2 = apy_order(ua, ub);
                             if (c2 == APY_UNORD) return apy_from_bool(0);
                             /* NOT ORDERABLE AS THE BUILTINS EITHER, which is
                                not the end: that is precisely when CPython

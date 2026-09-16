@@ -8074,6 +8074,25 @@ PROGRAMS = {
         print("extremes", len(min(xs)), len(max(xs)))
         ts = [T((2,)), T((1,))]
         print("sorted tuples", [t[0] for t in sorted(ts)])
+
+        # AND THE GUARD THE REORDER NEEDED, which the first attempt at it got
+        # wrong: reading the builtin only counts when BOTH sides come out of
+        # it as builtins. `list.__lt__` answers NotImplemented for an operand
+        # it knows nothing about, and that is when CPython goes on to the
+        # mirror -- giving it the operands THE PROGRAM WROTE. Comparing the
+        # half-unwrapped pair instead handed `Watcher.__gt__` a bare list
+        # where it is owed the Sub, and then coerced the string it answered
+        # into True.
+        class Watcher:
+            def __gt__(self, other):
+                return "gt got " + type(other).__name__
+
+            def __radd__(self, other):
+                return "radd got " + type(other).__name__
+
+        show("held pair must be whole", lambda: Plain([1]) < Watcher())
+        show("and from a bare builtin", lambda: [1] < Watcher())
+        show("the tuple side too", lambda: T((1,)) < Watcher())
     """,
     "fstrings": """
         n = 42

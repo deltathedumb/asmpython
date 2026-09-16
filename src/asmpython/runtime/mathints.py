@@ -1018,15 +1018,23 @@ def apy_order_lt_held_of(a: ptr, b: ptr) -> i64:
     hb: ptr = ptr(0)
     if i64(load(i32, offset(b, 0))) == apy_inst_kind():
         hb = ptr(load(u64, offset(b, apy_o_held_offset())))
-    if not ha:
-        if not hb:
-            return -1
     left: ptr = a
     if ha:
         left = ha
     right: ptr = b
     if hb:
         right = hb
+    # STILL AN INSTANCE MEANS NOT A BUILTIN COMPARISON. `list.__lt__` would
+    # answer NotImplemented for an operand it knows nothing about, which is
+    # when CPython goes on to the mirror AND gives it the operands the
+    # PROGRAM wrote -- `Sub([1]) < Watcher()` owes `Watcher.__gt__` the Sub
+    # and not a bare list. Subsumes the "neither side was unwrapped" check
+    # this used to make: if nothing was unwrapped, both are still what they
+    # were, and the outer guard only got here because one is an instance.
+    if i64(load(i32, offset(left, 0))) == apy_inst_kind():
+        return -1
+    if i64(load(i32, offset(right, 0))) == apy_inst_kind():
+        return -1
     c2: i64 = apy_order_rich_of(left, right)
     if c2 == apy_unord():
         return 0
