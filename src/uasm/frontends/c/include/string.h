@@ -8,40 +8,8 @@
 
 #include <stddef.h>
 #include <errno.h>
-
-static void *memcpy(void *__d, const void *__s, size_t __n)
-{
-    unsigned char *d = (unsigned char *)__d;
-    const unsigned char *s = (const unsigned char *)__s;
-    size_t i;
-    for (i = 0; i < __n; i++) d[i] = s[i];
-    return __d;
-}
-
-static void *memmove(void *__d, const void *__s, size_t __n)
-{
-    unsigned char *d = (unsigned char *)__d;
-    const unsigned char *s = (const unsigned char *)__s;
-    size_t i;
-    /* BACKWARDS WHEN THEY OVERLAP THE OTHER WAY. This is the whole difference
-       from memcpy, and getting it wrong is invisible until the day two
-       objects overlap. */
-    if (d < s) {
-        for (i = 0; i < __n; i++) d[i] = s[i];
-    } else if (d > s) {
-        for (i = __n; i > 0; i--) d[i - 1] = s[i - 1];
-    }
-    return __d;
-}
-
-static void *memset(void *__d, int __c, size_t __n)
-{
-    unsigned char *d = (unsigned char *)__d;
-    unsigned char v = (unsigned char)__c;
-    size_t i;
-    for (i = 0; i < __n; i++) d[i] = v;
-    return __d;
-}
+#include <__uasm_mem.h>
+#include <__uasm_alloc.h>
 
 static int memcmp(const void *__a, const void *__b, size_t __n)
 {
@@ -232,6 +200,72 @@ static char *strerror(int __n)
     case EILSEQ: return (char *)"Invalid or incomplete multibyte or wide character";
     default: return (char *)"Unknown error";
     }
+}
+
+
+/* ── the ones C23 added, and the two that are locale's ────────────────── */
+/* `memccpy` STOPS AT A BYTE OR AT A LENGTH, whichever comes first, and
+   answers the address JUST PAST the byte it stopped on -- or null if it
+   ran out of length. It was POSIX for thirty years before C23 took it. */
+static void *memccpy(void *__d, const void *__s, int __c, size_t __n)
+{
+    unsigned char *d = (unsigned char *)__d;
+    const unsigned char *s = (const unsigned char *)__s;
+    unsigned char stop = (unsigned char)__c;
+    size_t i;
+    for (i = 0; i < __n; i++) {
+        d[i] = s[i];
+        if (s[i] == stop) return (void *)(d + i + 1);
+    }
+    return NULL;
+}
+
+static char *strdup(const char *__s)
+{
+    size_t n = strlen(__s) + 1;
+    char *p = (char *)malloc(n);
+    if (p == NULL) return NULL;
+    memcpy(p, __s, n);
+    return p;
+}
+
+static char *strndup(const char *__s, size_t __n)
+{
+    size_t n = 0;
+    char *p;
+    while (n < __n && __s[n]) n++;
+    p = (char *)malloc(n + 1);
+    if (p == NULL) return NULL;
+    memcpy(p, __s, n);
+    p[n] = 0;
+    return p;
+}
+
+/* THE EXPLICIT ONE IS THE SAME LOOP, and the difference is a promise rather
+   than an instruction: a compiler may delete a `memset` over storage whose
+   life is ending, and may not delete this one. There is no optimiser here
+   that would have deleted either, so the promise is kept by construction --
+   and the name has to exist for a program that asks for it. */
+static void *memset_explicit(void *__d, int __c, size_t __n)
+{
+    volatile unsigned char *d = (volatile unsigned char *)__d;
+    size_t i;
+    for (i = 0; i < __n; i++) d[i] = (unsigned char)__c;
+    return __d;
+}
+
+/* THERE IS ONE LOCALE AND IT IS "C", so collation is comparison and the
+   transform is a copy. `<locale.h>` says the same thing at more length. */
+static int strcoll(const char *__a, const char *__b) { return strcmp(__a, __b); }
+
+static size_t strxfrm(char *__d, const char *__s, size_t __n)
+{
+    size_t len = strlen(__s), i;
+    /* AT MOST `__n` BYTES, and the terminator only if it fits: the answer is
+       the transformed length either way, which is how a caller learns how
+       big a buffer to ask for. */
+    for (i = 0; i < __n && i <= len; i++) __d[i] = __s[i];
+    return len;
 }
 
 #endif

@@ -71,8 +71,19 @@ def _host_run(source: str, tmp_path: Path) -> tuple[int, str]:
         # `-lpthread` FOR THE SAME REASON THE LINKER PASSES IT: the thread
         # functions were in libpthread before glibc 2.34 and the flag is an
         # empty stub since. The oracle has to be built the way we build.
-        [HAS_CC, "-std=c11", "-w", "-o", str(exe), str(src), "-lm",
-         "-lpthread"],
+        # `-std=c2x` BECAUSE THIS FRONTEND COMPILES C23, and an oracle a
+        # version behind cannot answer for `[[nodiscard]]` or for
+        # `LDBL_NORM_MAX`. gcc 13 still takes a K&R definition there, which
+        # C23 removed and one of the programs below relies on.
+        #
+        # `_GNU_SOURCE` AND THE IEC 60559 WANT-MACRO, because glibc hides
+        # names behind them that C23 puts in the standard headers with no
+        # guard at all: `strdup`, `memccpy` and `strfromd` are there only if
+        # asked for. Both change what the ORACLE can see and nothing about
+        # what it does.
+        [HAS_CC, "-std=c2x", "-w", "-D_GNU_SOURCE=1",
+         "-D__STDC_WANT_IEC_60559_BFP_EXT__=1",
+         "-o", str(exe), str(src), "-lm", "-lpthread"],
         capture_output=True, text=True)
     assert built.returncode == 0, f"the host compiler refused it:\n{built.stderr}"
     ran = subprocess.run([str(exe)], capture_output=True, text=True)
@@ -1628,6 +1639,74 @@ PROGRAMS: dict[str, str] = {
         }
     """,
 
+    "the_names_c23_added_to_the_library": r"""
+        /* `strdup`, `memccpy`, `strcoll`, `strxfrm`,
+           `aligned_alloc`, `strfrom*` and `quick_exit`. The host
+           build defines `_GNU_SOURCE` and the IEC 60559 want-macro
+           so that glibc will admit to having them under
+           `-std=c11`; the ones it has not got at all are in the
+           unit suite instead. */
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        /* EACH ONE FLUSHES. C leaves it implementation-defined whether
+           `quick_exit` flushes a stream, and a hosted libc writing to a pipe
+           does not -- so a test that did not flush would be comparing two
+           right answers. */
+        static void bye_one(void) { printf("quick one\n"); fflush(stdout); }
+        static void bye_two(void) { printf("quick two\n"); fflush(stdout); }
+
+        int main(void) {
+            char buf[64], *p;
+            setvbuf(stdout, NULL, _IONBF, 0);
+            size_t n;
+
+            p = strdup("hello");
+            printf("%s %zu\n", p, strlen(p));
+            free(p);
+            p = strndup("hello world", 5);
+            printf("%s %zu\n", p, strlen(p));
+            free(p);
+
+            memset(buf, '.', sizeof buf);
+            p = (char *)memccpy(buf, "abc:def", ':', sizeof buf);
+            printf("%d %.8s\n", (int)(p - buf), buf);
+            p = (char *)memccpy(buf, "abcdef", 'z', 4);
+            printf("%d %.6s\n", p == NULL, buf);
+
+            printf("%d %d %d\n", strcoll("a", "b") < 0, strcoll("b", "a") > 0,
+                   strcoll("a", "a"));
+            n = strxfrm(buf, "transform", sizeof buf);
+            printf("%zu %s\n", n, buf);
+            n = strxfrm(buf, "transform", 4);
+            printf("%zu\n", n);
+
+            p = (char *)aligned_alloc(64, 100);
+            printf("%d\n", ((unsigned long)p & 63) == 0);
+            memset(p, 'x', 100);
+            p = (char *)realloc(p, 200);
+            printf("%d %d\n", p != NULL, p[99] == 'x');
+            free(p);
+
+            /* `strfrom*`: one conversion, and the wide one takes no `L`. */
+            strfromd(buf, sizeof buf, "%.3f", 3.14159);
+            printf("%s\n", buf);
+            strfromf(buf, sizeof buf, "%.2e", 1234.5f);
+            printf("%s\n", buf);
+            strfroml(buf, sizeof buf, "%.5g", 2.718281828459045235L);
+            printf("%s\n", buf);
+            printf("%d\n", strfromd(buf, 4, "%.6f", 1.5));
+
+            at_quick_exit(bye_one);
+            at_quick_exit(bye_two);
+            printf("about to leave\n");
+            fflush(stdout);
+            quick_exit(0);
+            return 1;
+        }
+    """,
+
     "float_h_describes_the_three_types": r"""
         /* WHAT THE IMPLEMENTATION SAYS ITS FLOATING TYPES ARE,
            against what the host's says: every one of these is a
@@ -2722,3 +2801,104 @@ class TestSeveralTranslationUnits:
         ran = _uasm("run", "main.c", "--c:unit", "absent.c", cwd=tmp_path)
         assert ran.returncode != 0
         assert "E1602" in ran.stdout + ran.stderr
+
+
+#: PROGRAMS WITH NO ORACLE, and the output each must produce. The host is the
+#: right answer for everything above; these two are where it cannot be one --
+#: glibc has not got the names, or it has them and answers differently for a
+#: reason that is its own choice rather than C's. So the expected text is
+#: written out, and the two paths that ARE comparable still are.
+NO_ORACLE: dict[str, tuple[str, str]] = {
+    "utf8_is_the_execution_encoding": (r"""
+    #include <stdio.h>
+    #include <stdlib.h>
+    #include <wchar.h>
+    #include <string.h>
+
+    int main(void) {
+        wchar_t w[8];
+        char back[16];
+        size_t n;
+        int k;
+        printf("%d %d\n", (int)MB_CUR_MAX, (int)sizeof(wchar_t));
+        printf("%d %d %d\n", mblen("a", 4), mblen("\xC3\xA9", 4),
+               mblen("\xE2\x82\xAC", 4));
+        printf("%d %d\n", mblen(NULL, 0), mblen("\xFF", 1));
+        k = mbtowc(w, "\xE2\x82\xAC", 4);
+        printf("%d %ld\n", k, (long)w[0]);
+        k = wctomb(back, (wchar_t)0x20AC);
+        printf("%d %d %d %d\n", k, (unsigned char)back[0],
+               (unsigned char)back[1], (unsigned char)back[2]);
+        n = mbstowcs(w, "a\xC3\xA9z", 8);
+        printf("%zu %ld %ld %ld\n", n, (long)w[0], (long)w[1], (long)w[2]);
+        printf("%zu\n", mbstowcs(NULL, "a\xC3\xA9z", 0));
+        n = wcstombs(back, w, sizeof back);
+        printf("%zu %s\n", n, back);
+        printf("%zu\n", wcstombs(NULL, w, 0));
+        printf("%zu\n", mbstowcs(w, "ab", 1));
+        return 0;
+    }
+    """, "4 4\n1 2 3\n0 -1\n3 8364\n3 226 130 172\n3 97 233 122\n3\n4 a\u00e9z\n4\n1\n"),
+
+    "the_c23_names_glibc_has_not_got": (r"""
+    #include <stdio.h>
+    #include <stdlib.h>
+    #include <string.h>
+    #include <stddef.h>
+
+    static int kind(int n) {
+        switch (n) {
+        case 0: return 10;
+        case 1: return 20;
+        default: unreachable();
+        }
+    }
+
+    int main(void) {
+        char buf[8];
+        void *p;
+        nullptr_t z = nullptr;
+        int *ip = z;
+        _Alignas(32) char big[64];
+        printf("%d %d\n", kind(0), kind(1));
+        printf("%d %zu\n", ip == NULL, sizeof(nullptr_t));
+        memset(buf, 'a', sizeof buf);
+        memset_explicit(buf, 0, sizeof buf);
+        printf("%d %d\n", buf[0], buf[7]);
+        printf("%zu %d\n", memalignment(NULL), memalignment(big) >= 32);
+        p = aligned_alloc(128, 300);
+        printf("%d %d\n", ((unsigned long)p & 127) == 0,
+               memalignment(p) >= 128);
+        free_aligned_sized(p, 128, 300);
+        p = malloc(48);
+        free_sized(p, 48);
+        printf("done\n");
+        return 0;
+    }
+    """, "10 20\n1 8\n0 0\n0 1\n1 1\ndone\n"),
+}
+
+
+class TestTheTwoOfOursAgree:
+    """The interpreter and the C backend, against a written-down answer.
+
+    NO HOST HERE, and each program says why it cannot have one. Everything
+    else in this file is compared against a real C compiler, which is the
+    point of the file; a test that checks an implementation against itself
+    proves much less, so these are the two where nothing better exists.
+    """
+
+    @harness.cases("name", sorted(NO_ORACLE))
+    def test_the_interpreter_says_it(self, name):
+        import textwrap
+        source, want = NO_ORACLE[name]
+        assert _interpret(_compile(textwrap.dedent(source))) == (0, want)
+
+    @harness.needs("cc")
+    @harness.cases("name", sorted(NO_ORACLE))
+    def test_the_c_backend_says_it(self, name, tmp_path):
+        import textwrap
+        source, want = NO_ORACLE[name]
+        got = _through_c_backend(_compile(textwrap.dedent(source)), tmp_path)
+        assert got == (0, want)
+

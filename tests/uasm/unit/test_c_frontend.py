@@ -343,10 +343,14 @@ class TestTheStandardHeaders:
         assert not sink.failed, [d.message for d in sink.diagnostics]
 
 
-class TestTheFourDivergences:
+class TestTheDivergences:
     """`frontends/c/__init__.py` names the places this frontend differs from
     a hosted implementation, and calls that list complete. A list nothing
-    checks becomes a list of the ones somebody remembered."""
+    checks becomes a list of the ones somebody remembered.
+
+    THE NUMBER IS IN THE DOCSTRING AND NOT IN THIS NAME on purpose: it was
+    `TestTheFourDivergences` until one was added, and a class that has to be
+    renamed to record a fact is a class that will not be."""
 
     def test_long_double_is_eighty_bit_extended(self):
         """x86-64's format, in software: sixteen bytes, ten in use, and a
@@ -414,6 +418,19 @@ class TestTheFourDivergences:
         names = {f.name for f in module.functions}
         assert "__c_tls_get" in names and "host_tss_new" in names
         assert [g for g in module.globals if g.name.endswith("mine.key")]
+
+    def test_the_multibyte_encoding_is_utf_8(self):
+        """C leaves the execution character set to the implementation, and
+        this one chose the source's. glibc's `"C"` locale chose one byte per
+        character, which is why a program can tell the two apart."""
+        module, sink = compile_c(
+            "#include <stdlib.h>\n"
+            "_Static_assert(MB_CUR_MAX == 4, \"\");\n"
+            "#include <limits.h>\n"
+            "_Static_assert(MB_LEN_MAX >= MB_CUR_MAX, \"\");\n"
+            "int main(void){ return (int)mbstowcs(0, \"\\xc3\\xa9\", 0); }\n")
+        assert module is not None, [d.message for d in sink.diagnostics]
+        assert not sink.failed, [d.message for d in sink.diagnostics]
 
     def test_setjmp_compiles_into_the_function_that_calls_it(self):
         """There is no `setjmp` function to call: `longjmp.py` turns the

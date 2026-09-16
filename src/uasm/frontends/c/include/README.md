@@ -50,6 +50,7 @@ What is still absent says so rather than approximating:
 | absent | because |
 | --- | --- |
 | `rename` | the `file` group has ten operations and no rename; copy-and-remove is not one, and `bundled/os.py` refuses `os.rename` for the same reason |
+| `*_SNAN` | a signaling NaN signals by raising the invalid-operation exception, and the IR has no instruction that reads a floating-point status flag; C defines those macros only where the type has one |
 | `_Imaginary` | Annex G, which an implementation may leave out, as gcc does |
 
 `long double` is 80-bit extended, in software: `support.py`'s `ldouble` unit
@@ -70,6 +71,13 @@ lists. `fmal` is the one that is not fused, and says so where it is written.
 `<tgmath.h>` dispatches to all of them: a `long double` argument picks the
 `l` function, which is what makes the paragraph above visible to a program
 that only ever writes `sqrt`.
+
+The multibyte encoding is UTF-8, always: `mbrtowc` decodes it, `MB_CUR_MAX`
+is 4, and `mbstowcs` of two UTF-8 bytes is one wide character. C leaves the
+execution character set to the implementation and this one chose the
+source's; glibc's `"C"` locale chose one byte per character and answers −1
+for the same input, which is a different choice rather than a better one.
+`<locale.h>` has one locale, so there is nowhere to put the other answer.
 
 `localtime` is `gmtime`. The host services can say what time it is and cannot
 say what the local offset from UTC is — there is no `TZ` that would mean
@@ -105,6 +113,24 @@ for two. A program with real sharing wants a mutex.
 All thirty-one headers C23 requires are here, and a test includes every one
 of them alone and then all of them together -- a macro one defines can break
 the next, and one translation unit is the only place that shows.
+
+## The three implementation headers
+
+`__uasm_base.h` is the platform floor and `__uasm_host.h` the optional
+groups; both are there so that several headers can name the same externs.
+The other two exist to break a circle rather than to share anything:
+`<string.h>` needs the allocator for `strdup`, the allocator needs `memcpy`
+and `memset`, and `<stdlib.h>` — where the allocator lives as far as a
+program is concerned — already includes `<string.h>`. So `__uasm_mem.h` has
+the three that move bytes and `__uasm_alloc.h` has the arena, and a program
+that includes `<string.h>` or `<stdlib.h>` sees exactly what C says it
+should.
+
+`<stdlib.h>` includes `<stdio.h>`, which is more than C asks for and is what
+`strfromd` costs: C23 puts it in `<stdlib.h>` and it is `snprintf` with one
+conversion in it. Nothing is paid for at run time — `lower.prune` drops
+every definition the program does not reach — and `<stdio.h>` does not
+include `<stdlib.h>`, so the circle does not close.
 
 ## Why the definitions are `static`
 

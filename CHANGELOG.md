@@ -112,7 +112,7 @@ deliverable.
   `_Alignof` for twelve declarations, because a struct's layout is an ABI and
   a frontend can be self-consistently wrong about one.
 
-  FOUR KNOWN DIVERGENCES, and they are the whole list: `long double` is
+  FIVE KNOWN DIVERGENCES, and they are the whole list: `long double` is
   software rather than the machine's (the format is x86-64's, so `sizeof`,
   `LDBL_*` and every printed digit agree with a hosted compiler, and the `l`
   SERIES in `<math.h>` answer to about a double's precision in the wider
@@ -121,7 +121,9 @@ deliverable.
   local that is not `volatile` survives a `longjmp` with the value it had,
   which is stricter than the standard's "indeterminate"; and `localtime` is
   `gmtime`, because the host services can say what time it is and cannot say
-  what the local offset from UTC is.
+  what the local offset from UTC is; and the multibyte encoding is UTF-8
+  always, which C leaves to the implementation and glibc's `"C"` locale
+  answers differently.
 
 - **Thirteen verbs down to five** — `build`, `run`, `verify`, `link`,
   `plugin`. `check` is `verify`, and renamed because the two words promise

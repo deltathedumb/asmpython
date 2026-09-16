@@ -23,8 +23,8 @@
 WHAT IT ACCEPTS is C23, which is to say C: every version's syntax, every
 version's semantics where they agree, and the newer one where they do not.
 
-FOUR PLACES THE LANGUAGE DIFFERS from a hosted implementation on x86-64
-Linux, and this is the whole list rather than the beginning of one. What the
+FIVE PLACES THIS IMPLEMENTATION DIFFERS from a hosted one on x86-64 Linux,
+and this is the whole list rather than the beginning of one. What the
 LIBRARY needs from the TARGET -- a filesystem, a clock, an environment -- is a
 different list, and it is in `include/README.md`: those are
 `objects/hostsvc.py`'s optional groups, a backend declares the ones its target
@@ -56,6 +56,12 @@ compile time rather than failing to link.
     cannot say what the local offset from UTC is, so the calendar is UTC and
     `tm_isdst` is 0 -- not unknown, not in effect.
 
+  * THE MULTIBYTE ENCODING IS UTF-8, ALWAYS. C leaves the execution
+    character set to the implementation and this one chose the source's, so
+    `mbrtowc` decodes UTF-8, `MB_CUR_MAX` is 4 and two bytes of UTF-8 are
+    one wide character. glibc's `"C"` locale calls each byte a character and
+    answers -1 for the same input; `<locale.h>` here has one locale, so
+    there is nowhere to put the other answer even if it were wanted.
 Everything else -- VLAs, flexible array members, bit-fields, anonymous
 members, `_Generic`, designated initialisers, compound literals, `__VA_OPT__`,
 K&R definitions, statement expressions, `__attribute__` where it is advisory,

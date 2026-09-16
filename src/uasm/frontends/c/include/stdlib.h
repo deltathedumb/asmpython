@@ -1,18 +1,23 @@
 /* <stdlib.h> -- uasm C frontend.
 
-   `malloc` IS AN ARENA WITH A FREE LIST, and `objects/floor.py` explains why
-   that is enough: the floor's `plat_heap` hands out regions that are NOT
-   guaranteed contiguous, so an allocator over it has to chain them rather
-   than assume one growing block. This one does, never returns a region to the
-   platform, and does not coalesce adjacent free blocks -- a program that
-   allocates and frees in a pattern designed to fragment it will use more
-   memory than glibc would. Every allocation is 16-byte aligned, which is what
-   `max_align_t` asks for. */
+   THE ALLOCATOR IS IN `__uasm_alloc.h`, because `<string.h>` needs it for
+   `strdup` and this header needs `<string.h>`; that file says how the arena
+   works and why it is one.
+
+   `<stdio.h>` COMES WITH THIS HEADER, which is more than C asks for and is
+   what `strfromd` costs: C23 puts it here and it is `snprintf` with one
+   conversion in it, so the formatter has to be in scope. Nothing is paid for
+   at run time -- `lower.prune` drops every definition the program does not
+   reach -- and `<stdio.h>` does not include this file, so there is no
+   circle. */
 #ifndef _UASM_STDLIB_H
 #define _UASM_STDLIB_H
 
 #include <stddef.h>
 #include <string.h>
+#include <stdio.h>
+#include <__uasm_alloc.h>
+#include <wchar.h>
 #include <errno.h>
 #include <__uasm_num.h>
 #include <__uasm_base.h>
@@ -21,91 +26,15 @@
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
 #define RAND_MAX 2147483647
-#define MB_CUR_MAX 1
+/* FOUR, BECAUSE THE ENCODING IS UTF-8: `<wchar.h>`'s `mbrtowc` decodes it
+   and `wcrtomb` writes it, so a character is one to four bytes and a caller
+   sizing a buffer by this macro needs to be told so. `MB_LEN_MAX` in
+   `<limits.h>` is the same 4. */
+#define MB_CUR_MAX 4
 
 typedef struct { int quot; int rem; } div_t;
 typedef struct { long quot; long rem; } ldiv_t;
 typedef struct { long long quot; long long rem; } lldiv_t;
-
-/* ── the allocator ────────────────────────────────────────────────────── */
-struct __blk { size_t size; struct __blk *next; };
-
-static struct __blk *__free_list;
-static char *__heap_next;
-static char *__heap_stop;
-
-#define __ALLOC_CHUNK 262144
-
-static void *malloc(size_t __n)
-{
-    struct __blk *b, **link;
-    size_t want;
-    char *p;
-    if (__n == 0) __n = 1;
-    want = (__n + 15u) & ~(size_t)15u;
-    /* FIRST FIT. A best-fit search over a list this simple costs more than
-       the fragmentation it saves, and an exact-fit cache would be a second
-       structure to keep right. */
-    link = &__free_list;
-    b = __free_list;
-    while (b) {
-        if (b->size >= want) {
-            *link = b->next;
-            return (void *)((char *)b + 16);
-        }
-        link = &b->next;
-        b = b->next;
-    }
-    if (__heap_next == 0 || __heap_next + want + 16 > __heap_stop) {
-        size_t ask = want + 16 > __ALLOC_CHUNK ? want + 16 : __ALLOC_CHUNK;
-        p = (char *)plat_heap((long)ask);
-        if (p == 0) return NULL;
-        __heap_next = p;
-        __heap_stop = p + ask;
-    }
-    b = (struct __blk *)__heap_next;
-    __heap_next += want + 16;
-    b->size = want;
-    b->next = 0;
-    return (void *)((char *)b + 16);
-}
-
-static void free(void *__p)
-{
-    struct __blk *b;
-    if (__p == NULL) return;
-    b = (struct __blk *)((char *)__p - 16);
-    b->next = __free_list;
-    __free_list = b;
-}
-
-static void *calloc(size_t __n, size_t __size)
-{
-    size_t total = __n * __size;
-    void *p;
-    /* THE OVERFLOW CHECK IS THE POINT OF `calloc`. Without it a caller asking
-       for 2^61 elements of 8 bytes gets a 0-byte block and writes over
-       whatever follows it. */
-    if (__n != 0 && total / __n != __size) return NULL;
-    p = malloc(total);
-    if (p) memset(p, 0, total);
-    return p;
-}
-
-static void *realloc(void *__p, size_t __n)
-{
-    struct __blk *b;
-    void *q;
-    if (__p == NULL) return malloc(__n);
-    if (__n == 0) { free(__p); return NULL; }
-    b = (struct __blk *)((char *)__p - 16);
-    if (b->size >= __n) return __p;
-    q = malloc(__n);
-    if (q == NULL) return NULL;
-    memcpy(q, __p, b->size);
-    free(__p);
-    return q;
-}
 
 /* ── ending the program ───────────────────────────────────────────────── */
 static void (*__atexit_fns[32])(void);
@@ -124,6 +53,28 @@ static _Noreturn void exit(int __status)
     /* IN REVERSE ORDER OF REGISTRATION, which is the standard's rule and the
        one that lets a later handler rely on an earlier one's state. */
     for (i = __atexit_count; i > 0; i--) __atexit_fns[i - 1]();
+    plat_exit((long)__status);
+    for (;;) { }
+}
+
+/* A SECOND LIST, AND THAT IS THE WHOLE POINT: `quick_exit` runs the
+   handlers registered with `at_quick_exit` and NOT the ones `atexit`
+   registered, so a program can have one path that tears down and another
+   that gets out. */
+static void (*__quick_fns[32])(void);
+static int __quick_count;
+
+static int at_quick_exit(void (*__f)(void))
+{
+    if (__quick_count >= 32) return -1;
+    __quick_fns[__quick_count++] = __f;
+    return 0;
+}
+
+static _Noreturn void quick_exit(int __status)
+{
+    int i;
+    for (i = __quick_count; i > 0; i--) __quick_fns[i - 1]();
     plat_exit((long)__status);
     for (;;) { }
 }
@@ -372,6 +323,123 @@ static int system(const char *__cmd)
     if (got > 0) plat_write(1, __system_out, got > __SYSTEM_CAP
                                              ? __SYSTEM_CAP : got);
     return (int)status;
+}
+
+
+/* ── a number into a buffer, without a stream ─────────────────────────── */
+/* `snprintf` WITH ONE CONVERSION IN IT, which is what C says these are: the
+   format carries a `%`, an optional precision with no `*` in it, and one of
+   `aAeEfFgG`. The point of having them at all is that a program formatting
+   one number need not name `<stdio.h>`'s whole machinery -- which it still
+   does here, and `lower.prune` drops what it does not reach. */
+static int strfromd(char *__s, size_t __n, const char *__format, double __fp)
+{ return snprintf(__s, __n, __format, __fp); }
+
+static int strfromf(char *__s, size_t __n, const char *__format, float __fp)
+{ return snprintf(__s, __n, __format, (double)__fp); }
+
+static int strfroml(char *__s, size_t __n, const char *__format,
+                    long double __fp)
+{
+    /* THE `L` GOES IN HERE. The format `strfroml` is handed carries NO
+       length modifier -- `"%f"` and not `"%Lf"` -- and `snprintf` needs one
+       to know which width it is being passed. The conversion character is
+       the first letter in the format, because the only other things C
+       allows in it are `%`, digits and a `.`. */
+    char __f[32];
+    size_t __i = 0, __j = 0;
+    char __c;
+    while (__format[__i] && __j + 2 < sizeof __f) {
+        __c = __format[__i++];
+        if (__c == 'a' || __c == 'A' || __c == 'e' || __c == 'E'
+            || __c == 'f' || __c == 'F' || __c == 'g' || __c == 'G')
+            __f[__j++] = 'L';
+        __f[__j++] = __c;
+    }
+    __f[__j] = 0;
+    return snprintf(__s, __n, __f, __fp);
+}
+
+/* ── multibyte, which is UTF-8 ────────────────────────────────────────── */
+/* THE ENCODING HAS NO STATE, so each of these makes a fresh `mbstate_t` and
+   the `s == NULL` question -- "does the encoding have shift states?" -- is
+   answered 0 by all three of the ones that take it. `<wchar.h>`'s
+   `mbrtowc` and `wcrtomb` are the encoder and the decoder; these are the
+   five that C keeps here rather than there. */
+static int mblen(const char *__s, size_t __n)
+{
+    mbstate_t __st;
+    size_t __r;
+    if (__s == NULL) return 0;
+    __st.__count = 0; __st.__value = 0;
+    __r = mbrtowc(NULL, __s, __n, &__st);
+    if (__r == (size_t)-1 || __r == (size_t)-2) return -1;
+    return (int)__r;
+}
+
+static int mbtowc(wchar_t *__w, const char *__s, size_t __n)
+{
+    mbstate_t __st;
+    size_t __r;
+    if (__s == NULL) return 0;
+    __st.__count = 0; __st.__value = 0;
+    __r = mbrtowc(__w, __s, __n, &__st);
+    if (__r == (size_t)-1 || __r == (size_t)-2) return -1;
+    return (int)__r;
+}
+
+static int wctomb(char *__s, wchar_t __w)
+{
+    mbstate_t __st;
+    size_t __r;
+    if (__s == NULL) return 0;
+    __st.__count = 0; __st.__value = 0;
+    __r = wcrtomb(__s, __w, &__st);
+    return __r == (size_t)-1 ? -1 : (int)__r;
+}
+
+static size_t mbstowcs(wchar_t *__d, const char *__s, size_t __n)
+{
+    mbstate_t __st;
+    const char *__p = __s;
+    size_t __i = 0, __left = strlen(__s) + 1, __k;
+    wchar_t __w;
+    __st.__count = 0; __st.__value = 0;
+    while (__d == NULL || __i < __n) {
+        __k = mbrtowc(&__w, __p, __left, &__st);
+        if (__k == (size_t)-1 || __k == (size_t)-2) return (size_t)-1;
+        if (__k == 0) {
+            if (__d) __d[__i] = 0;
+            return __i;
+        }
+        if (__d) __d[__i] = __w;
+        __i++;
+        __p += __k;
+        __left -= __k;
+    }
+    return __i;
+}
+
+static size_t wcstombs(char *__d, const wchar_t *__s, size_t __n)
+{
+    mbstate_t __st;
+    char __buf[8];
+    size_t __i = 0, __k, __j;
+    __st.__count = 0; __st.__value = 0;
+    for (;;) {
+        if (*__s == 0) {
+            if (__d && __i < __n) __d[__i] = 0;
+            return __i;
+        }
+        __k = wcrtomb(__buf, *__s, &__st);
+        if (__k == (size_t)-1) return (size_t)-1;
+        if (__d) {
+            if (__i + __k > __n) return __i;
+            for (__j = 0; __j < __k; __j++) __d[__i + __j] = __buf[__j];
+        }
+        __i += __k;
+        __s++;
+    }
 }
 
 #endif
