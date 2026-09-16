@@ -24,7 +24,7 @@ from pathlib import Path
 
 from .report import Outcome, Report
 
-CACHE = ".asmpython-tests.json"
+CACHE = ".uasm-tests.json"
 
 
 def fingerprint(root: Path) -> str:

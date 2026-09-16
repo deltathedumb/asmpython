@@ -1,0 +1,213 @@
+{
+  "name": "uasm",
+  "displayName": "uasm",
+  "description": "Diagnostics, build, and run support for uasm (the Python-to-native compiler) directly on .py files.",
+  "version": "0.2.0",
+  "publisher": "pixelateddream",
+  "icon": "icon.png",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/deltathedumb/uasm",
+    "directory": "editors/vscode/uasm"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Debuggers"
+  ],
+  "activationEvents": [
+    "onLanguage:python"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "uasm",
+      "properties": {
+        "uasm.executablePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the uasm executable or 'python -m uasm' shim. Leave empty to auto-detect (tries 'uasm' on PATH, then 'py -m uasm' / 'python3 -m uasm')."
+        },
+        "uasm.checkOnType": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run `uasm --check` as you type (debounced), not just on save."
+        },
+        "uasm.checkDebounceMs": {
+          "type": "number",
+          "default": 400,
+          "description": "Milliseconds to wait after the last keystroke before re-running `--check` when uasm.checkOnType is enabled."
+        },
+        "uasm.target": {
+          "type": "string",
+          "default": "",
+          "enum": [
+            "",
+            "windows",
+            "linux",
+            "freestanding",
+            "freestanding16"
+          ],
+          "description": "Default --target for Compile/Run commands. Empty = host platform (uasm's default)."
+        },
+        "uasm.extraCompileArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra command-line arguments appended to every compile invocation (e.g. [\"--use-runtime-lib\"])."
+        },
+        "uasm.outputDirectory": {
+          "type": "string",
+          "default": "build",
+          "description": "Directory (relative to the workspace folder) where Compile/Run commands write the output executable."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "uasm.compile",
+        "title": "uasm: Compile Current File",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "uasm.run",
+        "title": "uasm: Compile and Run Current File",
+        "icon": "$(play)"
+      },
+      {
+        "command": "uasm.check",
+        "title": "uasm: Check Current File (no build)",
+        "icon": "$(checklist)"
+      },
+      {
+        "command": "uasm.emitAsm",
+        "title": "uasm: Emit Assembly for Current File"
+      },
+      {
+        "command": "uasm.explainCode",
+        "title": "uasm: Explain Error Code..."
+      },
+      {
+        "command": "uasm.showOutput",
+        "title": "uasm: Show Output Channel"
+      }
+    ],
+    "menus": {
+      "editor/title/run": [
+        {
+          "command": "uasm.run",
+          "when": "resourceLangId == python",
+          "group": "navigation@1"
+        },
+        {
+          "command": "uasm.compile",
+          "when": "resourceLangId == python",
+          "group": "navigation@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "uasm.compile",
+          "when": "resourceLangId == python"
+        },
+        {
+          "command": "uasm.run",
+          "when": "resourceLangId == python"
+        },
+        {
+          "command": "uasm.check",
+          "when": "resourceLangId == python"
+        },
+        {
+          "command": "uasm.emitAsm",
+          "when": "resourceLangId == python"
+        },
+        {
+          "command": "uasm.explainCode"
+        },
+        {
+          "command": "uasm.showOutput"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "uasm.run",
+        "key": "ctrl+f5",
+        "mac": "cmd+f5",
+        "when": "resourceLangId == python"
+      },
+      {
+        "command": "uasm.compile",
+        "key": "ctrl+shift+b",
+        "mac": "cmd+shift+b",
+        "when": "resourceLangId == python"
+      }
+    ],
+    "taskDefinitions": [
+      {
+        "type": "uasm",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "compile",
+              "run",
+              "check",
+              "emit-asm"
+            ],
+            "description": "Which uasm invocation this task runs."
+          },
+          "file": {
+            "type": "string",
+            "description": "Source file to compile (defaults to the active editor file)."
+          },
+          "target": {
+            "type": "string",
+            "description": "Override --target for this task."
+          }
+        }
+      }
+    ],
+    "problemMatchers": [
+      {
+        "name": "uasm",
+        "owner": "uasm",
+        "severity": "error",
+        "fileLocation": [
+          "relative",
+          "${workspaceFolder}"
+        ],
+        "pattern": {
+          "regexp": "^(.*):(\\d+):(\\d+):\\s+\\w+\\s+error:\\s+(?:\\[(\\w+)\\]\\s+)?(.*)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "code": 4,
+          "message": 5
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.32.0",
+    "typescript": "^5.4.0"
+  }
+}

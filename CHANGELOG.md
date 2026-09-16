@@ -1,7 +1,20 @@
 # Changelog
 
-All notable changes to asmpython are documented here.
+All notable changes to uasm are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+
+
+## [Unreleased]
+
+### Changed
+
+- **Renamed the project from `asmpython` to `uasm`**, and its IR format from
+  `apir` (`.apir`/`.apirc`) to `uir` (`.uir`/`.uirb`). The import path, CLI
+  command, PyPI project name, environment variables (`ASMPYTHON_*` ->
+  `UASM_*`), and the plugin entry-point group (`asmpython.plugins` ->
+  `uasm.plugins`) all moved with it — a hard cutover, not aliased for
+  compatibility. Entries below predate the rename and use the names that
+  were current when they were written.
 
 
 ## [3.14.0-preview] — in progress — Win64 ABI fixes, stdlib depth, SSA optimisation
@@ -105,8 +118,8 @@ deliverable.
   makes the short spelling an error naming both -- awarding it by
   registration order would configure the wrong component silently -- while
   one declaration SHARED, as `--link-input` is, is not a collision at all.
-  `asmpython frontends` and `asmpython toolchains` list their components'
-  flags the way `asmpython backends` always has.
+  `uasm frontends` and `uasm toolchains` list their components' flags the
+  way `uasm backends` always has.
 
 - **A from-scratch retargetable compiler** (`src/asmpython/`) — a
   language-independent IR with four registries (frontends, backends, targets,

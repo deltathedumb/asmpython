@@ -10,7 +10,7 @@
 # CPython's random.Random is the Mersenne Twister with a specific seeding
 # scheme (init_by_array over a seed's 32-bit words, not init_genrand
 # directly). Everything below is deterministic given the seed, so CPython
-# and asmpython MUST print the identical sequence -- that is the entire
+# and uasm MUST print the identical sequence -- that is the entire
 # point of reimplementing MT19937 by hand rather than approximating it.
 import random
 

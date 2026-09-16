@@ -16,7 +16,7 @@ print(type(__future__.division).__name__)
 # THE RELEASE TUPLES ARE THE REAL ONES, so a program comparing against
 # sys.version_info gets a true answer rather than a plausible one.
 #
-# WRITTEN OUT RATHER THAN LOOPED THROUGH `getattr`. Under asmpython there are
+# WRITTEN OUT RATHER THAN LOOPED THROUGH `getattr`. Under uasm there are
 # two `__future__`s -- this module, spliced in and reached by writing the
 # attribute out, and the compiler's own table where the same names are integer
 # flags -- and `getattr` reaches the second. The module says so; a program

@@ -8,7 +8,7 @@ first.
 WHY BOTH EXIST. `embedded.py` measures the thing that ships and costs a native
 compile per batch; this costs about a tenth of a second per case. They can
 disagree, and a disagreement is itself a finding: the bundled modules are
-compiled by asmpython in one and interpreted by CPython in the other, so a case
+compiled by uasm in one and interpreted by CPython in the other, so a case
 passing here and failing there is a bug in the COMPILER's handling of the
 interpreter's own source, not in the interpreter. That is the same
 three-paths-must-agree argument the corpus makes, one level up.
@@ -17,7 +17,7 @@ This is the loop to develop `_pyrun` inside. `embedded.py` is the checkpoint.
 
 WHAT IT DOES NOT MEASURE, and the difference matters when reading a pass: the
 bundled modules run here on CPython's object model, so a case can pass because
-CPython's `list` behaves rather than because anything asmpython built does.
+CPython's `list` behaves rather than because anything uasm built does.
 Only `embedded.py` closes that gap.
 """
 from __future__ import annotations
@@ -28,7 +28,7 @@ import sys
 import traceback
 from pathlib import Path
 
-_BUNDLED = (Path(__file__).resolve().parents[2] / "src" / "asmpython"
+_BUNDLED = (Path(__file__).resolve().parents[2] / "src" / "uasm"
             / "frontends" / "python" / "bundled")
 
 

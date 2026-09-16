@@ -195,7 +195,7 @@ print("--- function counts done ---")
 # a lazy implementation would get wrong.
 #
 # `argv[0]` IS COMPARED BY SHAPE, not printed: the oracle runs
-# `python tests/stdlib/sys.py` and asmpython runs `asmpython run
+# `python tests/stdlib/sys.py` and uasm runs `uasm run
 # tests/stdlib/sys.py`, so both see the same path -- but printing it would
 # put a machine-specific absolute path in the compared output for no gain.
 

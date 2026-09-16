@@ -19,10 +19,10 @@
 # the current context when it is created and confines each step to that
 # copy, so a plain `asyncio.run(coro())` already gives a single coroutine
 # its own private context -- a ContextVar it .set() does not leak back to
-# the caller once asyncio.run() returns. asmpython's scheduler drives a
+# the caller once asyncio.run() returns. uasm's scheduler drives a
 # task's generator directly with no such copy (see the module's own
-# docstring, and `src/asmpython/runtime/tasks.py`), so the identical
-# program run under asmpython DOES leak that .set() back out. This was
+# docstring, and `src/uasm/runtime/tasks.py`), so the identical
+# program run under uasm DOES leak that .set() back out. This was
 # checked, not assumed: a scratch probe of exactly that shape --
 #
 #     v.set("before-run")
@@ -32,7 +32,7 @@
 #     asyncio.run(worker())
 #     print(v.get())
 #
-# -- prints "before-run" under CPython and "inside-task" under asmpython.
+# -- prints "before-run" under CPython and "inside-task" under uasm.
 # Including it here would fail the byte-identical requirement for a gap in
 # the async runtime that this module cannot close on its own, so this file
 # stays synchronous throughout and the gap is named here instead.

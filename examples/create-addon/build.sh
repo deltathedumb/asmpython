@@ -4,7 +4,7 @@
 set -eu
 cd "$(dirname "$0")"
 
-asmpython build mod.py --backend jvm \
+uasm build mod.py --backend jvm \
     --jvm-class createpy.Mod \
     --jvm-runtime-package createpy.rt \
     --jvm-instantiate "net.neoforged.bus.api.IEventBus" \

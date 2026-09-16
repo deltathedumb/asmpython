@@ -2,7 +2,7 @@ import pathlib
 import re
 import struct
 
-SRC = pathlib.Path("src/asmpython/objects/c/unicode_table.py")
+SRC = pathlib.Path("src/uasm/objects/c/unicode_table.py")
 rows = re.findall(r"\{(\d+),(\d+),(\d+)\}", SRC.read_text(encoding="utf-8"))
 rows = [(int(a), int(b), int(c)) for a, b, c in rows]
 assert rows and rows == sorted(rows), "the C table is not sorted by `lo`"
@@ -71,6 +71,6 @@ def apy_uc_lookup(cp: i64) -> i64:
     return 0
 '''
 
-out = pathlib.Path("src/asmpython/runtime/unicode_table.py")
+out = pathlib.Path("src/uasm/runtime/unicode_table.py")
 out.write_text(HEAD.format(n=len(rows), blob=blob), encoding="utf-8")
 print(f"{len(rows)} rows, {len(blob)} bytes, {out.stat().st_size} on disk")

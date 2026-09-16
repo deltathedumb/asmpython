@@ -19,9 +19,9 @@
 # is unreliable on this compiler for plain ints (worked around throughout
 # by never calling it -- `//`/`%` separately, or `.__divmod__()` directly).
 #
-# Run under CPython and under asmpython; the outputs must be identical, so
+# Run under CPython and under uasm; the outputs must be identical, so
 # every assertion below is written against the SPECIFICATION rather than
-# against whatever asmpython currently prints.
+# against whatever uasm currently prints.
 import decimal
 from decimal import (Decimal, Context, getcontext, setcontext, localcontext,
                      ROUND_HALF_EVEN, ROUND_HALF_UP, ROUND_HALF_DOWN,

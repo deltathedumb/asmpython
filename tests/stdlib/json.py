@@ -12,7 +12,7 @@ import json
 
 # ---- round trip: nested objects/arrays, escapes, unicode, numbers ---------
 doc = {
-    "name": "asmpython",
+    "name": "uasm",
     "nested": {"a": [1, 2, 3], "b": {"c": None, "d": [True, False]}},
     "list_of_dicts": [{"x": 1}, {"x": 2}, {"x": 3}],
     "escapes": "quote\"backslash\\slash/tab\tnewline\ncr\rbs\bff\f",

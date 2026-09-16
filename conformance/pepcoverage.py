@@ -98,7 +98,7 @@ _exclude(
 )
 _exclude(
     "implementation internals with no defined observable behaviour; pinning "
-    "them would hold asmpython to a CPython accident",
+    "them would hold uasm to a CPython accident",
     412, 442, 456, 509, 617, 626, 659, 683, 684, 703, 744, 768, 779, 831,
 )
 _exclude(

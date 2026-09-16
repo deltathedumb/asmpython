@@ -3,7 +3,7 @@
 /memory/
 /.vscode/
 /.idea/
-/.asmpython-pytest-scout/
+/.uasm-pytest-scout/
 /agents/
 *.swp
 
@@ -25,7 +25,7 @@ _build/
 *_onedir/
 
 # ── Compiler / toolchain artifacts ──────────────────────────────────────────
-# asmpython emits .asm next to the source and intermediate objects while
+# uasm emits .asm next to the source and intermediate objects while
 # linking; none of that belongs in the repo. (Hand-written package .asm under
 # *.asmpkg/ is whitelisted below so packages stay tracked.)
 *.asm
@@ -37,10 +37,10 @@ _build/
 *.a
 *.lib
 
-# Vendored SDL2 binaries (asmpython/_vendor/sdl2/README.md): these are
+# Vendored SDL2 binaries (uasm/_vendor/sdl2/README.md): these are
 # intentionally committed so `import lumen` builds without any system SDL2
 # install, so the binary-extension blanket ignores above don't apply here.
-!asmpython/_vendor/**
+!uasm/_vendor/**
 
 # Keep the assembly sources that ship inside assembly packages.
 !**/*.asmpkg/**/*.asm
@@ -48,10 +48,10 @@ _build/
 # Keep the hand-written ABI shim layer bridging the new uasm-backed IR
 # pipeline's standard-ABI calls to the legacy runtime's ad-hoc convention
 # (see ir_lower.py's module docstring) -- this is source, not build output.
-!asmpython/_runtime/abi_shims.asm
-!asmpython/_runtime/abi_shims_linux.asm
-!asmpython/_runtime/abi_shims_x86_32.asm
-!asmpython/_runtime/threading_shims.asm
+!uasm/_runtime/abi_shims.asm
+!uasm/_runtime/abi_shims_linux.asm
+!uasm/_runtime/abi_shims_x86_32.asm
+!uasm/_runtime/threading_shims.asm
 
 # ── Downloaded dependencies (NASM / GCC / embeddable Python) ─────────────────
 /tools/*
@@ -118,7 +118,7 @@ _tmp*.*
 /scratchpad
 
 # Zip for some reason
-asmpython.zip
+uasm.zip
 
 # VS Code specific files (one directory per extension under editors/vscode/)
 editors/vscode/*/node_modules/
@@ -135,9 +135,9 @@ editors/vscode/*/package-lock.json
 
 # The test runner's record of what passed last time, keyed by a fingerprint of
 # the sources. Local to one checkout -- see tests/harness/cache.py.
-/.asmpython-tests.json
+/.uasm-tests.json
 
-# Working conformance measurements. `asmpython.json` is the recorded state and
+# Working conformance measurements. `uasm.json` is the recorded state and
 # is tracked; a session produces dozens of these on the way to it.
 conformance/results/new*.json
 # A work brief for a second agent, not part of the project.

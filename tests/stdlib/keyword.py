@@ -1,8 +1,8 @@
 # COVERAGE: kwlist, softkwlist, iskeyword, issoftkeyword -- the whole module.
 #
-# Run under CPython and under asmpython; the outputs must be identical. So the
+# Run under CPython and under uasm; the outputs must be identical. So the
 # assertions below are written against what the module IS SPECIFIED to do, not
-# against what asmpython currently does -- a test that prints asmpython's
+# against what uasm currently does -- a test that prints uasm's
 # answer and calls it correct tests nothing.
 import keyword
 

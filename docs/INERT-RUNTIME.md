@@ -120,7 +120,7 @@ So the runtime does not need a new representation. It needs to BE IR.
 
 ### Rejected: write a C frontend
 
-Reuses the 15,560 verified lines, and asmpython already builds frontends
+Reuses the 15,560 verified lines, and uasm already builds frontends
 (`frontends/python`, `frontends/x86`). Rejected on scope: the C in `objects.py`
 uses 22 typedefs, 18 unions, 19 enums, 18 function-pointer types, 63 varargs,
 364 designated initialisers, 271 casts and 332 ternaries. Those are the hard
@@ -229,18 +229,18 @@ until a stage replaces a piece of it and the corpus agrees.
    PROVED BY: a unit test compiling a function that allocates, stores a tagged
    cell and reads it back, checked through the IR verifier and the IR
    interpreter. Cheap -- no backend, no gcc.
-   `tests/asmpython/unit/test_machine_subset.py`, 31 tests, ~1 second.
+   `tests/uasm/unit/test_machine_subset.py`, 31 tests, ~1 second.
 2. **The floor.** ***DONE*** -- see "What stage 2 landed" below. Define the
    platform interface and implement it for the C backend (trivially, over libc)
    and the JVM backend (over `byte[]` and `System.out`).
    PROVED BY: a program that prints, on both backends.
-   `tests/asmpython/integration/test_platform_floor.py`.
+   `tests/uasm/integration/test_platform_floor.py`.
 3. **One real kind, end to end.** ***DONE for construction; arithmetic
    deferred*** -- see "What stage 3 landed". Port the smallest complete object
    kind -- the integer cell and its arithmetic -- to the subset. Keep the C
    version and run BOTH. PROVED BY: the multi-path corpus, which already
    compares CPython, the IR interpreter and the C backend on 143 programs.
-   `tests/asmpython/integration/test_ported_int.py`, 13 tests.
+   `tests/uasm/integration/test_ported_int.py`, 13 tests.
 4. **The allocator**, in the subset, over the floor's arena. PROVED BY: the
    same corpus, plus a stress program that exercises reuse.
 5. **Kind by kind**, largest surface first: str, list, dict, then classes,
@@ -391,7 +391,7 @@ must not happen on any of the three paths.
   to be live at every branch TARGET. Choosing the output stream after the
   bounds checks verified as "top is not assignable to PrintStream", which names
   the slot rather than the jump that skipped it.
-* **`asmpython run` reported 0 whatever the program did.** `plat_exit(7)` now
+* **`uasm run` reported 0 whatever the program did.** `plat_exit(7)` now
   ends it with 7, as every compiled path already did. NOT FIXED, and worth
   knowing: the entry's RETURN value also becomes a compiled program's exit
   status and still does not become the interpreter's. That divergence predates
@@ -408,7 +408,7 @@ except three methods it has. That is the entire bet of this document, executing.
 ## What stage 3 landed
 
 **The object runtime is no longer entirely C.** `apy_from_int` and `apy_as_int`
-are `src/asmpython/runtime/int_cell.py`, compiled by asmpython's own frontend
+are `src/uasm/runtime/int_cell.py`, compiled by uasm's own frontend
 and spliced into every program that builds an object. The C definitions they
 replace become declarations, so the runtime's hundred-odd callers still have
 one in scope and nothing is defined twice.
@@ -478,9 +478,9 @@ a sharper test than having both paths run the same code.
 
 ### Two things about the tree, learned here
 
-`tests/runner.py` and its 1,932 cases drive the LEGACY CLI (`asmpython <file>`,
+`tests/runner.py` and its 1,932 cases drive the LEGACY CLI (`uasm <file>`,
 no subcommand) and score 0/1932 against this tree regardless of any change.
-The live multi-path corpus is `tests/asmpython/integration/test_differential.py`.
+The live multi-path corpus is `tests/uasm/integration/test_differential.py`.
 
 An installed third-party plugin can fail a backend from outside the tree. A
 `CompilerPatch` wrapping `Lowerer.run` to declare its own runtime symbols
@@ -717,7 +717,7 @@ not as a wrong answer at run time.
 
 **The floor's own rule is inherited unchanged.** Nothing may know what a
 Python value is. Every signature is machine words and pointers to bytes, and
-`tests/asmpython/integration/test_hostsvc.py` asserts it, because the moment
+`tests/uasm/integration/test_hostsvc.py` asserts it, because the moment
 one takes a `str` every backend implementing it owes the LANGUAGE rather than
 the machine -- which is the argument `objects/floor.py` makes for why the
 floor is three functions and not the five it used to be.

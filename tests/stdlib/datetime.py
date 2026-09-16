@@ -31,9 +31,9 @@
 # for bit -- only hash/eq consistency, which the naive case's plain tuple
 # hash already demonstrates matches CPython exactly).
 #
-# Run under CPython and under asmpython; the outputs must be identical,
+# Run under CPython and under uasm; the outputs must be identical,
 # so every assertion below is written against the SPECIFICATION rather
-# than against whatever asmpython currently prints.
+# than against whatever uasm currently prints.
 import datetime
 
 # ── timedelta construction and normalization ───────────────────────────────

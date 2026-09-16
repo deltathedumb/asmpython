@@ -13,9 +13,9 @@
 # __round__ with half-to-even and ndigits=. NOT covered: numbers.Rational
 # interop, complex, __format__, Decimal interop, pickling.
 #
-# Run under CPython and under asmpython; the outputs must be identical, so
+# Run under CPython and under uasm; the outputs must be identical, so
 # every assertion below is written against the SPECIFICATION rather than
-# against whatever asmpython currently prints.
+# against whatever uasm currently prints.
 import math
 import fractions
 from fractions import Fraction
