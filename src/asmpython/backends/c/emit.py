@@ -222,8 +222,21 @@ class CBackend(Backend):
         # it directly is a compile error, so it is renamed (see _cname) and a
         # real entry point wraps it. Without this the output looks correct and
         # fails at the C compiler, which is a confusing place to learn about it.
+        #
+        # THE WRAPPER TAKES THE COMMAND LINE AND HANDS IT ON, which is the
+        # whole reason it takes any parameters at all: `main` is the one place
+        # C offers a program its arguments, and `sys.argv` reads them back
+        # through the `env` group's `host_arg_count`/`host_arg_get`. Those two
+        # answered from statics nothing ever wrote until this line existed, so
+        # every compiled program saw an empty command line -- see
+        # `apy_host_args_take` in `objects/hostsvc.py`, whose own comment
+        # named this wrapper before it did so.
         if module.function("main") is not None:
-            out.append("int main(void) { return (int)ir_main(); }")
+            out.append("int main(int argc, char **argv)")
+            out.append("{")
+            out.append("    apy_host_args_take(argc, argv);")
+            out.append("    return (int)ir_main();")
+            out.append("}")
             out.append("")
 
         return {"out.c": "\n".join(out).encode("utf-8")}

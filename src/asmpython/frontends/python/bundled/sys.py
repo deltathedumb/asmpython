@@ -3,9 +3,10 @@
 COVERAGE: `stdout` and `stderr` as real writable streams on file descriptors
 1 and 2, replaceable by assignment -- `sys.stdout = io.StringIO()` captures
 what `print` writes, which is the whole reason they are objects here rather
-than compiler constants; `breakpointhook` and `__breakpointhook__`, PEP 553;
-`audit` and `addaudithook`, PEP 578; `monitoring`, PEP 669's tool-id
-registry and event constants.
+than compiler constants; `argv`, the command line the process was started
+with; `breakpointhook` and `__breakpointhook__`, PEP 553; `audit` and
+`addaudithook`, PEP 578; `monitoring`, PEP 669's tool-id registry and event
+constants.
 
 BUNDLED IN PART, and `bundled.py` says so at two places that were written
 before this file existed. The other half of `sys` -- `maxsize`, `platform`,
@@ -60,7 +61,7 @@ refuses BY NAME rather than doing nothing, which would make `breakpoint()`
 look like it worked. Replacing the hook, which is what PEP 553 is for, works
 exactly as specified.
 
-## The `file` host-service group
+## The `file` and `env` host-service groups
 
 `stdout` and `stderr` write through `host_file_write`, which is the same
 primitive `bundled/io.py` uses and which belongs to the `file` service group
@@ -69,6 +70,14 @@ primitive `bundled/io.py` uses and which belongs to the `file` service group
 `objects/hostsvc.py`, which says so where it defines them. Routing `stderr`
 to `print` instead would have avoided the dependency and sent the error
 stream to standard output, which is a wrong answer rather than a smaller one.
+
+`argv` adds `env` to that, for `host_arg_count` and `host_arg_get`, and adds
+it to EVERY program that imports `sys` rather than only to one that reads
+`argv` -- because the list is built by module-level code, and module-level
+code always runs. That is the price of `sys.argv` being a real list; see the
+section that builds it for why it cannot be lazy. It costs nothing today:
+the two backends that provide `file` provide `env` too, so no program that
+compiled before this stops compiling.
 """
 
 
@@ -162,6 +171,75 @@ class _Console:
 
 stdout = _Console(1, "<stdout>")
 stderr = _Console(2, "<stderr>")
+
+
+# ── the command line ─────────────────────────────────────────────────────
+#
+# A REAL LIST, BUILT ONCE, exactly as CPython's is. A program may assign to
+# `sys.argv`, slice it, or hand it to `argparse`, and every one of those needs
+# an ordinary mutable list rather than a view that asks the host again -- which
+# is also why this is read eagerly here rather than on first use: a lazy
+# `argv` would answer the command line as it is NOW to a program that had
+# already replaced it.
+#
+# WHERE THE WORDS COME FROM is `objects/hostsvc.py`'s `env` group. A compiled
+# binary gets them from its `main`, which hands them to `apy_host_args_take`
+# on the way in; `asmpython run` gets them from the CLI, which sets
+# `interp.argv` before it runs anything. Both routes answer the same two
+# primitives, so a program reads the same list whichever one compiled it.
+
+def _read_arg(i):
+    """Word `i` of the command line, as `str`.
+
+    A GROWING BUFFER, the shape `bundled/os.py`'s `_getenv_raw` uses and for
+    the same reason: `host_arg_get` answers the length it NEEDED rather than
+    the length it wrote, so a caller whose first guess was too small asks
+    again with a buffer that big instead of keeping a truncated answer.
+
+    `surrogateescape` IS NOT DECORATION. A command line is bytes on every
+    platform this targets and nothing promises they are UTF-8 -- a file name
+    typed in another encoding reaches `argv` verbatim. CPython decodes it
+    with this error handler (that is what `os.fsdecode` is), so the bytes
+    survive as lone surrogates and re-encode to exactly what came in. A plain
+    `decode("utf-8")` raised instead, and raised INSIDE THE MODULE BODY --
+    so one undecodable argument killed every program that imported `sys`,
+    including the ones that never read `argv`.
+    """
+    cap = 256
+    buf = bytearray(cap)
+    got = host_arg_get(i, buf, cap)
+    if got < 0:
+        # THE EMPTY STRING RATHER THAN A REFUSAL. The only way here is a
+        # count that disagrees with what `host_arg_get` will answer, and a
+        # program that cannot import `sys` because of it is worse served than
+        # one whose argument list has a gap in it.
+        return ""
+    if got > cap:
+        cap = got
+        buf = bytearray(cap)
+        got = host_arg_get(i, buf, cap)
+        if got < 0:
+            return ""
+    return bytes(buf[:got]).decode("utf-8", "surrogateescape")
+
+
+def _read_argv():
+    out = []
+    n = host_arg_count()
+    i = 0
+    while i < n:
+        out.append(_read_arg(i))
+        i = i + 1
+    # NEVER EMPTY, which is CPython's rule and not a convenience: `sys.argv[0]`
+    # is documented to be the empty string when there was no script name, so a
+    # program that reads it unguarded -- and most do -- works on a target with
+    # no command line instead of raising IndexError there and nowhere else.
+    if len(out) == 0:
+        out.append("")
+    return out
+
+
+argv = _read_argv()
 
 
 def _print(*args, sep=" ", end="\n", file=None, flush=False):

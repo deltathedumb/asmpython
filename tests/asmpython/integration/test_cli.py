@@ -179,8 +179,8 @@ class TestRun:
         """The frontend's own rule, honoured on the path that defines it.
 
         `E0009`'s note says the entry's return value BECOMES the process exit
-        code, and `objects/support.py` makes that true for every compiled
-        backend: `int main(void) { return (int)ir_main(); }`. This path used
+        code, and the entry wrapper each backend emits makes that true for
+        every compiled backend: `return (int)ir_main();`. This path used
         to report 0 regardless, so `return 7` exited 7 when compiled and 0
         when interpreted -- the oracle every backend is measured against
         disagreeing with all of them about a documented behaviour, which is a
@@ -325,3 +325,161 @@ class TestBuildProducesAProgram:
         r = run_cli("build", str(path), "-o", str(exe))
         assert r.returncode == 1
         assert not exe.exists(), "a failed build left an executable behind"
+
+
+#: A program that does nothing but report its own command line. Module-level
+#: rather than inside a `def main()`: an untyped entry is a definition and not
+#: a program here, so the call has to be written.
+ARGV_PROGRAM = """\
+import sys
+
+print("count:", len(sys.argv))
+print("name is a str:", isinstance(sys.argv[0], str))
+print("tail:", sys.argv[1:])
+"""
+
+
+class TestTheCommandLineReachesTheProgram:
+    """`sys.argv`, from the two places a program can be started.
+
+    THE WORDS CAME FROM NOWHERE. `objects/hostsvc.py` declared
+    `host_arg_count` and `host_arg_get` and both answered from statics that
+    nothing ever assigned, so every compiled program saw an empty command
+    line and `asmpython run`'s own trailing arguments went to an entry that
+    did not take any. A program could be given arguments by either route and
+    read none of them.
+
+    THE TWO ROUTES MUST AGREE, which is why both are here: a binary gets its
+    words from C's `main` and the interpreter gets them from this CLI, and a
+    program compiled one way and run the other has to see the same list.
+    """
+
+    def test_run_passes_its_trailing_arguments(self, tmp_path):
+        path = tmp_path / "argv.py"
+        path.write_text(ARGV_PROGRAM, encoding="utf-8")
+        r = run_cli("run", str(path), "alpha", "beta")
+        assert r.returncode == 0, r.stderr
+        assert "count: 3" in r.stdout, r.stdout
+        assert "tail: ['alpha', 'beta']" in r.stdout, r.stdout
+
+    def test_run_names_the_source_first(self, tmp_path):
+        """`argv[0]` is the source as written, as CPython's is the script."""
+        path = tmp_path / "argv.py"
+        path.write_text("import sys\nprint(sys.argv[0])\n", encoding="utf-8")
+        r = run_cli("run", str(path))
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == str(path), r.stdout
+
+    def test_run_with_no_arguments_still_has_a_name(self, tmp_path):
+        path = tmp_path / "argv.py"
+        path.write_text(ARGV_PROGRAM, encoding="utf-8")
+        r = run_cli("run", str(path))
+        assert r.returncode == 0, r.stderr
+        assert "count: 1" in r.stdout, r.stdout
+        assert "tail: []" in r.stdout, r.stdout
+
+    def test_an_entry_that_takes_parameters_still_gets_integers(self,
+                                                               tmp_path):
+        """The older meaning of the trailing words, which this must not break.
+
+        `--entry fib prog.py 30` calls `fib(30)`. Which reading applies is
+        decided by the ENTRY: an IR function's parameters are i64, so one
+        that declares some wants numbers, and one that declares none can only
+        be reading them as `sys.argv`.
+        """
+        path = tmp_path / "fib.py"
+        path.write_text(
+            "def fib(n: int) -> int:\n"
+            "    if n < 2:\n"
+            "        return n\n"
+            "    return fib(n - 1) + fib(n - 2)\n"
+            "\n"
+            "def main() -> int:\n"
+            "    return 0\n", encoding="utf-8")
+        r = run_cli("run", str(path), "--entry", "fib", "10",
+                    "--print-result")
+        assert r.returncode == 0, r.stderr
+        assert "55" in r.stdout, r.stdout
+
+    @harness.needs("cc")
+    def test_a_compiled_binary_reads_its_own_arguments(self, tmp_path):
+        """The half only a real process can show.
+
+        C offers a program its command line in `main` and nowhere else, so
+        the entry wrapper the C backend emits has to take it and hand it on
+        -- see `apy_host_args_take` in `objects/hostsvc.py`. Nothing else in
+        the build can supply it, and a unit test of the emitter would only
+        assert that a string was written.
+        """
+        path = tmp_path / "argv.py"
+        path.write_text(ARGV_PROGRAM, encoding="utf-8")
+        exe = tmp_path / "argv.exe"
+        r = run_cli("build", str(path), "-o", str(exe))
+        assert r.returncode == 0, r.stderr + r.stdout
+        ran = subprocess.run([str(exe), "alpha", "beta"],
+                             capture_output=True, text=True, encoding="utf-8")
+        assert ran.returncode == 0, ran.stderr
+        assert "count: 3" in ran.stdout, ran.stdout
+        assert "tail: ['alpha', 'beta']" in ran.stdout, ran.stdout
+        # THE PATH IT WAS INVOKED BY, which is what a shell passes and what
+        # CPython puts in `argv[0]` for a script.
+        assert str(exe) in ran.stdout or "name is a str: True" in ran.stdout
+
+    @harness.needs("cc")
+    def test_a_compiled_binary_with_no_arguments_has_a_name(self, tmp_path):
+        path = tmp_path / "argv.py"
+        path.write_text(ARGV_PROGRAM, encoding="utf-8")
+        exe = tmp_path / "argv.exe"
+        assert run_cli("build", str(path), "-o", str(exe)).returncode == 0
+        ran = subprocess.run([str(exe)], capture_output=True, text=True,
+                             encoding="utf-8")
+        assert "count: 1" in ran.stdout, ran.stdout
+        assert "tail: []" in ran.stdout, ran.stdout
+
+    @harness.needs("cc")
+    def test_an_argument_longer_than_the_first_buffer_survives(self, tmp_path):
+        """The growing buffer, which is the one thing `_read_arg` can get
+        wrong silently: `host_arg_get` answers the length it NEEDED, and a
+        caller that took that for the length it WROTE keeps a truncated
+        word."""
+        path = tmp_path / "argv.py"
+        path.write_text(
+            "import sys\nprint(len(sys.argv[1]), sys.argv[1][-3:])\n",
+            encoding="utf-8")
+        exe = tmp_path / "argv.exe"
+        assert run_cli("build", str(path), "-o", str(exe)).returncode == 0
+        long = "z" * 700 + "end"
+        ran = subprocess.run([str(exe), long], capture_output=True, text=True,
+                             encoding="utf-8")
+        assert ran.stdout.strip() == "703 end", ran.stdout
+        r = run_cli("run", str(path), long)
+        assert r.stdout.strip() == "703 end", r.stdout
+
+    @harness.needs("cc")
+    def test_an_argument_that_is_not_utf_8_survives_as_bytes(self, tmp_path):
+        """A command line is BYTES, and a file name typed in another encoding
+        reaches `argv` verbatim. CPython decodes it with `surrogateescape` --
+        that is what `os.fsdecode` is -- so it re-encodes to what came in. A
+        plain `decode("utf-8")` raised instead, and raised in the MODULE BODY,
+        which killed every program that imported `sys` rather than only the
+        ones that read `argv`."""
+        path = tmp_path / "argv.py"
+        path.write_text(
+            "import sys\n"
+            "a = sys.argv[1]\n"
+            "print(len(a), [ord(c) for c in a])\n"
+            "print(a.encode('utf-8', 'surrogateescape'))\n",
+            encoding="utf-8")
+        exe = tmp_path / "argv.exe"
+        assert run_cli("build", str(path), "-o", str(exe)).returncode == 0
+        raw = b"a\xff\xfeb"
+        want = "4 [97, 56575, 56574, 98]\nb'a\\xff\\xfeb'"
+        ran = subprocess.run([str(exe), raw], capture_output=True)
+        assert ran.stdout.decode().strip() == want, ran.stdout
+        # AND THE INTERPRETER AGREES, which is the whole point: the bytes go
+        # out through `os.fsencode` in `objects/hostsvc_host.py` and come back
+        # through the same handler.
+        r = subprocess.run(
+            [sys.executable, "-m", "asmpython", "run", str(path), raw],
+            capture_output=True, env={**os.environ, "PYTHONPATH": str(SRC)})
+        assert r.stdout.decode().strip() == want, r.stdout

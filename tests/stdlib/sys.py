@@ -187,3 +187,58 @@ def function_counts():
 
 function_counts()
 print("--- function counts done ---")
+
+
+# COVERAGE: sys.argv -- what it is, what is in it, and that it is an
+# ORDINARY MUTABLE LIST rather than a view onto the host. The last part is
+# what a program relying on `argparse`-shaped code needs, and it is the part
+# a lazy implementation would get wrong.
+#
+# `argv[0]` IS COMPARED BY SHAPE, not printed: the oracle runs
+# `python tests/stdlib/sys.py` and asmpython runs `asmpython run
+# tests/stdlib/sys.py`, so both see the same path -- but printing it would
+# put a machine-specific absolute path in the compared output for no gain.
+
+def command_line():
+    print("type:", type(sys.argv).__name__)
+    print("never empty:", len(sys.argv) >= 1)
+    print("argv[0] is a str:", isinstance(sys.argv[0], str))
+    print("argv[0] names this file:",
+          sys.argv[0].replace("\\", "/").endswith("tests/stdlib/sys.py"))
+    # NO ARGUMENTS WERE PASSED, so everything after the name is empty -- on
+    # both sides, which is the point of asserting it.
+    print("tail:", sys.argv[1:])
+
+    # A REAL LIST. Every one of these would fail against a host-backed view.
+    same = sys.argv
+    print("same object:", same is sys.argv)
+    same.append("appended")
+    print("append is visible:", sys.argv[-1])
+    print("length after append:", len(sys.argv))
+    sys.argv.pop()
+    print("length after pop:", len(sys.argv))
+    print("a copy is not the list:", list(sys.argv) == sys.argv,
+          list(sys.argv) is sys.argv)
+
+
+command_line()
+print("--- command line done ---")
+
+
+def command_line_replaced():
+    """A program that REWRITES `sys.argv`, which real ones do.
+
+    `argparse`-shaped code assigns a list of its own before re-parsing, and a
+    test suite that drives a `main(argv)` does it every case. What it reads
+    back has to be what it wrote, with nothing from the host left in it.
+    """
+    sys.argv = ["prog", "--flag", "value"]
+    print("replaced:", sys.argv)
+    print("name:", sys.argv[0], "rest:", sys.argv[1:])
+    print("length:", len(sys.argv))
+    for one in sys.argv:
+        print("  *", one)
+
+
+command_line_replaced()
+print("--- command line replaced done ---")

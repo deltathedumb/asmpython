@@ -664,10 +664,27 @@ C_SOURCE["env"] = r"""/* --- host services: env --------------------------------
 }
 
 /* THE COMMAND LINE, stashed by the entry wrapper because C only offers it to
-   `main`.Zero arguments is a legitimate answer for a backend whose target has
+   `main`. Zero arguments is a legitimate answer for a backend whose target has
    no command line. */
 static int apy_host_argc = 0;
 static char **apy_host_argv = 0;
+
+/* THE ENTRY WRAPPER'S DOOR, and the only writer of the two above. `main` is
+   the one place C hands a program its command line, so the wrapper an emitter
+   writes around the IR's entry calls this on the way in -- see the C
+   backend's `main` in `backends/c/emit.py`, which is where the words come
+   from. NOT A DECLARED SERVICE: it is not in the `env` group's table above
+   and no frontend can reach it, because a program setting its own command
+   line is not a thing a program does.
+
+   A BACKEND WHOSE TARGET HAS NO COMMAND LINE simply never calls it, and
+   `host_arg_count` then answers 0 -- which `sys.argv` turns into CPython's
+   `['']` rather than an empty list, because CPython's is never empty. */
+@STATIC@void apy_host_args_take(int argc, char **argv)
+{
+    apy_host_argc = argc;
+    apy_host_argv = argv;
+}
 
 @STATIC@int64_t host_arg_count(void)
 {

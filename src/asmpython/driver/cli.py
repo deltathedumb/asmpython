@@ -173,8 +173,24 @@ def cmd_run(args) -> int:
         module = result.module
 
     interp = Interpreter(module)
+
+    # WHAT THE TRAILING WORDS ARE depends on what the entry takes, and asking
+    # the entry is the only way to tell: `asmpython run --entry fib prog.py 30`
+    # calls `fib(30)` and always did, while `asmpython run prog.py a b` should
+    # do what `python prog.py a b` does. An IR function's parameters are i64,
+    # so a function that declares some wants integers and a word is not one;
+    # a function that declares none can only be reading them as `sys.argv`.
+    #
+    # `argv[0]` IS THE SOURCE AS WRITTEN, exactly as CPython's is the script
+    # as written and as a compiled binary's is the path it was invoked by.
+    # It is set either way -- an entry taking parameters still leaves a
+    # program able to ask its own name.
+    entry = module.function(args.entry)
+    takes = len(entry.params) if entry is not None else 0
+    interp.argv = [args.source] + ([] if takes else list(args.args))
     try:
-        value = interp.run(args.entry, [int(a) for a in args.args])
+        value = interp.run(args.entry,
+                           [int(a) for a in args.args] if takes else [])
     except Trap as trap:
         print(f"trap: {trap}", file=sys.stderr)
         return 70

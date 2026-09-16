@@ -324,6 +324,15 @@ RUNTIME_C = """/* asmpython runtime for the Python frontend. Generated -- edit o
 
 extern int64_t @ENTRY@(void);
 
+/* NO COMMAND LINE HERE, unlike the C backend's own wrapper, which takes
+   `(int argc, char **argv)` and hands them to the `env` group's
+   `apy_host_args_take`. This runtime is what a backend that emits MACHINE
+   CODE links against, and `runtime_c` below substitutes the host functions
+   and the object runtime only -- there is no `@HOSTSVC@` in it, so the
+   statics `sys.argv` reads through do not exist in this translation unit at
+   all. A program needing them is refused before it gets here, by
+   `Backend.check_host_services` naming the `env` group; wiring this `main`
+   would have to wait for those backends to provide it. */
 int main(void) { return (int)@ENTRY@(); }
 """
 
