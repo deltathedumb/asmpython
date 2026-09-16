@@ -71,15 +71,11 @@ deliverable.
   double-underscore spellings are keywords, because real headers use them.
 
   Its flags are declared the way a backend's always were, on the frontend
-  itself: `--include-path`, `--define`, `--trigraphs` and
+  itself: `-I`/`--include-path`, `-D`/`--define`, `--trigraphs` and
   `--bundled-headers`, each also spellable `--c:include-path` and so on. A
-  frontend could not declare options until this release; `Option` grew a
-  `repeat` flag so that a search path could be one, and `Frontend.configure`
-  is the mirror of `Backend.configure` -- returning a new instance, because
-  the registry holds one shared object and a frontend that stored a run's
-  flags on itself would leak them into the next compilation in the same
-  process. `run` and `check` get those flags too, not only `build`: they put
-  the same source through the same frontend.
+  frontend could not declare options until this release; see the entry below
+  for the mechanism. `run` and `check` get those flags too, not only
+  `build`: they put the same source through the same frontend.
 
   Eighty-seven programs are compiled three ways — the host's `cc`, this
   frontend's IR in the reference interpreter, and this frontend's IR through
@@ -96,6 +92,34 @@ deliverable.
   are refused, because a non-local jump needs a frame the IR deliberately
   cannot name; and `main`'s parameters are 0 and a null `argv`, because
   nothing in the platform floor can ask the host for a command line.
+
+- **Every component declares its own flags**, and the driver's parser stops
+  carrying flags that belong to one language or one linker. `--import-path`,
+  `-P`, `--no-site-packages`, `--host-python`, `--native-library` and
+  `--library` are the Python frontend's; `--link-input` is declared by the
+  three toolchains that really link, so `jar` and `pyc` refuse it before
+  anything is built rather than failing at link time. The driver no longer
+  imports `hostlib`, `imports` and `nativelib` out of `frontends/python` by
+  name to do that frontend's setup itself, and the `--library` special case
+  -- which inspected `compile`'s SIGNATURE to guess whether a frontend
+  supported the flag -- is the ordinary "this component does not take that
+  option" refusal now.
+
+  `Option` grew the shapes a real flag has: `repeat` for `--import-path`,
+  `switch` for `--library`, and `short` for `-P` -- and for `-I` and `-D`,
+  which is how every C compiler spells the C frontend's two commonest flags.
+  A letter rides with its word when both are uncontested, so `--help` prints
+  `-P, --safe-path`.
+
+  Every flag has TWO spellings. `--opt-level` is what a user types;
+  `--pybc:opt-level` is registered whether or not anything collides, so a
+  script written against it keeps working when a plugin later claims the
+  short name. Two components declaring one name with DIFFERENT declarations
+  makes the short spelling an error naming both -- awarding it by
+  registration order would configure the wrong component silently -- while
+  one declaration SHARED, as `--link-input` is, is not a collision at all.
+  `uasm frontends` and `uasm toolchains` list their components' flags the
+  way `uasm backends` always has.
 
 - **A from-scratch retargetable compiler** (`src/asmpython/`) — a
   language-independent IR with four registries (frontends, backends, targets,

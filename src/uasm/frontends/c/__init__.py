@@ -98,11 +98,15 @@ class CFrontend(Frontend):
     #: Python build offered `--include-path` would be offered a flag that
     #: means nothing to it. `--c:include-path` is always spellable too.
     options = (
+        # `-I` AND `-D`, spelled as every C compiler spells them. They are
+        # the two flags a C build is most likely to be handed by a Makefile
+        # written elsewhere, and a compiler that only accepted the long form
+        # would need that Makefile rewritten to use it.
         Option("include-path",
                "where #include <...> looks, before the bundled headers",
-               metavar="DIR", repeat=True),
+               metavar="DIR", repeat=True, short="I"),
         Option("define", "define a preprocessor macro; no value means 1",
-               metavar="NAME[=VALUE]", repeat=True),
+               metavar="NAME[=VALUE]", repeat=True, short="D"),
         Option("trigraphs",
                "translate ??= and the rest; C23 deleted them", metavar="1|0"),
         Option("bundled-headers",
@@ -122,8 +126,16 @@ class CFrontend(Frontend):
         self.bundled = bundled
         self.units = units
 
-    def configure(self, values: dict, sink: DiagnosticSink) -> "CFrontend":
-        """A frontend carrying this run's flags. See `Frontend.configure`."""
+    def configure(self, values: dict, context, sink: DiagnosticSink
+                  ) -> "CFrontend":
+        """A frontend carrying this run's flags. See `Frontend.configure`.
+
+        `context` IS UNUSED HERE, deliberately: `#include "foo.h"` resolves
+        against the INCLUDING FILE's directory, which the preprocessor knows
+        from the file it is reading, and `<foo.h>` against the search path.
+        Neither needs the source the driver started from, and nothing this
+        frontend does is scoped by the target platform.
+        """
         return CFrontend(
             include_paths=tuple(Path(p) for p in
                                 values.get("include-path", ())),

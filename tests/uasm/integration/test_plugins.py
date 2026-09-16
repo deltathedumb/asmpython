@@ -186,10 +186,18 @@ class TestTheListingsSurviveAThirdParty:
         The column width was fixed at ten, which is right for exactly the
         names that shipped -- the one class of bug an extension point has
         that nobody in-tree can see.
+
+        THE COMPONENT ROWS AND NOT EVERY LINE. A toolchain that declares
+        flags lists them under its own line, indented past the name column
+        -- `--link-input` is one -- and those lines are deliberately not in
+        this column. They are told apart by their indent: a component row
+        begins at column two and nothing else does.
         """
         done = run(workspace, "--plugin", "mypack", "toolchains")
         assert done.returncode == 0, done.stderr
-        lines = [l for l in done.stdout.splitlines() if l.strip()]
-        starts = {l.index(l.strip().split()[1]) for l in lines
+        rows = [l for l in done.stdout.splitlines()
+                if l.strip() and l.startswith("  ") and not l.startswith("   ")]
+        assert len(rows) > 1, f"no component rows at all: {done.stdout}"
+        starts = {l.index(l.strip().split()[1]) for l in rows
                   if len(l.strip().split()) > 1}
         assert len(starts) == 1, f"descriptions are not aligned: {done.stdout}"

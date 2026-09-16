@@ -28,7 +28,7 @@ from tests import harness
 from uasm import backend as backend_registry
 from uasm import frontend as frontend_registry
 from uasm import link as link_registry
-from uasm.driver.cli import _add_component_options
+from uasm.driver.cli import _ALL_KINDS, _add_component_options
 from uasm.link.base import Toolchain
 from uasm.options import Option
 
@@ -37,7 +37,7 @@ frontend_registry.load_builtin()
 link_registry.load_builtin()
 
 
-def _parser() -> argparse.ArgumentParser:
+def _parser(kinds: tuple[str, ...] = _ALL_KINDS) -> argparse.ArgumentParser:
     """A parser carrying nothing but the component options.
 
     NOT `build_parser()`: that one also carries the driver's own flags, and a
@@ -45,7 +45,7 @@ def _parser() -> argparse.ArgumentParser:
     keep passing after the component lost it.
     """
     ap = argparse.ArgumentParser(prog="t")
-    _add_component_options(ap)
+    _add_component_options(ap, kinds)
     return ap
 
 
@@ -218,3 +218,64 @@ class TestATieIsRefusedRatherThanAwarded:
         # AMBIGUITY IS PER FLAG, not per component. `stub-a` declaring one
         # contested name does not cost it the other.
         assert _parse("--strip", "yes").linker_options == {"strip": "yes"}
+
+
+class TestAFlagHasTheShapeItWasDeclaredWith:
+    def test_a_repeatable_option_keeps_every_occurrence(self):
+        # NOT "THE LAST ONE WINS". A search path is a sequence by nature, and
+        # a rule that silently kept only the last `--import-path` is not one
+        # anybody would guess from the flag.
+        args = _parse("--import-path", "a", "--import-path", "b")
+        assert args.frontend_options == {"import-path": ["a", "b"]}
+
+    def test_the_two_spellings_fill_one_list(self):
+        args = _parse("--import-path", "a", "--python:import-path", "b")
+        assert args.frontend_options == {"import-path": ["a", "b"]}
+
+    def test_a_switch_is_true_and_takes_no_value(self):
+        assert _parse("--library").frontend_options == {"library": True}
+        # `prog.py` IS NOT SWALLOWED: a switch that consumed the next word
+        # would eat the source file, and the failure would be reported
+        # against the file that was left. This parser carries no positional,
+        # so the word coming back unclaimed is the whole of the claim.
+        args, rest = _parser().parse_known_args(["--library", "prog.py"])
+        assert args.frontend_options == {"library": True}
+        assert rest == ["prog.py"]
+
+    def test_a_short_letter_reaches_the_same_key(self):
+        assert _parse("-P").frontend_options == {"safe-path": True}
+        assert _parse("--safe-path").frontend_options == {"safe-path": True}
+        assert _parse("--python:safe-path").frontend_options == {"safe-path": True}
+
+
+class TestOneDeclarationSharedIsNotACollision:
+    def test_three_linkers_share_one_link_input(self):
+        # `cc`, `cpyext` and `baremetal` all declare `--link-input`, and it
+        # means the same thing to all three. Refusing it as ambiguous would
+        # be telling the user to choose between three spellings of one flag;
+        # WHICH linker may honour it is settled later, against the linker
+        # that was actually chosen.
+        shared = {name for name, tc in link_registry.available().items()
+                  if any(o.name == "link-input" for o in tc.options)}
+        assert len(shared) > 1
+        assert _parse("--link-input", "libfoo.a").linker_options == {
+            "link-input": ["libfoo.a"]}
+
+    def test_differing_declarations_of_one_name_still_collide(self, stubs):
+        # The stubs' two `jobs` options carry different help text, which is a
+        # different declaration and so a real question.
+        assert "ambiguous" in _refuse("--jobs", "4")
+
+
+class TestAVerbOffersOnlyTheStagesItHas:
+    def test_run_takes_the_frontends_flags(self):
+        only = _parser(("frontend",))
+        assert only.parse_args(["--import-path", "a"]).frontend_options == {
+            "import-path": ["a"]}
+
+    def test_run_does_not_take_a_backends(self):
+        # `run` STOPS AT THE IR, so `--class-version` on it would name a
+        # stage this command never reaches -- and, worse, could make a
+        # frontend's flag ambiguous against one nothing there could use.
+        rest = _parser(("frontend",)).parse_known_args(["--class-version", "55"])[1]
+        assert rest == ["--class-version", "55"]

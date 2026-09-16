@@ -26,11 +26,37 @@ whether to continue with other inputs.
 from __future__ import annotations
 
 import abc
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..diagnostics import DiagnosticSink, SourceFile
 from ..ir import Module
 from ..options import Option, OptionError  # noqa: F401  (re-export)
+
+
+@dataclass(frozen=True, slots=True)
+class BuildContext:
+    """What a frontend needs about the run that is not one of its own flags.
+
+    A FLAG IS NOT THE WHOLE OF WHAT `configure` NEEDS. `--import-path` adds
+    to a search path whose FIRST entry is the source's own directory, and a
+    scoped native-library declaration picks a library by the platform being
+    built for -- neither is anything the user typed, and both were reasons
+    the driver did this work itself.
+
+    HANDED OVER RATHER THAN LOOKED UP. The driver resolves the target once
+    and passes what it resolved; a frontend working it out again is how a
+    program type-checks against `user32.dll` and links against
+    `libX11.so.6`.
+    """
+
+    #: The file being compiled. Its directory is `sys.path[0]` in CPython's
+    #: terms -- first on the search path, unless a flag says otherwise.
+    source: Path
+    #: The platform the program is being built for, as `Target.os` spells it.
+    #: None when nothing can say yet, which is not an error: it leaves only
+    #: the declarations that named no platform applying.
+    target_os: str | None = None
 
 
 class Frontend(abc.ABC):
@@ -49,20 +75,30 @@ class Frontend(abc.ABC):
     #: nothing to it.
     options: tuple[Option, ...] = ()
 
-    def configure(self, values: dict, sink: DiagnosticSink) -> "Frontend":
+    def configure(self, values: dict, context: "BuildContext",
+                  sink: DiagnosticSink) -> "Frontend | None":
         """The frontend to compile with, given this run's option values.
 
         THE MIRROR OF `Backend.configure`, and for the same reasons. `values`
         holds only the options this frontend declared, keyed by name without
-        the dashes; a repeatable one arrives as a list. Raise `OptionError`
-        for a value that cannot be used and report anything advisory to
-        `sink`.
+        the dashes; a repeatable one arrives as a list and a switch as True.
+        Raise `OptionError` for a value that cannot be used, and report
+        anything advisory to `sink`.
+
+        `context` IS WHAT A FRONTEND NEEDS THAT IS NOT ITS OWN FLAG -- the
+        source, and the platform being built for. See `BuildContext` for why
+        the driver hands them over rather than the frontend looking them up.
 
         RETURN A NEW INSTANCE rather than mutating `self`. The registry holds
         one shared frontend object, so a frontend that stored its flags on
         itself would leak them into the next compilation in the same process
         -- invisible in a command-line run and wrong in every test suite and
         every embedding tool.
+
+        RETURN None, having reported to `sink`, for anything that stops the
+        build before compiling: an interpreter that would not run, a
+        declaration file that will not parse. A diagnostic and a return are
+        the two halves of one refusal.
         """
         return self
 

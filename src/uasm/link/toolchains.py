@@ -14,8 +14,17 @@ from pathlib import Path
 
 from .. import target as target_registry
 from ..target import Target
+from ..options import Option
 from .base import LinkError, LinkRequest, Toolchain, find_tool, run
 from .registry import register
+
+#: DECLARED ONCE AND SHARED by the three toolchains that really link. The same
+#: flag on `jar` or `pyc` would be a promise neither can keep: one packages
+#: class files and one writes a `.pyc`, and an object file handed to either has
+#: nowhere to go. That used to be found out at link time, as a LinkError about
+#: inputs; a declaration lets it be said before anything is built.
+LINK_INPUT = Option("link-input", metavar="INPUT", repeat=True,
+                    help="extra object, archive or -l name for the link step")
 
 #: Suffixes a C driver knows how to consume directly. Anything else is passed
 #: through as a linker input (an object, an archive, a `-l` name).
@@ -39,6 +48,7 @@ class CcToolchain(Toolchain):
     #: belongs here once the target decides the answer.
     artifacts = ()
     backends = ("c", "x86-64", "arm64", "x86-32", "arm32")
+    options = (LINK_INPUT,)
     description = "assemble and link with the system C compiler driver"
 
     #: Tried in order. `cc` last: it is usually a symlink to one of the others,
@@ -188,6 +198,7 @@ class CPyExtToolchain(Toolchain):
     #: reaches the `cpyext` backend only through it.
     artifacts = (".so", ".pyd")
     backends = ("cpyext",)
+    options = (LINK_INPUT,)
     description = "compile and link a CPython extension module (.so/.pyd)"
 
     def supports(self, target: Target) -> bool:
