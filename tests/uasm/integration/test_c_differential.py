@@ -1697,6 +1697,393 @@ PROGRAMS: dict[str, str] = {
         }
     """,
 
+    "macro_expansion_corners": r"""
+        /* The preprocessor under load: `##` with an empty
+           operand, `#` and the spacing it collapses, `__VA_OPT__`
+           with and without arguments, the hide set that stops
+           `REC(x)` and the mutual pair `A`/`B`, and `#undef`
+           followed by a redefinition that an earlier macro's body
+           must NOT see. `preprocess.py` says these are Prosser's
+           algorithm; this is what that buys. */
+        #include <stdio.h>
+
+        #define CAT(a, b) a##b
+        #define XCAT(a, b) CAT(a, b)
+        #define STR(x) #x
+        #define XSTR(x) STR(x)
+        #define EMPTY
+        #define VAL 42
+        #define F(x) ((x) * 2)
+        #define G(x, ...) x __VA_OPT__(,) __VA_ARGS__
+        #define H(...) __VA_ARGS__
+        #define REC(x) REC(x)
+        #define SELF SELF
+        #define A B
+        #define B A
+        #define PASTE_EMPTY(a, b) a ## b
+        #define NARGS(...) XCAT(NARGS_, H(COUNT(__VA_ARGS__)))
+        #define COUNT(...) 9
+
+        int main(void) {
+            int XCAT(ab, 1) = 5;
+            printf("%d %s %s\n", ab1, STR(VAL), XSTR(VAL));
+            printf("%s %s\n", STR(a "b" c), STR(  spaced   out  ));
+            printf("%d %d\n", F(3), F(F(3)));
+            printf("[%s] [%s]\n", STR(G(1)), STR(G(1, 2, 3)));
+            printf("[%s] [%s]\n", STR(H()), STR(H(1, 2)));
+            printf("%d %d\n", PASTE_EMPTY(VA, L), (int)sizeof XSTR(EMPTY));
+            printf("[%s] [%s]\n", XSTR(REC(1)), XSTR(SELF));
+            printf("[%s]\n", XSTR(A));
+            /* `__LINE__`, `__FILE__` and `__STDC_VERSION__` are not comparable:
+               the two builds put a different prelude above this, the file has a
+               different name, and gcc's `-std=c2x` predates C23's final number. That
+               they EXIST and expand to the right SHAPE is what can be checked. */
+            printf("%d %d %d\n", __LINE__ > 0, __FILE__[0] != 0,
+                   __STDC_VERSION__ >= 201112L);
+        #define VAL2 VAL
+        #undef VAL
+        #define VAL 7
+            printf("%d %d\n", VAL, VAL2);
+            printf("[%s]\n", XSTR(PASTE_EMPTY(, x)));
+            return 0;
+        }
+    """,
+
+    "sequence_points": r"""
+        /* The order C DOES define: a comma expression, `&&`
+           and `||` short-circuiting, `?:` evaluating one arm,
+           and a side effect in a loop condition. Each is a
+           count of how many times a function ran, which is the
+           only way to see an evaluation that should not have
+           happened. */
+        #include <stdio.h>
+
+        static int calls = 0;
+        static int bump(void) { calls++; return calls; }
+
+        int main(void) {
+            int a = 0, b = 0, i;
+            int arr[5] = { 0 };
+
+            /* Sequence points that ARE defined. */
+            a = (bump(), bump(), bump());
+            printf("%d %d\n", a, calls);
+            calls = 0;
+            b = bump() && bump() && 0 && bump();
+            printf("%d %d\n", b, calls);
+            calls = 0;
+            b = bump() || 1 || bump();
+            printf("%d %d\n", b, calls);
+            calls = 0;
+            b = bump() ? bump() : bump();
+            printf("%d %d\n", b, calls);
+
+            /* Compound assignment and increment on the same object, one per
+               statement so the order is defined. */
+            i = 1;
+            i += i;
+            printf("%d\n", i);
+            i = 1;
+            i = i++ + 1;
+            printf("%d\n", i > 0);
+            for (i = 0; i < 5; i++) arr[i] = i * i;
+            for (i = 0; i < 5; i++) printf("%d ", arr[i]);
+            printf("\n");
+
+            /* Short-circuit inside a loop condition with a side effect. */
+            calls = 0;
+            for (i = 0; i < 3 && bump(); i++) ;
+            printf("%d %d\n", i, calls);
+            return 0;
+        }
+    """,
+
+    "control_flow_corners": r"""
+        /* `goto` out of nested loops with a VLA in scope, a
+           `switch` on a `long` whose `default` is in the
+           middle, a `longjmp` out of twenty recursive frames,
+           and a `continue` from a block that declares. */
+        #include <stdio.h>
+        #include <setjmp.h>
+
+        static jmp_buf jb;
+
+        static int deep(int n) {
+            if (n == 0) longjmp(jb, 42);
+            return deep(n - 1) + 1;
+        }
+
+        static int with_vla(int n) {
+            int a[n];
+            int i, t = 0;
+            for (i = 0; i < n; i++) a[i] = i;
+            for (i = 0; i < n; i++) t += a[i];
+            if (n > 3) goto out;
+            t += 100;
+        out:
+            return t;
+        }
+
+        int main(void) {
+            int i, j, t = 0;
+            long big = 1;
+
+            /* goto out of nested loops and blocks, with a VLA in scope. */
+            for (i = 0; i < 4; i++) {
+                int a[i + 1];
+                for (j = 0; j <= i; j++) a[j] = j;
+                for (j = 0; j <= i; j++) t += a[j];
+                if (t > 4) goto done;
+            }
+        done:
+            printf("%d %d %d\n", t, with_vla(5), with_vla(2));
+
+            /* switch on a long, with a default in the middle. */
+            for (big = 0; big < 4; big++) {
+                switch (big) {
+                case 0: printf("zero "); break;
+                default: printf("other "); break;
+                case 2: printf("two "); break;
+                }
+            }
+            printf("\n");
+
+            /* A recursive longjmp out of many frames. */
+            if (setjmp(jb) == 0) {
+                printf("%d\n", deep(20));
+            } else {
+                printf("jumped\n");
+            }
+
+            /* do/while, continue, and a loop whose body declares. */
+            i = 0;
+            do {
+                int k = i * 2;
+                if (k == 4) { i++; continue; }
+                t += k;
+                i++;
+            } while (i < 5);
+            printf("%d\n", t);
+            return 0;
+        }
+    """,
+
+    "every_floating_conversion": r"""
+        /* `%g`, `%G`, `%e`, `%f`, `%a` and `%L` of the values a
+           formatter gets wrong: the two zeros, the ties, the
+           exponent thresholds where `%g` changes its mind, an
+           infinity, a NaN, the smallest subnormal, and the
+           precision and width flags around each. */
+        #include <stdio.h>
+        #include <float.h>
+        #include <math.h>
+
+        int main(void) {
+            double v[] = { 0.0, -0.0, 1.0, 0.5, 1.0 / 3.0, 1e-5, 1e-4, 123456.789,
+                           1e15, 1e16, 1e17, 9.999999e5, 0.1 + 0.2, 2.5, 3.5,
+                           1e300, 5e-324, 2.2250738585072014e-308 };
+            int i;
+            for (i = 0; i < (int)(sizeof v / sizeof v[0]); i++) {
+                printf("%g|%G|%e|%f|%.0f|%.17g|%.3g|%#.0f|%+.2e\n",
+                       v[i], v[i], v[i], v[i], v[i], v[i], v[i], v[i], v[i]);
+            }
+            printf("%f %f %f\n", 1.0 / 0.0, -1.0 / 0.0, 0.0 / 0.0);
+            printf("%g %G %e\n", 1.0 / 0.0, -1.0 / 0.0, 0.0 / 0.0);
+            printf("%.0e %.1e %.20e\n", 1.5, 1.25, 1.0 / 3.0);
+            printf("%20.5f|%-20.5f|%020.5f|\n", 3.14159, 3.14159, 3.14159);
+            printf("%.*f %*.*f\n", 3, 3.14159, 12, 4, 3.14159);
+            printf("%a %A\n", 1.0, 0.5);
+            printf("%.13a\n", 1.0 / 3.0);
+            printf("%Lf %Le %Lg\n", 1.5L, 1.5L, 1.5L);
+            printf("%.21Lg\n", (long double)1 / 3);
+            return 0;
+        }
+    """,
+
+    "the_string_and_number_functions": r"""
+        /* `<string.h>`, `<ctype.h>` and `<stdlib.h>`'s
+           converters, against the host's. `strtod` of a hex
+           float and `strtoll` of the most negative value are
+           the two that are easy to get nearly right. */
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <ctype.h>
+
+        int main(void) {
+            char a[32], b[32];
+            const char *p;
+            char *q;
+            int i;
+
+            strcpy(a, "hello world");
+            printf("%zu %d %d\n", strlen(a), (int)(strchr(a, 'o') - a),
+                   (int)(strrchr(a, 'o') - a));
+            printf("%d %d %d\n", strcmp("a", "b"), strcmp("b", "a"), strcmp("a", "a"));
+            printf("%d %d\n", strncmp("abc", "abd", 2), strncmp("abc", "abd", 3));
+            printf("%zu %zu\n", strspn("abcde", "abc"), strcspn("abcde", "cd"));
+            printf("%s\n", strpbrk(a, "ow"));
+            printf("%s\n", strstr(a, "lo w"));
+            printf("%d\n", strstr(a, "zz") == NULL);
+            strcpy(b, "one,two;three");
+            for (q = strtok(b, ",;"); q; q = strtok(NULL, ",;")) printf("[%s]", q);
+            printf("\n");
+            memset(a, 'z', 5);
+            a[5] = 0;
+            printf("%s %d\n", a, memcmp("abc", "abd", 3) < 0);
+            memcpy(a, "0123456789", 11);
+            memmove(a + 2, a, 8);
+            printf("%s\n", a);
+            printf("%s %s\n", strerror(0), strerror(2));
+
+            printf("%ld %ld %ld\n", strtol("  -42abc", &q, 10), strtol("0x1f", NULL, 0),
+                   strtol("777", NULL, 8));
+            printf("%s\n", q);
+            printf("%lu %lld\n", strtoul("4294967295", NULL, 10),
+                   strtoll("-9223372036854775808", NULL, 10));
+            printf("%.17g %.17g %.17g\n", strtod("3.14159", NULL), strtod("1e300", NULL),
+                   strtod("0x1.8p3", NULL));
+            printf("%d %d %d\n", atoi("42"), (int)atol("-7"), (int)(atof("2.5") * 2));
+
+            for (i = 0, p = "aA1 .\t"; *p; p++, i++)
+                printf("%d%d%d%d%d%d ", !!isalpha((unsigned char)*p),
+                       !!isdigit((unsigned char)*p), !!isspace((unsigned char)*p),
+                       !!ispunct((unsigned char)*p), !!isupper((unsigned char)*p),
+                       !!isalnum((unsigned char)*p));
+            printf("\n%c%c\n", toupper('a'), tolower('Z'));
+            return 0;
+        }
+    """,
+
+    "the_type_system_under_load": r"""
+        /* Function pointers in an array, a function returning
+           one, a pointer to an array, a union read through
+           another member, a linked list, and `ptrdiff_t` /
+           `intptr_t` round trips. */
+        #include <stdio.h>
+        #include <stddef.h>
+        #include <stdint.h>
+
+        typedef int (*fn)(int);
+        typedef int array3[3];
+        typedef struct node { struct node *next; int v; } node;
+
+        static int twice(int x) { return x * 2; }
+        static int thrice(int x) { return x * 3; }
+        static fn pick(int n) { return n ? twice : thrice; }
+        static int apply(fn f, int x) { return f(x); }
+        static int variadic(const char *fmt, ...) { return (int)fmt[0]; }
+
+        union both { long l; double d; char b[8]; };
+
+        int main(void) {
+            fn table[2] = { twice, thrice };
+            array3 a = { 1, 2, 3 };
+            node n3 = { 0, 3 }, n2 = { &n3, 2 }, n1 = { &n2, 1 };
+            node *p;
+            union both u;
+            int (*pa)[3] = &a;
+            int *pi = a;
+            const char *const names[] = { "a", "bb", "ccc" };
+            int (*vp)(const char *, ...) = variadic;
+            int i, t = 0;
+
+            printf("%d %d %d\n", apply(table[0], 5), apply(pick(1), 5),
+                   apply(pick(0), 5));
+            printf("%zu %zu %zu %zu\n", sizeof table, sizeof a, sizeof *pa,
+                   sizeof names);
+            for (p = &n1; p; p = p->next) t += p->v;
+            printf("%d %d %d\n", t, (*pa)[2], pi[1]);
+            u.l = 0;
+            u.d = 1.5;
+            printf("%d %d\n", u.b[7] != 0, (int)u.l != 0);
+            for (i = 0; i < 3; i++) printf("%s%zu ", names[i], sizeof names[i]);
+            printf("\n%d\n", vp("x", 1, 2));
+
+            /* Pointer arithmetic and comparison across a whole object. */
+            printf("%d %d %d %d\n", (int)(&a[3] - a), a + 1 > a, (void *)a != NULL,
+                   (int)((char *)&a[1] - (char *)&a[0]));
+            /* ptrdiff_t / size_t / intptr_t round trips. */
+            {
+                ptrdiff_t d = &a[2] - &a[0];
+                size_t z = sizeof a;
+                intptr_t ip = (intptr_t)(void *)a;
+                printf("%td %zu %d\n", d, z, (int)((void *)ip == (void *)a));
+            }
+            /* A function returning a pointer to a function. */
+            {
+                fn (*getter)(int) = pick;
+                printf("%d\n", getter(1)(7));
+            }
+            return 0;
+        }
+    """,
+
+    "every_atomic_operation": r"""
+        /* `<stdatomic.h>`'s whole surface. With one thread
+           every one of these IS atomic, which is what the
+           header says it relies on -- and what it does NOT
+           promise for two. */
+        #include <stdio.h>
+        #include <stdatomic.h>
+
+        static atomic_int counter = 0;
+
+        int main(void) {
+            atomic_int a = 0;
+            atomic_long l = 0;
+            _Atomic double d = 0.0;
+            int expected = 5, got;
+
+            /* ONE OPERATION PER STATEMENT. The order in which a call's arguments
+               are evaluated is unspecified, and two of these in one `printf` is a
+               test of the compiler's choice rather than of the operation. */
+            atomic_init(&a, 1);
+            printf("%d %d\n", atomic_load(&a), (int)atomic_is_lock_free(&a));
+            atomic_store(&a, 5);
+            got = atomic_load(&a);
+            printf("%d\n", got);
+            got = atomic_fetch_add(&a, 3);
+            printf("%d %d\n", got, atomic_load(&a));
+            got = atomic_fetch_sub(&a, 2);
+            printf("%d %d\n", got, atomic_load(&a));
+            got = atomic_fetch_or(&a, 1);
+            printf("%d %d\n", got, atomic_load(&a));
+            got = atomic_fetch_and(&a, 0xF);
+            printf("%d %d\n", got, atomic_load(&a));
+            got = atomic_fetch_xor(&a, 2);
+            printf("%d %d\n", got, atomic_load(&a));
+            got = atomic_exchange(&a, 5);
+            printf("%d %d\n", got, atomic_load(&a));
+            expected = 5;
+            got = (int)atomic_compare_exchange_strong(&a, &expected, 9);
+            printf("%d %d %d\n", got, expected, atomic_load(&a));
+            expected = 0;
+            got = (int)atomic_compare_exchange_weak(&a, &expected, 1);
+            printf("%d %d %d\n", got, expected, atomic_load(&a));
+
+            atomic_store(&l, 1L << 40);
+            printf("%ld\n", atomic_load(&l));
+            d = 1.5;
+            printf("%.1f\n", (double)d);
+            counter += 3;
+            counter++;
+            printf("%d\n", (int)counter);
+            atomic_thread_fence(memory_order_seq_cst);
+            atomic_signal_fence(memory_order_acquire);
+            {
+                atomic_flag f = ATOMIC_FLAG_INIT;
+                got = (int)atomic_flag_test_and_set(&f);
+                printf("%d %d\n", got, (int)atomic_flag_test_and_set(&f));
+                atomic_flag_clear(&f);
+                printf("%d\n", (int)atomic_flag_test_and_set(&f));
+            }
+            printf("%d %d %d\n", ATOMIC_INT_LOCK_FREE >= 0,
+                   ATOMIC_POINTER_LOCK_FREE >= 0, ATOMIC_BOOL_LOCK_FREE >= 0);
+            return 0;
+        }
+    """,
+
     "the_execution_character_set_is_utf_8": r"""
         /* WHAT A LITERAL'S BYTES ARE, which is the execution
            character set and here is UTF-8. The distinction that
