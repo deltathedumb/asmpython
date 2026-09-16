@@ -9231,6 +9231,92 @@ PROGRAMS = {
         show("splatted", lambda: min(*[1, 2]))
         show("keyword splatted", lambda: sorted(*[[2, 1]]))
     """,
+    "a_function_named_like_a_c_library_symbol_still_builds": """
+        # A MODULE-LEVEL `def` KEEPS ITS BARE NAME AS ITS IR SYMBOL, and the
+        # C backend emits that name as a top-level function. So a program
+        # that wrote `def abs(a)` did not BUILD:
+        #
+        #     error: conflicting types for 'abs';
+        #            have 'uintptr_t(uintptr_t, uintptr_t)'
+        #     note: previous declaration of 'abs' with type 'int(int)'
+        #
+        # `abs`, `time`, `index`, `pow`, `log`, `exit`, `remove`, `div` and
+        # `send` are ordinary Python function names and CPython runs every one
+        # of them. Twelve of the seventeen names tried stopped the build.
+        #
+        # THE NAMES MOVE ASIDE NOW, the same way a nested `def` already did --
+        # its key is not a C identifier, so it gets a `pyf_` symbol, and a key
+        # the C runtime already owns is no more usable as a symbol than that.
+        #
+        # DECIDED BEFORE ANY BACKEND rather than in the C emitter, because the
+        # collision is not only C's: the assembler backends emit an object
+        # file that links against libc, and a global `abs` there preempts the
+        # real one at LINK time -- a wrong answer rather than an error.
+        def abs(a):
+            return ("my abs", a)
+
+        def time():
+            return "my time"
+
+        def index(a):
+            return ("my index", a)
+
+        def pow(a, b):
+            return ("my pow", a, b)
+
+        def log(a):
+            return ("my log", a)
+
+        def remove(a):
+            return ("my remove", a)
+
+        def div(a, b):
+            return ("my div", a, b)
+
+        def send(a):
+            return ("my send", a)
+
+        def free(a):
+            return ("my free", a)
+
+        def malloc(n):
+            return ("my malloc", n)
+
+        def printf(s):
+            return ("my printf", s)
+
+        def sqrt(a):
+            return ("my sqrt", a)
+
+        def floor(a):
+            return ("my floor", a)
+
+        def system(a):
+            return ("my system", a)
+
+        def rename(a, b):
+            return ("my rename", a, b)
+
+        def stdout():
+            return "my stdout"
+
+        def errno():
+            return "my errno"
+
+        print(abs(-1), time(), index(2), pow(2, 3), log(4))
+        print(remove(5), div(6, 7), send(8), free(9), malloc(10))
+        print(printf("x"), sqrt(11), floor(12), system("y"), rename("a", "b"))
+        print(stdout(), errno())
+
+        # AND THEY ARE STILL ORDINARY VALUES, reachable by name and callable
+        # through one -- the renaming is a SYMBOL, not a binding.
+        def apply(f, a):
+            return f(a)
+
+        print(apply(abs, -2), apply(index, 3))
+        fs = [abs, log, send]
+        print([f(1) for f in fs])
+    """,
     "fstrings": """
         n = 42
         s = 'ab'

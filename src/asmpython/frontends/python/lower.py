@@ -121,14 +121,71 @@ _HOSTSVC_IR = {name: ([TO_IR[a] for a in args], TO_IR[ret])
 _CONVERSIONS = {"int": INT, "float": FLOAT, "bool": BOOL}
 
 
+#: NAMES THE C RUNTIME ALREADY OWNS. A module-level `def` keeps its bare name
+#: as its IR symbol, and the C backend emits that name as a top-level
+#: function -- so `def abs(a)` produced
+#:
+#:     error: conflicting types for 'abs'; have 'uintptr_t(uintptr_t, uintptr_t)'
+#:     note: previous declaration of 'abs' with type 'int(int)'
+#:
+#: and the program did not build at all. `abs`, `time`, `index`, `pow`, `log`,
+#: `exit`, `remove`, `div` and `send` are ordinary Python function names;
+#: CPython runs every one of them.
+#:
+#: SCOPED TO THE HEADERS THE GENERATED C INCLUDES -- <stdio.h>, <stdlib.h>,
+#: <string.h>, <math.h>, <errno.h>, <time.h> and <stdint.h> -- plus the POSIX
+#: and BSD names those pull in on a real libc, which is where `index`, `send`
+#: and `y1` come from. Not every name any header anywhere declares: the ones
+#: the emitted translation unit can actually see.
+#:
+#: HERE AND NOT IN THE C BACKEND'S `_cname`, because the collision is not
+#: only C's. The assembler backends emit an object file that links against
+#: libc, and a global `abs` there preempts the real one at link time -- which
+#: is a wrong answer rather than an error. One rule, before any backend.
+#:
+#: `main` AND `putchar` ARE NOT HERE. Both already have a rule of their own
+#: further down and in the C backend's `_RESERVED`, and adding them would
+#: have two renamings fighting over one symbol.
+_C_RUNTIME_NAMES = frozenset("""
+clearerr fclose feof ferror fflush fgetc fgetpos fgets fopen fprintf fputc
+fputs fread freopen fscanf fseek fsetpos ftell fwrite getc getchar gets perror
+printf putc puts remove rename rewind scanf setbuf setvbuf snprintf sprintf
+sscanf stderr stdin stdout tmpfile tmpnam ungetc vfprintf vfscanf vprintf
+vscanf vsnprintf vsprintf vsscanf
+abort abs aligned_alloc at_quick_exit atexit atof atoi atol atoll bsearch
+calloc div exit free getenv labs ldiv llabs lldiv malloc mblen mbstowcs mbtowc
+qsort quick_exit rand realloc srand strtod strtof strtol strtold strtoll
+strtoul strtoull system wcstombs wctomb
+memccpy memchr memcmp memcpy memmove memset strcat strchr strcmp strcoll
+strcpy strcspn strdup strerror strlen strncat strncmp strncpy strndup strpbrk
+strrchr strspn strstr strtok strxfrm bcmp bcopy bzero index rindex strcasecmp
+strncasecmp strsep strtok_r
+acos acosh asin asinh atan atan2 atanh cbrt ceil copysign cos cosh drem erf
+erfc exp exp2 expm1 fabs fdim floor fma fmax fmin fmod frexp gamma hypot ilogb
+j0 j1 jn ldexp lgamma llrint llround log log10 log1p log2 logb lrint lround
+modf nan nearbyint nextafter nexttoward pow remainder remquo rint round scalb
+scalbln scalbn significand sin sinh sqrt tan tanh tgamma trunc y0 y1 yn
+asctime clock ctime difftime gmtime localtime mktime strftime time timegm
+timespec_get tzset nanosleep gettimeofday clock_gettime
+errno environ optarg optind opterr optopt
+accept bind close connect creat dup dup2 fcntl fork getpid kill link listen
+lseek open pipe poll read recv select send shutdown signal sleep socket stat
+symlink truncate unlink usleep wait waitpid write
+""".split())
+
+
 def _is_plain_symbol(name: str) -> bool:
     """Whether a function's KEY can be its IR symbol unchanged.
 
     Module-level `def`s keep their bare name, which is what every existing
     test and every reader expects to find in the IR. Anything nested has a key
     built from its qualified name and needs sanitising.
+
+    AND ANYTHING THE C RUNTIME ALREADY OWNS moves aside too -- see
+    `_C_RUNTIME_NAMES`. The key is a perfectly good identifier; what it is not
+    is a symbol this program may define.
     """
-    return name.isidentifier()
+    return name.isidentifier() and name not in _C_RUNTIME_NAMES
 
 
 class Lowerer(DynamicLowering):
