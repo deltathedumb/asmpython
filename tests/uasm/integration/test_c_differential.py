@@ -1697,6 +1697,319 @@ PROGRAMS: dict[str, str] = {
         }
     """,
 
+    "the_streams_the_round_trip_does_not_reach": r"""
+        /* The stream operations the round-trip program does not reach: the two
+           position pairs, the two ways to make a temporary, reopening, and the
+           error flags. Nothing NONDETERMINISTIC is printed -- a temporary file's
+           name is different every run and on every implementation -- so what is
+           compared is the behaviour and not the name. */
+        #include <stdio.h>
+        #include <string.h>
+        #include <errno.h>
+
+        int main(void) {
+            FILE *f = fopen("scratch.txt", "w+");
+            fpos_t pos;
+            char buf[64];
+            int c, n;
+
+            if (f == NULL) { printf("no file\n"); return 1; }
+            fputs("alpha\nbeta\ngamma\n", f);
+
+            /* ftell and fseek, then the fgetpos/fsetpos pair over the same place. */
+            rewind(f);
+            printf("tell %ld\n", ftell(f));
+            fgets(buf, sizeof buf, f);
+            printf("one [%s] tell %ld\n", buf, ftell(f));
+            fgetpos(f, &pos);
+            fgets(buf, sizeof buf, f);
+            printf("two [%s]\n", buf);
+            fsetpos(f, &pos);
+            fgets(buf, sizeof buf, f);
+            printf("again [%s]\n", buf);
+            fseek(f, 0, SEEK_END);
+            printf("size %ld\n", ftell(f));
+            fseek(f, -6, SEEK_END);
+            fgets(buf, sizeof buf, f);
+            printf("last [%s]\n", buf);
+            fseek(f, 6, SEEK_SET);
+            printf("mid %c\n", fgetc(f));
+
+            /* The end-of-file and error flags, and clearing them. */
+            fseek(f, 0, SEEK_END);
+            c = fgetc(f);
+            printf("eof %d %d %d\n", c == EOF, feof(f) != 0, ferror(f) != 0);
+            clearerr(f);
+            printf("cleared %d %d\n", feof(f) != 0, ferror(f) != 0);
+
+            /* ungetc, twice over, and what it does to the position. */
+            rewind(f);
+            c = fgetc(f);
+            ungetc(c, f);
+            printf("unget %c %c\n", c, fgetc(f));
+            fclose(f);
+
+            /* freopen onto a stream that is already open. */
+            f = fopen("scratch.txt", "r");
+            f = freopen("scratch2.txt", "w", f);
+            printf("reopened %d\n", f != NULL);
+            if (f) { fputs("second\n", f); fclose(f); }
+            f = fopen("scratch2.txt", "r");
+            printf("read back [%s]", fgets(buf, sizeof buf, f) ? buf : "(none)");
+            fclose(f);
+
+            /* A temporary: deleted when it is closed, and writable meanwhile. */
+            f = tmpfile();
+            printf("tmpfile %d\n", f != NULL);
+            if (f) {
+                fputs("scratch", f);
+                rewind(f);
+                n = (int)fread(buf, 1, 7, f);
+                buf[n] = 0;
+                printf("tmp [%s] %d\n", buf, n);
+                fclose(f);
+            }
+            {   char name[L_tmpnam];
+                char *got = tmpnam(name);
+                printf("tmpnam %d %d\n", got != NULL, got == name && name[0] != 0); }
+
+            /* A stream that could not be opened, and the error it leaves. */
+            errno = 0;
+            f = fopen("no/such/directory/file.txt", "r");
+            printf("missing %d %d\n", f == NULL, errno != 0);
+
+            /* setvbuf before anything is written, which is the only time C allows. */
+            f = fopen("scratch3.txt", "w");
+            printf("setvbuf %d\n", setvbuf(f, NULL, _IONBF, 0) == 0);
+            fputs("unbuffered\n", f);
+            fclose(f);
+            f = fopen("scratch3.txt", "r");
+            printf("back [%s]", fgets(buf, sizeof buf, f) ? buf : "(none)");
+            fclose(f);
+
+            printf("removed %d %d %d\n", remove("scratch.txt") == 0,
+                   remove("scratch2.txt") == 0, remove("scratch3.txt") == 0);
+            return 0;
+        }
+    """,
+
+    "the_calendar_formatted_and_the_sorting_pair": r"""
+        /* `strftime`'s whole conversion table, `mktime` normalising a date nobody
+           would write, the two signal functions, and the sorting pair. A FIXED
+           `struct tm` throughout, so what is compared is the formatting and not
+           what time it happens to be. */
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <string.h>
+        #include <time.h>
+        #include <signal.h>
+        #include <locale.h>
+
+        static volatile sig_atomic_t caught = 0;
+        static void handler(int sig) { caught = sig; }
+
+        static int by_int(const void *a, const void *b) {
+            int x = *(const int *)a, y = *(const int *)b;
+            return x < y ? -1 : x > y ? 1 : 0;
+        }
+
+        int main(void) {
+            struct tm t;
+            char buf[128];
+            static const char *const specs[] = {
+                "%a", "%A", "%b", "%B", "%C", "%d", "%D", "%e", "%F", "%g", "%G",
+                "%h", "%H", "%I", "%j", "%m", "%M", "%n", "%p", "%r", "%R", "%S",
+                "%t", "%T", "%u", "%U", "%V", "%w", "%W", "%y", "%Y", "%%", 0
+            };
+            int i;
+
+            memset(&t, 0, sizeof t);
+            t.tm_year = 123; t.tm_mon = 6; t.tm_mday = 4;      /* 2023-07-04 */
+            t.tm_hour = 13; t.tm_min = 5; t.tm_sec = 9;
+            t.tm_wday = 2; t.tm_yday = 184; t.tm_isdst = 0;
+            for (i = 0; specs[i]; i++) {
+                size_t n = strftime(buf, sizeof buf, specs[i], &t);
+                printf("%s=[%s](%zu) ", specs[i], buf, n);
+                if (i % 6 == 5) printf("\n");
+            }
+            printf("\n");
+            strftime(buf, sizeof buf, "%Y-%m-%dT%H:%M:%S", &t);
+            printf("iso [%s]\n", buf);
+            /* A BUFFER TOO SMALL answers 0 and the contents are unspecified, so
+               only the count is printed. */
+            printf("small %zu\n", strftime(buf, 4, "%Y-%m-%d", &t));
+
+            /* `mktime` normalises: the 40th of December is in January. */
+            {   struct tm n;
+                memset(&n, 0, sizeof n);
+                n.tm_year = 99; n.tm_mon = 11; n.tm_mday = 40;
+                n.tm_hour = 25; n.tm_min = 70; n.tm_sec = 70; n.tm_isdst = 0;
+                mktime(&n);
+                printf("norm %d-%02d-%02d %02d:%02d:%02d wday %d yday %d\n",
+                       n.tm_year + 1900, n.tm_mon + 1, n.tm_mday,
+                       n.tm_hour, n.tm_min, n.tm_sec, n.tm_wday, n.tm_yday); }
+            {   struct tm n;
+                memset(&n, 0, sizeof n);
+                n.tm_year = 70; n.tm_mon = 0; n.tm_mday = 1; n.tm_isdst = 0;
+                printf("epoch %lld\n", (long long)mktime(&n)); }
+
+            /* `asctime` and `ctime`, whose output C fixes to the character. */
+            printf("asctime [%s]", asctime(&t));
+            {   time_t when = 0;
+                printf("gmtime [%s]", asctime(gmtime(&when))); }
+
+            /* `signal` and `raise`. */
+            /* EACH `raise` ON ITS OWN LINE, not sharing a `printf` with the flag
+               it sets: the order in which arguments are evaluated is unspecified,
+               so `caught` could be read before the call that sets it. */
+            printf("handler %d\n", signal(SIGTERM, handler) != SIG_ERR);
+            {   int ok = raise(SIGTERM) == 0;
+                printf("raise %d caught %d\n", ok, (int)caught); }
+            {   void (*prev)(int) = signal(SIGTERM, SIG_IGN);
+                printf("ignore %d %d\n", prev != SIG_ERR, prev == handler); }
+            caught = 0;
+            {   int ok = raise(SIGTERM) == 0;
+                printf("ignored %d caught %d\n", ok, (int)caught); }
+            /* NOT `raise(0)`: signal zero is POSIX's null signal, which asks
+               whether a process exists and delivers nothing, and C says no such
+               thing. glibc answers 0 for it and this answers non-zero, and both
+               are conforming -- so it is not something two C implementations can
+               be compared on. 99 is out of range for either. */
+            {   int bad = raise(99) == 0;
+                printf("out of range %d %d\n", bad,
+                       signal(99, handler) == SIG_ERR); }
+
+            /* `qsort` and `bsearch`, including the sizes that catch an off-by-one. */
+            {   int a[] = {5, 3, 9, 1, 7, 3, 8, 2};
+                int one[] = {42};
+                int key = 7, *found;
+                qsort(a, 8, sizeof a[0], by_int);
+                for (i = 0; i < 8; i++) printf("%d", a[i]);
+                printf("\n");
+                qsort(one, 1, sizeof one[0], by_int);
+                qsort(a, 0, sizeof a[0], by_int);
+                found = bsearch(&key, a, 8, sizeof a[0], by_int);
+                printf("found %d %d\n", found != NULL, found ? *found : -1);
+                key = 6;
+                printf("absent %d\n", bsearch(&key, a, 8, sizeof a[0], by_int) == NULL);
+                printf("empty %d\n",
+                       bsearch(&key, a, 0, sizeof a[0], by_int) == NULL); }
+
+            /* One locale, and it is the one C requires. */
+            printf("locale [%s]\n", setlocale(LC_ALL, "C"));
+            printf("same [%s]\n", setlocale(LC_ALL, NULL));
+            {   struct lconv *lc = localeconv();
+                printf("point [%s] thousands [%s] grouping %d currency [%s]\n",
+                       lc->decimal_point, lc->thousands_sep,
+                       lc->grouping[0] == 0, lc->currency_symbol); }
+            return 0;
+        }
+    """,
+
+    "abort_raises_sigabrt": r"""
+        /* `abort` raises SIGABRT first, so a handler installed for it runs. C
+           words it the other way round -- `abort` terminates "unless the signal
+           SIGABRT is being caught and the signal handler does not return" -- so a
+           handler that does not return is how a program stops it, and that is what
+           this one does.
+
+           WHY THE HANDLER EXITS. If it returned, both implementations would
+           terminate abnormally and the two STATUSES would differ: the host dies by
+           signal 6 and this exits with 134, which is the number a shell prints for
+           that death. C makes the status implementation-defined, so it is not
+           something to compare; what the handler SEES is. */
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <signal.h>
+
+        static void on_abort(int sig) {
+            printf("handler saw %d\n", sig);
+            fflush(stdout);
+            _Exit(0);
+        }
+
+        int main(void) {
+            void (*prev)(int) = signal(SIGABRT, on_abort);
+            printf("installed %d\n", prev != SIG_ERR);
+            fflush(stdout);
+            abort();
+            printf("never\n");
+            return 1;
+        }
+    """,
+
+    "the_translation_limits": r"""
+        /* The translation limits C23 5.2.4.1 says an implementation must manage
+           at least once. Not every one -- 4095 external identifiers would be a
+           megabyte of source -- but the ones a real program reaches. */
+        #include <stdio.h>
+
+        /* 63 significant characters in an internal identifier, and 31 in an
+           external one; these two differ in the 63rd character only. */
+        static int aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1 = 1;
+        static int aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2 = 2;
+
+        /* 12 pointer, array and function declarators modifying one type. */
+        static int *(*(*(*(*(*(*(*(*(*(*(*deep)))))))))));
+
+        /* 127 members in one structure. */
+        struct wide {
+        #define M8(p) int p##0, p##1, p##2, p##3, p##4, p##5, p##6, p##7;
+        #define M64(p) M8(p##a) M8(p##b) M8(p##c) M8(p##d) \
+                       M8(p##e) M8(p##f) M8(p##g) M8(p##h)
+            M64(x) M64(y)
+        };
+
+        /* 127 nesting levels of blocks, and 63 of parenthesised expressions. */
+        #define B8(s) { { { { { { { { s } } } } } } } }
+        #define B64(s) B8(B8(B8(s)))
+        #define P8(e) ((((((((e))))))))
+        #define P64(e) P8(P8(P8(e)))
+
+        /* 127 parameters, and 127 arguments. */
+        #define A8(p)  p, p, p, p, p, p, p, p
+        #define A64(p) A8(p), A8(p), A8(p), A8(p), A8(p), A8(p), A8(p), A8(p)
+        static int many(int a, int b, int c, int d, int e, int f, int g, int h,
+                        int i, int j, int k, int l, int m, int n, int o, int p,
+                        int q, int r, int s, int t, int u, int v, int w, int x,
+                        int y, int z, int a2, int b2, int c2, int d2, int e2,
+                        int f2, ...) { return a + f2; }
+
+        /* 4095 characters in a string literal, and 1023 case labels. */
+        static const char long_string[] =
+        #define S16 "0123456789abcdef"
+        #define S256 S16 S16 S16 S16 S16 S16 S16 S16 S16 S16 S16 S16 S16 S16 S16 S16
+            S256 S256 S256 S256 S256 S256 S256 S256 S256 S256 S256 S256 S256 S256
+            S256 S256;
+
+        static int pick(int v) {
+            switch (v) {
+        #define C4(n) case n: case n + 1: case n + 2: case n + 3: return n;
+        #define C64(n) C4(n) C4(n+4) C4(n+8) C4(n+12) C4(n+16) C4(n+20) C4(n+24) \
+                       C4(n+28) C4(n+32) C4(n+36) C4(n+40) C4(n+44) C4(n+48) \
+                       C4(n+52) C4(n+56) C4(n+60)
+            C64(0) C64(64) C64(128) C64(192) C64(256) C64(320) C64(384) C64(448)
+            C64(512) C64(576) C64(640) C64(704) C64(768) C64(832) C64(896) C64(960)
+            default: return -1;
+            }
+        }
+
+        int main(void) {
+            struct wide w;
+            int total = 0;
+            w.xa0 = 1;
+            B64(total++;)
+            total += P64(1);
+            total += many(A64(1), 1);
+            printf("%d %d %d %d %d %zu %d %d\n",
+                   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1,
+                   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2,
+                   w.xa0, total, deep == 0, sizeof long_string - 1,
+                   pick(1000), pick(5000));
+            return 0;
+        }
+    """,
+
     "an_unnamed_parameter_and_a_literal_that_says_static": r"""
         /* Two of C23's: a parameter a definition does not name, and
            the storage classes a compound literal may carry. */

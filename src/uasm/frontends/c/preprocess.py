@@ -177,6 +177,20 @@ class Preprocessor:
             "__STDC_EMBED_FOUND__": "1",
             "__STDC_EMBED_EMPTY__": "2",
             "__STDC_UTF_32__": "1",
+            # `wchar_t` HOLDS A UNICODE CODE POINT, so this says so. C makes
+            # it a claim rather than a constant: define it, and every
+            # character in the extended character set has the value ISO
+            # 10646 gives it -- which here follows from the encoding being
+            # UTF-8 and `mbrtowc` decoding it to the code point, with no
+            # locale that could put anything else there. The value names a
+            # revision of the standard, and any code point at all survives
+            # the round trip, so it names a recent one.
+            #
+            # `__STDC_MB_MIGHT_NEQ_WC__` IS THE OTHER HALF and is correctly
+            # ABSENT: it would say that a basic character might differ
+            # between `char` and `wchar_t`, and ASCII and its code points
+            # are the same numbers.
+            "__STDC_ISO_10646__": "202405L",
             "__uasm__": "1",
             "__UIR__": "1",
             "__CHAR_BIT__": "8",

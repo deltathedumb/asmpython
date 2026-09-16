@@ -20,6 +20,7 @@
 #include <__uasm_alloc.h>
 #include <__uasm_wide.h>
 #include <errno.h>
+#include <signal.h>
 #include <__uasm_num.h>
 #include <__uasm_base.h>
 #include <__uasm_host.h>
@@ -88,6 +89,12 @@ static _Noreturn void _Exit(int __status)
 
 static _Noreturn void abort(void)
 {
+    /* `SIGABRT` IS RAISED FIRST, because C says `abort` terminates "unless
+       the signal SIGABRT is being caught and the signal handler does not
+       return" -- so a handler installed for it gets its turn, and the exit
+       below happens anyway once the handler comes back. 134 is 128 plus
+       SIGABRT, which is the status a shell reports for that death. */
+    raise(SIGABRT);
     plat_exit(134);
     for (;;) { }
 }

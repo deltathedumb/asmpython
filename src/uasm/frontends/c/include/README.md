@@ -104,6 +104,20 @@ say what the local offset from UTC is — there is no `TZ` that would mean
 anything on a target without an environment — so the calendar is UTC and
 `tm_isdst` is 0 rather than -1: it is not unknown, it is not in effect.
 
+`<signal.h>` has the half that needs no operating system. Nothing delivers
+an **asynchronous** signal — the platform floor writes, exits and asks for
+memory, and a ctrl-C does not become a `SIGINT` — but `raise` is
+*synchronous*: the program raises a signal on itself and C asks that the
+installed handler be called, which is a table and a call. So `signal`
+records a handler and answers the previous one, `raise` calls it, the
+default action terminates with 128 plus the number, and `abort` raises
+`SIGABRT` first — which is 7.24.4.1's wording, "unless the signal SIGABRT
+is being caught and the signal handler does not return". The one thing
+that differs from a hosted implementation is the exit status after a
+handler returns: the host dies *by* signal 6 and this exits *with* 134,
+which is the number a shell prints for that death. C makes it
+implementation-defined.
+
 `<setjmp.h>` works, and not by saving a frame: `longjmp` sets a flag, every
 call site in the program checks it as its call returns, and the frame that
 recognises the jump's token branches back to its own `setjmp`. It costs a
