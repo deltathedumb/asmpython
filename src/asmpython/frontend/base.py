@@ -77,4 +77,4 @@ def available() -> dict[str, Frontend]:
 
 
 def load_builtin() -> None:
-    from ..frontends import python  # noqa: F401
+    from ..frontends import c, python  # noqa: F401

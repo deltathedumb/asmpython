@@ -84,6 +84,9 @@ class Symbol:
     vla_bound: Any = None
     #: `_Alignas`, when it asked for more than the type's own alignment.
     align: int | None = None
+    #: Set by lowering: True when the object lives in an IR register rather
+    #: than in frame storage. Only a scalar whose address is never taken can.
+    in_register: bool = False
 
     @property
     def is_global(self) -> bool:
