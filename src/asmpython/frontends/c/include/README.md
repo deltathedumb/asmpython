@@ -8,33 +8,58 @@ the program that included it.
 
 ## What is underneath
 
-Three functions, and `objects/floor.py` argues at length for why it is three:
+Two layers, and a program pays for the second only if it asks for it.
+
+The first is the platform floor, and `objects/floor.py` argues at length for
+why it is three functions:
 
     plat_write(fd, buf, n) -> i64      bytes written, or -1
     plat_exit(code)                    does not return
     plat_heap(n) -> ptr                n more bytes, or null
 
-Nothing in this directory calls anything else. That is what makes a C program
-built here run on **every** backend and in the IR interpreter: a backend that
-can already run a Python program has already implemented the whole of what a C
-one needs.
+`printf`, `puts`, `malloc` and everything built on them reach that and nothing
+else. A program that only computes and prints therefore runs on **every**
+backend and in the IR interpreter, with no second runtime to implement.
 
-It is also why some things are missing rather than approximated:
+The second is `objects/hostsvc.py`'s optional groups — a filesystem, a clock,
+entropy, an environment, another program — which a backend **declares**. A
+program that calls into a group its target has not got is refused at compile
+time, by name:
+
+    error: this program needs host services the x86-64 backend does not
+    provide: 'file' (for host_file_open)
+
+| what | group | reached by |
+| --- | --- | --- |
+| `fopen`, `fclose`, `fseek`, `remove`, `tmpfile` | `file` | opening a file |
+| `fgetc`, `fgets`, `fread`, `scanf` on any stream | `file` | reading anything |
+| `time`, `clock`, `timespec_get` | `time` | asking what time it is |
+| `getenv` | `env` | asking about the environment |
+| `main(argc, argv)` | `env` | declaring parameters |
+| `system` | `proc` | running another program |
+
+`lower._prune` drops the declaration of a host service nothing reaches, which
+is what makes the second column true rather than aspirational: `printf`
+reaches the write path through a function pointer that only `fopen` ever sets,
+so hello world names no group at all.
+
+What is still absent says so rather than approximating:
 
 | absent | because |
 | --- | --- |
-| `scanf`, `fgets`, `fread`, `fopen` | the floor writes; it cannot read |
-| `time`, `clock` | nothing can ask the host what time it is |
-| `getenv`, `system` | there is no environment and no command processor |
+| `rename` | the `file` group has ten operations and no rename; copy-and-remove is not one, and `bundled/os.py` refuses `os.rename` for the same reason |
 | `<setjmp.h>` | `longjmp` restores a machine frame; the IR has no frames |
-| `<threads.h>` | the floor cannot create one |
+| `<threads.h>` | there is no way to create one |
 | `<complex.h>` | the IR has no aggregate type to make a complex value out of |
 
-Each of those returns the value the standard defines for "unavailable" --
-`NULL`, `EOF`, `(time_t)-1` -- rather than something plausible a program would
-go on to do arithmetic with. The three headers that cannot exist at all are
-PRESENT AND REFUSE, with `#error` and a sentence saying what to write instead:
-a missing file is a mystery and a refusal is an answer.
+`localtime` is `gmtime`. The host services can say what time it is and cannot
+say what the local offset from UTC is — there is no `TZ` that would mean
+anything on a target without an environment — so the calendar is UTC and
+`tm_isdst` is 0 rather than -1: it is not unknown, it is not in effect.
+
+The three headers that cannot exist at all are PRESENT AND REFUSE, with
+`#error` and a sentence saying what to write instead: a missing file is a
+mystery and a refusal is an answer.
 
 `<stdatomic.h>` is supported and `<threads.h>` is not, which is not a
 contradiction. With one thread a plain load is indivisible with respect to
@@ -61,7 +86,11 @@ module rather than an object file.
 
 ## The two that are worth reading
 
-`stdio.h` converts a double to decimal **exactly**, with a base-10^9 bignum:
+`stdio.h` converts a double to decimal **exactly**, with a base-10^9 bignum,
+and `__asmpython_num.h` converts it back the same way — 54 rounds of
+compare-and-subtract against a big integer, which is a whole long division for
+a double and needs no bignum divide. That is what makes `strtod(buf)` recover
+the value `printf("%.17g", v)` wrote, for every `v` including the subnormals:
 every finite double is a terminating decimal, so `printf("%f", 1e300)` has a
 right answer with 301 digits in it and the usual trick of scaling into [1,10)
 gets seventeen of them and then lies. Rounding is ties-to-even, which is what

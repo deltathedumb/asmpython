@@ -7,6 +7,7 @@
 #define _ASMPYTHON_STRING_H
 
 #include <stddef.h>
+#include <errno.h>
 
 static void *memcpy(void *__d, const void *__s, size_t __n)
 {
@@ -200,13 +201,37 @@ static char *strtok(char *__s, const char *__set)
     return start;
 }
 
-static const char *strerror(int __n)
+/* THE MESSAGES FOR THE NUMBERS THIS LIBRARY CAN ACTUALLY PRODUCE, which is
+   the nine `<errno.h>` maps the host services' codes onto and nothing else.
+   A number no operation here sets gets the generic answer rather than a
+   wrong sentence: a table copied out of Linux would name errors that cannot
+   happen and would be read as a promise that they can. The names come from
+   `<errno.h>`, which is included for them -- the numbers are Linux's and
+   writing them out twice is how two lists drift.
+
+   `char *` AND NOT `const char *`, which is what C says and what a caller
+   that passes the result to something taking `char *` needs. The strings are
+   this unit's own and a caller that writes through the pointer has undefined
+   behaviour, exactly as it does with a hosted libc. */
+static char *strerror(int __n)
 {
-    /* No `errno` values are produced by anything here -- there is no
-       filesystem and no syscall to fail -- so this is honest rather than a
-       table of messages nothing can return. */
-    (void)__n;
-    return "no error information is available";
+    switch (__n) {
+    case 0:  return (char *)"Success";
+    case ENOENT:  return (char *)"No such file or directory";
+    case EIO:  return (char *)"Input/output error";
+    case EAGAIN: return (char *)"Resource temporarily unavailable";
+    case EACCES: return (char *)"Permission denied";
+    case EEXIST: return (char *)"File exists";
+    case ENOTDIR: return (char *)"Not a directory";
+    case EINVAL: return (char *)"Invalid argument";
+    case EPIPE: return (char *)"Broken pipe";
+    case EDOM: return (char *)"Numerical argument out of domain";
+    case ERANGE: return (char *)"Numerical result out of range";
+    case ENOSYS: return (char *)"Function not implemented";
+    case ENOTEMPTY: return (char *)"Directory not empty";
+    case EILSEQ: return (char *)"Invalid or incomplete multibyte or wide character";
+    default: return (char *)"Unknown error";
+    }
 }
 
 #endif

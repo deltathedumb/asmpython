@@ -1,61 +1,129 @@
 /* <stdio.h> -- asmpython C frontend.
 
-   OUTPUT ONLY, and the reason is the platform floor: `plat_write`,
-   `plat_exit` and `plat_heap`. There is no way to READ, so every input
-   function here reports end of file rather than returning something
-   plausible, and `fopen` answers NULL. A program that needs input needs a
-   floor with a fourth function in it, and `objects/floor.py` argues carefully
-   for why there are three.
+   TWO LAYERS UNDERNEATH, AND A PROGRAM PAYS FOR THE SECOND ONLY IF IT ASKS.
+   Writing to `stdout` and `stderr` reaches `plat_write`, which is the
+   platform floor every backend owes -- so hello world runs on a target with
+   no filesystem at all, as it always did. Everything else -- `fopen`, and
+   every read, `stdin` included -- reaches `objects/hostsvc.py`'s `file`
+   group, and `Backend.check_host_services` refuses a program that calls into
+   it on a backend whose target has none. `lower._prune` drops the
+   declarations nothing reaches, which is what keeps the first sentence true.
 
-   FLOATING-POINT CONVERSION IS NOT CORRECTLY ROUNDED. The digits come from
-   scaling the value into [1,10) and taking one digit at a time, which is
-   accurate to about sixteen significant figures -- enough that `%f`, `%e` and
-   `%g` at their usual precisions agree with a hosted libc, and not enough
-   that `%.17g` always does. Said here rather than discovered later.
+   WHY `fopen` AND NOT `fputs` IS THE DOOR. `fputs(s, stdout)` and
+   `fputs(s, f)` are the same call, and which one a program makes is not
+   knowable until it runs -- so the write path reaches the host through a
+   POINTER that only `fopen`, `freopen` and `tmpfile` ever set. Nothing else
+   mentions `host_file_write`, so nothing else drags the group in. Reading is
+   not arranged that way and does not need to be: a program that reads has
+   asked for a file, whichever descriptor it reads.
 
-   ONE ENGINE, FOUR ENTRY POINTS. `printf`, `fprintf`, `snprintf` and their
-   `v` forms all run `__vformat` over a sink that either buffers towards a
-   descriptor or fills a caller's array -- so a padding rule cannot be right
-   in one of them and wrong in another. */
+   FLOATING-POINT CONVERSION IS EXACT. `__format_float` converts through a
+   base-10^9 bignum and rounds ties to even, so `%.17g` and `%f` of a large
+   value agree with a hosted libc digit for digit rather than nearly. The
+   comment on `__bn_from` says how.
+
+   ONE ENGINE, FOUR ENTRY POINTS, TWICE. `printf`, `fprintf`, `snprintf` and
+   their `v` forms all run `__vformat` over a sink that either buffers towards
+   a handle or fills a caller's array; `scanf`, `fscanf` and `sscanf` all run
+   `__vscan` over a source that is either a stream or a string. A padding rule
+   or a conversion cannot be right in one of them and wrong in another. */
 #ifndef _ASMPYTHON_STDIO_H
 #define _ASMPYTHON_STDIO_H
 
 #include <stddef.h>
 #include <stdarg.h>
+#include <errno.h>
+#include <string.h>
+#include <__asmpython_num.h>
 #include <__asmpython_base.h>
+#include <__asmpython_host.h>
 
 #define EOF (-1)
 #define BUFSIZ 512
-#define FOPEN_MAX 3
+#define FOPEN_MAX 16
 #define FILENAME_MAX 260
 #define L_tmpnam 20
 #define SEEK_SET 0
 #define SEEK_CUR 1
 #define SEEK_END 2
 #define _IOFBF 0
-#define _IOLBF 1
 #define _IONBF 2
-#define TMP_MAX 1
+#define _IOLBF 1
+#define TMP_MAX 4096
 
-typedef struct __FILE { int __fd; int __eof; int __err; } FILE;
+/* THE HANDLE IS THE HOST'S, and 0, 1 and 2 are the standard three -- the
+   same numbering `plat_write` uses, which is not a coincidence:
+   `objects/hostsvc.py` fixed it so that a program cannot end up with two
+   numbering schemes for one descriptor and interleaved output nobody can
+   explain.
+
+   READS ARE BUFFERED AND WRITES ARE NOT. A read from the host is a call per
+   `BUFSIZ` rather than per character, which is the difference between
+   `fgetc` in a loop being usable and being a joke; a write goes straight
+   out, which is what makes `printf` to a terminal appear when it was
+   printed and `fflush` a no-op that is honest. `__vformat` does its own
+   batching into 256-byte holds, so a formatted line is still one call. */
+typedef struct __FILE {
+    long __h;              /* the host handle; 0, 1, 2 are the three     */
+    int __eof;
+    int __err;
+    int __append;          /* opened "a": every write goes to the end    */
+    int __used;            /* this slot is open; see `__file_slot`       */
+    int __tmp;             /* `tmpfile`: remove it on close              */
+    int __rd, __rn;        /* the read buffer: cursor, and bytes in it   */
+    char __name[L_tmpnam]; /* `tmpfile`'s, so close can remove it        */
+    char __rbuf[BUFSIZ];
+} FILE;
+
+/* A POSITION IS A BYTE OFFSET, which is what the host's seek takes and
+   answers. C allows `fpos_t` to be anything a program only ever passes back;
+   a long is the honest spelling of what this one is. */
 typedef long fpos_t;
 
-static FILE __stdin_file = { 0, 1, 0 };
-static FILE __stdout_file = { 1, 0, 0 };
-static FILE __stderr_file = { 2, 0, 0 };
+static FILE __stdin_file = { 0, 0, 0, 0, 1, 0, 0, 0, { 0 }, { 0 } };
+static FILE __stdout_file = { 1, 0, 0, 0, 1, 0, 0, 0, { 0 }, { 0 } };
+static FILE __stderr_file = { 2, 0, 0, 0, 1, 0, 0, 0, { 0 }, { 0 } };
 
 #define stdin  (&__stdin_file)
 #define stdout (&__stdout_file)
 #define stderr (&__stderr_file)
 
+/* ── the way out ──────────────────────────────────────────────────────── */
+/* THE POINTER THE HEADER COMMENT IS ABOUT. It is null until `fopen` runs,
+   and every write to a handle above 2 goes through it -- so a program that
+   never opens a file never mentions `host_file_write`, and the `file` group
+   is not among the host services its module asks for. The three seek and
+   close hooks are set at the same moment and for the same reason. */
+static long (*__host_write_fn)(long, const void *, long);
+static long (*__host_seek_fn)(long, long, long);
+static long (*__host_close_fn)(long);
+
+static void __file_hooks(void)
+{
+    __host_write_fn = host_file_write;
+    __host_seek_fn = host_file_seek;
+    __host_close_fn = host_file_close;
+}
+
+/* EVERY BYTE THIS LIBRARY WRITES LEAVES THROUGH HERE. The standard three go
+   to the floor, which every backend has; anything else is a file, and a file
+   without the hooks set cannot exist -- the only thing that hands out a
+   handle above 2 is the function that sets them. */
+static long __file_out(long __h, const void *__p, long __n)
+{
+    if (__h >= 0 && __h <= 2) return plat_write(__h, __p, __n);
+    if (__host_write_fn == 0) return -1;
+    return __host_write_fn(__h, __p, __n);
+}
+
 /* ── the sink ─────────────────────────────────────────────────────────── */
 #define __SINK_HOLD 256
 
 typedef struct {
-    char *__dst;        /* NULL when writing to a descriptor */
+    char *__dst;        /* NULL when writing to a stream */
     size_t __cap;       /* room in __dst, terminator included */
     size_t __count;     /* characters the format PRODUCED, capped by nothing */
-    int __fd;
+    long __h;           /* the host handle, when __dst is NULL */
     int __held;
     char __hold[__SINK_HOLD];
 } __sink;
@@ -63,7 +131,7 @@ typedef struct {
 static void __sink_flush(__sink *__s)
 {
     if (__s->__dst == NULL && __s->__held > 0) {
-        plat_write((long)__s->__fd, __s->__hold, (long)__s->__held);
+        __file_out(__s->__h, __s->__hold, (long)__s->__held);
         __s->__held = 0;
     }
 }
@@ -246,6 +314,34 @@ static int __float_round(char *__d, int __n, int __keep, int *__e10)
     return __keep > 0 ? __keep : 1;
 }
 
+/* ── positioning a stream before a write ──────────────────────────────── */
+/* AN UPDATE STREAM READS AHEAD, so the host's position is past the one the
+   program has seen, and a write would land in the wrong place. C requires a
+   positioning call between a read and a write on such a stream; doing it
+   here as well costs one branch and turns undefined behaviour into the
+   obvious answer.
+
+   AN APPEND STREAM WRITES AT THE END, always, whatever the position is --
+   which the host's open modes cannot express for a stream that also reads
+   ("ab" is write-only), so `fopen` records it and this enforces it. */
+static void __stream_prepare(FILE *__f)
+{
+    if (__f == NULL || __f->__h <= 2) return;
+    if (__f->__rn > __f->__rd && __host_seek_fn != 0)
+        __host_seek_fn(__f->__h, -(long)(__f->__rn - __f->__rd),
+                       __HOST_SEEK_CUR);
+    __f->__rd = 0;
+    __f->__rn = 0;
+    if (__f->__append && __host_seek_fn != 0)
+        __host_seek_fn(__f->__h, 0, __HOST_SEEK_END);
+}
+
+static long __stream_write(FILE *__f, const void *__p, long __n)
+{
+    __stream_prepare(__f);
+    return __file_out(__f ? __f->__h : 1, __p, __n);
+}
+
 /* ── the formatter ────────────────────────────────────────────────────── */
 #define __F_LEFT   1
 #define __F_PLUS   2
@@ -293,6 +389,79 @@ static int __format_float(__sink *__s, double __v, char __conv, int __prec,
         return 0;
     }
     if (negative) __v = -__v;
+    if (__conv == 'a' || __conv == 'A') {
+        /* THE HEXADECIMAL FORM, WHICH IS THE VALUE ITSELF. `%a` exists so
+           that a double can be written down and read back with nothing
+           lost, and it can because the significand is already binary: four
+           bits to a digit, no conversion, no rounding unless a precision
+           asks for one. `__asmpython_num.h` reads it back.
+
+           A SUBNORMAL LEADS WITH 0 AND KEEPS THE EXPONENT -1022, which is
+           what makes the form continuous across the boundary -- the
+           alternative is a leading 1 and an exponent below the smallest a
+           normal can have, which no reader expects. */
+        union { double __d; unsigned long __u; } bits;
+        unsigned long frac, keep;
+        const char *hexd = (__conv == 'A') ? "0123456789ABCDEF"
+                                           : "0123456789abcdef";
+        int expo2, lead, nib, i;
+        bits.__d = __v;
+        frac = bits.__u & 0xFFFFFFFFFFFFFUL;
+        expo2 = (int)((bits.__u >> 52) & 0x7FFUL);
+        if (expo2 == 0) { lead = 0; expo2 = (frac == 0) ? 0 : -1022; }
+        else { lead = 1; expo2 -= 1023; }
+        nib = 13;                          /* 52 bits, four to a digit */
+        keep = frac;
+        if (__prec >= 0 && __prec < 13) {
+            int drop = 52 - 4 * __prec;
+            unsigned long rest = frac & ((1UL << drop) - 1UL);
+            unsigned long half = 1UL << (drop - 1);
+            keep = frac >> drop;
+            /* TIES TO EVEN, which is the rounding every other conversion
+               here uses and what the default floating-point environment
+               would have done. */
+            if (rest > half || (rest == half && (keep & 1UL)))
+                keep++;
+            if (__prec == 0) {
+                if (keep) { lead++; keep = 0; }
+            } else if (keep >> (4 * __prec)) {
+                keep = 0;
+                lead++;
+            }
+            nib = __prec;
+        } else if (__prec < 0) {
+            /* NO PRECISION MEANS EXACTLY ENOUGH, so the trailing zeros that
+               carry no information come off. */
+            while (nib > 0 && ((keep >> (4 * (13 - nib))) & 0xFUL) == 0) nib--;
+            /* THE DIGITS MOVE DOWN TO WHERE THE LOOP BELOW LOOKS FOR THEM:
+               a rounded significand has already been shifted, so the two
+               paths have to agree about where the last digit is. */
+            keep >>= 4 * (13 - nib);
+        } else {
+            nib = 13;
+            /* A precision beyond thirteen digits is zeros: the value has no
+               more bits. */
+        }
+        prefix[plen++] = '0';
+        prefix[plen++] = (__conv == 'A') ? 'X' : 'x';
+        body[len++] = (char)('0' + lead);
+        if (nib > 0 || (__prec > 0) || (__flags & __F_ALT)) body[len++] = '.';
+        for (i = 0; i < nib && i < 13; i++)
+            body[len++] = hexd[(keep >> (4 * (nib - 1 - i))) & 0xFUL];
+        for (i = 13; i < __prec; i++) body[len++] = '0';
+        body[len++] = (__conv == 'A') ? 'P' : 'p';
+        body[len++] = expo2 < 0 ? '-' : '+';
+        {
+            int e = expo2 < 0 ? -expo2 : expo2, at = len, j;
+            char tmp[8];
+            int tn = 0;
+            do { tmp[tn++] = (char)('0' + e % 10); e /= 10; } while (e);
+            for (j = tn - 1; j >= 0; j--) body[at++] = tmp[j];
+            len = at;
+        }
+        __emit_padded(__s, body, len, prefix, plen, __flags, __width, 0);
+        return 0;
+    }
     if (__prec < 0) __prec = 6;
     if (__prec > 300) __prec = 300;
 
@@ -472,7 +641,8 @@ static int __vformat(__sink *__s, const char *__fmt, va_list __ap)
             prefix[plen++] = '0';
             prefix[plen++] = 'x';
         } else if (conv == 'f' || conv == 'F' || conv == 'e' || conv == 'E'
-                   || conv == 'g' || conv == 'G') {
+                   || conv == 'g' || conv == 'G' || conv == 'a'
+                   || conv == 'A') {
             __format_float(__s, va_arg(__ap, double), conv, prec, flags, width);
             continue;
         } else if (conv == 'n') {
@@ -522,29 +692,31 @@ static int __vformat(__sink *__s, const char *__fmt, va_list __ap)
     return (int)__s->__count;
 }
 
-static __sink __make_fd_sink(int __fd)
+static __sink __make_stream_sink(long __h)
 {
     __sink s;
-    s.__dst = NULL; s.__cap = 0; s.__count = 0; s.__fd = __fd; s.__held = 0;
+    s.__dst = NULL; s.__cap = 0; s.__count = 0; s.__h = __h; s.__held = 0;
     return s;
 }
 
 static int vfprintf(FILE *__f, const char *__fmt, va_list __ap)
 {
-    __sink s = __make_fd_sink(__f ? __f->__fd : 1);
+    __sink s;
+    __stream_prepare(__f);
+    s = __make_stream_sink(__f ? __f->__h : 1);
     return __vformat(&s, __fmt, __ap);
 }
 
 static int vprintf(const char *__fmt, va_list __ap)
 {
-    __sink s = __make_fd_sink(1);
+    __sink s = __make_stream_sink(1);
     return __vformat(&s, __fmt, __ap);
 }
 
 static int vsnprintf(char *__buf, size_t __n, const char *__fmt, va_list __ap)
 {
     __sink s;
-    s.__dst = __buf; s.__cap = __n; s.__count = 0; s.__fd = -1; s.__held = 0;
+    s.__dst = __buf; s.__cap = __n; s.__count = 0; s.__h = -1; s.__held = 0;
     return __vformat(&s, __fmt, __ap);
 }
 
@@ -593,7 +765,7 @@ static int sprintf(char *__buf, const char *__fmt, ...)
 static int fputc(int __c, FILE *__f)
 {
     char b = (char)__c;
-    plat_write((long)(__f ? __f->__fd : 1), &b, 1);
+    if (__stream_write(__f, &b, 1) < 0) { if (__f) __f->__err = 1; return EOF; }
     return (unsigned char)b;
 }
 static int putc(int __c, FILE *__f) { return fputc(__c, __f); }
@@ -603,59 +775,864 @@ static int fputs(const char *__s, FILE *__f)
 {
     long n = 0;
     while (__s[n]) n++;
-    plat_write((long)(__f ? __f->__fd : 1), __s, n);
+    if (__stream_write(__f, __s, n) < 0) { if (__f) __f->__err = 1; return EOF; }
     return 0;
 }
 
 static int puts(const char *__s)
 {
-    fputs(__s, stdout);
-    fputc('\n', stdout);
-    return 0;
+    if (fputs(__s, stdout) == EOF) return EOF;
+    return fputc('\n', stdout) == EOF ? EOF : 0;
 }
 
 static size_t fwrite(const void *__p, size_t __size, size_t __n, FILE *__f)
 {
     long got;
     if (__size == 0 || __n == 0) return 0;
-    got = plat_write((long)(__f ? __f->__fd : 1), __p, (long)(__size * __n));
-    if (got < 0) return 0;
+    got = __stream_write(__f, __p, (long)(__size * __n));
+    if (got < 0) { if (__f) __f->__err = 1; return 0; }
     return (size_t)got / __size;
 }
 
+/* NOTHING IS HELD, so there is nothing to flush: a write leaves through
+   `plat_write` or the host as it is made. Answering 0 is therefore the truth
+   rather than a stub -- every byte a program has written really is out. */
 static int fflush(FILE *__f) { (void)__f; return 0; }
 static void setbuf(FILE *__f, char *__b) { (void)__f; (void)__b; }
+/* THE BUFFERING A PROGRAM ASKS FOR IS WHAT IT ALREADY HAS on the writing
+   side, and the reading side's buffer is inside the FILE rather than in the
+   caller's array. Accepting the request and answering success is what a
+   hosted libc does for a mode it cannot honour exactly. */
 static int setvbuf(FILE *__f, char *__b, int __mode, size_t __n)
 { (void)__f; (void)__b; (void)__mode; (void)__n; return 0; }
 
-/* ── the input that is not there ──────────────────────────────────────── */
-static int fgetc(FILE *__f) { if (__f) __f->__eof = 1; return EOF; }
-static int getc(FILE *__f) { return fgetc(__f); }
-static int getchar(void) { return EOF; }
-static char *fgets(char *__s, int __n, FILE *__f)
-{ (void)__n; (void)__f; if (__s && __n > 0) __s[0] = 0; return NULL; }
-static size_t fread(void *__p, size_t __size, size_t __n, FILE *__f)
-{ (void)__p; (void)__size; (void)__n; if (__f) __f->__eof = 1; return 0; }
-static int ungetc(int __c, FILE *__f) { (void)__c; (void)__f; return EOF; }
+/* ── opening a file ───────────────────────────────────────────────────── */
+/* A STATIC POOL AND NOT `malloc`, which keeps this header independent of
+   `<stdlib.h>` -- a program that opens a file gets the pool and nothing
+   else, and a program that does not gets neither. FOPEN_MAX is what C
+   promises a program may have open at once and is what this is; a hosted
+   libc has a limit too, it is just further away. */
+static FILE __file_pool[FOPEN_MAX];
+
+static FILE *__file_slot(void)
+{
+    int i;
+    for (i = 0; i < FOPEN_MAX; i++)
+        if (!__file_pool[i].__used) {
+            FILE *f = &__file_pool[i];
+            f->__h = -1; f->__eof = 0; f->__err = 0; f->__append = 0;
+            f->__used = 1; f->__tmp = 0; f->__rd = 0; f->__rn = 0;
+            f->__name[0] = 0;
+            return f;
+        }
+    return NULL;
+}
+
+/* THE MODE STRING, WHICH IS FOUR QUESTIONS AND NOT ONE. `b` is accepted and
+   ignored because every stream here is binary already -- newline translation
+   is a property of text, and `objects/hostsvc.py` says at length why the
+   layer underneath will not do it. `x` is C11's exclusive create. The `+`
+   forms need the update mode, and `w+` and `a+` need it after something else
+   has happened to the file -- see `fopen`. */
+static int __mode_read(const char *__m, int *__plus, int *__excl)
+{
+    int i;
+    *__plus = 0;
+    *__excl = 0;
+    if (__m == NULL || (__m[0] != 'r' && __m[0] != 'w' && __m[0] != 'a'))
+        return -1;
+    for (i = 1; __m[i]; i++) {
+        if (__m[i] == '+') *__plus = 1;
+        else if (__m[i] == 'x') *__excl = 1;
+        else if (__m[i] != 'b') return -1;
+    }
+    return __m[0];
+}
+
+static long __path_len(const char *__p)
+{
+    long n = 0;
+    while (__p[n]) n++;
+    return n;
+}
+
+/* THE ONE PLACE A HANDLE ABOVE 2 COMES FROM, which is what makes the
+   header's promise about `host_file_write` true: the hooks are set here and
+   nowhere else, so a program that never opens a file never names the `file`
+   group's writing half. */
+static FILE *__file_open(const char *__path, const char *__mode, FILE *__into)
+{
+    int plus, excl, kind;
+    long h, n;
+    FILE *f;
+    kind = __mode_read(__mode, &plus, &excl);
+    if (kind < 0 || __path == NULL) { errno = EINVAL; return NULL; }
+    n = __path_len(__path);
+    __file_hooks();
+    if (excl) {
+        /* EXCLUSIVE CREATE, ASKED AS A QUESTION AND THEN DONE, because the
+           open modes have no `O_EXCL`. The window between the two is real
+           and a hosted libc does not have it; a program that needs the
+           atomic form needs a host service that offers one. */
+        if (kind != 'w' || host_file_kind(__path, n) != __HOST_KIND_MISSING) {
+            errno = EEXIST;
+            return NULL;
+        }
+    }
+    if (kind == 'r') {
+        h = host_file_open(__path, n, plus ? __HOST_OPEN_UPDATE
+                                           : __HOST_OPEN_READ);
+    } else if (kind == 'w') {
+        /* `w+` IS TRUNCATE AND THEN READ-WRITE, and the host has no single
+           mode for it: `HOST_OPEN_WRITE` is write-only. Truncating with it
+           and reopening for update is what the two modes together mean. */
+        h = host_file_open(__path, n, __HOST_OPEN_WRITE);
+        if (plus && h >= 0) {
+            host_file_close(h);
+            h = host_file_open(__path, n, __HOST_OPEN_UPDATE);
+        }
+    } else {
+        /* `a` AND `a+`. Update is the mode that can also read, and the
+           append rule -- every write goes to the end, whatever the position
+           -- is enforced by `__stream_prepare` rather than by the host. The
+           file has to exist first, which is what the create is for. */
+        h = host_file_open(__path, n, __HOST_OPEN_UPDATE);
+        if (h < 0) {
+            long made = host_file_open(__path, n, __HOST_OPEN_WRITE);
+            if (made >= 0) {
+                host_file_close(made);
+                h = host_file_open(__path, n, __HOST_OPEN_UPDATE);
+            }
+        }
+    }
+    if (h < 0) { errno = __host_errno(h); return NULL; }
+    f = __into ? __into : __file_slot();
+    if (f == NULL) { host_file_close(h); errno = EMFILE; return NULL; }
+    f->__h = h;
+    f->__eof = 0; f->__err = 0; f->__rd = 0; f->__rn = 0;
+    f->__append = kind == 'a';
+    f->__used = 1;
+    if (f->__append) host_file_seek(h, 0, __HOST_SEEK_END);
+    return f;
+}
 
 static FILE *fopen(const char *__path, const char *__mode)
-{ (void)__path; (void)__mode; return NULL; }
+{
+    return __file_open(__path, __mode, NULL);
+}
+
+static int fclose(FILE *__f)
+{
+    long h;
+    if (__f == NULL) return EOF;
+    h = __f->__h;
+    if (__f->__tmp && __f->__name[0]) host_file_remove(__f->__name,
+                                                       __path_len(__f->__name));
+    __f->__used = __f == stdin || __f == stdout || __f == stderr;
+    __f->__rd = 0; __f->__rn = 0; __f->__h = -1;
+    if (h <= 2) return 0;                /* never close the standard three */
+    if (__host_close_fn == 0) return 0;
+    return __host_close_fn(h) < 0 ? EOF : 0;
+}
+
 static FILE *freopen(const char *__path, const char *__mode, FILE *__f)
-{ (void)__path; (void)__mode; (void)__f; return NULL; }
-static int fclose(FILE *__f) { (void)__f; return 0; }
-static int feof(FILE *__f) { return __f ? __f->__eof : 1; }
+{
+    if (__f == NULL) return NULL;
+    if (__path == NULL) {
+        /* THE "SAME FILE, NEW MODE" FORM, which C says may fail and which
+           this one does -- BEFORE closing anything, so a program whose
+           `freopen` is refused still has the stream it had. The host hands
+           out a handle and not a path, so there is nothing to reopen. */
+        errno = ENOSYS;
+        return NULL;
+    }
+    if (__f->__h > 2 && __host_close_fn != 0) __host_close_fn(__f->__h);
+    __f->__rd = 0; __f->__rn = 0; __f->__eof = 0; __f->__err = 0;
+    return __file_open(__path, __mode, __f);
+}
+
+/* ── reading ──────────────────────────────────────────────────────────── */
+/* ONE HOST CALL PER BUFFER, not per character. `fgetc` in a loop is how most
+   C reads a file, and a call into the host for each byte would make it
+   unusable for anything larger than a line. */
+static int __refill(FILE *__f)
+{
+    long got;
+    if (__f == NULL || __f->__eof || __f->__err) return 0;
+    got = host_file_read(__f->__h, __f->__rbuf, (long)BUFSIZ);
+    if (got < 0) { __f->__err = 1; errno = __host_errno(got); return 0; }
+    if (got == 0) { __f->__eof = 1; return 0; }
+    __f->__rd = 0;
+    __f->__rn = (int)got;
+    return 1;
+}
+
+static int fgetc(FILE *__f)
+{
+    if (__f == NULL) return EOF;
+    if (__f->__rd >= __f->__rn && !__refill(__f)) return EOF;
+    return (unsigned char)__f->__rbuf[__f->__rd++];
+}
+static int getc(FILE *__f) { return fgetc(__f); }
+static int getchar(void) { return fgetc(stdin); }
+
+/* ONE CHARACTER OF PUSHBACK, which is all C promises. It goes back into the
+   buffer the character came out of -- there is always room, because the
+   cursor only moves forward over bytes that are already there. */
+static int ungetc(int __c, FILE *__f)
+{
+    if (__f == NULL || __c == EOF) return EOF;
+    if (__f->__rd > 0) {
+        __f->__rbuf[--__f->__rd] = (char)__c;
+    } else if (__f->__rn < BUFSIZ) {
+        int i;
+        for (i = __f->__rn; i > 0; i--) __f->__rbuf[i] = __f->__rbuf[i - 1];
+        __f->__rbuf[0] = (char)__c;
+        __f->__rn++;
+    } else {
+        return EOF;
+    }
+    __f->__eof = 0;
+    return (unsigned char)__c;
+}
+
+static char *fgets(char *__s, int __n, FILE *__f)
+{
+    int i = 0, c;
+    if (__s == NULL || __n <= 0 || __f == NULL) return NULL;
+    while (i < __n - 1) {
+        c = fgetc(__f);
+        if (c == EOF) break;
+        __s[i++] = (char)c;
+        if (c == '\n') break;
+    }
+    if (i == 0) { __s[0] = 0; return NULL; }
+    __s[i] = 0;
+    return __s;
+}
+
+static size_t fread(void *__p, size_t __size, size_t __n, FILE *__f)
+{
+    char *out = (char *)__p;
+    size_t want, done = 0;
+    long got;
+    if (__f == NULL || __size == 0 || __n == 0) return 0;
+    want = __size * __n;
+    /* WHAT IS ALREADY IN THE BUFFER FIRST -- a `fread` after an `fgetc` must
+       not skip the character the refill read ahead. */
+    while (done < want && __f->__rd < __f->__rn)
+        out[done++] = __f->__rbuf[__f->__rd++];
+    while (done < want) {
+        got = host_file_read(__f->__h, out + done, (long)(want - done));
+        if (got < 0) { __f->__err = 1; errno = __host_errno(got); break; }
+        if (got == 0) { __f->__eof = 1; break; }
+        done += (size_t)got;
+    }
+    return done / __size;
+}
+
+/* ── position ─────────────────────────────────────────────────────────── */
+static int fseek(FILE *__f, long __off, int __whence)
+{
+    long at, ahead;
+    if (__f == NULL) { errno = EINVAL; return -1; }
+    ahead = (long)(__f->__rn - __f->__rd);
+    /* THE BUFFER IS PART OF THE POSITION. A relative seek is relative to
+       where the PROGRAM is, which is `ahead` bytes behind where the host
+       is; forgetting that is the classic read-ahead bug. */
+    if (__whence == SEEK_CUR) __off -= ahead;
+    __f->__rd = 0; __f->__rn = 0;
+    at = host_file_seek(__f->__h, __off, (long)__whence);
+    if (at < 0) { errno = __host_errno(at); return -1; }
+    __f->__eof = 0;
+    return 0;
+}
+
+static long ftell(FILE *__f)
+{
+    long at;
+    if (__f == NULL) { errno = EINVAL; return -1L; }
+    at = host_file_seek(__f->__h, 0, __HOST_SEEK_CUR);
+    if (at < 0) { errno = __host_errno(at); return -1L; }
+    return at - (long)(__f->__rn - __f->__rd);
+}
+
+static void rewind(FILE *__f)
+{
+    fseek(__f, 0L, SEEK_SET);
+    if (__f) __f->__err = 0;
+}
+
+static int fgetpos(FILE *__f, fpos_t *__at)
+{
+    long where = ftell(__f);
+    if (where < 0 || __at == NULL) return -1;
+    *__at = where;
+    return 0;
+}
+
+static int fsetpos(FILE *__f, const fpos_t *__at)
+{
+    if (__at == NULL) return -1;
+    return fseek(__f, *__at, SEEK_SET);
+}
+
+static int feof(FILE *__f) { return __f ? __f->__eof : 0; }
 static int ferror(FILE *__f) { return __f ? __f->__err : 0; }
 static void clearerr(FILE *__f) { if (__f) { __f->__eof = 0; __f->__err = 0; } }
-static int fseek(FILE *__f, long __off, int __whence)
-{ (void)__f; (void)__off; (void)__whence; return -1; }
-static long ftell(FILE *__f) { (void)__f; return -1L; }
-static void rewind(FILE *__f) { (void)__f; }
-static int remove(const char *__p) { (void)__p; return -1; }
-static int rename(const char *__a, const char *__b) { (void)__a; (void)__b; return -1; }
+
+/* ── files as names ───────────────────────────────────────────────────── */
+static int remove(const char *__p)
+{
+    long r;
+    if (__p == NULL) { errno = EINVAL; return -1; }
+    r = host_file_remove(__p, __path_len(__p));
+    if (r < 0) { errno = __host_errno(r); return -1; }
+    return 0;
+}
+
+/* THE HOST SERVICES HAVE NO RENAME, and `objects/hostsvc.py`'s `file` group
+   is ten operations chosen on purpose -- `bundled/os.py` refuses `os.rename`
+   for exactly this reason rather than approximating it. Copy-and-remove is
+   not a rename: it is not atomic, it loses every link and permission, and it
+   cannot move a directory. So this fails, which is an answer C allows, and
+   says why through `errno`. */
+static int rename(const char *__a, const char *__b)
+{
+    (void)__a; (void)__b;
+    errno = ENOSYS;
+    return -1;
+}
+
+/* A NAME THAT IS NOT TAKEN, asked of the host rather than assumed. The
+   counter makes TMP_MAX distinct attempts, as C requires, and each is
+   checked before it is offered. */
+static unsigned long __tmp_counter;
+static char __tmpnam_buf[L_tmpnam];
+
+static char *tmpnam(char *__s)
+{
+    char *out = __s ? __s : __tmpnam_buf;
+    unsigned long n;
+    int i, tries;
+    for (tries = 0; tries < TMP_MAX; tries++) {
+        n = ++__tmp_counter;
+        out[0] = 't'; out[1] = 'm'; out[2] = 'p';
+        for (i = 10; i >= 3; i--) { out[i] = (char)('0' + (int)(n % 10)); n /= 10; }
+        out[11] = 0;
+        if (host_file_kind(out, 11) == __HOST_KIND_MISSING) return out;
+    }
+    return NULL;
+}
+
+static FILE *tmpfile(void)
+{
+    char name[L_tmpnam];
+    FILE *f;
+    int i;
+    if (tmpnam(name) == NULL) return NULL;
+    f = __file_open(name, "w+b", NULL);
+    if (f == NULL) return NULL;
+    /* REMOVED WHEN IT IS CLOSED, which is what C promises. A hosted libc
+       unlinks it immediately and lets the descriptor keep it alive; there is
+       no unlink-while-open in the host services, so the removal waits for
+       `fclose` -- and a program that exits without closing leaves the file
+       behind, which is the one difference and is said here. */
+    f->__tmp = 1;
+    for (i = 0; i < L_tmpnam; i++) f->__name[i] = name[i];
+    return f;
+}
+
 static void perror(const char *__s)
 {
     if (__s && __s[0]) { fputs(__s, stderr); fputs(": ", stderr); }
-    fputs("no error information is available\n", stderr);
+    fputs(strerror(errno), stderr);
+    fputc('\n', stderr);
+}
+
+/* ── the scanner ──────────────────────────────────────────────────────── */
+/* THE OTHER ENGINE. `scanf`, `fscanf` and `sscanf` differ only in where the
+   characters come from, so they differ only in this structure: a stream, or
+   a string with a cursor. Everything about a conversion -- the width, the
+   length modifier, what counts as white space, when a match fails -- is
+   written once.
+
+   MATCHING FAILURE AND INPUT FAILURE ARE DIFFERENT and C makes a program
+   able to tell: a conversion that read nothing because the input ran out
+   answers EOF when no assignment has been made yet, and the number of
+   assignments otherwise. */
+typedef struct {
+    FILE *__f;              /* NULL when the source is a string */
+    const char *__s;
+    size_t __at;
+    int __back;             /* the string's one pushback slot, or -1 */
+    long __taken;           /* characters consumed, for `%n` */
+} __scan;
+
+static int __scan_get(__scan *__sc)
+{
+    int c;
+    if (__sc->__back >= 0) { c = __sc->__back; __sc->__back = -1; }
+    else if (__sc->__f != NULL) c = fgetc(__sc->__f);
+    else c = __sc->__s[__sc->__at] ? (unsigned char)__sc->__s[__sc->__at++] : EOF;
+    if (c != EOF) __sc->__taken++;
+    return c;
+}
+
+static void __scan_unget(__scan *__sc, int __c)
+{
+    if (__c == EOF) return;
+    __sc->__taken--;
+    if (__sc->__f != NULL) ungetc(__c, __sc->__f);
+    else __sc->__back = __c;
+}
+
+static int __scan_space(int __c)
+{
+    return __c == ' ' || __c == '\t' || __c == '\n' || __c == '\v'
+        || __c == '\f' || __c == '\r';
+}
+
+static int __scan_skip(__scan *__sc)
+{
+    int c;
+    do { c = __scan_get(__sc); } while (c != EOF && __scan_space(c));
+    if (c != EOF) __scan_unget(__sc, c);
+    return c;
+}
+
+/* THE LENGTH MODIFIERS, as a number, so the assignment below is a switch
+   rather than a tree of comparisons. */
+#define __LEN_INT   0
+#define __LEN_CHAR  1
+#define __LEN_SHORT 2
+#define __LEN_LONG  3
+#define __LEN_LLONG 4
+#define __LEN_MAX   5
+#define __LEN_SIZE  6
+#define __LEN_PTRD  7
+#define __LEN_LDBL  8
+
+static void __scan_put_int(void *__p, int __len, unsigned long long __v,
+                           int __neg)
+{
+    long long v = __neg ? -(long long)__v : (long long)__v;
+    switch (__len) {
+    case __LEN_CHAR:  *(char *)__p = (char)v; break;
+    case __LEN_SHORT: *(short *)__p = (short)v; break;
+    case __LEN_LONG:  *(long *)__p = (long)v; break;
+    case __LEN_LLONG: *(long long *)__p = v; break;
+    case __LEN_MAX:   *(long long *)__p = v; break;
+    case __LEN_SIZE:  *(size_t *)__p = (size_t)v; break;
+    case __LEN_PTRD:  *(ptrdiff_t *)__p = (ptrdiff_t)v; break;
+    default:          *(int *)__p = (int)v; break;
+    }
+}
+
+static int __scan_digit(int __c, int __base)
+{
+    int v;
+    if (__c >= '0' && __c <= '9') v = __c - '0';
+    else if (__c >= 'a' && __c <= 'z') v = __c - 'a' + 10;
+    else if (__c >= 'A' && __c <= 'Z') v = __c - 'A' + 10;
+    else return -1;
+    return v < __base ? v : -1;
+}
+
+/* AN INTEGER, WITH THE BASE POSSIBLY UNDECIDED. `%i` takes the base from the
+   text the way a C literal does, which is what makes it different from `%d`,
+   and `%x` accepts the `0x` it does not need. */
+static int __scan_int(__scan *__sc, int __base, int __width, int __want_signed,
+                      void *__out, int __len)
+{
+    unsigned long long v = 0;
+    int c, neg = 0, any = 0, used = 0;
+    c = __scan_get(__sc);
+    used++;
+    if (c == '+' || c == '-') {
+        neg = c == '-';
+        if (__width && used >= __width) { __scan_unget(__sc, c); return 0; }
+        c = __scan_get(__sc);
+        used++;
+    }
+    if ((__base == 0 || __base == 16) && c == '0') {
+        int save;
+        any = 1;
+        v = 0;
+        if (!__width || used < __width) {
+            save = __scan_get(__sc);
+            used++;
+            if (save == 'x' || save == 'X') {
+                __base = 16;
+                any = 0;
+                c = (!__width || used < __width) ? __scan_get(__sc) : EOF;
+                if (c != EOF) used++;
+            } else {
+                if (__base == 0) __base = 8;
+                c = save;
+            }
+        } else {
+            if (__base == 0) __base = 8;
+            c = EOF;
+        }
+    } else if (__base == 0) {
+        __base = 10;
+    }
+    while (c != EOF && __scan_digit(c, __base) >= 0) {
+        v = v * (unsigned long long)__base
+            + (unsigned long long)__scan_digit(c, __base);
+        any = 1;
+        if (__width && used >= __width) { c = EOF; break; }
+        c = __scan_get(__sc);
+        used++;
+    }
+    __scan_unget(__sc, c);
+    if (!any) return 0;
+    if (__out != NULL) {
+        if (__want_signed) __scan_put_int(__out, __len, v, neg);
+        else __scan_put_int(__out, __len, neg ? (unsigned long long)0 - v : v, 0);
+    }
+    return 1;
+}
+
+/* A FLOATING-POINT NUMBER, COLLECTED AND THEN CONVERTED, because the
+   conversion is `__num_decimal`'s and doing it here would be a second one to
+   keep right. `inf`, `infinity` and `nan` are part of the grammar C gives
+   `%f`, and a hex significand is too. */
+static int __scan_float(__scan *__sc, int __width, void *__out, int __len)
+{
+    char buf[__NUM_TEXT_MAX];
+    int n = 0, c, used = 0, any = 0;
+    double v;
+    c = __scan_get(__sc); used++;
+    if (c == '+' || c == '-') {
+        buf[n++] = (char)c;
+        if (__width && used >= __width) { __scan_unget(__sc, c); return 0; }
+        c = __scan_get(__sc); used++;
+    }
+    if (c == 'i' || c == 'I' || c == 'n' || c == 'N') {
+        const char *w = (c == 'i' || c == 'I') ? "infinity" : "nan";
+        int matched = 0;
+        while (c != EOF && matched < 8 && w[matched]
+               && (c | 32) == w[matched]) {
+            buf[n++] = (char)c;
+            matched++;
+            /* `inf` is complete at three and `infinity` at eight; anything
+               between is put back, which is what the grammar says. */
+            if (__width && used >= __width) { c = EOF; break; }
+            c = __scan_get(__sc); used++;
+        }
+        __scan_unget(__sc, c);
+        buf[n] = 0;
+        if (n >= 3) {
+            any = 1;
+        } else {
+            return 0;
+        }
+    } else {
+        int hex = 0;
+        if (c == '0') {
+            buf[n++] = (char)c;
+            any = 1;
+            if (!__width || used < __width) {
+                c = __scan_get(__sc); used++;
+                if (c == 'x' || c == 'X') {
+                    hex = 1;
+                    buf[n++] = (char)c;
+                    any = 0;
+                    c = (!__width || used < __width) ? __scan_get(__sc) : EOF;
+                    if (c != EOF) used++;
+                }
+            } else {
+                c = EOF;
+            }
+        }
+        while (c != EOF && n < __NUM_TEXT_MAX - 2) {
+            int d = hex ? __scan_digit(c, 16) : __scan_digit(c, 10);
+            if (d < 0) break;
+            buf[n++] = (char)c;
+            any = 1;
+            if (__width && used >= __width) { c = EOF; break; }
+            c = __scan_get(__sc); used++;
+        }
+        if (c == '.' && n < __NUM_TEXT_MAX - 2) {
+            buf[n++] = (char)c;
+            if (!__width || used < __width) { c = __scan_get(__sc); used++; }
+            else c = EOF;
+            while (c != EOF && n < __NUM_TEXT_MAX - 2) {
+                int d = hex ? __scan_digit(c, 16) : __scan_digit(c, 10);
+                if (d < 0) break;
+                buf[n++] = (char)c;
+                any = 1;
+                if (__width && used >= __width) { c = EOF; break; }
+                c = __scan_get(__sc); used++;
+            }
+        }
+        if (any && ((hex && (c == 'p' || c == 'P'))
+                    || (!hex && (c == 'e' || c == 'E')))) {
+            int mark = n;
+            buf[n++] = (char)c;
+            if (!__width || used < __width) { c = __scan_get(__sc); used++; }
+            else c = EOF;
+            if (c == '+' || c == '-') {
+                buf[n++] = (char)c;
+                if (!__width || used < __width) { c = __scan_get(__sc); used++; }
+                else c = EOF;
+            }
+            if (c != EOF && __scan_digit(c, 10) >= 0) {
+                while (c != EOF && __scan_digit(c, 10) >= 0
+                       && n < __NUM_TEXT_MAX - 2) {
+                    buf[n++] = (char)c;
+                    if (__width && used >= __width) { c = EOF; break; }
+                    c = __scan_get(__sc); used++;
+                }
+            } else {
+                /* AN EXPONENT THAT IS NOT ONE is not part of the number:
+                   `1e+` is `1` followed by `e+`, and the characters go
+                   back. Only one can, so the rest are dropped -- which is
+                   what a hosted libc's `scanf` does too. */
+                __scan_unget(__sc, c);
+                n = mark;
+                c = EOF;
+            }
+        }
+        __scan_unget(__sc, c);
+        buf[n] = 0;
+        if (!any) return 0;
+    }
+    v = __num_strtod(buf, NULL);
+    if (__out != NULL) {
+        if (__len == __LEN_LDBL) *(long double *)__out = (long double)v;
+        else if (__len == __LEN_LONG) *(double *)__out = v;
+        else *(float *)__out = (float)v;
+    }
+    return 1;
+}
+
+static int __vscan(__scan *__sc, const char *__fmt, va_list __ap)
+{
+    int done = 0, c;
+    const char *f = __fmt;
+    while (*f) {
+        if (__scan_space((unsigned char)*f)) {
+            /* WHITE SPACE IN THE FORMAT MATCHES ANY AMOUNT, INCLUDING NONE,
+               and never fails -- which is why it is not a conversion and is
+               not counted. */
+            __scan_skip(__sc);
+            f++;
+            continue;
+        }
+        if (*f != '%') {
+            c = __scan_get(__sc);
+            if (c == EOF) return done ? done : EOF;
+            if (c != (unsigned char)*f) { __scan_unget(__sc, c); return done; }
+            f++;
+            continue;
+        }
+        f++;
+        if (*f == '%') {
+            c = __scan_skip(__sc);
+            c = __scan_get(__sc);
+            if (c == EOF) return done ? done : EOF;
+            if (c != '%') { __scan_unget(__sc, c); return done; }
+            f++;
+            continue;
+        }
+        {
+            int suppress = 0, width = 0, len = __LEN_INT, ok;
+            void *out;
+            if (*f == '*') { suppress = 1; f++; }
+            while (*f >= '0' && *f <= '9') width = width * 10 + (*f++ - '0');
+            if (*f == 'h') { f++; len = __LEN_SHORT;
+                             if (*f == 'h') { f++; len = __LEN_CHAR; } }
+            else if (*f == 'l') { f++; len = __LEN_LONG;
+                                  if (*f == 'l') { f++; len = __LEN_LLONG; } }
+            else if (*f == 'j') { f++; len = __LEN_MAX; }
+            else if (*f == 'z') { f++; len = __LEN_SIZE; }
+            else if (*f == 't') { f++; len = __LEN_PTRD; }
+            else if (*f == 'L') { f++; len = __LEN_LDBL; }
+            if (*f == 0) return done;
+            c = *f++;
+            /* THE POINTER IS TAKEN BEFORE THE CONVERSION RUNS and only when
+               there is one to take: `%*d` reads an argument from nobody. */
+            out = suppress ? NULL : va_arg(__ap, void *);
+            switch (c) {
+            case 'd': case 'u':
+                if (__scan_skip(__sc) == EOF) return done ? done : EOF;
+                ok = __scan_int(__sc, 10, width, c == 'd', out, len);
+                break;
+            case 'i':
+                if (__scan_skip(__sc) == EOF) return done ? done : EOF;
+                ok = __scan_int(__sc, 0, width, 1, out, len);
+                break;
+            case 'o':
+                if (__scan_skip(__sc) == EOF) return done ? done : EOF;
+                ok = __scan_int(__sc, 8, width, 0, out, len);
+                break;
+            case 'x': case 'X':
+                if (__scan_skip(__sc) == EOF) return done ? done : EOF;
+                ok = __scan_int(__sc, 16, width, 0, out, len);
+                break;
+            case 'b':
+                if (__scan_skip(__sc) == EOF) return done ? done : EOF;
+                ok = __scan_int(__sc, 2, width, 0, out, len);
+                break;
+            case 'p': {
+                unsigned long long v = 0;
+                int any = 0, used = 0, d;
+                if (__scan_skip(__sc) == EOF) return done ? done : EOF;
+                c = __scan_get(__sc); used++;
+                if (c == '0') {
+                    int nxt = __scan_get(__sc);
+                    if (nxt == 'x' || nxt == 'X') { c = __scan_get(__sc); used += 2; }
+                    else { __scan_unget(__sc, nxt); }
+                }
+                while (c != EOF && (d = __scan_digit(c, 16)) >= 0) {
+                    v = v * 16u + (unsigned long long)d;
+                    any = 1;
+                    if (width && used >= width) { c = EOF; break; }
+                    c = __scan_get(__sc); used++;
+                }
+                __scan_unget(__sc, c);
+                if (any && out != NULL) *(void **)out = (void *)(size_t)v;
+                ok = any;
+                break;
+            }
+            case 'e': case 'E': case 'f': case 'F': case 'g': case 'G':
+            case 'a': case 'A':
+                if (__scan_skip(__sc) == EOF) return done ? done : EOF;
+                ok = __scan_float(__sc, width, out, len);
+                break;
+            case 'c': {
+                /* NO SKIPPING, NO TERMINATOR: `%c` is the one conversion
+                   that takes white space as data, and it writes exactly as
+                   many characters as its width says. */
+                int want = width ? width : 1, i;
+                char *dst = (char *)out;
+                ok = 1;
+                for (i = 0; i < want; i++) {
+                    int got = __scan_get(__sc);
+                    if (got == EOF) { ok = i > 0 ? 0 : -1; break; }
+                    if (dst) dst[i] = (char)got;
+                }
+                if (ok < 0) return done ? done : EOF;
+                break;
+            }
+            case 's': {
+                char *dst = (char *)out;
+                int i = 0;
+                if (__scan_skip(__sc) == EOF) return done ? done : EOF;
+                while (!width || i < width) {
+                    int got = __scan_get(__sc);
+                    if (got == EOF || __scan_space(got)) {
+                        __scan_unget(__sc, got);
+                        break;
+                    }
+                    if (dst) dst[i] = (char)got;
+                    i++;
+                }
+                if (dst) dst[i] = 0;
+                ok = i > 0;
+                break;
+            }
+            case '[': {
+                /* THE SCANSET, WHICH IS A SET AND NOT A PATTERN. `^` at the
+                   front inverts it, `]` first is a literal, and `a-z` is a
+                   range -- the three rules C gives, and no others. */
+                char member[256];
+                char *dst = (char *)out;
+                int negate = 0, i, prev = -1;
+                for (i = 0; i < 256; i++) member[i] = 0;
+                if (*f == '^') { negate = 1; f++; }
+                if (*f == ']') { member[(unsigned char)']'] = 1; prev = ']'; f++; }
+                while (*f && *f != ']') {
+                    if (*f == '-' && prev >= 0 && f[1] && f[1] != ']') {
+                        int hi = (unsigned char)f[1];
+                        for (i = prev; i <= hi; i++) member[i] = 1;
+                        f += 2;
+                        prev = -1;
+                        continue;
+                    }
+                    prev = (unsigned char)*f;
+                    member[prev] = 1;
+                    f++;
+                }
+                if (*f == ']') f++;
+                i = 0;
+                while (!width || i < width) {
+                    int got = __scan_get(__sc);
+                    if (got == EOF) { __scan_unget(__sc, got); break; }
+                    if ((member[got] != 0) == (negate != 0)) {
+                        __scan_unget(__sc, got);
+                        break;
+                    }
+                    if (dst) dst[i] = (char)got;
+                    i++;
+                }
+                if (dst) dst[i] = 0;
+                ok = i > 0;
+                break;
+            }
+            case 'n':
+                /* NOT A CONVERSION, so it is not counted and cannot fail --
+                   which is why it is the one case that does not touch `ok`. */
+                if (out != NULL) __scan_put_int(out, len,
+                                                (unsigned long long)__sc->__taken, 0);
+                continue;
+            default:
+                return done;
+            }
+            if (!ok) return done;
+            if (!suppress) done++;
+        }
+    }
+    return done;
+}
+
+static int vfscanf(FILE *__f, const char *__fmt, va_list __ap)
+{
+    __scan sc;
+    sc.__f = __f; sc.__s = NULL; sc.__at = 0; sc.__back = -1; sc.__taken = 0;
+    return __vscan(&sc, __fmt, __ap);
+}
+
+static int vscanf(const char *__fmt, va_list __ap)
+{
+    return vfscanf(stdin, __fmt, __ap);
+}
+
+static int vsscanf(const char *__s, const char *__fmt, va_list __ap)
+{
+    __scan sc;
+    sc.__f = NULL; sc.__s = __s; sc.__at = 0; sc.__back = -1; sc.__taken = 0;
+    return __vscan(&sc, __fmt, __ap);
+}
+
+static int scanf(const char *__fmt, ...)
+{
+    va_list ap; int n;
+    va_start(ap, __fmt);
+    n = vscanf(__fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+static int fscanf(FILE *__f, const char *__fmt, ...)
+{
+    va_list ap; int n;
+    va_start(ap, __fmt);
+    n = vfscanf(__f, __fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+static int sscanf(const char *__s, const char *__fmt, ...)
+{
+    va_list ap; int n;
+    va_start(ap, __fmt);
+    n = vsscanf(__s, __fmt, ap);
+    va_end(ap);
+    return n;
 }
 
 #endif

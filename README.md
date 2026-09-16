@@ -265,9 +265,9 @@ the whole list, rather than the beginning of one:
   * `_Complex` and `_Imaginary` are refused, with a diagnostic that says why.
   * `setjmp`/`longjmp` are refused: a non-local jump needs the machine's
     frame, and the IR deliberately has no way to name one.
-  * `main`'s parameters are `0` and a null `argv`. The platform floor is
-    `plat_write`, `plat_exit` and `plat_heap`; none of them can ask the host
-    for a command line, and inventing one would be worse than saying so.
+  * `localtime` **is** `gmtime`. The host services can say what time it is
+    and cannot say what the local offset from UTC is, so the calendar is UTC
+    and `tm_isdst` is 0 — not unknown, not in effect.
 
 Everything else is implemented — VLAs, flexible array members, bit-fields,
 anonymous members, `_Generic`, designated initialisers, compound literals,
@@ -278,12 +278,17 @@ worked examples rather than with an opinion about what recursive macro
 expansion should mean.
 
 **The standard library is C, compiled by this frontend**, from
-`frontends/c/include/`. It sits on the three floor functions and nothing else,
-which is what makes a C program built here run on every backend and in the IR
-interpreter: a backend that can run a Python program can already run a C one.
+`frontends/c/include/`. Computing and printing sit on the three floor
+functions and nothing else, which is what makes such a program run on every
+backend and in the IR interpreter: a backend that can run a Python program can
+already run a C one. Reading a file, asking the time, looking at the
+environment or running another program reach `objects/hostsvc.py`'s optional
+groups, and a backend whose target has not got one refuses such a program by
+name at compile time rather than leaving an undefined symbol for the linker.
 `printf`'s floating-point conversion is exact rather than approximate, because
 every finite double is a terminating decimal and `%f` of `1e300` has a right
-answer with 301 digits in it.
+answer with 301 digits in it — and `strtod` is exact in the other direction,
+so the round trip through `%.17g` recovers the value it started with.
 
 One translation unit per build: `asmpython build prog.c` compiles `prog.c`
 and whatever it includes, and a project with several `.c` files builds as a

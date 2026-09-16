@@ -1355,6 +1355,74 @@ PROGRAMS: dict[str, str] = {
             return 0;
         }
     """,
+
+    "sscanf_conversions": r"""
+        #include <stdio.h>
+        #include <string.h>
+        /* THE SCANNER, OVER A STRING, so it needs no host service and can
+           be checked on every path. Every conversion class is here: the
+           bases, the width, the suppression, the scanset and the two ways
+           a conversion can fail. */
+        int main(void) {
+            int a = 0, b = 0, n = 0;
+            unsigned u = 0;
+            long l = 0;
+            double d = 0;
+            char word[16] = {0}, rest[16] = {0}, ch = 0;
+            n = sscanf("12 -34 0x1f 077", "%d %d %x %lo", &a, &b, &u, &l);
+            printf("%d: %d %d %u %ld\n", n, a, b, u, l);
+            n = sscanf("  hello world", "%5s %c", word, &ch);
+            printf("%d: [%s] [%c]\n", n, word, ch);
+            n = sscanf("3.5e2xyz", "%lf%2s", &d, rest);
+            printf("%d: %g [%s]\n", n, d, rest);
+            n = sscanf("42abc", "%*d%[a-c]", word);
+            printf("%d: [%s]\n", n, word);
+            n = sscanf("ab", "%d", &a);
+            printf("%d\n", n);
+            n = sscanf("", "%d", &a);
+            printf("%d\n", n);
+            n = sscanf("7 8", "%d%n %d", &a, &l, &b);
+            printf("%d: %d %ld %d\n", n, a, l, b);
+            n = sscanf("1,2;3", "%d,%d;%d", &a, &b, &u);
+            printf("%d: %d %d %u\n", n, a, b, u);
+            return 0;
+        }
+    """,
+
+    "strtod_is_exact": r"""
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <string.h>
+        /* THE ROUND TRIP, BOTH WAYS. `%.17g` writes enough digits to name
+           the value and `strtod` has to land back on exactly it -- which is
+           only true if both directions are correctly rounded, and is what
+           the bignum in each of them is for. The awkward ones are here by
+           name: `1e23` is the classic off-by-one-ulp, and the subnormals
+           are where a scaled conversion stops working entirely. */
+        static void trip(double v) {
+            char buf[64];
+            double back;
+            snprintf(buf, sizeof buf, "%.17g", v);
+            back = strtod(buf, NULL);
+            printf("%s %d\n", buf, back == v);
+        }
+        int main(void) {
+            trip(1.0);
+            trip(0.1);
+            trip(1e23);
+            trip(1e-300);
+            trip(123456789.0 / 7.0);
+            trip(3.141592653589793);
+            printf("%.17g\n", strtod("1e23", NULL));
+            printf("%.17g\n", strtod("9007199254740993", NULL));
+            printf("%.17g\n", strtod("2.2250738585072011e-308", NULL));
+            printf("%a %a %a\n", strtod("1e-323", NULL),
+                   strtod("0x1p-1074", NULL), strtod("255.5", NULL));
+            printf("%g %g\n", strtod("nope", NULL), strtod("  12.5rest", NULL));
+            printf("%d\n", strtod("inf", NULL) > 1e308);
+            return 0;
+        }
+    """,
 }
 
 
@@ -1381,20 +1449,26 @@ class TestTheThreePathsAgree:
         assert got == want
 
 
-def _asmpython(*argv: str, cwd: Path) -> subprocess.CompletedProcess:
+def _asmpython(*argv: str, cwd: Path, stdin_text: str | None = None,
+               extra_env: dict | None = None) -> subprocess.CompletedProcess:
     """Run the CLI in a subprocess, against the package this test imported.
 
     THE PATH COMES FROM THE IMPORTED MODULE and not from the repository
     layout: the harness copies `src/` to a per-run directory and imports from
     there, so a test that computed the root from `__file__` would run the
     CLI from a DIFFERENT tree than the one it is testing.
+
+    STANDARD INPUT AND THE ENVIRONMENT ARE ARGUMENTS because a program that
+    reads one or asks about the other has to be given them from outside: the
+    host services read the real descriptor and the real environment, which
+    is the point of them.
     """
     import asmpython
     root = Path(asmpython.__file__).parents[1]
-    env = dict(os.environ, PYTHONPATH=str(root))
+    env = dict(os.environ, PYTHONPATH=str(root), **(extra_env or {}))
     return subprocess.run([sys.executable, "-m", "asmpython", *argv],
                           capture_output=True, text=True, cwd=str(cwd),
-                          env=env)
+                          env=env, input=stdin_text)
 
 
 #: A program small enough to go through a machine backend quickly, and
@@ -1522,3 +1596,244 @@ class TestTheDriverBuildsAndRuns:
                          str(tmp_path / "inc"), cwd=tmp_path)
         assert ran.returncode == 0, ran.stderr
         assert ran.stdout.endswith("42\n"), ran.stdout
+
+
+# ── the host services ───────────────────────────────────────────────────────
+#
+# THE SAME THREE PATHS, run differently. Everything above this line is a
+# program that needs nothing but the floor, so the interpreter can run it
+# in-process and the comparison is a string. A program that reads `stdin`,
+# opens a file or asks for the command line needs a process to have those
+# things, so these go through the CLI in a subprocess -- with a working
+# directory of their own, a fixed line of input and two arguments.
+#
+# WHAT THE ORACLE IS DOING HERE IS DIFFERENT IN KIND from the programs above.
+# There, `cc` and this frontend compile the same text and the library is the
+# only difference; here the library underneath is a real one on one side and
+# `objects/hostsvc.py` on the other, and the point is that a program cannot
+# tell. `fseek` past a read-ahead buffer, `%[^,]` stopping where it should,
+# `mktime` normalising the 32nd of January: each is somewhere the two could
+# disagree and does not.
+
+#: What every program below is given on its standard input.
+HOST_INPUT = "first line\n11 31\nlast\n"
+
+#: And the words after the program's name.
+HOST_ARGS = ("alpha", "beta")
+
+#: And one variable in its environment, so `getenv` has something to find.
+HOST_ENV = {"ASMPY_DIFFERENTIAL": "set-by-the-test"}
+
+HOST_PROGRAMS: dict[str, str] = {
+    "a_file_round_trip": r"""
+        #include <stdio.h>
+        #include <string.h>
+        int main(void) {
+            FILE *f = fopen("round.txt", "w");
+            char buf[64];
+            int a = 0, b = 0;
+            long at;
+            if (!f) { printf("no file\n"); return 1; }
+            fprintf(f, "%d %d\nsecond line\nthird\n", 17, 23);
+            fputc('!', f);
+            fputs("tail", f);
+            fclose(f);
+
+            f = fopen("round.txt", "r");
+            if (!f) { printf("no reopen\n"); return 1; }
+            printf("%d\n", fscanf(f, "%d %d", &a, &b));
+            printf("%d %d\n", a, b);
+            fgets(buf, sizeof buf, f);
+            fgets(buf, sizeof buf, f);
+            printf("[%s]", buf);
+            at = ftell(f);
+            printf("at %ld eof %d\n", at, feof(f));
+            fseek(f, 0, SEEK_SET);
+            printf("%d bytes back: [%.5s]\n", (int)fread(buf, 1, 5, f), buf);
+            fseek(f, -4, SEEK_END);
+            fgets(buf, sizeof buf, f);
+            printf("end [%s]\n", buf);
+            printf("%d\n", fgetc(f));
+            printf("eof %d\n", feof(f) != 0);
+            fclose(f);
+
+            f = fopen("round.txt", "a");
+            fputs("+more", f);
+            fclose(f);
+            f = fopen("round.txt", "r");
+            at = 0;
+            while (fgetc(f) != EOF) at++;
+            printf("size %ld\n", at);
+            fclose(f);
+
+            printf("remove %d\n", remove("round.txt"));
+            printf("gone %d\n", fopen("round.txt", "r") == NULL);
+            printf("missing %d\n", fopen("not-there.txt", "r") == NULL);
+            return 0;
+        }
+    """,
+
+    "standard_input": r"""
+        #include <stdio.h>
+        #include <string.h>
+        int main(void) {
+            char line[64];
+            int a = 0, b = 0, c;
+            if (fgets(line, sizeof line, stdin)) printf("one [%s]", line);
+            printf("%d\n", scanf("%d %d", &a, &b));
+            printf("%d\n", a + b);
+            c = getchar();
+            printf("after %d\n", c);
+            ungetc(c, stdin);
+            if (fgets(line, sizeof line, stdin)) printf("two [%s]", line);
+            printf("%d %d\n", getchar() == EOF, feof(stdin) != 0);
+            return 0;
+        }
+    """,
+
+    "the_calendar": r"""
+        #include <stdio.h>
+        #include <time.h>
+        int main(void) {
+            time_t fixed = 1700000000;
+            struct tm *tm = gmtime(&fixed);
+            char out[128];
+            struct tm copy;
+            printf("%04d-%02d-%02d %02d:%02d:%02d wday %d yday %d\n",
+                   tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+                   tm->tm_hour, tm->tm_min, tm->tm_sec,
+                   tm->tm_wday, tm->tm_yday);
+            strftime(out, sizeof out, "%Y-%m-%dT%H:%M:%S %a %A %b %B %j %p %I",
+                     tm);
+            printf("%s\n", out);
+            strftime(out, sizeof out, "%F %T %D %R %e %C %y %u %w %%", tm);
+            printf("%s\n", out);
+            printf("%s", asctime(tm));
+            printf("%ld\n", (long)mktime(tm));
+            /* THE 32ND OF JANUARY, which `mktime` has to turn into the
+               first of February -- normalising is most of what it is for. */
+            copy = *tm;
+            copy.tm_year = 100; copy.tm_mon = 0; copy.tm_mday = 32;
+            copy.tm_hour = 25; copy.tm_min = 0; copy.tm_sec = 0;
+            printf("%ld\n", (long)mktime(&copy));
+            printf("%04d-%02d-%02d %02d\n", copy.tm_year + 1900,
+                   copy.tm_mon + 1, copy.tm_mday, copy.tm_hour);
+            {
+                time_t early = 0, negative = -86399;
+                printf("%s", asctime(gmtime(&early)));
+                printf("%s", asctime(gmtime(&negative)));
+            }
+            printf("now %d\n", time(NULL) > 1700000000);
+            printf("clock %d\n", clock() >= 0);
+            printf("%.0f\n", difftime(100, 40));
+            return 0;
+        }
+    """,
+
+    "the_environment": r"""
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <string.h>
+        int main(void) {
+            const char *v = getenv("ASMPY_DIFFERENTIAL");
+            printf("[%s]\n", v ? v : "(unset)");
+            printf("%d\n", getenv("ASMPY_NOT_SET_AT_ALL") == NULL);
+            printf("%d\n", (int)strlen(getenv("ASMPY_DIFFERENTIAL")));
+            return 0;
+        }
+    """,
+
+    "the_command_line": r"""
+        #include <stdio.h>
+        #include <string.h>
+        int main(int argc, char **argv) {
+            int i;
+            printf("%d\n", argc);
+            /* NOT argv[0], which is the program's own name and is a
+               different string on each path by definition. */
+            for (i = 1; i < argc; i++) printf("%d [%s]\n", i, argv[i]);
+            printf("%d\n", argv[argc] == NULL);
+            printf("%d\n", (int)strlen(argv[1]));
+            return 0;
+        }
+    """,
+}
+
+
+def _host_service_run(source: str, where: Path) -> tuple[int, str]:
+    """The oracle: `cc`, in its own directory, with the same input."""
+    where.mkdir(parents=True, exist_ok=True)
+    src = where / "host.c"
+    exe = where / "host.exe"
+    src.write_text(HOST_PRELUDE + source, encoding="utf-8")
+    built = subprocess.run(
+        [HAS_CC, "-std=c11", "-w", "-o", str(exe), str(src), "-lm"],
+        capture_output=True, text=True)
+    assert built.returncode == 0, f"the host compiler refused it:\n{built.stderr}"
+    ran = subprocess.run([str(exe), *HOST_ARGS], capture_output=True, text=True,
+                         input=HOST_INPUT, cwd=str(where),
+                         env=dict(os.environ, **HOST_ENV))
+    return ran.returncode, ran.stdout
+
+
+class TestTheHostServicesAgreeToo:
+    """A program that reads, opens a file, asks the time or looks at its
+    own command line, three ways -- and the same answer each time."""
+
+    @harness.needs("cc")
+    @harness.cases("name", sorted(HOST_PROGRAMS))
+    def test_interpreter_matches_the_host_compiler(self, name, tmp_path):
+        import textwrap
+        source = textwrap.dedent(HOST_PROGRAMS[name])
+        want = _normalise(_host_service_run(source, tmp_path / "host"))
+        ours = tmp_path / "interp"
+        ours.mkdir()
+        (ours / "prog.c").write_text(OURS_PRELUDE + source, encoding="utf-8")
+        ran = _asmpython("run", "prog.c", *HOST_ARGS, cwd=ours,
+                         stdin_text=HOST_INPUT, extra_env=HOST_ENV)
+        assert _normalise((ran.returncode, ran.stdout)) == want, ran.stderr
+
+    @harness.needs("cc")
+    @harness.cases("name", sorted(HOST_PROGRAMS))
+    def test_the_c_backend_matches_the_host_compiler(self, name, tmp_path):
+        import textwrap
+        source = textwrap.dedent(HOST_PROGRAMS[name])
+        want = _normalise(_host_service_run(source, tmp_path / "host"))
+        ours = tmp_path / "compiled"
+        ours.mkdir()
+        (ours / "prog.c").write_text(OURS_PRELUDE + source, encoding="utf-8")
+        built = _asmpython("build", "-b", "c", "-o", "prog.exe", "prog.c",
+                           cwd=ours)
+        assert built.returncode == 0, built.stderr
+        ran = subprocess.run([str(ours / "prog.exe"), *HOST_ARGS],
+                             capture_output=True, text=True, input=HOST_INPUT,
+                             cwd=str(ours), env=dict(os.environ, **HOST_ENV))
+        assert _normalise((ran.returncode, ran.stdout)) == want
+
+    @harness.needs("cc")
+    def test_a_backend_without_the_group_refuses_by_name(self, tmp_path):
+        """The whole point of the arrangement: the refusal names the
+        capability rather than leaving an undefined symbol for the linker."""
+        import textwrap
+        (tmp_path / "prog.c").write_text(
+            OURS_PRELUDE + textwrap.dedent(HOST_PROGRAMS["a_file_round_trip"]),
+            encoding="utf-8")
+        ran = _asmpython("build", "-b", "x86-64", "-o", "prog.out", "prog.c",
+                         cwd=tmp_path)
+        assert ran.returncode != 0
+        assert "'file'" in ran.stdout + ran.stderr
+
+    @harness.needs("cc")
+    def test_a_program_that_only_prints_still_runs_anywhere(self, tmp_path):
+        """And the other half: adding a filesystem to the library must not
+        cost a program that does not use one."""
+        (tmp_path / "prog.c").write_text(
+            OURS_PRELUDE
+            + "#include <stdio.h>\n"
+              "#include <stdlib.h>\n"
+              "#include <time.h>\n"
+              "int main(void){ printf(\"%d\\n\", 7); return 0; }\n",
+            encoding="utf-8")
+        ran = _asmpython("build", "-b", "x86-64", "-o", "prog.out", "prog.c",
+                         cwd=tmp_path)
+        assert ran.returncode == 0, ran.stdout + ran.stderr

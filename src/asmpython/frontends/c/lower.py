@@ -95,6 +95,7 @@ class Lowerer:
         self.declared: dict[str, Function] = {}
         self.globals: set[str] = set()
         self.needs_vla = False
+        self.needs_args = False
         self._temp_n = 0
         #: The register holding this function's variadic argument area.
         self.va_area: int | None = None
@@ -114,7 +115,7 @@ class Lowerer:
         self._declare_externals()
         self._emit_init()
         self._emit_entry()
-        if self.needs_vla:
+        if self.needs_vla or self.needs_args:
             self._splice_support()
         self._prune()
         return self.module
@@ -542,22 +543,7 @@ class Lowerer:
         self.sret = None
         if self.init_stores:
             self.b.call(IR.VOID, "__c_init", [])
-        args: list[int] = []
-        for p in user.params:
-            ty = user.registers[p]
-            if ty.is_ptr:
-                args.append(self._null_argv())
-            else:
-                args.append(self.b.const(ty, 0))
-        if args:
-            self.sink.report(
-                warning("W1501",
-                        "`main` declares parameters, and the command line is "
-                        "not available here")
-                .at(user.span)
-                .note("the platform floor is plat_write, plat_exit and "
-                      "plat_heap; none of them can ask for the arguments")
-                .help("`argc` is 0 and `argv[0]` is a null pointer"))
+        args = self._main_args(user)
         got = self.b.call(user.ret, USER_MAIN, args)
         if user.ret.is_void:
             self.b.emit(Instruction(Op.RET, IR.I64,
@@ -567,6 +553,48 @@ class Lowerer:
                                     args=[self._ir_convert(got, user.ret, IR.I64)]))
         self.fn = None
         self.b = None
+
+    def _main_args(self, user: Function) -> list[int]:
+        """What to hand `main`, which is `argc` and `argv` when it asks.
+
+        THE COMMAND LINE IS `objects/hostsvc.py`'s `env` GROUP, reached
+        through the two functions `support.py`'s `args` unit is written
+        around. A `main(void)` never mentions them, so a program that does
+        not ask still runs on a backend whose target has no command line --
+        and one that does ask is refused there by name, at compile time,
+        rather than being handed zero arguments and left to wonder.
+
+        THE THIRD PARAMETER IS NULL. `main(argc, argv, envp)` is a common
+        extension and not C; the host services can look a variable UP by
+        name and cannot enumerate them, so there is no array to point at. A
+        null pointer is what a program that tests before walking expects,
+        and W1501 says so for one that would not have.
+        """
+        args: list[int] = []
+        for i, reg in enumerate(user.params):
+            ty = user.registers[reg]
+            if i == 0 and not ty.is_ptr:
+                self.needs_args = True
+                got = self.b.call(IR.I64, "__c_args_count", [])
+                args.append(self._ir_convert(got, IR.I64, ty))
+            elif i == 1 and ty.is_ptr:
+                self.needs_args = True
+                args.append(self.b.call(IR.PTR, "__c_args_build", []))
+            else:
+                if ty.is_ptr:
+                    self.sink.report(
+                        warning("W1501",
+                                "`main` declares a third parameter, and the "
+                                "environment is not an array here")
+                        .at(user.span)
+                        .note("the `env` host service looks a name up; it "
+                              "cannot list what is set")
+                        .help("this parameter is a null pointer; `getenv` "
+                              "reads the environment"))
+                    args.append(self._null_argv())
+                else:
+                    args.append(self.b.const(ty, 0))
+        return args
 
     def _null_argv(self) -> int:
         self._add_global(Global("__c_argv", 8, bytes(8), readonly=True))
@@ -1687,7 +1715,9 @@ class Lowerer:
     def _splice_support(self) -> None:
         """Compile `support.c` into this module. See the module docstring."""
         from .support import compile_support
-        functions, globals_ = compile_support(self.sink)
+        units = (("vla",) if self.needs_vla else ()) + (
+            ("args",) if self.needs_args else ())
+        functions, globals_ = compile_support(self.sink, units)
         for fn in functions:
             existing = self.module.function(fn.name)
             if existing is not None:

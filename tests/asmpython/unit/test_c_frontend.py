@@ -343,8 +343,26 @@ class TestTheFourDivergences:
         assert [d.code for d in sink.diagnostics] == ["E1112"]
         assert "machine frame" in sink.diagnostics[0].message
 
-    def test_main_with_parameters_is_warned_about(self):
-        _, sink = compile_c("int main(int argc, char **argv){ return argc; }")
+    def test_main_with_parameters_gets_the_command_line(self):
+        """`argc` and `argv` are built from the `env` host service by the
+        support unit, and only when `main` asks for them."""
+        module, sink = compile_c(
+            "int main(int argc, char **argv){ return argc; }")
+        assert not sink.failed, [d.message for d in sink.diagnostics]
+        names = {f.name for f in module.functions}
+        assert {"__c_args_count", "__c_args_build"} <= names
+        assert "host_arg_count" in names
+
+    def test_main_without_parameters_needs_no_host_services(self):
+        """The floor is enough for a program that does not ask, which is
+        what keeps one runnable on a backend with no environment."""
+        module, _ = compile_c("int main(void){ return 0; }")
+        names = {f.name for f in module.functions}
+        assert not [n for n in names if n.startswith("host_")]
+
+    def test_a_third_parameter_is_null_and_says_so(self):
+        _, sink = compile_c(
+            "int main(int c, char **v, char **e){ return e == 0; }")
         assert [d.code for d in sink.diagnostics] == ["W1501"]
 
 

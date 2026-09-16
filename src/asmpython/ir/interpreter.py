@@ -199,7 +199,14 @@ class Interpreter:
         #: reason: it is a static property of the IR and never changes.
         self._fn_loops: dict[int, frozenset] = {}
         for g in module.globals:
-            addr = self.mem.alloc(max(1, g.size))
+            # THE ALIGNMENT IT ASKED FOR, and not the allocator's default.
+            # A global carries one because a frontend had a reason -- C's
+            # `_Alignas(32)`, an SSE vector, a page -- and a backend that
+            # emits one honours it, so an interpreter that packs everything
+            # to eight bytes disagrees with every compiled path about what
+            # `&v % 32` is. It was right about two thirds of the time by
+            # luck, which is the worst way for it to be wrong.
+            addr = self.mem.alloc(max(1, g.size), max(8, g.align))
             if g.data:
                 self.mem.buf[addr:addr + len(g.data)] = g.data
             self.globals[g.name] = addr

@@ -13,7 +13,10 @@
 
 #include <stddef.h>
 #include <string.h>
+#include <errno.h>
+#include <__asmpython_num.h>
 #include <__asmpython_base.h>
+#include <__asmpython_host.h>
 
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
@@ -196,42 +199,19 @@ static int atoi(const char *__s) { return (int)strtol(__s, NULL, 10); }
 static long atol(const char *__s) { return strtol(__s, NULL, 10); }
 static long long atoll(const char *__s) { return strtoll(__s, NULL, 10); }
 
+/* THE CONVERSION IS `__asmpython_num.h`'s, and it is exact: the nearest
+   double to the decimal, ties to even, for every input including the ones
+   with eight hundred digits in them. It lives there rather than here because
+   `<stdio.h>`'s `%f` scanner needs the same grammar and the same answer, and
+   two copies of a rounding rule is how they come to disagree. */
 static double strtod(const char *__s, char **__end)
 {
-    const char *p = __s;
-    double v = 0.0, scale;
-    int neg = 0, any = 0, esign, eval, i;
-    while (__isspace_c((unsigned char)*p)) p++;
-    if (*p == '+' || *p == '-') { neg = *p == '-'; p++; }
-    while (*p >= '0' && *p <= '9') { v = v * 10.0 + (double)(*p - '0'); p++; any = 1; }
-    if (*p == '.') {
-        double f = 0.1;
-        p++;
-        while (*p >= '0' && *p <= '9') { v += (double)(*p - '0') * f; f *= 0.1; p++; any = 1; }
-    }
-    if (any && (*p == 'e' || *p == 'E')) {
-        const char *save = p;
-        p++;
-        esign = 0;
-        if (*p == '+' || *p == '-') { esign = *p == '-'; p++; }
-        if (*p >= '0' && *p <= '9') {
-            eval = 0;
-            while (*p >= '0' && *p <= '9') { eval = eval * 10 + (*p - '0'); p++; }
-            if (eval > 400) eval = 400;
-            scale = 1.0;
-            for (i = 0; i < eval; i++) scale *= 10.0;
-            if (esign) v /= scale; else v *= scale;
-        } else {
-            p = save;
-        }
-    }
-    if (__end) *__end = (char *)(any ? p : __s);
-    return neg ? -v : v;
+    return __num_strtod(__s, __end);
 }
 static float strtof(const char *__s, char **__end)
-{ return (float)strtod(__s, __end); }
+{ return (float)__num_strtod(__s, __end); }
 static long double strtold(const char *__s, char **__end)
-{ return (long double)strtod(__s, __end); }
+{ return (long double)__num_strtod(__s, __end); }
 static double atof(const char *__s) { return strtod(__s, NULL); }
 
 /* ── pseudo-random ────────────────────────────────────────────────────── */
@@ -309,22 +289,84 @@ static void qsort(void *__base, size_t __n, size_t __size,
     }
 }
 
-/* ── the environment there is not ─────────────────────────────────────── */
+/* ── the environment ──────────────────────────────────────────────────── */
+/* A `char *` INTO A BUFFER THIS OWNS, which is what C promises and what the
+   host service cannot do: it copies into a caller's array and answers the
+   length it needed, because a layer that allocated would have to say who
+   frees it and the answer differs in every backend. So the buffer is here,
+   one of it, and the string in it lasts until the next `getenv` -- which is
+   exactly what C allows ("the string pointed to shall not be modified... may
+   be overwritten by a subsequent call").
+
+   THE `env` GROUP IS WHAT THIS COSTS. A program that calls `getenv` is
+   refused at compile time by a backend whose target has no environment,
+   naming the group; a program that does not call it pays nothing, because
+   `lower._prune` drops the declaration with the function. */
+#define __ENV_MAX 4096
+static char __env_buf[__ENV_MAX];
+
 static char *getenv(const char *__name)
 {
-    /* The platform floor cannot ask the host for an environment. NULL is
-       what a real `getenv` returns for a name that is not set, so a program
-       that checks gets a correct answer rather than a wrong one. */
-    (void)__name;
-    return NULL;
+    long n = 0, got;
+    if (__name == NULL) return NULL;
+    while (__name[n]) n++;
+    got = host_env_get(__name, n, __env_buf, (long)__ENV_MAX - 1);
+    if (got < 0) return NULL;             /* not set, or the host refused */
+    if (got > (long)__ENV_MAX - 1) got = (long)__ENV_MAX - 1;
+    __env_buf[got] = 0;
+    return __env_buf;
 }
+
+/* ── another program ──────────────────────────────────────────────────── */
+/* `/bin/sh -c CMD`, ASSEMBLED HERE, because the host service takes an argv
+   and not a command line: `objects/hostsvc.py` says at length why -- quoting
+   a list into one string is where command injection comes from, so the
+   separation a caller has must not be thrown away. `system` is the one
+   function whose argument really IS a shell command, so this is the one
+   place that hands three arguments to a shell on purpose.
+
+   WHAT THE CHILD WROTE ARRIVES AT THE END rather than as it is written,
+   which is the one visible difference from a hosted `system`: there the
+   child shares this program's descriptors, and here the host service runs it
+   to completion and hands back what it said. Its stdout is written on to
+   this program's stdout, in order, once it has finished.
+
+   ITS STDERR IS CAPTURED AND DROPPED, and that is the contract's shape
+   rather than a choice: `host_proc_run` answers ONE number and it is the
+   stdout length, so the length of the stderr capture is not knowable here.
+   Draining it still matters -- a child whose stderr pipe filled would block
+   for ever -- which is why the buffer is passed at all. A program that needs
+   the child's diagnostics redirects them: `system("cmd 2>&1")`. */
+#define __SYSTEM_CAP 8192
+static char __system_out[__SYSTEM_CAP];
+static char __system_err[__SYSTEM_CAP];
+static char __system_cmd[__SYSTEM_CAP];
 
 static int system(const char *__cmd)
 {
-    /* Zero means "no command processor is available", which is exactly the
-       situation. */
-    (void)__cmd;
-    return 0;
+    long status = 0, got, n = 0, i;
+    const char *sh = "/bin/sh";
+    if (__cmd == NULL) {
+        /* "IS THERE A COMMAND PROCESSOR" is answered by asking for one: the
+           `proc` group either exists on this target or the program was
+           refused at compile time, so reaching here means it does. */
+        return 1;
+    }
+    /* THE PACKED ARGV: three NUL-separated words in one buffer, which is the
+       shape `host_proc_run` takes. */
+    for (i = 0; sh[i] && n < __SYSTEM_CAP - 4; i++) __system_cmd[n++] = sh[i];
+    __system_cmd[n++] = 0;
+    __system_cmd[n++] = '-';
+    __system_cmd[n++] = 'c';
+    __system_cmd[n++] = 0;
+    for (i = 0; __cmd[i] && n < __SYSTEM_CAP - 1; i++) __system_cmd[n++] = __cmd[i];
+    __system_cmd[n++] = 0;
+    got = host_proc_run(__system_cmd, 3, n, __system_out, __SYSTEM_CAP,
+                        __system_err, __SYSTEM_CAP, &status);
+    if (got < 0) { errno = __host_errno(got); return -1; }
+    if (got > 0) plat_write(1, __system_out, got > __SYSTEM_CAP
+                                             ? __SYSTEM_CAP : got);
+    return (int)status;
 }
 
 #endif

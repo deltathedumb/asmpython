@@ -22,8 +22,11 @@ version's semantics where they agree, and the newer one where they do not.
 
 FOUR PLACES THE LANGUAGE DIFFERS from a hosted implementation on x86-64
 Linux, and this is the whole list rather than the beginning of one. What the
-LIBRARY cannot do -- read, tell the time, start a thread -- is a different
-list, and it is in `include/README.md` beside the headers that say so:
+LIBRARY needs from the TARGET -- a filesystem, a clock, an environment -- is a
+different list, and it is in `include/README.md`: those are
+`objects/hostsvc.py`'s optional groups, a backend declares the ones its target
+has, and a program that calls into one it has not got is refused by name at
+compile time rather than failing to link.
 
   * `long double` IS `double`. The IR has `f32` and `f64` and nothing wider.
     `__SIZEOF_LONG_DOUBLE__` says 8 and `<float.h>`'s `LDBL_*` macros have
@@ -32,9 +35,9 @@ list, and it is in `include/README.md` beside the headers that say so:
     diagnostic that says so rather than a parse error.
   * `setjmp`/`longjmp` are refused. A non-local jump needs the machine's
     frame, and the IR deliberately has no way to name one.
-  * `main`'s parameters are `0` and a null `argv`. The platform floor is
-    `plat_write`, `plat_exit` and `plat_heap`; none of them can ask the host
-    for a command line, and inventing one would be worse than saying so.
+  * `localtime` IS `gmtime`. The host services can say what time it is and
+    cannot say what the local offset from UTC is, so the calendar is UTC and
+    `tm_isdst` is 0 -- not unknown, not in effect.
 
 Everything else -- VLAs, flexible array members, bit-fields, anonymous
 members, `_Generic`, designated initialisers, compound literals, `__VA_OPT__`,

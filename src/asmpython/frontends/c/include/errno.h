@@ -1,9 +1,15 @@
 /* <errno.h>.
 
-   `errno` exists, is zero, and nothing in this library sets it: there is no
-   filesystem, no syscall and no locale to fail. The E* numbers are here so a
-   program that compares against them compiles, and they are Linux's values so
-   that a program printing one prints what its author expected. */
+   THE E* NUMBERS ARE LINUX'S, so a program that prints one prints what its
+   author expected, and they are the only numbers this library's callers ever
+   see. The host services answer a small negative code from a table of their
+   own (`objects/hostsvc.py`, and `__asmpython_host.h` repeats it) -- the
+   whole point of which is that it is the same on every target, where `errno`
+   is not. `__host_errno` below is the one place the two meet.
+
+   WHAT SETS IT. Every failing file operation in `<stdio.h>`, and `getenv`
+   and `system` in `<stdlib.h>` when the host refuses them. Nothing else can
+   fail: there is no locale to be wrong about and no syscall of our own. */
 #ifndef _ASMPYTHON_ERRNO_H
 #define _ASMPYTHON_ERRNO_H
 
@@ -43,6 +49,30 @@ static int __errno_storage;
 #define EDOM 33
 #define ERANGE 34
 #define ENOSYS 38
+#define ENOTEMPTY 39
 #define EILSEQ 84
+
+/* THE HOST'S CODE, TRANSLATED. `objects/hostsvc.py`'s table is nine small
+   negative numbers and is deliberately not `errno`: it is the same on every
+   target. This is where it becomes the local spelling, once, so that no
+   other header in this directory has to know both sets.
+
+   A NON-NEGATIVE ARGUMENT IS NOT AN ERROR and answers 0 -- callers hand this
+   whatever the operation returned rather than testing first. */
+static int __host_errno(long __code)
+{
+    switch (__code) {
+    case -2: return ENOENT;
+    case -3: return EACCES;
+    case -4: return EEXIST;
+    case -5: return ENOTDIR;
+    case -6: return ENOTEMPTY;
+    case -7: return EAGAIN;
+    case -8: return EPIPE;
+    case -9: return EINVAL;
+    case -1: return EIO;
+    default: return __code < 0 ? EIO : 0;
+    }
+}
 
 #endif
