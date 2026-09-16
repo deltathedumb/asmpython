@@ -1,4 +1,4 @@
-"""The APIR opcode table.
+"""The UIR opcode table.
 
 This is the whole instruction set, and it is the single source of truth for
 four consumers that would otherwise drift apart:
@@ -6,7 +6,7 @@ four consumers that would otherwise drift apart:
     verifier.py     checks operand counts and types against these specs
     printer.py      prints and parses using these names
     interpreter.py  executes them
-    docs            `asmpython ops` prints this table; no separate reference
+    docs            `uasm ops` prints this table; no separate reference
 
 A backend author reads this file and nothing else. That is the design target:
 if implementing a backend requires understanding a second document, the second

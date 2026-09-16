@@ -1,6 +1,6 @@
 """The IR must not know which language is above it or which machine below.
 
-`ir/__init__.py` opens by calling APIR "A Portable Intermediate
+`ir/__init__.py` opens by calling UIR "a Universal Intermediate
 Representation", and `opcodes.py` promises a backend author reads that file and
 nothing else. Both are claims about what the package does NOT contain, and a
 claim like that decays silently: nobody notices the day a Python-shaped helper
@@ -63,7 +63,7 @@ class TestTheIRKnowsNothingAboveOrBelowIt:
         assert not reached, (
             "the IR reaches outside itself:\n  "
             + "\n  ".join(f"{f} -> {sorted(n)}" for f, n in sorted(reached.items()))
-            + "\n\nAPIR is meant to be portable between frontends. A package "
+            + "\n\nUIR is meant to be portable between frontends. A package "
               "it imports is a package a second frontend inherits.")
 
     def test_it_never_names_the_python_object_runtime(self):

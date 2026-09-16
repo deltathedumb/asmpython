@@ -1,4 +1,4 @@
-# PYIR — the level above APIR
+# PYIR — the level above UIR
 
 **Status: a design, not an implementation.** Nothing in `src/` implements this
 yet. It is written down because the measurements below are the argument for
@@ -63,7 +63,7 @@ else:                             call apy_mul
 No deopt machinery, no OSR, no side tables — a branch that is cheaper than the
 call it replaces. Where analysis *proves* the types, the guard is dropped;
 where it only suspects them, the guard stays. Both produce the same shape of
-lowered APIR, which is what keeps the design small.
+lowered UIR, which is what keeps the design small.
 
 ## What belongs at this level
 
@@ -127,13 +127,13 @@ before any arithmetic specialisation is sound:
 ## Where it sits
 
 ```
-AST  →  PYIR  →  APIR  →  backends
+AST  →  PYIR  →  UIR  →  backends
 ```
 
 PYIR is **legitimately Python-specific**, and that asymmetry is the whole
-argument for a separate level rather than dialects inside APIR: APIR stays
+argument for a separate level rather than dialects inside UIR: UIR stays
 machine-level and language-neutral, PYIR knows what a Python object is. So it
-carries Python's name where APIR must not.
+carries Python's name where UIR must not.
 
 PYIR always lowers before anything else sees it. `ir/interpreter.py` never
 learns it, so `asmpython run` stays the oracle the corpus is diffed against.
@@ -144,15 +144,15 @@ learns it, so `asmpython run` stays the oracle the corpus is diffed against.
 reads that file and nothing else; the moment a plugin can add opcodes, every
 backend must cope with opcodes it has never seen. MLIR needed on the order of
 200k lines and a decade of institutional backing to make that work. A second
-frontend needing operations APIR cannot express is the only thing that should
-reopen it, and APIR is deliberately machine-level — the level everyone
+frontend needing operations UIR cannot express is the only thing that should
+reopen it, and UIR is deliberately machine-level — the level everyone
 converges on.
 
 Note that `plugins/patch.py` already makes it *possible*: a plugin can wrap or
 replace anything, with the verifier and the four registries guarded behind
 `force=True`. The question was never whether someone can bolt an IR on; it is
 whether this project supports it, and supporting an extension point means
-freezing what sits behind it — at the exact moment APIR is known to need SSA.
+freezing what sits behind it — at the exact moment UIR is known to need SSA.
 
 ## Order of work
 

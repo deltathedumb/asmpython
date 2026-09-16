@@ -1,15 +1,15 @@
-"""APIR text: printing and parsing.
+"""UIR text: printing and parsing.
 
-`.apir` IS THE TEXT AND `.apirc` IS THE CONTAINER, the way `.wat` is to
+`.uir` IS THE TEXT AND `.uirb` IS THE CONTAINER, the way `.wat` is to
 `.wasm` -- the shorthand goes to the form you read and the full-length one to
-the artifact you ship. A file in this format is APIR whoever wrote it, which
+the artifact you ship. A file in this format is UIR whoever wrote it, which
 is why the extension carries no frontend's name.
 
-The text form is the IR's user interface. It is what `asmpython build
+The text form is the IR's user interface. It is what `uasm build
 --emit-ir` writes, what a backend author reads while debugging, and -- because
 it parses back -- what you can hand-write to test a backend without running a
 frontend at all. That last use is the reason the parser exists: writing twenty
-lines of APIR by hand is a far better first test of a new backend than
+lines of UIR by hand is a far better first test of a new backend than
 compiling a Python program and hoping.
 
     module demo

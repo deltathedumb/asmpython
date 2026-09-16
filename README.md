@@ -1,9 +1,9 @@
-# asmpython — a retargetable compiler
+# uasm — a retargetable compiler
 
-**APIR** -- *A Portable Intermediate Representation* -- with pluggable
+**UIR** -- *a Universal Intermediate Representation* -- with pluggable
 frontends, backends, targets and toolchains. Python in, a native executable
-out, and no half knows about another. The IR is written `.apir` and shipped
-as `.apirc`; neither spelling mentions Python, because nothing about the IR
+out, and no half knows about another. The IR is written `.uir` and shipped
+as `.uirb`; neither spelling mentions Python, because nothing about the IR
 does.
 
 ```
