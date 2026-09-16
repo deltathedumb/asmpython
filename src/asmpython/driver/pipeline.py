@@ -65,6 +65,10 @@ class Options:
     #: Produce a program, not just artifacts. False is `--emit`.
     link: bool = False
     toolchain: str = "cc"
+    #: WHETHER `toolchain` WAS POSITIVELY DETERMINED -- named on the command
+    #: line, or claimed by the output's extension. False means it was fallen
+    #: back to, and the TARGET gets the last word: see below.
+    toolchain_chosen: bool = False
     #: Extra objects/archives/-l names handed to the toolchain.
     link_inputs: tuple[str, ...] = ()
     workdir: Path | None = None
@@ -422,8 +426,15 @@ def _link_stage(opts: Options, result: Result, be, target: Target,
     # no start files, and a linker script that has to match the machine. Nor
     # can a class file, which is packaged rather than linked. The default
     # follows the target rather than making every invocation say so.
+    # THE TARGET GETS THE LAST WORD ONLY WHEN NOTHING ELSE SAID. This used
+    # to compare the toolchain against the string "cc", which worked only
+    # because "cc" was the hardcoded default and therefore stood in for "not
+    # chosen". Once the driver began choosing from the output's extension,
+    # `-o Prog.class` resolved to `none` -- a real answer, not the sentinel --
+    # and the jvm target's `jar` never applied, so the class file was written
+    # and the jar beside it was not.
     name = opts.toolchain
-    if name == "cc":
+    if not opts.toolchain_chosen:
         if target.default_toolchain:
             name = target.default_toolchain
         elif target.os == "none":

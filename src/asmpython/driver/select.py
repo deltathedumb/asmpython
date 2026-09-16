@@ -46,6 +46,19 @@ class Choice:
     backend: str
     linker: str
 
+    #: WHETHER THE LINKER WAS POSITIVELY DETERMINED -- named with `-ln`, or
+    #: claimed by the output's extension -- rather than fallen back to.
+    #:
+    #: THE TARGET GETS THE LAST WORD WHEN IT WAS NOT. A `.class` file is
+    #: packaged into a jar rather than linked, and the jvm target says so with
+    #: `default_toolchain`; so does pybc, and so does cpyext. `-o Prog.class`
+    #: names a backend ARTIFACT, which falls back to `none` here and would
+    #: leave the jar unwritten -- the target knowing better is the whole point
+    #: of it declaring a default, and this is what lets the driver tell the
+    #: two cases apart. It used to tell them apart by comparing the toolchain
+    #: to the string "cc", which was a sentinel standing in for this flag.
+    linker_named: bool = False
+
 
 def _claimants(suffix: str, registry, attr: str) -> list[str]:
     """Every registered component whose `attr` lists `suffix`, sorted."""
@@ -186,10 +199,17 @@ def choose(source: Path, output: Path | None, *, frontend: str | None,
                              and _claimants(output.suffix, backends,
                                             "artifacts"))
                   else "cc"))
+    # POSITIVELY DETERMINED, rather than fallen back to: either the user
+    # named it or the output's extension is one a linker claims.
+    named = bool(linker) or bool(
+        output is not None and _claimants(output.suffix, linkers, "artifacts"))
     return Choice(
         frontend=fe,
         backend=choose_backend(output, backend, names, backends, linkers),
         # `--emit` TRUNCATES THE PIPELINE, it does not choose a different
         # one. An explicitly named linker still wins, because a user who
         # types both has said which they meant.
-        linker=(linker or "none") if emit else names)
+        linker=(linker or "none") if emit else names,
+        # `--emit` IS ITSELF A DECISION. The user asked for the artifact and
+        # nothing after it, so the target must not add a packaging step back.
+        linker_named=named or emit)

@@ -107,6 +107,7 @@ def _options(args) -> Options:
         link=not (getattr(args, "emit", False)
                   or getattr(args, "emit_asm", False)),
         toolchain=choice.linker,
+        toolchain_chosen=choice.linker_named,
         link_inputs=tuple(getattr(args, "link_input", None) or ()),
         workdir=Path(args.workdir) if getattr(args, "workdir", None) else None,
         keep_intermediates=getattr(args, "keep_intermediates", False),

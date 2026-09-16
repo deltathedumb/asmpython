@@ -190,3 +190,54 @@ class TestTheWholeSpellingResolves:
                      frontends=frontend_registry, backends=backend_registry,
                      linkers=link_registry)
         assert (got.backend, got.linker) == ("llvm", "none")
+
+
+class TestWhoGetsTheLastWordOnTheLinker:
+    """`linker_named` is what lets the TARGET override a fallback.
+
+    THE CASE THIS EXISTS FOR. `-o Prog.class` names a backend ARTIFACT, so
+    the linker falls back to `none` -- and the jvm target declares `jar`,
+    because a class file is packaged rather than linked. The target has to
+    win there, and must NOT win when the user said otherwise.
+
+    IT USED TO BE DECIDED BY COMPARING THE TOOLCHAIN TO "cc", which worked
+    only while "cc" was the hardcoded default and so stood in for "nobody
+    chose". The moment the output's extension began choosing, that sentinel
+    started reading real answers as decisions and the jar stopped being
+    written.
+    """
+
+    def _named(self, output, **kw):
+        return choose(Path("t.py"),
+                      Path(output) if output is not None else None,
+                      frontend=None, backend=None, linker=None, emit=False,
+                      frontends=frontend_registry, backends=backend_registry,
+                      linkers=link_registry, **kw).linker_named
+
+    def test_a_backend_artifact_leaves_it_to_the_target(self):
+        assert self._named("Prog.class") is False
+        assert self._named("thing.ll") is False
+
+    def test_no_output_leaves_it_to_the_target(self):
+        assert self._named(None) is False
+
+    def test_an_extension_a_linker_claims_is_a_decision(self):
+        assert self._named("thing.so") is True
+        assert self._named("thing.jar") is True
+
+    def test_naming_the_linker_is_a_decision(self):
+        got = choose(Path("t.py"), Path("Prog.class"), frontend=None,
+                     backend=None, linker="none", emit=False,
+                     frontends=frontend_registry, backends=backend_registry,
+                     linkers=link_registry)
+        assert got.linker_named is True
+
+    def test_emit_is_a_decision_so_nothing_packages_it_again(self):
+        # The user asked for the artifact and nothing after it; a target
+        # adding its packaging step back would be answering a question that
+        # was already settled.
+        got = choose(Path("t.py"), Path("Prog.class"), frontend=None,
+                     backend=None, linker=None, emit=True,
+                     frontends=frontend_registry, backends=backend_registry,
+                     linkers=link_registry)
+        assert (got.linker, got.linker_named) == ("none", True)
