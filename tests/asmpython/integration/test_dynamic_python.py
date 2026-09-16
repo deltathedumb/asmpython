@@ -8094,6 +8094,98 @@ PROGRAMS = {
         show("and from a bare builtin", lambda: [1] < Watcher())
         show("the tuple side too", lambda: T((1,)) < Watcher())
     """,
+    "arithmetic_asks_the_builtin_a_class_extends": """
+        # THE OTHER OPERATOR FAMILY, with the same three steps comparison
+        # got: the dunder a wrote, the builtin a extends, the mirror b wrote.
+        # Arithmetic had BOTH halves of that wrong and one gap of its own.
+        #
+        # THE GAP: a BUILTIN on the left and an INSTANCE on the right never
+        # reached the dispatch at all. `apy_add`'s concatenation refusals
+        # return before `apy_binop_fallback` at the bottom is ever read, so
+        # `[9] + Sub([2])` on a `class Sub(list)` reported `can only
+        # concatenate list (not "Sub") to list` -- about an object that IS a
+        # list. `apy_mul` had the same shape. There WAS a guard for str + an
+        # instance, added for `StrEnum`, but it asked only the written
+        # dunders, so a subclass that writes nothing still fell through.
+        #
+        # THE ORDER: `apy_binop_fallback` ran both written halves and only
+        # then read the builtin, and the interpreter read the builtin FIRST,
+        # before either. Two different wrong answers for one rule.
+        #
+        # AND THE GUARD: reading the builtin only counts when BOTH sides come
+        # out of it as builtins, because that is when CPython's inherited
+        # slot answers NotImplemented and hands the mirror the operands the
+        # program wrote. `Sub([1]) + Mirror()` owes `Mirror.__radd__` the Sub.
+        #
+        # WITH ONE EXCEPTION, which is `str % anything`: `str.__mod__` takes
+        # whatever it is handed and formats it rather than declining by kind,
+        # so it must run even against an instance.
+        class Sub(list):
+            pass
+
+        class SubT(tuple):
+            pass
+
+        class SubS(str):
+            pass
+
+        class SubD(dict):
+            pass
+
+        class OnlyRadd(list):
+            def __radd__(self, other):
+                return "RADD"
+
+        class OnlyAdd(list):
+            def __add__(self, other):
+                return "ADD"
+
+        class Mirror:
+            def __radd__(self, other):
+                return "RADD " + type(other).__name__
+
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except TypeError as e:
+                print(label, "TypeError:", e)
+
+        # A BUILTIN ON THE LEFT reaches the instance on the right.
+        show("list + sub", lambda: [9] + Sub([2]))
+        show("tuple + sub", lambda: (9,) + SubT((2,)))
+        show("str + sub", lambda: "b" + SubS("a"))
+        show("dict | sub", lambda: {"b": 2} | SubD(a=1))
+        # AND THE OTHER DIRECTION, which already worked and must stay.
+        show("sub + list", lambda: Sub([1]) + [9])
+        show("sub + sub", lambda: Sub([1]) + Sub([2]))
+        show("sub * 2", lambda: Sub([1]) * 2)
+        show("2 * sub", lambda: 2 * Sub([1]))
+        show("subs * 2", lambda: SubS("a") * 2)
+        # THE INHERITED SLOT BEATS A WRITTEN MIRROR, as in comparison.
+        show("inherited add", lambda: OnlyRadd([1]) + OnlyRadd([2]))
+        show("inherited vs list", lambda: OnlyRadd([1]) + [9])
+        # AND THE SUBCLASS STILL GOES FIRST when it overrides the mirror.
+        show("subclass first", lambda: [9] + OnlyRadd([2]))
+        show("no reorder", lambda: [9] + OnlyAdd([2]))
+        # THE HELD PAIR MUST BE WHOLE, or the mirror gets the wrong operand.
+        show("mirror keeps the sub", lambda: Sub([1]) + Mirror())
+        show("mirror from a builtin", lambda: [1] + Mirror())
+        # A BUILTIN THAT RAN AND REFUSED IS NOT A DECLINE, and it words the
+        # refusal as a failed CONCATENATION rather than as an operand pair.
+        # The interpreter said the generic text and deferred to the C in a
+        # comment -- back when the C said it too; `apy_add` has worded it
+        # from the left operand's kind for some time and this was the half
+        # that did not follow. Two plain builtins show it without any class
+        # at all, which is why they are here.
+        show("refused by the builtin", lambda: Sub([1]) + 5)
+        show("plain list and int", lambda: [1] + 5)
+        show("plain list and tuple", lambda: [1] + (2,))
+        show("plain tuple and list", lambda: (1,) + [2])
+        show("plain str and int", lambda: "a" + 1)
+        show("multiply by a list", lambda: [1] * [2])
+        # AND `%` ON A str RUNS AGAINST ANYTHING.
+        show("percent", lambda: SubS("%d") % 5)
+    """,
     "fstrings": """
         n = 42
         s = 'ab'

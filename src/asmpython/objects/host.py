@@ -6154,25 +6154,69 @@ def _binop(name, op, sym):
         if sym == "|" and _is_type_like(x) and _is_type_like(y):
             arms = _union_arms(x) + _union_arms(y)
             return h._new(Alias(_union_form(h), tuple(_dedup_arms(arms))))
-        # BEFORE `_reject`, which sees a builtin-extending instance as
-        # neither a sequence nor a number and reports an unsupported pair --
-        # so a substitution made after it never gets the chance.
-        _pair = _OP_DUNDER.get(sym.split(" ")[0])
-        if _pair is not None:
-            x = _as_builtin(x, _pair)
-            y = _as_builtin(y, _pair)
-        bad = _reject(h, sym, x, y)
-        if bad is not None:
-            return bad
         # THE REFLECTED CALL IS MADE HERE, not left to Python's protocol.
         # Every user object is the same Python class (`Instance`), and Python
         # SKIPS the reflected method when both operands have the same type --
         # so `A() + B()` never reached `B.__radd__` and reported an
         # unsupported pair instead. The C dispatches explicitly; so does this.
+        #
+        # THREE STEPS, AND THE BUILTIN IS THE MIDDLE ONE -- the same order
+        # `_cmpop` takes and for the same reason, which `_order_plan` gives at
+        # length. This read the builtin FIRST, before either dunder and before
+        # `_reject`, so `OnlyRadd([1]) + OnlyRadd([2])` answered `'RADD'`
+        # where CPython concatenates: `type(a).__add__` is the one `list`
+        # gives the subclass, and an inherited slot wins outright.
         dunder = _OP_DUNDER.get(sym.split(" ")[0])
         if dunder and (isinstance(x, Instance) or isinstance(y, Instance)):
             direct, reflected = dunder
-            for who, other, which in ((x, y, direct), (y, x, reflected)):
+            for step in _order_plan(x, y, reflected):
+                if step is _HELD:
+                    # BOTH SIDES MUST COME OUT AS BUILTINS, as in `_cmpop`:
+                    # `list.__add__` answers NotImplemented for an operand it
+                    # knows nothing about, which is when CPython goes on to
+                    # the mirror AND hands it the operands the program wrote.
+                    bx = _as_builtin(x, (direct,))
+                    by = y.held if isinstance(y, Instance) \
+                        and y.held is not None else y
+                    if isinstance(bx, Instance):
+                        continue
+                    # `str % anything` IS NOT A KIND-DECLINE, and it is the
+                    # one operator that is not. Every other builtin answers
+                    # NotImplemented for an operand it does not know, which
+                    # is what sends the operation on to the mirror -- but
+                    # `str.__mod__` accepts whatever it is handed and
+                    # formats it, so `SubS("%d") % obj` raises the format
+                    # error and never reaches `obj.__rmod__`. CPython does
+                    # the same.
+                    if isinstance(by, Instance) and not (
+                            sym == "%" and isinstance(bx, str)):
+                        continue
+                    # A BUILTIN THAT RAN AND REFUSED IS NOT A DECLINE, and
+                    # the mirror does not get a turn after it: CPython reports
+                    # `can only concatenate list (not "int") to list` for
+                    # `Sub([1]) + 5`, which is `_reject`'s own text.
+                    bad = _reject(h, sym, bx, by)
+                    if bad is not None:
+                        return bad
+                    try:
+                        return _result(h, op(bx, by))
+                    except _UserFailed:
+                        return 0
+                    except TypeError as e:
+                        # PYTHON'S OWN TEXT WHEN IT NAMES THE RIGHT KINDS,
+                        # which for two unwrapped builtins it does -- `[1] +
+                        # 5` is `can only concatenate list (not "int") to
+                        # list`, the message CPython reports for
+                        # `Sub([1]) + 5`. The same test the plain path makes
+                        # below, and for the same reason.
+                        if (type(bx).__name__ != h.kind_name(bx)
+                                or type(by).__name__ != h.kind_name(by)):
+                            return h._binop_error(sym.split(" ")[0], x, y)
+                        return h._fail_like(e)
+                    except (ValueError, ZeroDivisionError, OverflowError) as e:
+                        return h._fail_like(e)
+                who, other, which = ((x, y, direct) if step is _DIRECT
+                                     else (y, x, reflected))
                 if not isinstance(who, Instance) or who.cls.find(which) is None:
                     continue
                 got = _user(h, lambda: who._send(which, other), fail=_FAILED)
@@ -6180,7 +6224,12 @@ def _binop(name, op, sym):
                     return 0
                 if got is not NotImplemented:
                     return h._value(got)
+            # NOBODY ANSWERED, and the refusal names what the PROGRAM wrote
+            # rather than what the builtin step unwrapped it to.
             return h._binop_error(sym.split(" ")[0], x, y)
+        bad = _reject(h, sym, x, y)
+        if bad is not None:
+            return bad
         try:
             return _result(h, op(x, y))
         except _UserFailed:
@@ -6346,9 +6395,16 @@ def _reject(h, sym: str, x, y):
                        f'can only concatenate str (not "{h.kind_name(y)}") '
                        f'to str')
     if sym == "+" and isinstance(x, (list, tuple)) and type(x) is not type(y):
-        # C DECIDES: the generic operand text, where CPython says
-        # "can only concatenate list (not "tuple") to list".
-        return h._binop_error(sym, x, y)
+        # THE CONCATENATION WORDING, FROM THE LEFT OPERAND'S KIND, which is
+        # what CPython says: `[1] + (2,)` is `can only concatenate list (not
+        # "tuple") to list`. This deferred to the C and said so, back when the
+        # C answered the generic operand text -- `apy_add` has worded it this
+        # way for some time and this was the half that did not follow, so
+        # `[1] + 5` read as an unsupported operand pair here and as a failed
+        # concatenation everywhere else.
+        return h._fail("TypeError",
+                       f'can only concatenate {h.kind_name(x)} '
+                       f'(not "{h.kind_name(y)}") to {h.kind_name(x)}')
     if sym == "*" and (isinstance(x, str) or isinstance(y, str)):
         if not (_is_int_like(x) or _is_int_like(y)):
             other = y if isinstance(x, str) else x

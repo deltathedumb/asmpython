@@ -140,31 +140,73 @@ static const char *const APY_OP_DUNDERS[][3] = {
    already decided the comparison failed and are naming why. */
 static apy_value apy_op_apply(const char *op, apy_value a, apy_value b);
 
-static apy_value apy_binop_fallback(const char *op, apy_value a, apy_value b) {
+/* THE THREE STEPS AN OPERATOR TAKES, in the order this pair takes them: the
+   dunder a wrote, the builtin a extends, the mirror b wrote. 0 when none of
+   them answered and no error is set, which every caller reads as "nobody
+   claimed this" and words its own refusal for.
+
+   THE BUILTIN IS THE MIDDLE STEP, for the reason `apy_order_mirror_first_of`
+   gives at length: `type(a).__add__` is the written one or the INHERITED one,
+   and an inherited slot wins outright over a `__radd__` the other side wrote.
+   `OnlyRadd([1]) + OnlyRadd([2])` is `[1, 2]` in CPython and was `'RADD'`
+   here -- the same divergence comparison had, in the other operator family.
+
+   AND IT ONLY COUNTS WHEN BOTH SIDES COME OUT OF IT AS BUILTINS, which is the
+   guard `apy_cmp` makes for the same reason: `list.__add__` answers
+   NotImplemented for an operand it knows nothing about, and that is exactly
+   when CPython goes on to the mirror AND gives it the operands the PROGRAM
+   wrote. `Sub([1]) + Mirror()` owes `Mirror.__radd__` the Sub.
+
+   A BUILTIN STEP THAT RAISES IS NOT A DECLINE. `Sub([1]) + 5` reports `can
+   only concatenate list (not "int") to list`, which is the very message
+   CPython reports -- `list.__add__` ran and refused, and the mirror does not
+   get a turn after that. The guard above is what separates the two cases, so
+   nothing here has to clear an error to tell them apart. */
+static apy_value apy_binop_dispatch(const char *op, apy_value a, apy_value b) {
     int i;
-    if (apy_either_inst(a, b))
-        for (i = 0; APY_OP_DUNDERS[i][0]; i++)
-            if (strcmp(APY_OP_DUNDERS[i][0], op) == 0) {
-                apy_value r = apy_binary_dunder(a, b, APY_OP_DUNDERS[i][1],
-                                                APY_OP_DUNDERS[i][2]);
-                if (r || apy_error_occurred()) return r;
-                /* NEITHER SIDE WROTE THE DUNDER, so a builtin-extending
-                   instance means the builtin: `t + (4,)` on a `class
-                   T(tuple)` is tuple concatenation, and reporting an
-                   unsupported operand pair between `'T'` and `'tuple'` names
-                   an operation tuples plainly support. Retried once, with
-                   whichever side was an instance replaced -- the retry
-                   cannot loop, because what goes back in is a builtin. */
-                {
-                    apy_value ua = apy_as_builtin(a, APY_OP_DUNDERS[i][1]);
-                    apy_value ub = apy_as_builtin(b, APY_OP_DUNDERS[i][2]);
-                    if (ua != a || ub != b) {
-                        apy_value r2 = apy_op_apply(op, ua, ub);
-                        if (r2 || apy_error_occurred()) return r2;
-                    }
+    if (!apy_either_inst(a, b)) return 0;
+    for (i = 0; APY_OP_DUNDERS[i][0]; i++)
+        if (strcmp(APY_OP_DUNDERS[i][0], op) == 0) {
+            const char *direct = APY_OP_DUNDERS[i][1];
+            const char *mirror = APY_OP_DUNDERS[i][2];
+            static const int PLAIN[3] = { 0, 1, 2 };
+            static const int SUBCLASS_FIRST[3] = { 2, 0, 1 };
+            const int *plan = apy_order_mirror_first(a, b, mirror)
+                ? SUBCLASS_FIRST : PLAIN;
+            int k;
+            for (k = 0; k < 3; k++) {
+                apy_value r;
+                if (plan[k] == 1) {
+                    /* Retried once: what goes back in is a builtin on both
+                       sides, so the retry cannot loop. */
+                    apy_value hb = apy_held_value(b);
+                    apy_value ua = apy_as_builtin(a, direct);
+                    apy_value ub = hb ? hb : b;
+                    if (O(ua)->kind == APY_INST_K) continue;
+                    /* `str % anything` IS NOT A KIND-DECLINE, and it is the
+                       one operator that is not: `str.__mod__` accepts
+                       whatever it is handed and formats it, so
+                       `SubS("%d") % obj` raises the format error and never
+                       reaches `obj.__rmod__`. CPython does the same. */
+                    if (O(ub)->kind == APY_INST_K
+                            && !(O(ua)->kind == APY_STR_K
+                                 && strcmp(op, "%") == 0)) continue;
+                    r = apy_op_apply(op, ua, ub);
+                    if (r || apy_error_occurred()) return r;
+                    continue;
                 }
-                break;
+                r = plan[k] == 0 ? apy_written_dunder(a, b, direct)
+                                 : apy_written_dunder(b, a, mirror);
+                if (r || apy_error_occurred()) return r;
             }
+            break;
+        }
+    return 0;
+}
+
+static apy_value apy_binop_fallback(const char *op, apy_value a, apy_value b) {
+    apy_value r = apy_binop_dispatch(op, a, b);
+    if (r || apy_error_occurred()) return r;
     return apy_binop_error(op, a, b);
 }
 
@@ -331,21 +373,35 @@ APY_API apy_value apy_add(apy_value a, apy_value b) {
         buf[n] = '\0';
         return apy_str_take(buf, n);
     }
+    /* THE USER'S CLASS GETS ITS SAY BEFORE ANY REFUSAL BELOW, and that is
+       what this branch is for rather than falling through to
+       `apy_binop_fallback` at the bottom: the concatenation refusals return
+       before ever reaching it.
+
+       `"the " + obj` is `str.__add__` answering NotImplemented and CPython
+       then asking `type(obj).__radd__`, which is how a `StrEnum` member
+       concatenates. That much was here already, as a written-dunder call
+       guarded on `APY_STR_K`. What it missed is the BUILTIN an instance
+       extends and the sequence side entirely: `[9] + Sub([2])` on a `class
+       Sub(list)` is `list.__add__` taking any list subclass for its right
+       operand, and `can only concatenate list (not "Sub") to list` names an
+       object that IS a list.
+
+       NOBODY ANSWERED FALLS THROUGH TO THE SAME REFUSALS, chosen by the LEFT
+       operand's kind exactly as they are for two builtins -- a plain class
+       with no `__radd__` and nothing held still gets `can only concatenate
+       list (not "C") to list`, which is what CPython reports. */
+    if (apy_either_inst(a, b)) {
+        apy_value r = apy_binop_dispatch("+", a, b);
+        if (r || apy_error_occurred()) return r;
+        if (O(a)->kind != APY_STR_K && !apy_is_seq(a))
+            return apy_binop_error("+", a, b);
+    }
     /* A str on the LEFT with anything else on the right is a concatenation
        that failed, and CPython says so in those words rather than in the
        generic operand form: `'ab' + 7` is `can only concatenate str (not
        "int") to str`. A str on the RIGHT of a non-str gets the generic
        message, because there the left operand's `__add__` is what refused. */
-    /* UNLESS THE RIGHT OPERAND WRITES `__radd__`. `"the " + obj` is
-       `str.__add__` answering NotImplemented and CPython then asking
-       `type(obj).__radd__`, which is how a `StrEnum` member concatenates.
-       Refusing here ran before that could happen and reported
-       `can only concatenate str (not "Colours") to str` about a class that
-       defines exactly the method for it. */
-    if (O(a)->kind == APY_STR_K && O(b)->kind == APY_INST_K) {
-        apy_value r = apy_binary_dunder(a, b, "__add__", "__radd__");
-        if (r || apy_error_occurred()) return r;
-    }
     if (O(a)->kind == APY_STR_K)
         return apy_fail2("TypeError",
                          "can only concatenate str (not \"%s\") to str%s",
@@ -460,6 +516,16 @@ APY_API apy_value apy_mul(apy_value a, apy_value b) {
        non-int of type '...'". The generic binop text would be a different
        wrong answer, not a smaller one. A set is NOT a sequence and does get
        the generic one: `{1} * 2` is an unsupported operand pair. */
+    /* AND THE USER'S CLASS FIRST, for the reason `apy_add` gives at length:
+       this refusal returns before `apy_binop_fallback` at the bottom is
+       reached, so a class extending a sequence never got to multiply. */
+    if (apy_either_inst(a, b)) {
+        apy_value r = apy_binop_dispatch("*", a, b);
+        if (r || apy_error_occurred()) return r;
+        if (O(a)->kind != APY_STR_K && !apy_is_seq(a)
+                && O(b)->kind != APY_STR_K && !apy_is_seq(b))
+            return apy_binop_error("*", a, b);
+    }
     if (O(a)->kind == APY_STR_K || O(b)->kind == APY_STR_K
         || apy_is_seq(a) || apy_is_seq(b)) {
         int a_is_seq = O(a)->kind == APY_STR_K || apy_is_seq(a);
