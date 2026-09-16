@@ -12,7 +12,7 @@ for a target by name, so adding one is a registration.
 ## The whole thing
 
 ```python
-from asmpython.target import Target, register
+from uasm.target import Target, register
 
 register(Target(
     "riscv64-linux",
@@ -31,12 +31,12 @@ register(Target(
 Then:
 
 ```bash
-asmpython build prog.py --target riscv64-linux --backend my-backend
-asmpython targets                       # lists it, with its aliases
+uasm build prog.py --target riscv64-linux --backend my-backend
+uasm targets                       # lists it, with its aliases
 ```
 
 Built-in targets go through this same call. There is no privileged path —
-if `asmpython/targets/__init__.py` were deleted, the compiler would still
+if `uasm/targets/__init__.py` were deleted, the compiler would still
 build and simply have no platforms until something registered one.
 
 ## Every field is explicit, and that matters
@@ -59,7 +59,7 @@ backend interprets; a backend that does not implement the ABI a target
 declares should refuse:
 
 ```python
-from asmpython.backend import BackendUnsupported
+from uasm.backend import BackendUnsupported
 
 def calling_convention(target):
     try:
@@ -133,12 +133,12 @@ register(Target("aarch64-none", arch="aarch64", os="none", abi="aapcs64",
 compiler is running on:
 
 ```bash
-asmpython build prog.py --target host      # or just omit --target
+uasm build prog.py --target host      # or just omit --target
 ```
 
 A backend that can emit for the machine it runs on should declare
 `default_target = "host"` rather than naming a platform. The x86-64 backend
-defaulted to `x86_64-linux`, so `asmpython build --backend x86-64` on Windows
+defaulted to `x86_64-linux`, so `uasm build --backend x86-64` on Windows
 emitted ELF directives and handed them to a COFF assembler — a cross-compile
 nobody asked for, reported as an assembler syntax error.
 
@@ -178,8 +178,8 @@ platform, configured differently" is a thing people legitimately want.
 - [ ] `default_toolchain` set if the artifacts are not objects a C driver
       can link
 - [ ] a backend exists that implements your `abi`, or yours refuses clearly
-- [ ] `asmpython targets` shows it
-- [ ] a program compiled for it runs, and agrees with `asmpython run` on
+- [ ] `uasm targets` shows it
+- [ ] a program compiled for it runs, and agrees with `uasm run` on
       the same program
 
 ## Getting it loaded
@@ -188,17 +188,17 @@ platform, configured differently" is a thing people legitimately want.
 you. Declare what you provide and install it once:
 
 ```python
-from asmpython.plugins import Plugin
+from uasm.plugins import Plugin
 
 plugin = Plugin("mypack")
 plugin.backends.append(MyBackend)         # a class or an instance, either
-__asmpython_plugin__ = plugin
+__uasm_plugin__ = plugin
 ```
 
 ```bash
-asmpython plugin add mypack        # remembered; loaded on every run afterwards
-asmpython plugin show mypack       # what it provides, registering none of it
-asmpython plugin list | remove
+uasm plugin add mypack        # remembered; loaded on every run afterwards
+uasm plugin show mypack       # what it provides, registering none of it
+uasm plugin list | remove
 ```
 
 `add` looks in the working directory, then the Python path, then pip --
@@ -219,10 +219,10 @@ compiler is run from another directory. `origin` stays recorded for exactly
 one purpose:
 
 ```bash
-asmpython plugin invalidate mypack           # one id
-asmpython plugin invalidate a,b              # comma-separated
-asmpython plugin invalidate a b              # or repeated
-asmpython plugin invalidate --all
+uasm plugin invalidate mypack           # one id
+uasm plugin invalidate a,b              # comma-separated
+uasm plugin invalidate a b              # or repeated
+uasm plugin invalidate --all
 ```
 
 `invalidate` goes back to the origin, re-resolves, and refreshes the cache --
@@ -230,8 +230,8 @@ which is how an edited plugin under development is picked up. If the origin is
 gone it fails and says so, leaving the cached copy in place: a cache that no
 longer matches any real source is exactly the state worth being told about.
 
-Without installing: `--plugin mypack` for one invocation, `ASMPYTHON_PLUGINS`
-for a CI job, or an `asmpython.plugins` entry point if you ship a
+Without installing: `--plugin mypack` for one invocation, `UASM_PLUGINS`
+for a CI job, or an `uasm.plugins` entry point if you ship a
 distribution. Declaring a manifest is better than calling `register()` at
 import time, which also works: a manifest can be READ, so `plugin show` and
 the install-time report can say what a module provides without letting it

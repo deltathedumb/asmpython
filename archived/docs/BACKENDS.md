@@ -7,8 +7,8 @@ reading a second, the second one would be the bug.
 ## The interface
 
 ```python
-from asmpython.backend import Backend, Target, register
-from asmpython.ir import Module
+from uasm.backend import Backend, Target, register
+from uasm.ir import Module
 
 class MyBackend(Backend):
     name = "my-machine"
@@ -27,7 +27,7 @@ That is the whole contract. One method, returning `{filename: contents}`.
 A backend that has a knob declares it, and the driver turns it into a flag.
 
 ```python
-from asmpython.backend import Backend, Option, OptionError
+from uasm.backend import Backend, Option, OptionError
 
 class MyBackend(Backend):
     name = "my-machine"
@@ -48,8 +48,8 @@ class MyBackend(Backend):
 ```
 
 ```bash
-asmpython build prog.py --backend my-machine --isa-level 3
-asmpython backends                      # lists the flag under the backend
+uasm build prog.py --backend my-machine --isa-level 3
+uasm backends                      # lists the flag under the backend
 ```
 
 `configure` receives only the options *your* backend declared, keyed by name
@@ -197,7 +197,7 @@ the hardest case to debug.
 When you want it:
 
 ```python
-from asmpython.backend import RegisterFile, allocate, verify_allocation
+from uasm.backend import RegisterFile, allocate, verify_allocation
 
 alloc = allocate(function, RegisterFile(
     general=("rax", "rcx", "rdx", "rbx", "rsi", "rdi"),
@@ -227,7 +227,7 @@ Diff against the reference interpreter. It is the executable specification, so
 any disagreement is your bug, localised to one program:
 
 ```python
-from asmpython.ir.interpreter import Interpreter
+from uasm.ir.interpreter import Interpreter
 from io import StringIO
 
 out = StringIO()
@@ -240,8 +240,8 @@ yourself is a far better first test than a program that requires a frontend, a
 runtime and your backend to all be correct simultaneously:
 
 ```bash
-asmpython build prog.py --emit-ir -o prog.ir     # then edit prog.ir freely
-asmpython run prog.ir                            # what it SHOULD do
+uasm build prog.py --emit-ir -o prog.ir     # then edit prog.ir freely
+uasm run prog.ir                            # what it SHOULD do
 ```
 
 ## Targets
@@ -267,7 +267,7 @@ A backend supporting only one shape ignores the fields it does not vary over.
 One it cannot support at all should refuse:
 
 ```python
-from asmpython.backend import BackendUnsupported
+from uasm.backend import BackendUnsupported
 
 raise BackendUnsupported(
     f"target {target.name!r} declares ABI {target.abi!r}, which this "
@@ -276,7 +276,7 @@ raise BackendUnsupported(
 
 `BackendUnsupported` becomes a diagnostic naming the backend and the target.
 Any other exception reaches the user as a traceback with a compiler stack in
-it, which reads as "you found a bug in asmpython" when it means "use another
+it, which reads as "you found a bug in uasm" when it means "use another
 backend".
 
 ## Producing a program
@@ -296,7 +296,7 @@ and emitting the IR's `main` under `ENTRY_SYMBOL`, not as `main` — it returns
 i64 where C requires int, and would collide with the runtime's entry point:
 
 ```python
-from asmpython.backend import ENTRY_SYMBOL
+from uasm.backend import ENTRY_SYMBOL
 
 def symbol(self, name):
     return ENTRY_SYMBOL if name == "main" else name
@@ -326,7 +326,7 @@ else's source, which is a second, quieter version of the same bug.
 ## Checklist
 
 - [ ] `name` and `description` set; `register()` called at import
-- [ ] Listed in `asmpython.backend.load_builtin`
+- [ ] Listed in `uasm.backend.load_builtin`
 - [ ] `case _` raises on an unhandled opcode
 - [ ] No defensive checks for the ten invariants above
 - [ ] Behaviour read from `target` fields, never parsed out of `target.name`
@@ -345,17 +345,17 @@ else's source, which is a second, quieter version of the same bug.
 you. Declare what you provide and install it once:
 
 ```python
-from asmpython.plugins import Plugin
+from uasm.plugins import Plugin
 
 plugin = Plugin("mypack")
 plugin.backends.append(MyBackend)         # a class or an instance, either
-__asmpython_plugin__ = plugin
+__uasm_plugin__ = plugin
 ```
 
 ```bash
-asmpython plugin add mypack        # remembered; loaded on every run afterwards
-asmpython plugin show mypack       # what it provides, registering none of it
-asmpython plugin list | remove
+uasm plugin add mypack        # remembered; loaded on every run afterwards
+uasm plugin show mypack       # what it provides, registering none of it
+uasm plugin list | remove
 ```
 
 `add` looks in the working directory, then the Python path, then pip --
@@ -376,10 +376,10 @@ compiler is run from another directory. `origin` stays recorded for exactly
 one purpose:
 
 ```bash
-asmpython plugin invalidate mypack           # one id
-asmpython plugin invalidate a,b              # comma-separated
-asmpython plugin invalidate a b              # or repeated
-asmpython plugin invalidate --all
+uasm plugin invalidate mypack           # one id
+uasm plugin invalidate a,b              # comma-separated
+uasm plugin invalidate a b              # or repeated
+uasm plugin invalidate --all
 ```
 
 `invalidate` goes back to the origin, re-resolves, and refreshes the cache --
@@ -387,8 +387,8 @@ which is how an edited plugin under development is picked up. If the origin is
 gone it fails and says so, leaving the cached copy in place: a cache that no
 longer matches any real source is exactly the state worth being told about.
 
-Without installing: `--plugin mypack` for one invocation, `ASMPYTHON_PLUGINS`
-for a CI job, or an `asmpython.plugins` entry point if you ship a
+Without installing: `--plugin mypack` for one invocation, `UASM_PLUGINS`
+for a CI job, or an `uasm.plugins` entry point if you ship a
 distribution. Declaring a manifest is better than calling `register()` at
 import time, which also works: a manifest can be READ, so `plugin show` and
 the install-time report can say what a module provides without letting it
@@ -396,20 +396,20 @@ change the compiler's state first.
 
 ## Patching the compiler
 
-The registries cover the four things asmpython expected people to extend.
+The registries cover the four things uasm expected people to extend.
 `CompilerPatch` covers everything else — a pass that needs to behave
 differently, a diagnostic worth rewording, an experiment you would otherwise
 maintain as a fork:
 
 ```python
-from asmpython.plugins import Plugin, CompilerPatch
+from uasm.plugins import Plugin, CompilerPatch
 
 def louder(original, module, sink):
     sink.report(...)
     return original(module, sink)
 
 plugin.patches.append(
-    CompilerPatch("asmpython.passes.transforms.DeadCodeElimination.run",
+    CompilerPatch("uasm.passes.transforms.DeadCodeElimination.run",
                   wrap=louder, reason="log what DCE removes"))
 ```
 
@@ -423,7 +423,7 @@ Two tiers are protected:
 
 | | |
 |---|---|
-| **sealed** | `asmpython.plugins.patch`, `asmpython.plugins.store` — never patchable. A patch that can disable the check makes every other rule advisory, and one that can rewrite the plugin store can reinstall itself after `plugin remove`. |
+| **sealed** | `uasm.plugins.patch`, `uasm.plugins.store` — never patchable. A patch that can disable the check makes every other rule advisory, and one that can rewrite the plugin store can reinstall itself after `plugin remove`. |
 | **guarded** | the verifier and the four registries — patchable with `force=True`, which `plugin show` then displays. Other plugins rely on these: a backend author is promised ten invariants hold *without checking*, and a patch that quietly stops enforcing them turns their correct code into a crash far away. |
 
 Everything else is open, deliberately. Guessing in advance which internals
@@ -433,8 +433,8 @@ fork.
 **The one thing that will surprise you:** patching `mod.func` rebinds the
 attribute on `mod`, so a caller that did `from mod import func` holds the
 function directly and never sees it. Patch what the callers reach —
-`asmpython.driver.pipeline.print_module`, not
-`asmpython.ir.printer.print_module`. When a patch appears to do nothing, this
+`uasm.driver.pipeline.print_module`, not
+`uasm.ir.printer.print_module`. When a patch appears to do nothing, this
 is why.
 
 Patches are reversible (`revert_all()`), so a patch is something you can

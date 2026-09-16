@@ -13,7 +13,7 @@ a copy of the same toolchain search.
 ```python
 from pathlib import Path
 
-from asmpython.link import (
+from uasm.link import (
     LinkError, LinkRequest, Toolchain, find_tool, register, run,
 )
 
@@ -41,8 +41,8 @@ register(MyLinker())
 Then:
 
 ```bash
-asmpython build prog.py --toolchain my-linker
-asmpython toolchains                    # lists it
+uasm build prog.py --toolchain my-linker
+uasm toolchains                    # lists it
 ```
 
 ## What ships
@@ -116,7 +116,7 @@ internal error. `find_tool` already does this, and names everything it tried —
 ## The runtime
 
 The IR has no I/O opcodes: `print` is a call to a named function, and
-something has to define it. `asmpython.link.runtime` supplies a small C file
+something has to define it. `uasm.link.runtime` supplies a small C file
 for the Python frontend, and the driver adds it when the backend is not
 `self_contained`.
 
@@ -137,10 +137,10 @@ values rather than eyeballed. Formatting looks like the trivial part of a
 runtime and contains the ties — 0.5, 1.5, 2.5 — that a naive round-half sends
 the wrong way, in output nobody double-checks.
 
-The IR's `main` is emitted under `ENTRY_SYMBOL` (`asmpython_main`), because
+The IR's `main` is emitted under `ENTRY_SYMBOL` (`uasm_main`), because
 it is not C's `main` — it returns i64 where C requires int, and would
 collide with the runtime's entry point. That constant lives in
-`asmpython.backend.base` so the backend writing the symbol and the runtime
+`uasm.backend.base` so the backend writing the symbol and the runtime
 calling it cannot disagree.
 
 ## Checklist
@@ -149,7 +149,7 @@ calling it cannot disagree.
 - [ ] `supports(target)` returns False for platforms you cannot produce
 - [ ] every external command goes through `run(request, ...)`
 - [ ] every failure a user can act on is a `LinkError` with `help`
-- [ ] the produced program runs, and its output matches `asmpython run` on
+- [ ] the produced program runs, and its output matches `uasm run` on
       the same source
 
 ## Getting it loaded
@@ -158,19 +158,19 @@ calling it cannot disagree.
 you. Declare what you provide and install it once:
 
 ```python
-from asmpython.plugins import Plugin
+from uasm.plugins import Plugin
 
 plugin = Plugin("mypack")
 plugin.backends.append(MyBackend)         # a class or an instance, either
 plugin.linkers.append(MyLinker)            # .frontends and .targets too
 
-__asmpython_plugin__ = plugin
+__uasm_plugin__ = plugin
 ```
 
 ```bash
-asmpython plugin add mypack        # remembered; loaded on every run afterwards
-asmpython plugin show mypack       # what it provides, registering none of it
-asmpython plugin list | remove
+uasm plugin add mypack        # remembered; loaded on every run afterwards
+uasm plugin show mypack       # what it provides, registering none of it
+uasm plugin list | remove
 ```
 
 `add` looks in the working directory, then the Python path, then pip --
@@ -191,10 +191,10 @@ compiler is run from another directory. `origin` stays recorded for exactly
 one purpose:
 
 ```bash
-asmpython plugin invalidate mypack           # one id
-asmpython plugin invalidate a,b              # comma-separated
-asmpython plugin invalidate a b              # or repeated
-asmpython plugin invalidate --all
+uasm plugin invalidate mypack           # one id
+uasm plugin invalidate a,b              # comma-separated
+uasm plugin invalidate a b              # or repeated
+uasm plugin invalidate --all
 ```
 
 `invalidate` goes back to the origin, re-resolves, and refreshes the cache --
@@ -202,8 +202,8 @@ which is how an edited plugin under development is picked up. If the origin is
 gone it fails and says so, leaving the cached copy in place: a cache that no
 longer matches any real source is exactly the state worth being told about.
 
-Without installing: `--plugin mypack` for one invocation, `ASMPYTHON_PLUGINS`
-for a CI job, or an `asmpython.plugins` entry point if you ship a
+Without installing: `--plugin mypack` for one invocation, `UASM_PLUGINS`
+for a CI job, or an `uasm.plugins` entry point if you ship a
 distribution. Declaring a manifest is better than calling `register()` at
 import time, which also works: a manifest can be READ, so `plugin show` and
 the install-time report can say what a module provides without letting it

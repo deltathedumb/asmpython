@@ -4,8 +4,8 @@ A frontend turns source text into a `Module`. It is the mirror image of a
 backend and about the same size.
 
 ```python
-from asmpython.frontend import Frontend, register
-from asmpython.ir import Module
+from uasm.frontend import Frontend, register
+from uasm.ir import Module
 
 class MyLang(Frontend):
     name = "mylang"
@@ -18,7 +18,7 @@ class MyLang(Frontend):
 register(MyLang())
 ```
 
-Then `asmpython build prog.ml`, or `--frontend mylang` if the extension is
+Then `uasm build prog.ml`, or `--frontend mylang` if the extension is
 ambiguous.
 
 ## Everything language-specific lives on your side
@@ -71,7 +71,7 @@ case _:
 The test that finds this class of bug is cheap: feed a corpus of unsupported
 source at the whole pipeline and assert only that a compiler behaves like one
 — a result or a diagnostic, never an exception. See
-`tests/asmpython/unit/test_frontend.py::TestNothingCrashes`.
+`tests/uasm/unit/test_frontend.py::TestNothingCrashes`.
 
 ## Registers are mutable, and there are no phi nodes
 
@@ -135,17 +135,17 @@ and still change meaning in combination, and nothing else finds that.
 you. Declare what you provide and install it once:
 
 ```python
-from asmpython.plugins import Plugin
+from uasm.plugins import Plugin
 
 plugin = Plugin("mypack")
 plugin.backends.append(MyBackend)         # a class or an instance, either
-__asmpython_plugin__ = plugin
+__uasm_plugin__ = plugin
 ```
 
 ```bash
-asmpython plugin add mypack        # remembered; loaded on every run afterwards
-asmpython plugin show mypack       # what it provides, registering none of it
-asmpython plugin list | remove
+uasm plugin add mypack        # remembered; loaded on every run afterwards
+uasm plugin show mypack       # what it provides, registering none of it
+uasm plugin list | remove
 ```
 
 `add` looks in the working directory, then the Python path, then pip --
@@ -166,10 +166,10 @@ compiler is run from another directory. `origin` stays recorded for exactly
 one purpose:
 
 ```bash
-asmpython plugin invalidate mypack           # one id
-asmpython plugin invalidate a,b              # comma-separated
-asmpython plugin invalidate a b              # or repeated
-asmpython plugin invalidate --all
+uasm plugin invalidate mypack           # one id
+uasm plugin invalidate a,b              # comma-separated
+uasm plugin invalidate a b              # or repeated
+uasm plugin invalidate --all
 ```
 
 `invalidate` goes back to the origin, re-resolves, and refreshes the cache --
@@ -177,8 +177,8 @@ which is how an edited plugin under development is picked up. If the origin is
 gone it fails and says so, leaving the cached copy in place: a cache that no
 longer matches any real source is exactly the state worth being told about.
 
-Without installing: `--plugin mypack` for one invocation, `ASMPYTHON_PLUGINS`
-for a CI job, or an `asmpython.plugins` entry point if you ship a
+Without installing: `--plugin mypack` for one invocation, `UASM_PLUGINS`
+for a CI job, or an `uasm.plugins` entry point if you ship a
 distribution. Declaring a manifest is better than calling `register()` at
 import time, which also works: a manifest can be READ, so `plugin show` and
 the install-time report can say what a module provides without letting it
