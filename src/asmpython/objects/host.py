@@ -6252,6 +6252,50 @@ def _binop(name, op, sym):
     return run
 
 
+#: The conversions that take a NUMBER, grouped by what they take and by how
+#: CPython words the refusal -- which is three different ways, not one
+#: generalised one. `%d` takes any real number; `%x` REFUSES A FLOAT, which
+#: `%d` accepts; and the floating conversions do not name the conversion at
+#: all.
+_PERCENT_REAL = ("d", "i", "u")
+_PERCENT_INT = ("x", "X", "o")
+_PERCENT_FLOAT = ("e", "E", "f", "F", "g", "G")
+
+
+def _percent_needs(h, conv, value):
+    """CPython's refusal for an argument a `%` conversion cannot take, or None.
+
+    THE WRONG EXCEPTION TYPE IS THE PART THAT MATTERS, and it is why this
+    exists rather than letting the failure surface on its own. `%` is
+    implemented by translating into the format MINI-LANGUAGE and handing the
+    argument to `format()` -- which is what keeps `%05.2f` and `{:05.2f}`
+    from being written twice -- and what `format()` complains about is an
+    unknown FORMAT CODE, a ValueError. What `%` complains about is the
+    ARGUMENT, a TypeError. So `"%d" % "a"` raised `Unknown format code 'd'
+    for object of type 'str'` where CPython raises `%d format: a real number
+    is required, not str`, and a program catching TypeError around a `%`
+    missed it entirely.
+    """
+    name = h.kind_name(value)
+    numeric = _is_int_like(value) or isinstance(value, float)
+    if conv in _PERCENT_REAL and not numeric:
+        return h._fail("TypeError",
+                       f"%{conv} format: a real number is required, "
+                       f"not {name}")
+    if conv in _PERCENT_INT and not _is_int_like(value):
+        # A FLOAT IS REFUSED HERE AND ACCEPTED BY `%d`, which is CPython's
+        # rule and not an oversight: `%x` of a non-integer has no answer,
+        # where `%d` of one truncates.
+        return h._fail("TypeError",
+                       f"%{conv} format: an integer is required, not {name}")
+    if conv in _PERCENT_FLOAT and not numeric:
+        # NO CONVERSION IN THE TEXT. CPython's message for these names only
+        # what was wanted, which is the one place it does not say `%e
+        # format:`.
+        return h._fail("TypeError", f"must be real number, not {name}")
+    return None
+
+
 def _percent(h, fmt, right):
     """`"%d %s" % (1, "a")` -- printf-style formatting.
 
@@ -6338,7 +6382,21 @@ def _percent(h, fmt, right):
             value = h._text(value, True).encode(
                 "ascii", "backslashreplace").decode("ascii")
         elif conv == "c":
-            value = chr(int(value)) if _is_int_like(value)                 else h._text(value, False)
+            # ONE CHARACTER OR AN INT, and nothing else. A string of any
+            # other length is refused BY ITS LENGTH, which is how CPython
+            # words it -- `%c requires an int or a unicode character, not a
+            # string of length 2`.
+            if _is_int_like(value):
+                value = chr(int(value))
+            elif isinstance(value, str) and len(value) == 1:
+                pass
+            else:
+                wanted = ("a string of length "
+                          + str(len(value)) if isinstance(value, str)
+                          else h.kind_name(value))
+                return h._fail("TypeError",
+                               f"%c requires an int or a unicode character, "
+                               f"not {wanted}")
         else:
             spec += "d" if conv in ("i", "u") else conv
         if isinstance(value, Instance):
@@ -6358,11 +6416,21 @@ def _percent(h, fmt, right):
                 return 0
             if h.err is not None:
                 return 0
-            if got is NotImplemented:
-                return h._fail("TypeError",
-                               f"%{conv} format: a number is required, "
-                               f"not {value.cls.name}")
-            value = got
+            # A CLASS THAT ANSWERED NEITHER is refused in the SAME WORDS a
+            # builtin of the wrong kind is, below: what `%d` wants does not
+            # depend on whether the argument came from a class.
+            if got is not NotImplemented:
+                value = got
+        if conv not in ("s", "b", "r", "a", "c"):
+            bad = _percent_needs(h, conv, value)
+            if bad is not None:
+                return bad
+            # `%d` OF A FLOAT TRUNCATES, which is why it takes a real number
+            # and `%x` takes an integer. The mini-language's `d` refuses one
+            # outright, so the truncation has to happen before the handoff --
+            # `"%d" % 1.5` is `'1'`, not an unknown format code.
+            if conv in _PERCENT_REAL and isinstance(value, float):
+                value = int(value)
         try:
             out.append(format(value, spec))
         except (ValueError, TypeError) as exc:

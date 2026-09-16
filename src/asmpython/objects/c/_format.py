@@ -572,6 +572,75 @@ static apy_value apy_format_at(apy_value fmt, apy_value args, apy_value kw,
    right is currently one argument like any other, which is right for `%s` and
    wrong for the mapping form -- so that spelling is refused below rather than
    quietly formatting the dict. */
+/* A USER OBJECT REACHES A NUMERIC `%` CONVERSION THROUGH ITS NUMBER and not
+   through `__format__`: CPython's `%d` asks `__index__` and `%f` asks
+   `__float__`. Handing the object straight to `apy_format` reached the
+   mini-language, which reported an unknown FORMAT CODE for a class that
+   defines exactly the method for it -- `"%d" % HasIndex()` is `'42'` there
+   and was a ValueError here.
+
+   THE OBJECT UNCHANGED when its class offers neither, so the refusal is
+   `apy_percent_needs`'s below and a class is refused in the same words a
+   builtin of the wrong kind is. Answers 0 with the error set for a dunder
+   that raised. `objects/host.py`'s `_percent` is the same three lines. */
+static apy_value apy_percent_number(char conv, apy_value value) {
+    apy_value got;
+    if (O(value)->kind != APY_INST_K) return value;
+    if (conv == 'e' || conv == 'E' || conv == 'f' || conv == 'F'
+            || conv == 'g' || conv == 'G') {
+        got = apy_unary_dunder(value, "__float__");
+        if (apy_error_occurred()) return 0;
+        return got ? got : value;
+    }
+    got = apy_unary_dunder(value, "__index__");
+    if (apy_error_occurred()) return 0;
+    if (!got) {
+        got = apy_unary_dunder(value, "__int__");
+        if (apy_error_occurred()) return 0;
+    }
+    return got ? got : value;
+}
+
+/* CPython's refusal for an argument a `%` conversion cannot take: sets the
+   error and answers 0, or answers 1 for one it can.
+
+   THE WRONG EXCEPTION TYPE IS WHY THIS EXISTS. `%` is implemented by
+   translating into the format MINI-LANGUAGE and handing the argument to
+   `apy_format` -- which is what keeps `%05.2f` and `{:05.2f}` from being
+   written twice -- and what that complains about is an unknown FORMAT CODE,
+   a ValueError. What `%` complains about is the ARGUMENT, a TypeError. So
+   `"%d" % "a"` raised `Unknown format code 'd' for object of type 'str'`
+   where CPython raises `%d format: a real number is required, not str`, and
+   a program catching TypeError around a `%` missed it entirely.
+
+   THREE WORDINGS, and they are CPython's own rather than one generalised:
+   `%d` takes any real number; `%x` takes an INTEGER and refuses a float that
+   `%d` accepts; and the floating conversions do not name the conversion at
+   all. */
+static int apy_percent_needs(char conv, apy_value value) {
+    char buf[256];
+    if (conv == 'd' || conv == 'i' || conv == 'u') {
+        if (apy_is_num(value)) return 1;
+        snprintf(buf, sizeof buf,
+                 "%%%c format: a real number is required, not %s",
+                 conv, apy_kind_name(value));
+    } else if (conv == 'x' || conv == 'X' || conv == 'o') {
+        if (apy_is_int_like(value)) return 1;
+        snprintf(buf, sizeof buf,
+                 "%%%c format: an integer is required, not %s",
+                 conv, apy_kind_name(value));
+    } else if (conv == 'e' || conv == 'E' || conv == 'f' || conv == 'F'
+               || conv == 'g' || conv == 'G') {
+        if (apy_is_num(value)) return 1;
+        snprintf(buf, sizeof buf, "must be real number, not %s",
+                 apy_kind_name(value));
+    } else {
+        return 1;
+    }
+    apy_fail("TypeError", buf);
+    return 0;
+}
+
 static apy_value apy_str_percent(apy_value fmt, apy_value right) {
     const char *p = APY_CSTR(fmt);
     int64_t n = O(fmt)->v.s.n, i = 0, out_cap = n + 64, out_n = 0, at = 0;
@@ -709,13 +778,48 @@ static apy_value apy_str_percent(apy_value fmt, apy_value right) {
         else if (conv == 'r') { value = apy_repr(value); }
         else if (conv == 'a') { value = apy_ascii(value); }
         else if (conv == 'c') {
-            value = apy_is_int_like(value) ? apy_chr(value) : apy_str(value);
-        } else if (conv == 'i' || conv == 'u') {
-            /* Both are spelled `d` in the mini-language, and `%u` has meant
-               `%d` since Python 2. */
-            spec[sn++] = 'd';
+            /* ONE CHARACTER OR AN INT, AND NOTHING ELSE. `apy_str` on
+               anything at all meant `"%c" % "ab"` answered `'ab'` and
+               `"%c" % obj` answered its repr -- wrong answers rather than
+               errors, which is the failure mode that does not announce
+               itself. A string of the wrong length is refused BY ITS
+               LENGTH, which is how CPython words it. */
+            if (apy_is_int_like(value)) {
+                value = apy_chr(value);
+            } else if (!(O(value)->kind == APY_STR_K
+                         && apy_str_chars(value) == 1)) {
+                char cbuf[256];
+                if (O(value)->kind == APY_STR_K)
+                    snprintf(cbuf, sizeof cbuf,
+                             "%%c requires an int or a unicode character, "
+                             "not a string of length %lld",
+                             (long long)apy_str_chars(value));
+                else
+                    snprintf(cbuf, sizeof cbuf,
+                             "%%c requires an int or a unicode character, "
+                             "not %s", apy_kind_name(value));
+                free(out);
+                return apy_fail("TypeError", cbuf);
+            }
         } else {
-            spec[sn++] = conv;
+            /* A CLASS REACHES A NUMERIC CONVERSION THROUGH ITS NUMBER, and
+               then anything still of the wrong kind is refused in CPython's
+               words rather than the mini-language's. */
+            value = apy_percent_number(conv, value);
+            if (!value) { free(out); return 0; }
+            if (!apy_percent_needs(conv, value)) { free(out); return 0; }
+            /* `%d` OF A FLOAT TRUNCATES, which is why it takes a real number
+               where `%x` takes an integer. The mini-language's `d` refuses a
+               float outright, so the truncation happens before the handoff:
+               `"%d" % 1.5` is `'1'`, not an unknown format code. */
+            if ((conv == 'd' || conv == 'i' || conv == 'u')
+                    && O(value)->kind == APY_FLOAT_K) {
+                value = apy_to_int(value);
+                if (!value) { free(out); return 0; }
+            }
+            /* `%i` and `%u` are both spelled `d` in the mini-language, and
+               `%u` has meant `%d` since Python 2. */
+            spec[sn++] = (conv == 'i' || conv == 'u') ? 'd' : conv;
         }
         if (!value) { free(out); return 0; }
         spec[sn] = 0;

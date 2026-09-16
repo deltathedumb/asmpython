@@ -8186,6 +8186,89 @@ PROGRAMS = {
         # AND `%` ON A str RUNS AGAINST ANYTHING.
         show("percent", lambda: SubS("%d") % 5)
     """,
+    "percent_refuses_an_argument_its_conversion_cannot_take": """
+        # `"%d" % "a"` RAISED A ValueError. `%` is implemented by translating
+        # into the format MINI-LANGUAGE and handing the argument to
+        # `format()` -- which is what keeps `%05.2f` and `{:05.2f}` from
+        # being written twice -- and what that complains about is an unknown
+        # FORMAT CODE. What `%` complains about is the ARGUMENT. So the
+        # exception TYPE was wrong, and a program catching TypeError around a
+        # `%` missed it entirely.
+        #
+        # THREE WORDINGS, which are CPython's own rather than one
+        # generalised: `%d` takes any real number, `%x` takes an INTEGER and
+        # refuses a float that `%d` accepts, and the floating conversions do
+        # not name the conversion at all.
+        #
+        # AND `%c` WAS ANSWERING. `"%c" % "ab"` gave back `'ab'` and
+        # `"%c" % obj` its repr -- wrong answers rather than errors, on the
+        # compiled paths, which is the failure that does not announce itself.
+        #
+        # A CLASS REACHES A NUMERIC CONVERSION THROUGH ITS NUMBER, which the
+        # interpreter did and the C did not: `%d` asks `__index__` and `%f`
+        # asks `__float__`, so a class defining exactly the method for it was
+        # reported as an unknown format code.
+        class Obj:
+            def __repr__(self):
+                return "<obj>"
+
+            def __str__(self):
+                return "obj!"
+
+        class HasIndex:
+            def __index__(self):
+                return 42
+
+        class HasFloat:
+            def __float__(self):
+                return 2.5
+
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except TypeError as e:
+                print(label, "TypeError:", e)
+            except ValueError as e:
+                print(label, "ValueError:", e)
+
+        # A REAL NUMBER IS REQUIRED, and a float is one -- it truncates.
+        show("d str", lambda: "%d" % "a")
+        show("d obj", lambda: "%d" % Obj())
+        show("i str", lambda: "%i" % "a")
+        show("u str", lambda: "%u" % "a")
+        show("d float", lambda: "%d" % 1.5)
+        show("d negative float", lambda: "%d" % -1.9)
+        show("d bool", lambda: "%d" % True)
+        # AN INTEGER IS REQUIRED, and a float is NOT one.
+        show("x str", lambda: "%x" % "a")
+        show("x float", lambda: "%x" % 1.5)
+        show("o str", lambda: "%o" % "a")
+        show("X obj", lambda: "%X" % Obj())
+        show("x int", lambda: "%x" % 255)
+        # THE FLOATING ONES NAME ONLY WHAT THEY WANTED.
+        show("f str", lambda: "%f" % "a")
+        show("e obj", lambda: "%e" % Obj())
+        show("g str", lambda: "%g" % "a")
+        show("f float", lambda: "%.2f" % 1.5)
+        # `%c` TAKES ONE CHARACTER OR AN INT.
+        show("c long str", lambda: "%c" % "ab")
+        show("c obj", lambda: "%c" % Obj())
+        show("c int", lambda: "%c" % 65)
+        show("c char", lambda: "%c" % "z")
+        # A CLASS THROUGH ITS NUMBER.
+        show("d index", lambda: "%d" % HasIndex())
+        show("x index", lambda: "%x" % HasIndex())
+        show("f float dunder", lambda: "%f" % HasFloat())
+        show("d float dunder", lambda: "%d" % HasFloat())
+        # AND THE SHAPES THAT MUST NOT HAVE MOVED.
+        show("s", lambda: "%s|%s|%s" % (1, "a", Obj()))
+        show("r", lambda: "%r|%r" % ("a", Obj()))
+        show("pad", lambda: "%5d|%-5d|%05d|%+d" % (42, 42, 42, 42))
+        show("bytes", lambda: b"%s|%d" % (b"ab", 5))
+        show("map", lambda: "%(a)s-%(b)d" % {"a": "x", "b": 2})
+        show("too few", lambda: "%s %s" % ("one",))
+        show("too many", lambda: "%s" % ("one", "two"))
+    """,
     "fstrings": """
         n = 42
         s = 'ab'
