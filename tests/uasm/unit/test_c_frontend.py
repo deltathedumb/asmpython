@@ -448,6 +448,61 @@ class TestTheDivergences:
         codes = [d.code for d in sink.diagnostics]
         assert codes.count("W1218") == 1, codes
 
+    def test_a_bitint_wider_than_the_maximum_is_refused_by_name(self):
+        """`BITINT_MAXWIDTH` is 64 here, which C23 permits -- it requires
+        only `ULLONG_WIDTH`. The refusal names the number rather than
+        failing somewhere in lowering, and `<limits.h>` reports the same
+        one so a program can ask before it asks for the type."""
+        module, sink = compile_c("_BitInt(65) too_wide;\n"
+                                 "int main(void){ return 0; }\n")
+        assert sink.failed
+        codes = [d.code for d in sink.diagnostics]
+        assert "E1283" in codes, codes
+        assert "64" in sink.diagnostics[0].message
+
+        # A SIGNED ONE NEEDS TWO BITS, an unsigned one needs one: the sign
+        # bit is not a value bit, and a type with no value bits is not one.
+        module, sink = compile_c("_BitInt(1) narrow;\nint main(void){return 0;}")
+        assert sink.failed
+        assert "E1284" in [d.code for d in sink.diagnostics]
+        module, sink = compile_c("unsigned _BitInt(1) b;\n"
+                                 "int main(void){ return (int)b; }\n")
+        assert module is not None, [d.message for d in sink.diagnostics]
+        assert not sink.failed, [d.message for d in sink.diagnostics]
+
+        # AND ONLY `signed` AND `unsigned` GO WITH IT.
+        module, sink = compile_c("long _BitInt(8) bad;\n"
+                                 "int main(void){ return 0; }\n")
+        assert sink.failed
+        assert "E1281" in [d.code for d in sink.diagnostics]
+
+    def test_a_bitint_is_not_promoted(self):
+        """The whole reason the type is useful: `a + b` on two `_BitInt(4)`s
+        is arithmetic in four bits and wraps there. A promotion to `int`
+        would have made it arithmetic in 32, and the wrapping would have
+        happened only on the way back into the object -- which is a
+        different answer for `*` and for `<<`."""
+        assert C.promote(C.bitint(4, True)) == C.bitint(4, True)
+        assert C.usual_arithmetic(C.bitint(4, True),
+                                  C.bitint(4, True)) == C.bitint(4, True)
+        # A standard type as wide or wider outranks it; a narrower one does
+        # not, which is C23's rank rule stated against the width.
+        assert C.usual_arithmetic(C.bitint(4, True), C.INT) == C.INT
+        assert C.usual_arithmetic(C.bitint(40, True), C.INT) \
+            == C.bitint(40, True)
+        assert C.usual_arithmetic(C.bitint(32, True), C.UINT) == C.UINT
+        assert C.usual_arithmetic(C.bitint(33, True), C.UINT) \
+            == C.bitint(33, True)
+        # Two of the same width differ only in signedness, and the unsigned
+        # one wins -- the same rule the standard types have.
+        assert C.usual_arithmetic(C.bitint(4, True), C.bitint(4, False)) \
+            == C.bitint(4, False)
+        # And the width is part of the type, which the kind alone does not
+        # say: two of different widths are no more compatible than `short`
+        # and `int`.
+        assert not C.compatible(C.bitint(13, True), C.bitint(14, True))
+        assert C.compatible(C.bitint(13, True), C.bitint(13, True))
+
     def test_constexpr_needs_a_constant_and_then_is_one(self):
         """The two halves of C23's `constexpr`: the initialiser must fold,
         and afterwards the NAME folds. Both are refusals rather than silent

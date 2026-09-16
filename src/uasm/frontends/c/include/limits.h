@@ -30,11 +30,31 @@
 #define ULLONG_MAX (__LONG_LONG_MAX__ * 2ULL + 1ULL)
 
 #define MB_LEN_MAX 4
+
+/* THE WIDTHS C23 ASKS FOR, and the unsigned ones are the same numbers: a
+   type and its unsigned counterpart have the same width, which is what
+   makes `UINT_WIDTH` worth defining at all rather than leaving the reader
+   to wonder whether it counts the sign bit. */
 #define BOOL_WIDTH 1
 #define CHAR_WIDTH 8
+#define SCHAR_WIDTH 8
+#define UCHAR_WIDTH 8
 #define SHRT_WIDTH 16
+#define USHRT_WIDTH 16
 #define INT_WIDTH 32
+#define UINT_WIDTH 32
 #define LONG_WIDTH 64
+#define ULONG_WIDTH 64
 #define LLONG_WIDTH 64
+#define ULLONG_WIDTH 64
+#define BOOL_MAX 1
+
+/* THE WIDEST `_BitInt` THIS IMPLEMENTATION HAS. C23 requires only that it be
+   at least `ULLONG_WIDTH`, and this is exactly that: a wider one would be
+   arithmetic in software over several machine registers -- the `long double`
+   story again -- for a type whose whole appeal is being a machine integer
+   with a narrower range. `ctype.BITINT_MAXWIDTH` is the same number, and a
+   program asking for more is refused by name. */
+#define BITINT_MAXWIDTH 64
 
 #endif

@@ -96,6 +96,17 @@ deliverable.
   range nor the precision. Several translation units build into one program,
   `uasm build main.c --c:unit parse.c`, meaning by it what `cc` does.
 
+  **C23's own surface is here**, and a probe of it against this frontend is
+  what found the rest of this entry: `_BitInt(N)` up to a
+  `BITINT_MAXWIDTH` of 64 -- what C23 requires and no more -- which is NOT
+  promoted, so `a + b` on two `_BitInt(4)`s is four-bit arithmetic that
+  wraps at four bits; `constexpr` objects, whose NAME is a constant
+  expression, which is the whole of what the specifier buys over `const`;
+  `[[...]]` attributes wherever C allows one, with `nodiscard` and
+  `deprecated` the two that warn; `nullptr` and `nullptr_t`; `typeof` and
+  `typeof_unqual`; an `enum` with a fixed underlying type; a label before a
+  declaration; `unreachable()`; and `%b`, `%ls` and `%lc` in `printf`.
+
   Its flags are declared the way a backend's always were, on the frontend
   itself: `-I`/`--include-path`, `-D`/`--define`, `--trigraphs` and
   `--bundled-headers`, each also spellable `--c:include-path` and so on. A

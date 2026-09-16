@@ -1118,9 +1118,58 @@ class Lowerer:
         return self._ir_convert(self._value(src), src.type, C.to_ir(e.type),
                                 target=e.type)
 
+    def _narrow_bitint(self, reg: int, ty: CType) -> int:
+        """Put back the bits a `_BitInt(N)` does not have.
+
+        THE CONTAINER IS WIDER THAN THE TYPE. `_BitInt(13)` lives in an i16,
+        and an addition that carried into bit 13 has produced a value the
+        type cannot hold -- so every operation whose RESULT is bit-precise
+        ends here and the value is normalised again: sign-extended from bit
+        N-1 if it is signed, masked if it is not. Do it once, at the end of
+        the operation, and every later read of the object is already right.
+
+        THE SHIFT PAIR AND NOT A MASK for the signed case, for the same
+        reason `_load_bitfield` uses one: `SHR` is arithmetic on a signed IR
+        type and logical on an unsigned one, so shifting up and back down is
+        the sign extension, with no second constant and no branch.
+        """
+        if not ty.is_bitint:
+            return reg
+        ir = C.to_ir(ty)
+        spare = ir.bits - ty.width
+        if spare == 0:
+            return reg              # the width IS the container's
+        if not ty.signed:
+            d = self.b.reg(ir)
+            self.b.emit(Instruction(Op.AND, ir, dst=d,
+                                    args=[reg, self.b.const(
+                                        ir, (1 << ty.width) - 1)]))
+            return d
+        up = self.b.reg(ir)
+        self.b.emit(Instruction(Op.SHL, ir, dst=up,
+                                args=[reg, self.b.const(ir, spare)]))
+        down = self.b.reg(ir)
+        self.b.emit(Instruction(Op.SHR, ir, dst=down,
+                                args=[up, self.b.const(ir, spare)]))
+        return down
+
     def _ir_convert(self, reg: int, src: CType | IR.Type, want: IR.Type,
                     target: CType | None = None) -> int:
-        """Convert a value between IR types, following C's rules."""
+        """Convert a value between IR types, following C's rules.
+
+        THE NARROWING IS HERE AND NOT IN THE CALLER because a conversion INTO
+        a bit-precise type is one of the two ways a value of one is made --
+        `_binary` is the other -- and because the IR conversion alone is not
+        enough even when the two land in the same container: `_BitInt(13)` to
+        `_BitInt(9)` is i16 to i16, and the four bits in between have to go.
+        """
+        got = self._ir_convert_to(reg, src, want, target)
+        if target is not None and target.is_bitint:
+            return self._narrow_bitint(got, target)
+        return got
+
+    def _ir_convert_to(self, reg: int, src: CType | IR.Type, want: IR.Type,
+                       target: CType | None = None) -> int:
         have = src if isinstance(src, IR.Type) else C.to_ir(src)
         if have is want:
             return reg
@@ -1215,11 +1264,11 @@ class Lowerer:
         if op == "-":
             d = self.b.reg(ir)
             self.b.emit(Instruction(Op.NEG, ir, dst=d, args=[value]))
-            return d
+            return self._narrow_bitint(d, e.type)
         if op == "~":
             d = self.b.reg(ir)
             self.b.emit(Instruction(Op.NOT, ir, dst=d, args=[value]))
-            return d
+            return self._narrow_bitint(d, e.type)
         raise AssertionError(op)
 
     def _incdec(self, e: S.Unary) -> int:
@@ -1255,6 +1304,7 @@ class Lowerer:
             new = self.b.reg(ir)
             self.b.emit(Instruction(Op.ADD if e.op == "++" else Op.SUB, ir,
                                     dst=new, args=[old, one]))
+            new = self._narrow_bitint(new, ty)
         self._store_into(target, new)
         return old if e.postfix else new
 
@@ -1324,7 +1374,7 @@ class Lowerer:
             right = self._ir_convert(right, e.right.type, ir)
         d = self.b.reg(ir)
         self.b.emit(Instruction(_ARITH[op], ir, dst=d, args=[left, right]))
-        return d
+        return self._narrow_bitint(d, e.type)
 
     def _logical(self, e: S.Logical) -> int:
         result = self.b.reg(IR.I1)
@@ -1447,6 +1497,7 @@ class Lowerer:
         result = self.b.reg(cir)
         self.b.emit(Instruction(_ARITH[binop], cir, dst=result,
                                 args=[old, right]))
+        result = self._narrow_bitint(result, compute)
         narrowed = self._ir_convert(result, compute, C.to_ir(ty), target=ty)
         self._write_through(target, addr, narrowed)
         return narrowed

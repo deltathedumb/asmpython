@@ -418,8 +418,9 @@ class Parser:
                 return S.FloatLit(t.span, C.complex_of(ty), False,
                                   complex(0.0, got.value))
             return S.FloatLit(t.span, ty, False, got.value)
-        return S.IntLit(t.span, C.integer(got.bits, got.signed), False,
-                        got.value)
+        ty = C.bitint(got.bits, got.signed) if got.bitint \
+            else C.integer(got.bits, got.signed)
+        return S.IntLit(t.span, ty, False, got.value)
 
     def _string(self) -> S.Expr:
         span = self.tok.span
@@ -565,7 +566,8 @@ class Parser:
                     "union", "enum", "const", "volatile", "restrict",
                     "_Atomic", "typedef", "extern", "static", "auto",
                     "register", "inline", "_Noreturn", "_Alignas",
-                    "_Thread_local", "typeof", "typeof_unqual", "constexpr"):
+                    "_Thread_local", "typeof", "typeof_unqual", "constexpr",
+                    "_BitInt"):
             return True
         return self.is_typedef(t)
 
@@ -657,6 +659,7 @@ class Parser:
         attrs: set[str] = set()
         made: CType | None = None
         complex_ = False
+        bit_width: int | None = None
         start = self.tok.span
         spec.span = start
         while True:
@@ -747,6 +750,10 @@ class Parser:
                 spec.explicit = True
                 self.next()
                 continue
+            if word == "_BitInt":
+                bit_width = self._bitint_width()
+                spec.explicit = True
+                continue
             if word == "_Complex":
                 # A FLAG RATHER THAN A WORD, because it combines with the
                 # words rather than replacing them: `long double _Complex`
@@ -787,6 +794,29 @@ class Parser:
             # spellings name one promise, and a program may write either.
             spec.noreturn = True
         spec.attrs = attrs
+        if bit_width is not None:
+            # `signed` AND `unsigned` COMBINE WITH IT and nothing else does:
+            # `long _BitInt(8)` is not a type, and letting `_BASIC` see the
+            # words would have answered `long` and dropped the width.
+            if words not in ([], ["signed"], ["unsigned"]):
+                self.sema.error(
+                    "E1281",
+                    f"`{' '.join(words)} _BitInt({bit_width})` is not a type",
+                    start,
+                    note="only `signed` and `unsigned` go with `_BitInt`")
+            signed_bits = words != ["unsigned"]
+            if signed_bits and bit_width < 2:
+                # ONE BIT AND A SIGN LEAVES NO VALUE BITS. C says a signed
+                # bit-precise type is at least 2 wide and an unsigned one at
+                # least 1, which is the same sentence read twice.
+                self.sema.error(
+                    "E1284", f"`_BitInt({bit_width})` needs a bit for the "
+                             f"sign and one for a value", start,
+                    help="`unsigned _BitInt(1)` is a type; the signed one "
+                         "starts at 2")
+                bit_width = 2
+            made = C.bitint(bit_width, signed=signed_bits)
+            words = []
         if words:
             key = tuple(sorted(words))
             basic = _BASIC.get(key)
@@ -903,6 +933,45 @@ class Parser:
                     self.next()
                     return
             self.next()
+
+    def _bitint_width(self) -> int:
+        """`_BitInt ( N )` -- the N, checked.
+
+        THE WIDTH IS PART OF THE TYPE and has to be known here, so it is an
+        integer constant expression like an array bound rather than anything
+        that could depend on a value. A SIGNED one needs two bits, because
+        one of them is the sign and a type with no value bits is not a type;
+        an unsigned one needs one. `ctype.BITINT_MAXWIDTH` says why 64 is the
+        top, and C23 requires only that it be at least that.
+        """
+        self.next()
+        at = self.tok.span
+        self.expect("(", "`_BitInt` takes a width in parentheses")
+        got = fold_int(self.conditional())
+        self.expect(")")
+        if got is None:
+            self.sema.error("E1282", "`_BitInt` needs a constant width", at,
+                            note="the width is part of the type, so it has "
+                                 "to be known at compile time")
+            return C.BITINT_MAXWIDTH
+        if got > C.BITINT_MAXWIDTH:
+            self.sema.error(
+                "E1283",
+                f"`_BitInt({got})` is wider than this implementation's "
+                f"{C.BITINT_MAXWIDTH}", at,
+                note="a wider one would be arithmetic in software over "
+                     "several machine registers, which is what `long double` "
+                     "already costs and what a bit-precise integer is for "
+                     "avoiding",
+                help=f"`BITINT_MAXWIDTH` is {C.BITINT_MAXWIDTH}, which C23 "
+                     f"permits: it requires only ULLONG_WIDTH")
+            return C.BITINT_MAXWIDTH
+        if got < 1:
+            self.sema.error("E1285", f"`_BitInt({got})` has no width", at,
+                            note="a width is at least 1, and at least 2 with "
+                                 "a sign bit to pay for")
+            return C.BITINT_MAXWIDTH
+        return got
 
     def _attributes(self) -> None:
         """`__attribute__((...))`, parsed and discarded.

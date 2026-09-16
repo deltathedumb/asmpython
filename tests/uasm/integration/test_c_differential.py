@@ -3122,6 +3122,147 @@ NO_ORACLE: dict[str, tuple[str, str]] = {
     }
     """, "4 4\n1 2 3\n0 -1\n3 8364\n3 226 130 172\n3 97 233 122\n3\n4 a\u00e9z\n4\n1\n"),
 
+    "bit_precise_integers": (r"""
+    /* `_BitInt(N)`, which gcc 13 has not got at all -- it landed in 14 --
+       so there is no oracle on this machine and the answers are written
+       out. Every one of them is arithmetic modulo 2^N: the type lives in
+       the smallest standard container that holds it and `lower._narrow_bitint`
+       puts the spare bits back after every operation, which is the whole
+       implementation and the whole thing that can be wrong.
+
+       `BITINT_MAXWIDTH` IS 64 HERE, which C23 permits: it requires only
+       `ULLONG_WIDTH`. Wider would be software arithmetic over several
+       registers for a type whose appeal is being a machine integer with a
+       narrower range, and a program asking for more is refused by name. */
+    #include <stdio.h>
+    #include <limits.h>
+
+    typedef _BitInt(13) small;
+    typedef unsigned _BitInt(4) nibble;
+
+    struct packed { _BitInt(9) a; unsigned _BitInt(4) b; _BitInt(33) c; };
+
+    static _BitInt(20) counter = 1000;
+
+    static _BitInt(13) doubled(_BitInt(13) v) { return v + v; }
+
+    int main(void) {
+        small a = 4000;
+        nibble u = 15;
+        _BitInt(5) s = 15;
+        unsigned _BitInt(1) one = 1;
+        _BitInt(64) wide = 9223372036854775807;
+        unsigned _BitInt(64) uwide = 18446744073709551615u;
+        struct packed p = { 255, 9, 4294967296 };
+        int i;
+
+        printf("%d %d %d %d\n", BITINT_MAXWIDTH, BOOL_WIDTH, INT_WIDTH, ULLONG_WIDTH);
+        printf("%zu %zu %zu %zu %zu %zu\n", sizeof(_BitInt(2)), sizeof(_BitInt(8)),
+               sizeof(_BitInt(9)), sizeof(_BitInt(17)), sizeof(_BitInt(33)),
+               sizeof(_BitInt(64)));
+        printf("%zu %zu %zu %zu\n", _Alignof(_BitInt(2)), _Alignof(_BitInt(9)),
+               _Alignof(_BitInt(17)), _Alignof(_BitInt(64)));
+        printf("%zu %zu\n", sizeof(struct packed), _Alignof(struct packed));
+
+        printf("%d %d %d %d\n", (int)(a + a), (int)(u + 1u), (int)(s + 1),
+               (int)one);
+        printf("%d %d\n", (int)doubled(4000), (int)doubled(-4000));
+        printf("%lld %llu\n", (long long)wide, (unsigned long long)uwide);
+        printf("%d %d %lld\n", (int)p.a, (int)p.b, (long long)p.c);
+
+        /* Wrapping, in both directions and both signednesses. */
+        a = 4095; a = a + 1;  printf("%d\n", (int)a);
+        a = -4096; a = a - 1; printf("%d\n", (int)a);
+        u = 0; u = u - 1;     printf("%d\n", (int)u);
+        s = -16; s = s - 1;   printf("%d\n", (int)s);
+
+        /* Compound assignment, increment, shifts and the bitwise ones. */
+        a = 1000; a += 4000;  printf("%d\n", (int)a);
+        a = 4095; a++;        printf("%d\n", (int)a);
+        a = -4096; a--;       printf("%d\n", (int)a);
+        u = 8; u <<= 1;       printf("%d\n", (int)u);
+        u = 8; u = u * 3u;    printf("%d\n", (int)u);
+        s = -1; printf("%d %d\n", (int)(s >> 1), (int)(~s));
+        { unsigned _BitInt(4) t = 1; printf("%d\n", (int)(unsigned)(t - 2u)); }
+
+        /* Conversions in both directions, and between two widths. */
+        {
+            _BitInt(9) n9 = 300;
+            _BitInt(5) n5 = (_BitInt(5))n9;
+            int back = (int)n9;
+            unsigned _BitInt(4) n4 = (unsigned _BitInt(4))n9;
+            printf("%d %d %d %d\n", (int)n9, (int)n5, back, (int)n4);
+        }
+
+        /* The usual arithmetic conversions, asked of the result's size. */
+        printf("%zu %zu %zu %zu\n",
+               sizeof(a + a), sizeof(a + 1), sizeof(u + u), sizeof(wide + 1));
+        printf("%d %d %d\n", (int)(a < 0), (int)(u > 0), (int)(s == -17));
+
+        /* An array of them, and a loop. */
+        {
+            _BitInt(13) v[4];
+            int total = 0;
+            for (i = 0; i < 4; i++) v[i] = (_BitInt(13))(i * 2000);
+            for (i = 0; i < 4; i++) total += (int)v[i];
+            printf("%d %zu\n", total, sizeof v);
+        }
+
+        /* The `wb` suffixes. */
+        printf("%zu %zu %d %d\n", sizeof(42wb), sizeof(42uwb),
+               (int)(42wb + 1wb), (int)(3uwb * 5uwb));
+
+        /* `_Generic` sees them as distinct types. */
+        printf("%d %d %d\n",
+               _Generic((small)0, small: 1, default: 0),
+               _Generic((nibble)0, nibble: 1, default: 0),
+               _Generic((small)0, nibble: 1, int: 2, default: 3));
+
+        printf("%d %lld\n", (int)counter, (long long)(counter * 1024));
+
+        /* Division, remainder, and the signs C gives them. */
+        {
+            _BitInt(13) n = -3001, d = 7;
+            printf("%d %d\n", (int)(n / d), (int)(n % d));
+            unsigned _BitInt(9) un = 500, ud = 7;
+            printf("%d %d\n", (int)(un / ud), (int)(un % ud));
+        }
+
+        /* To and from the other kinds of scalar. */
+        {
+            _BitInt(9) n = -200;
+            double f = (double)n;
+            _BitInt(9) back = (_BitInt(9))(f / 2.0);
+            _Bool t = (_Bool)n, z = (_Bool)(_BitInt(9))0;
+            long double w = (long double)n;
+            printf("%.1f %d %d %d %.1Lf\n", f, (int)back, (int)t, (int)z, w);
+            printf("%d %d\n", (int)(_BitInt(9))3.9, (int)(_BitInt(9))-3.9);
+        }
+
+        /* A bit-field of one, a `constexpr` one, and a `switch`. */
+        {
+            struct { _BitInt(13) x : 5; unsigned _BitInt(9) y : 3; } bf = { -16, 7 };
+            constexpr _BitInt(13) K = 4000;
+            _BitInt(13) v = K;
+            printf("%d %d %d\n", (int)bf.x, (int)bf.y, (int)K);
+            switch ((int)v) {
+            case 4000: printf("four thousand\n"); break;
+            default: printf("other\n");
+            }
+            static _BitInt(13) tbl[K > 0 ? 2 : 1] = { K, -K };
+            printf("%d %d %zu\n", (int)tbl[0], (int)tbl[1], sizeof tbl);
+        }
+
+        /* Through a variadic call, which does NOT promote them. */
+        {
+            _BitInt(13) n = -5;
+            unsigned _BitInt(4) m = 9;
+            printf("%d %d\n", (int)n, (int)m);
+        }
+        return 0;
+    }
+    """, '64 1 32 64\n1 1 2 4 8 8\n1 2 4 8\n16 8\n-192 16 16 1\n-192 192\n9223372036854775807 18446744073709551615\n255 9 -4294967296\n-4096\n4095\n15\n15\n-3192\n-4096\n4095\n0\n8\n-1 0\n-1\n-212 12 -212 12\n2 4 1 8\n0 1 0\n3808 8\n1 1 43 7\n1 1 3\n1000 1024000\n-428 -5\n71 3\n-200.0 -100 1 0 -200.0\n3 -3\n-16 7 4000\nfour thousand\n4000 -4000 4\n-5 9\n'),
+
     "the_c23_names_glibc_has_not_got": (r"""
     #include <stdio.h>
     #include <stdlib.h>

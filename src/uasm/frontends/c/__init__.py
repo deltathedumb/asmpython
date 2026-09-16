@@ -70,7 +70,13 @@ file scope, where one is a static object and its address is a constant),
 is advisory, and GNU's `__typeof__`/`__restrict` spellings because real headers
 use them -- is implemented.
 
-AND C23's OWN: `constexpr` objects, whose NAME is a constant expression --
+AND C23's OWN: `_BitInt(N)`, a bit-precise integer that is NOT promoted --
+`a + b` on two `_BitInt(4)`s is arithmetic in four bits and wraps there --
+with the `wb` and `uwb` constant suffixes and a `BITINT_MAXWIDTH` of 64,
+which is what C23 requires (`ULLONG_WIDTH`) and no more: a wider one would be
+software arithmetic over several registers, for a type whose appeal is being
+a machine integer with a narrower range. `constexpr` objects, whose NAME is a
+constant expression --
 which is the whole of what the specifier buys, since `const int n = 7;` has
 always produced the same code and never been one; `[[...]]` attributes
 everywhere C allows them, with `nodiscard` and `deprecated` the two that

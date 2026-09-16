@@ -250,6 +250,10 @@ class IntConst:
     #: `long long` and `long` are both 64 bits here, and a diagnostic that
     #: says "long" when the source said "long long" reads as a compiler bug.
     spelling: str
+    #: A `wb` or `uwb` suffix: the type is `_BitInt(bits)` rather than the
+    #: standard type of that width, and `bits` is the SMALLEST that can
+    #: represent the value -- with a bit for the sign when it has one.
+    bitint: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -390,6 +394,20 @@ def _integer(raw: str, spelling: str) -> IntConst:
     unsigned = "u" in low
     long_ = "l" in low or "z" in low
     llong = "ll" in low
+    if "wb" in low:
+        # C23'S OWN SUFFIX, and the width is not chosen from a candidate list
+        # the way every other integer constant's is: it is the SMALLEST that
+        # represents the value. `42wb` is `_BitInt(7)` -- six bits for the
+        # value and one for the sign it is allowed to have -- and `42uwb` is
+        # `unsigned _BitInt(6)`.
+        want = max(1, value.bit_length()) if unsigned \
+            else max(2, value.bit_length() + 1)
+        if want > 64:
+            raise LiteralError(
+                f"{spelling!r} needs a `_BitInt({want})`, which is wider "
+                f"than this implementation's 64")
+        return IntConst(value, want, not unsigned, spelling=spelling,
+                        bitint=True)
     return IntConst(value, *_int_type(value, base, unsigned, long_, llong),
                     spelling=spelling)
 

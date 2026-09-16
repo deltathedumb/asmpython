@@ -303,9 +303,12 @@ anonymous members, `_Generic`, designated initialisers, compound literals
 (including at file scope, where one is a static object whose address is a
 constant), `__VA_OPT__`, K&R definitions, statement expressions, and GNU's
 `__typeof__` and `__restrict` spellings because real headers use them — and
-C23's own: `constexpr` objects whose name is a constant expression,
-`[[...]]` attributes everywhere C allows them, `nullptr`, `typeof`, an
-`enum` with a fixed underlying type, and a label before a declaration.
+C23's own: `_BitInt(N)` up to `BITINT_MAXWIDTH`, which is 64 — what C23
+requires and no more — and which is *not* promoted, so `a + b` on two
+`_BitInt(4)`s wraps at four bits; `constexpr` objects whose name is a
+constant expression; `[[...]]` attributes everywhere C allows them;
+`nullptr`, `typeof`, an `enum` with a fixed underlying type, and a label
+before a declaration.
 
 The preprocessor is Prosser's algorithm, which is to say it agrees with the
 standard's own worked examples rather than with an opinion about what

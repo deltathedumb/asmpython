@@ -51,6 +51,12 @@ class K(enum.Enum):
     ULONG = "unsigned long"
     LLONG = "long long"
     ULLONG = "unsigned long long"
+    #: `_BitInt(N)` AND `unsigned _BitInt(N)`, C23's bit-precise integers.
+    #: TWO KINDS AND NOT 126, because the width is a PARAMETER -- `CType.width`
+    #: -- exactly as an array's count is. Everything C says about them is said
+    #: about the width, so a table keyed by kind could not have held it.
+    BITINT = "_BitInt"
+    UBITINT = "unsigned _BitInt"
     FLOAT = "float"
     DOUBLE = "double"
     LDOUBLE = "long double"
@@ -109,7 +115,17 @@ _TO_UNSIGNED: dict[K, K] = {
 }
 
 _INTEGER = frozenset({K.BOOL, K.CHAR, K.SCHAR, K.UCHAR, K.SHORT, K.USHORT,
-                      K.INT, K.UINT, K.LONG, K.ULONG, K.LLONG, K.ULLONG})
+                      K.INT, K.UINT, K.LONG, K.ULONG, K.LLONG, K.ULLONG,
+                      K.BITINT, K.UBITINT})
+_BITINT = frozenset({K.BITINT, K.UBITINT})
+
+#: THE WIDEST `_BitInt` THIS IMPLEMENTATION HAS, which `<limits.h>` reports as
+#: `BITINT_MAXWIDTH`. C23 requires it to be at least `ULLONG_WIDTH`, which is
+#: 64, and 64 is what it is: a wider one would have to be arithmetic in
+#: software over several IR registers, which is the `long double` story again
+#: for a type whose whole appeal is that it is a machine integer with a
+#: narrower range. A program asking for more is refused by name.
+BITINT_MAXWIDTH = 64
 _FLOATING = frozenset({K.FLOAT, K.DOUBLE, K.LDOUBLE})
 _QUALIFIERS = ("const", "volatile", "restrict", "_Atomic")
 
@@ -191,6 +207,10 @@ class CType:
     of: CType | None = None
     #: ARRAY: the element count, or None for `[]`.
     count: int | None = None
+    #: BITINT, UBITINT: the declared width in bits. `_BitInt(13)` holds 13
+    #: value bits in a two-byte object, and the 3 spare ones are not part of
+    #: the value -- every operation puts them back the way the sign says.
+    width: int = 0
     #: ARRAY: the expression of a variable-length array, unevaluated.
     vla: Any = None
     #: FUNCTION: the return type and parameters. `params is None` is a
@@ -291,6 +311,8 @@ class CType:
         """Whether values of this type are signed. Enums follow their base."""
         if self.kind is K.ENUM:
             return self.tag.base.signed if self.tag and self.tag.base else True
+        if self.kind in _BITINT:
+            return self.kind is K.BITINT
         return _SCALAR.get(self.kind, (0, False))[1]
 
     @property
@@ -318,6 +340,8 @@ class CType:
         """Bytes. Raises on an incomplete type -- the caller must have checked."""
         if self.kind is K.COMPLEX:
             return self.of.size * 2
+        if self.kind in _BITINT:
+            return bitint_bytes(self.width)
         if self.kind in _SCALAR:
             return _SCALAR[self.kind][0]
         if self.kind is K.POINTER:
@@ -346,6 +370,8 @@ class CType:
         # `_Alignof(double _Complex)` must answer.
         if self.kind is K.COMPLEX:
             return self.of.align
+        if self.kind in _BITINT:
+            return bitint_bytes(self.width)
         if self.kind in _SCALAR:
             return _SCALAR[self.kind][0]
         if self.kind is K.POINTER:
@@ -360,7 +386,20 @@ class CType:
 
     @property
     def bits(self) -> int:
+        """The VALUE bits, which for a bit-precise type is not the object's.
+
+        `sizeof(_BitInt(13))` is 2 and `_BitInt(13)` holds 13 bits, and every
+        rule C states about a bit-precise type -- its rank, what it can
+        represent, what an operation wraps modulo -- is stated about the 13.
+        `fold.wrap` reads this, which is why a folded `_BitInt` constant comes
+        out right with no further work.
+        """
+        if self.kind in _BITINT:
+            return self.width
         return self.size * 8
+
+    @property
+    def is_bitint(self) -> bool: return self.kind in _BITINT
 
     # ── qualifiers ──────────────────────────────────────────────────────────
     def unqualified(self) -> CType:
@@ -462,6 +501,33 @@ def record(tag: Tag) -> CType:
     return CType(tag.kind, tag=tag)
 
 
+def bitint_bytes(width: int) -> int:
+    """The object size of a `_BitInt(width)`.
+
+    THE SMALLEST STANDARD CONTAINER THAT HOLDS IT, which is what an ABI does
+    with a type whose width is not a byte count: 1, 2, 4 or 8. It is an
+    implementation choice -- C says only that the object representation has
+    at least `width` bits -- and this one is the obvious one, so a program
+    laying out a struct of them gets the packing it would expect.
+    """
+    for n in (1, 2, 4, 8):
+        if width <= n * 8:
+            return n
+    raise ValueError(f"_BitInt({width}) is wider than {BITINT_MAXWIDTH}")
+
+
+def bitint(width: int, signed: bool) -> CType:
+    """`_BitInt(width)` or `unsigned _BitInt(width)`."""
+    return CType(K.BITINT if signed else K.UBITINT, width=width)
+
+
+def to_unsigned(ty: CType) -> CType:
+    """The unsigned type of the same rank. 6.3.1.8 needs one by name."""
+    if ty.is_bitint:
+        return bitint(ty.width, signed=False)
+    return CType(_TO_UNSIGNED[ty.kind])
+
+
 def integer(bits: int, signed: bool) -> CType:
     """The C type of a given width. Used by `<stdint.h>`'s own lowering and by
     anything that has computed a width and needs a type back."""
@@ -489,6 +555,12 @@ def promote(ty: CType) -> CType:
     """
     if not ty.is_integer:
         return ty
+    if ty.is_bitint:
+        # A BIT-PRECISE TYPE IS NOT PROMOTED, which C23 says in so many
+        # words and which is the whole reason the type is useful: `a + b` on
+        # two `_BitInt(4)`s is arithmetic in 4 bits and wraps there, and a
+        # promotion to `int` would have made it arithmetic in 32.
+        return ty.unqualified()
     if ty.kind is K.ENUM:
         base = ty.tag.base if ty.tag and ty.tag.base else INT
         return promote(base)
@@ -530,6 +602,8 @@ def usual_arithmetic(a: CType, b: CType) -> CType:
             if a.kind is k or b.kind is k:
                 return CType(k)
     a, b = promote(a), promote(b)
+    if a.is_bitint or b.is_bitint:
+        return _bitint_common(a, b)
     if a.kind is b.kind:
         return a.unqualified()
     ra, rb = rank(a), rank(b)
@@ -545,6 +619,42 @@ def usual_arithmetic(a: CType, b: CType) -> CType:
     if s.size > u.size:
         return s
     return CType(_TO_UNSIGNED[s.kind])
+
+
+def _wide_rank(ty: CType) -> tuple[int, int]:
+    """A rank two types can be compared by when one is bit-precise.
+
+    C23 STATES THAT RANK AGAINST THE WIDTH: a bit-precise type outranks every
+    standard type NARROWER than it and is outranked by every standard type as
+    wide or wider. So the pair is (value bits, 1 for a standard type), and
+    comparing them lexicographically says exactly that -- the 1 breaking a tie
+    in the standard type's favour.
+
+    NOT `rank()`, WHOSE TABLE CANNOT ANSWER THIS. It has `long` and `long
+    long` at different numbers for the same 64 bits, which is right for two
+    standard types and says nothing about where `_BitInt(64)` goes; and it has
+    no entry for a bit-precise kind at all, because there is no one number for
+    126 different widths.
+    """
+    return (ty.bits, 0 if ty.is_bitint else 1)
+
+
+def _bitint_common(a: CType, b: CType) -> CType:
+    """The usual arithmetic conversions where one side is bit-precise."""
+    ra, rb = _wide_rank(a), _wide_rank(b)
+    if a.signed == b.signed:
+        return (a if ra > rb else b).unqualified()
+    u, s = (a, b) if not a.signed else (b, a)
+    ru, rs = (ra, rb) if not a.signed else (rb, ra)
+    if ru >= rs:
+        return u.unqualified()
+    # The signed type has the greater rank; it wins only if it can hold every
+    # value of the unsigned one, which needs one more bit than the unsigned
+    # one has. Otherwise both go to the unsigned type of the signed one's
+    # rank, which is C's rule for the standard types said the same way.
+    if s.bits > u.bits:
+        return s.unqualified()
+    return to_unsigned(s)
 
 
 def decay(ty: CType) -> CType:
@@ -576,6 +686,11 @@ def to_ir(ty: CType) -> IR.Type:
     k = ty.kind
     if k is K.BOOL:
         return IR.I1
+    if k in _BITINT:
+        # THE CONTAINER, not the width: the IR has i8, i16, i32 and i64, and
+        # a `_BitInt(13)` lives in an i16 with its top three bits kept the way
+        # its sign says. `lower._narrow_bitint` is what keeps them that way.
+        return IR.int_of(bitint_bytes(ty.width) * 8, k is K.BITINT)
     if k in _INTEGER:
         size, signed = _SCALAR[k]
         return IR.int_of(size * 8, signed)
@@ -614,6 +729,12 @@ def compatible(a: CType, b: CType, *, qualifiers: bool = True) -> bool:
         if b.is_enum and a.is_integer:
             return compatible(a, b.tag.base or INT, qualifiers=qualifiers)
         return False
+    if a.kind in _BITINT:
+        # `_BitInt(13)` AND `_BitInt(14)` ARE DIFFERENT TYPES, which the kind
+        # alone does not say: the width is a parameter of the type the way an
+        # array's count is, and two of different widths are no more compatible
+        # than `short` and `int`.
+        return a.width == b.width
     if a.kind in (K.STRUCT, K.UNION, K.ENUM):
         return a.tag is b.tag
     if a.kind is K.COMPLEX:
@@ -794,6 +915,8 @@ def spell(ty: CType, inner: str = "") -> str:
         return spell(ty.ret, f"{inner}({args})")
     if k is K.COMPLEX:
         base = f"{ty.of.kind.value} _Complex"
+    elif k in _BITINT:
+        base = f"{k.value}({ty.width})"
     elif k in (K.STRUCT, K.UNION, K.ENUM):
         name = ty.tag.name if ty.tag and ty.tag.name else "(anonymous)"
         base = f"{k.value} {name}"
