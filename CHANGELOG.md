@@ -58,17 +58,43 @@ deliverable.
   **The standard library is compiled from C too**, over `plat_write`,
   `plat_exit` and `plat_heap` and nothing else — so a C program built here
   runs on every backend AND in the IR interpreter, with no second runtime for
-  a backend to implement. Nineteen headers including a complete `printf`
-  whose floating-point conversion is EXACT (a base-10^9 bignum: every finite
-  double is a terminating decimal, so `printf("%f", 1e300)` has a right answer
-  with 301 digits in it) and rounds ties to even, and a `<math.h>` written
-  over `+ - * /` because there is no libm below it.
+  a backend to implement. All thirty-one headers C23 requires, including a
+  complete `printf` whose floating-point conversion is EXACT (a base-10^9
+  bignum: every finite double is a terminating decimal, so
+  `printf("%f", 1e300)` has a right answer with 301 digits in it) and rounds
+  ties to even, and a `<math.h>` written over `+ - * /` because there is no
+  libm below it. A test includes every header alone and then all of them
+  together, because a macro one defines can break the next. GNU's
+  `__typeof__`, `__restrict` and the rest of the double-underscore spellings
+  are keywords, because real headers use them.
 
-  All thirty-one headers C23 requires are present; three refuse with a
-  reason rather than being absent (`<complex.h>`, `<setjmp.h>`,
-  `<threads.h>`), because a missing file is a mystery and a refusal is an
-  answer. GNU's `__typeof__`, `__restrict` and the rest of the
-  double-underscore spellings are keywords, because real headers use them.
+  **What the library needs from the TARGET is declared rather than
+  assumed.** Below the three platform-floor functions there is a second
+  layer that a program pays for only if it asks: `objects/hostsvc.py`'s
+  optional groups — a filesystem, a clock, entropy, an environment, another
+  program, threads — which a backend DECLARES. A program that calls into a
+  group its target has not got is refused at compile time, by name
+  (`this program needs host services the x86-64 backend does not provide:
+  'file' (for host_file_open)`), rather than failing to link or returning a
+  plausible zero. `lower.prune` drops the declaration of a service nothing
+  reaches, which is what keeps hello world naming no group at all. That is
+  where `main(int argc, char **argv)` gets its command line, `scanf` its
+  standard input, `fopen` its files, `time` its clock, `getenv` its
+  environment and `system` another program: DECLARING the parameters is what
+  names the group, so a program that does not is not asking.
+
+  `<setjmp.h>` works, and not by saving a machine frame: `longjmp` sets a
+  flag, every call site in the PROGRAM checks it as its call returns, and
+  the frame that recognises the jump's token branches back to its own
+  `setjmp`. `<complex.h>` works, with Annex G's multiply and divide rather
+  than the four-multiply formula, because what an infinity times a zero must
+  produce is the hard part. `<threads.h>` works where the target has them,
+  and `_Thread_local` is compiled onto the same keys. `long double` is
+  80-bit extended in software — the format written out in C, checked
+  bit-for-bit against x87 — and everything about it that is exact by
+  definition is exact rather than computed in a double that has neither the
+  range nor the precision. Several translation units build into one program,
+  `uasm build main.c --c:unit parse.c`, meaning by it what `cc` does.
 
   Its flags are declared the way a backend's always were, on the frontend
   itself: `-I`/`--include-path`, `-D`/`--define`, `--trigraphs` and
@@ -77,21 +103,25 @@ deliverable.
   for the mechanism. `run` and `check` get those flags too, not only
   `build`: they put the same source through the same frontend.
 
-  Eighty-seven programs are compiled three ways — the host's `cc`, this
-  frontend's IR in the reference interpreter, and this frontend's IR through
-  the C backend and then `cc` — and all three must agree on output and exit
-  status. One is built through the **x86-64** backend and the **jvm** one as
+  A hundred and eight programs are compiled three ways — the host's `cc`,
+  this frontend's IR in the reference interpreter, and this frontend's IR
+  through the C backend and then `cc` — and all three must agree on output
+  and exit status. One is built through the **x86-64** backend and the **jvm** one as
   well, and prints the same thing.
   Struct layout is compared against the host compiler's `sizeof` and
   `_Alignof` for twelve declarations, because a struct's layout is an ABI and
   a frontend can be self-consistently wrong about one.
 
   FOUR KNOWN DIVERGENCES, and they are the whole list: `long double` is
-  `double` (the IR has no type wider than f64, and `<float.h>` says so rather
-  than pretending); `_Complex` is refused with a diagnostic; `setjmp`/`longjmp`
-  are refused, because a non-local jump needs a frame the IR deliberately
-  cannot name; and `main`'s parameters are 0 and a null `argv`, because
-  nothing in the platform floor can ask the host for a command line.
+  software rather than the machine's (the format is x86-64's, so `sizeof`,
+  `LDBL_*` and every printed digit agree with a hosted compiler, and the `l`
+  SERIES in `<math.h>` answer to about a double's precision in the wider
+  type); `_Imaginary` is absent, which is conforming rather than missing
+  because imaginary types are Annex G and gcc has never had them either; a
+  local that is not `volatile` survives a `longjmp` with the value it had,
+  which is stricter than the standard's "indeterminate"; and `localtime` is
+  `gmtime`, because the host services can say what time it is and cannot say
+  what the local offset from UTC is.
 
 - **Thirteen verbs down to five** — `build`, `run`, `verify`, `link`,
   `plugin`. `check` is `verify`, and renamed because the two words promise
