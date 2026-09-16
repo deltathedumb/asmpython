@@ -1697,6 +1697,95 @@ PROGRAMS: dict[str, str] = {
         }
     """,
 
+    "an_unnamed_parameter_and_a_literal_that_says_static": r"""
+        /* Two of C23's: a parameter a definition does not name, and
+           the storage classes a compound literal may carry. */
+        #include <stdio.h>
+
+        struct point { int x, y; };
+
+        /* An unnamed parameter in a DEFINITION, which C23 added so a function can
+           say "this argument is part of my interface and I do not read it". */
+        static int ignores_two(int a, int, const char *, int b) { return a + b; }
+
+        static int *counter(void) {
+            /* `static` gives the literal static storage duration, so it survives
+               the call and its address is a constant. */
+            static int *kept = (static int[]){10, 20, 30};
+            return kept;
+        }
+
+        int main(void) {
+            printf("%d\n", ignores_two(1, 99, "ignored", 2));
+
+            {   int *p = (static int[]){1, 2, 3};
+                p[0]++;
+                printf("%d %d %d\n", p[0], p[1], p[2]); }
+            {   int *q = counter();
+                q[1] += 5;
+                printf("%d %d\n", counter()[1], q == counter()); }
+
+            {   const struct point *s = &(static const struct point){4, 5};
+                printf("%d %d\n", s->x, s->y); }
+            {   int n = (constexpr int){7};
+                int arr[(constexpr int){3}];
+                arr[0] = n;
+                printf("%d %d\n", arr[0], (int)(sizeof arr / sizeof arr[0])); }
+            /* `register` buys nothing but the promise not to take an address,
+               so a scalar one is read for its value and that is all. */
+            printf("%d\n", (register int){8} + 1);
+            /* An ordinary one still has automatic storage: a fresh object per pass. */
+            for (int i = 0; i < 2; i++) {
+                int *t = (int[]){0, 0};
+                t[0] += 1;
+                printf("auto %d\n", t[0]);
+            }
+            return 0;
+        }
+    """,
+
+    "a_compound_literal_per_thread": r"""
+        /* `(static thread_local T){...}` -- one copy per thread from
+           the object the literal describes -- and the file-scope
+           literal that is NOT read-only, which was a segmentation
+           fault on the compiled path and nothing at all on the
+           interpreted one. That is what three ways is for. */
+        #include <stdio.h>
+        #include <threads.h>
+
+        /* A FILE-SCOPE LITERAL IS A MODIFIABLE OBJECT unless it says `const`. It
+           was in read-only storage once and this store was a segmentation fault. */
+        static int *table = (int[]){1, 2, 3};
+        static const int *frozen = (const int[]){7, 8};
+
+        static int *per_thread(void) { return (static thread_local int[]){0, 0}; }
+
+        static int worker(void *arg) {
+            int *mine = per_thread();
+            mine[0] = *(int *)arg;
+            mine[1] = mine[0] * 10;
+            printf("thread %d %d\n", mine[0], mine[1]);
+            return 0;
+        }
+
+        int main(void) {
+            thrd_t a, b;
+            int one = 1, two = 2;
+            table[0] = 99;
+            printf("%d %d %d %d %d\n", table[0], table[1], table[2],
+                   frozen[0], frozen[1]);
+            {   int *m = per_thread();
+                m[0] = 5;
+                printf("main %d %d\n", per_thread()[0], m == per_thread()); }
+            thrd_create(&a, worker, &one);
+            thrd_join(a, NULL);
+            thrd_create(&b, worker, &two);
+            thrd_join(b, NULL);
+            printf("main still %d\n", per_thread()[0]);
+            return 0;
+        }
+    """,
+
     "binary_conversions_and_the_width_modifiers": r"""
         /* C23's `%b` and `%B`, its `wN` and `wfN` length
            modifiers, the `0b` prefix in the scanner and in

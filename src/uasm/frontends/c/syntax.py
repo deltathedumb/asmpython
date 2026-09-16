@@ -210,12 +210,19 @@ class SizeofType(Expr):
 @dataclass(slots=True)
 class CompoundLiteral(Expr):
     """`(T){...}`. An unnamed object with the lifetime of its scope -- a frame
-    slot inside a function, a global at file scope."""
+    slot inside a function, a global at file scope, and a global wherever it
+    appears once C23's `(static T){...}` says so."""
 
     init: Any = None
     #: Set by lowering for the file-scope case.
     symbol: str | None = None
     static: bool = False
+    #: C23's `(static thread_local T){...}`: one copy per thread, from the
+    #: object above as a template. Implies `static`.
+    thread_local: bool = False
+    #: C23's `(register T){...}`, which buys exactly one thing: the
+    #: promise not to take the address. Kept so `&` can hold it.
+    register: bool = False
 
 
 @dataclass(slots=True)

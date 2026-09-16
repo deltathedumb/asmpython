@@ -403,6 +403,26 @@ class Sema:
                        span,
                        note="`&` needs an object with a location in memory")
             return self.poison(span)
+        # A `register` OBJECT HAS NO ADDRESS TO TAKE, which is the one thing
+        # the specifier still means now that no compiler takes it as advice:
+        # 6.5.3.2 makes `&x` on one a constraint violation, so it is
+        # diagnosed rather than quietly given the slot it would otherwise
+        # have got. An ARRAY decaying to a pointer is a different rule --
+        # undefined rather than a violation -- and is left alone.
+        reg = operand
+        while isinstance(reg, S.Conv):
+            reg = reg.operand
+        if isinstance(reg, S.Ident) and reg.sym is not None \
+                and reg.sym.storage is Storage.REGISTER:
+            self.error("E1412",
+                       f"{reg.name!r} is `register` and has no address",
+                       span, help="drop the `register`")
+            return self.poison(span)
+        if isinstance(reg, S.CompoundLiteral) and reg.register:
+            self.error("E1412",
+                       "this compound literal is `register` and has no "
+                       "address", span, help="drop the `register`")
+            return self.poison(span)
         self._mark_addressed(operand)
         return S.Unary(span, C.pointer_to(operand.type), False, "&", operand)
 

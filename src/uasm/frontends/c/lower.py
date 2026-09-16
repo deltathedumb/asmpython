@@ -200,9 +200,30 @@ class Lowerer:
         size = node.type.size
         mark = len(self.init_stores)
         data = self._init_bytes(node.symbol, node.init, size)
+        # READ-ONLY ONLY IF IT SAYS `const`, which is the same rule
+        # `_readonly` applies to a named object and for the same reason.
+        # A compound literal is a modifiable object unless its type is
+        # qualified -- `int *p = (int[]){1, 2}; p[0] = 5;` is an ordinary
+        # store -- and putting one in `.rodata` because its initialiser
+        # happened to be constant is a program that SEGFAULTS on the store.
+        # A per-thread one is never read-only either: `__c_tls_get` copies
+        # out of it, and the symmetry with the named case is worth the page.
         self._add_global(Global(node.symbol, max(1, size), data,
-                                readonly=len(self.init_stores) == mark,
+                                readonly=(node.type.is_const
+                                          and len(self.init_stores) == mark
+                                          and not node.thread_local),
                                 align=node.type.align))
+        if node.thread_local:
+            # THE SAME TWO PIECES A NAMED `thread_local` OBJECT GETS: the
+            # object above is the template a thread's first use copies, and
+            # the key beside it is made once before `main`. Not read-only,
+            # whatever the initialiser looks like -- `__c_tls_get` copies
+            # OUT of it and a backend that put it in `.rodata` would be
+            # right to, but the symmetry with the named case is worth more
+            # than the page.
+            self._add_global(Global(node.symbol + ".key", 8, None,
+                                    span=node.span))
+            self.thread_locals.append((node.symbol, max(1, size)))
 
     def _readonly(self, sym: Symbol, mark: int) -> bool:
         """Whether a global may go in read-only storage.
@@ -1068,12 +1089,18 @@ class Lowerer:
         has no threads, by name. That is the honest reading of what the
         program asked for.
         """
+        return self._tls_lookup(sym.ir_name or sym.name,
+                                max(1, sym.type.size))
+
+    def _tls_lookup(self, name: str, size: int) -> int:
+        """The lookup itself, by name and size, so that a `thread_local`
+        COMPOUND LITERAL -- which has a global but no `Symbol` -- reaches the
+        same three-argument call rather than a copy of it."""
         self.needs_tls = True
-        name = sym.ir_name or sym.name
         self._ensure_extern("__c_tls_get", IR.PTR, [IR.PTR, IR.I64, IR.PTR])
         return self.b.call(IR.PTR, "__c_tls_get",
                            [self._global_addr(name + ".key"),
-                            self.b.const(IR.I64, max(1, sym.type.size)),
+                            self.b.const(IR.I64, size),
                             self._global_addr(name)])
 
     def _global_addr(self, name: str) -> int:
@@ -2140,6 +2167,8 @@ class Lowerer:
                                 target=ty)
 
     def _compound_literal(self, e: S.CompoundLiteral) -> int:
+        if e.symbol is not None and e.thread_local:
+            return self._tls_lookup(e.symbol, max(1, e.type.size))
         if e.symbol is not None:
             return self._global_addr(e.symbol)
         slot = self.b.alloca(max(1, e.type.size))

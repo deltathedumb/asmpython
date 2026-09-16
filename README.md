@@ -314,7 +314,11 @@ requires and no more — and which is *not* promoted, so `a + b` on two
 `_BitInt(4)`s wraps at four bits; `constexpr` objects whose name is a
 constant expression; `[[...]]` attributes everywhere C allows them;
 `nullptr`, `typeof`, `auto` that takes the initialiser's type, an `enum`
-with a fixed underlying type, and a label before a declaration. In the preprocessor: `#embed` with all four of its
+with a fixed underlying type, a label before a declaration, a parameter a
+definition does not name, and the storage classes a compound literal may
+carry — `(static int[]){1, 2}` inside a function is a static object whose
+address is a constant, and `(static thread_local T){...}` is one copy per
+thread. In the preprocessor: `#embed` with all four of its
 parameters and `__has_embed`, `#elifdef`, `__VA_OPT__` and `_Pragma`.
 
 `printf` and `scanf` are C23's: `%b` and `%B` for binary with `%#b` writing

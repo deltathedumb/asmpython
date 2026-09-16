@@ -215,7 +215,65 @@ class Parser:
             left = self.sema.build_binary(op.text, left, right, op.span)
         return left
 
+    #: THE STORAGE CLASSES A COMPOUND LITERAL MAY CARRY, which C23 added so
+    #: that `(static int[]){1, 2}` has static storage duration and its
+    #: address is therefore a constant -- the one thing a block-scope
+    #: compound literal could not be before. `extern`, `auto` and `typedef`
+    #: are NOT among them: the literal defines its object right where it
+    #: stands, so there is nothing for any of the three to mean.
+    #: SPELT AS `_kw` LEAVES THEM, which is why `thread_local` appears here
+    #: under its C11 name: `KEYWORD_ALIASES` folds the two spellings into
+    #: one keyword and this table is consulted after the fold. Written the
+    #: other way it silently matched nothing.
+    _LITERAL_STORAGE = ("static", "register", "constexpr", "_Thread_local")
+
+    def _at_literal_storage(self, t: Token) -> bool:
+        return (t.kind is Kind.IDENT
+                and _kw(t.text) in self._LITERAL_STORAGE)
+
+    def _storage_literal(self) -> S.Expr:
+        """`(static T){...}` and the other three. A CAST CANNOT START WITH A
+        STORAGE CLASS, so seeing one after the `(` settles what this is
+        before the type is read -- which is why this does not go through
+        `_at_compound_literal`'s lookahead."""
+        self.next()                                   # `(`
+        seen: dict[str, Span] = {}
+        while self._at_literal_storage(self.tok):
+            t = self.next()
+            word = _kw(t.text)
+            if word in seen:
+                self.sema.error("E1604", f"`{t.text}` appears twice here",
+                                t.span, also=(seen[word], "the first one"))
+            seen[word] = t.span
+        ty = self.type_name()
+        close = self.expect(")", "a compound literal's type needs a `)`")
+        span = close.span if close else self.tok.span
+        if not self.at("{"):
+            self.sema.error(
+                "E1605", "a storage class here needs a compound literal", span,
+                note="`(static int)x` is not a cast",
+                help="write `(static int){x}`, or drop the storage class")
+            return self.sema.poison(span)
+        if "_Thread_local" in seen and "static" not in seen:
+            # C says `thread_local` goes with `static` or `extern` and a
+            # compound literal cannot be `extern`, so `static` is the only
+            # company left. Reported rather than assumed: a program that
+            # wrote one and meant a per-call object should hear about it.
+            self.sema.error(
+                "E1606", "`thread_local` here needs `static` too",
+                seen["_Thread_local"],
+                note="a per-thread object outlives the call that made it",
+                help="write `(static thread_local T){...}`")
+        if "constexpr" in seen:
+            ty = ty.qualified({"const"})
+        return self._compound_literal(
+            ty, span, static="static" in seen or "_Thread_local" in seen,
+            thread_local="_Thread_local" in seen,
+            constexpr="constexpr" in seen, register="register" in seen)
+
     def cast_expression(self) -> S.Expr:
+        if self.at("(") and self._at_literal_storage(self.peek()):
+            return self.postfix(self._storage_literal())
         if self.at("(") and self._type_starts(self.peek()):
             self.next()
             ty = self.type_name()
@@ -545,13 +603,38 @@ class Parser:
             ty = body.items[-1].expr.type
         return S.StmtExpr(span, ty, False, body)
 
-    def _compound_literal(self, ty: CType, span: Span) -> S.Expr:
+    def _compound_literal(self, ty: CType, span: Span, *,
+                          static: bool = False, thread_local: bool = False,
+                          constexpr: bool = False,
+                          register: bool = False) -> S.Expr:
         init = self.initializer(ty, span)
         if ty.is_array and ty.count is None:
             ty = C.array_of(ty.of, init.size // max(1, ty.of.size))
         node = S.CompoundLiteral(span, ty, True, init)
-        if self.sema.scope.is_file:
+        node.register = register
+        if constexpr:
+            # THE SAME RULE A `constexpr` OBJECT LIVES BY, and checked the
+            # same way: every entry has to fold. There is no name to
+            # remember a scalar value under -- a literal is not something a
+            # later expression can spell -- so this is the check alone.
+            for entry in init.entries:
+                if entry.value is None or entry.data is not None:
+                    continue
+                if fold(entry.value) is None:
+                    self.sema.error(
+                        "E1607",
+                        "this `constexpr` compound literal has an "
+                        "initialiser that is not a constant",
+                        entry.value.span,
+                        note="`constexpr` says the value is known at "
+                             "compile time, and this one is not")
+                    break
+        # A FILE-SCOPE LITERAL IS STATIC WHETHER IT SAYS SO OR NOT, because
+        # there is no frame for it to live in; `(static T){...}` is how a
+        # literal INSIDE a function asks for the same thing.
+        if static or self.sema.scope.is_file:
             node.static = True
+            node.thread_local = thread_local
             node.symbol = self.sema.unique(self.sema.prefix + "compound")
             self.anon.append(node)
         return node
@@ -2144,7 +2227,13 @@ class Parser:
         elif spec.storage is Storage.STATIC:
             storage, linkage = Storage.STATIC, Linkage.NONE
         else:
-            storage, linkage = Storage.AUTO, Linkage.NONE
+            # `register` KEPT AND NOT FOLDED INTO `auto`. It asks for no
+            # storage of its own and lowering treats the two alike, but it
+            # is the reason `&x` is a constraint violation, and a symbol
+            # that has forgotten it cannot say so.
+            storage = (Storage.REGISTER
+                       if spec.storage is Storage.REGISTER else Storage.AUTO)
+            linkage = Linkage.NONE
         sym = self._merge(name, ty, storage, linkage, span)
         if spec.constexpr:
             sym.type = ty = ty.qualified({"const"})
@@ -2154,7 +2243,7 @@ class Parser:
             # ONE COPY PER THREAD, which is a property of the OBJECT rather
             # than of this declaration: a second declaration without the
             # keyword refers to the same thread-local object.
-            if storage is Storage.AUTO:
+            if storage in (Storage.AUTO, Storage.REGISTER):
                 self.sema.error(
                     "E1278",
                     f"{name!r} is `_Thread_local` and has automatic storage",
@@ -2532,17 +2621,28 @@ class Parser:
         self._gotos = []
         self.sema.push()
         try:
-            for p in params:
-                if p.name is None:
-                    self.sema.error("E1281",
-                                    "a parameter in a definition needs a name",
-                                    p.span or span)
-                    continue
+            for index, p in enumerate(params):
                 if not p.type.complete and not p.type.is_vla:
                     self.sema.error(
                         "E1282",
-                        f"parameter {p.name!r} has the incomplete type "
-                        f"{C.spell(p.type)}", p.span or span)
+                        (f"parameter {p.name!r}" if p.name
+                         else f"parameter {index + 1}")
+                        + f" has the incomplete type {C.spell(p.type)}",
+                        p.span or span)
+                if p.name is None:
+                    # C23 LETS A PARAMETER IN A DEFINITION GO UNNAMED, which
+                    # is how a function says "this argument is part of my
+                    # interface and I do not read it" without the
+                    # `(void)unused;` line that used to be the only way.
+                    #
+                    # IT STILL TAKES ITS PLACE. The symbol is made and
+                    # appended and only the DECLARING is skipped -- dropping
+                    # it would shift every argument after it by one, which is
+                    # a miscompilation rather than a diagnostic.
+                    fn.params.append(p.sym or Symbol("<unnamed>", p.type,
+                                                     Storage.PARAM,
+                                                     span=p.span))
+                    continue
                 if self.sema.scope.names.get(p.name) is not None:
                     self.sema.error("E1276",
                                     f"{p.name!r} is declared twice",

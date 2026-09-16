@@ -890,6 +890,64 @@ class TestTheDivergences:
         assert sink.failed
         assert "E1281" in [d.code for d in sink.diagnostics]
 
+    def test_a_parameter_in_a_definition_need_not_be_named(self):
+        """C23's, and the point of it is that the argument still ARRIVES.
+        Dropping an unnamed parameter instead of giving it a nameless place
+        would shift every argument after it by one, which is a wrong answer
+        rather than a diagnostic -- so the test is a call, not a compile."""
+        module, sink = compile_c(
+            "static int f(int a, int, const char *, int b){ return a + b; }\n"
+            "int main(void){ return f(1, 99, \"x\", 2); }\n")
+        assert module is not None, [d.message for d in sink.diagnostics]
+        assert not sink.failed, [d.message for d in sink.diagnostics]
+
+        # AN INCOMPLETE TYPE IS STILL AN INCOMPLETE TYPE, named or not, and
+        # the diagnostic counts to it rather than quoting a name it has not
+        # got.
+        _, sink = compile_c("struct opaque;\n"
+                            "int f(int, struct opaque){ return 0; }\n"
+                            "int main(void){ return 0; }\n")
+        assert sink.failed
+        assert "E1282" in [d.code for d in sink.diagnostics]
+        assert "parameter 2" in sink.diagnostics[0].message
+
+    def test_a_compound_literal_may_say_static(self):
+        """C23 again, and the reason is the initialiser below it: a literal
+        inside a function used to have automatic storage and no constant
+        address, so `static int *p = (int[]){1};` had nowhere to point."""
+        module, sink = compile_c(
+            "int *f(void){ static int *p = (static int[]){1, 2, 3};\n"
+            "              return p; }\n"
+            "int main(void){ return f()[0] - 1; }\n")
+        assert module is not None, [d.message for d in sink.diagnostics]
+        assert not sink.failed, [d.message for d in sink.diagnostics]
+
+        # WITHOUT IT THE ADDRESS IS NOT A CONSTANT, which is what the
+        # specifier changes and what the host compiler says too.
+        _, sink = compile_c("int *f(void){ static int *p = (int[]){1};\n"
+                            "              return p; }\n"
+                            "int main(void){ return 0; }\n")
+        assert sink.failed
+
+    @harness.cases("source,code", [
+        # `thread_local` needs company: a compound literal cannot be
+        # `extern`, so `static` is the only company C leaves it.
+        ("int *f(void){ return (thread_local int[]){1}; }", "E1606"),
+        # A CAST CANNOT HAVE A STORAGE CLASS, so this is a literal missing
+        # its braces rather than a cast with a stray word in it.
+        ("int f(int x){ return (static int)x; }", "E1605"),
+        ("int *f(void){ return (static static int[]){1}; }", "E1604"),
+        # `constexpr` says the value is known now, and `n` is not.
+        ("int f(int n){ return (constexpr int){n}; }", "E1607"),
+        # `register` buys exactly one thing and this is it.
+        ("int *f(void){ return &(register int){1}; }", "E1412"),
+        ("int f(void){ register int x = 1; return (int)(long)&x; }", "E1412"),
+    ])
+    def test_the_storage_classes_a_literal_may_not_have(self, source, code):
+        _, sink = compile_c(source + "\nint main(void){ return 0; }\n")
+        got = [d.code for d in sink.diagnostics]
+        assert code in got, got
+
     def test_a_bitint_is_not_promoted(self):
         """The whole reason the type is useful: `a + b` on two `_BitInt(4)`s
         is arithmetic in four bits and wraps there. A promotion to `int`
