@@ -60,6 +60,16 @@ class LinkRequest:
     output: Path
     #: Directory for intermediates. Kept if `keep_intermediates`.
     workdir: Path
+    #: FILES ALREADY ON DISK that are part of what is being linked.
+    #:
+    #: NOT `artifacts` AND NOT `extra_inputs`, and the three are different
+    #: things. `artifacts` is what a backend produced, in memory, which the
+    #: toolchain writes into the workdir; `extra_inputs` is `-l` names and
+    #: libraries, handed to the tool after the output; this is objects the
+    #: USER named, which exist where they are and must not be copied
+    #: anywhere -- `uasm link a.o b.o -o prog` compiles nothing and has only
+    #: these. A toolchain counts them as inputs alongside the artifacts.
+    input_paths: tuple[Path, ...] = ()
     #: Extra objects, archives or `-l` names supplied by the caller.
     extra_inputs: tuple[str, ...] = ()
     #: Runtime source the frontend needs linked in (see `uasm.objects.support`).

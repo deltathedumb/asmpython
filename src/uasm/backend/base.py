@@ -284,7 +284,7 @@ def available() -> dict[str, Backend]:
 
 def load_builtin() -> None:
     # THE STUBS ARE IMPORTED TOO. Each declares `ready = False` and refuses to
-    # emit -- so `uasm backends` shows the whole matrix with the
+    # emit -- so `uasm plugin backends` shows the whole matrix with the
     # unfinished half marked, rather than showing four and leaving the rest to
     # be discovered as "unknown backend".
     from ..backends import (                                   # noqa: F401

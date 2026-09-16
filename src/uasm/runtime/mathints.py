@@ -292,7 +292,7 @@ def apy_math_lcm(a: ptr, b: ptr) -> ptr:
 
 # ── the numeric walls ──────────────────────────────────────────────────────
 #
-# `apy_math_arg` IS THE BIGGEST BLOCKER LEFT in `uasm port`: fifteen
+# `apy_math_arg` IS THE BIGGEST BLOCKER LEFT in `uasm plugin port`: fifteen
 # functions wait on it, and it is five lines. Like the three before it, what
 # kept it in the C was `static` rather than difficulty.
 

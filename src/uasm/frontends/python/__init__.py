@@ -209,7 +209,7 @@ class PythonFrontend(Frontend):
         # differently because of it. See `hostlib.py`.
         Option("no-site-packages", switch=True,
                help="do not search the host Python installation's "
-                    "site-packages (see `uasm libraries`)"),
+                    "site-packages (see `uasm plugin libraries`)"),
         Option("host-python", metavar="PATH",
                help="the interpreter whose site-packages to search; "
                     "default is the one running the compiler"),
@@ -232,6 +232,8 @@ class PythonFrontend(Frontend):
 
     #: Set by `configure` on the copy it returns; see `compile`.
     library = False
+    #: Set by `configure` from `BuildContext.verifying`; see `compile`.
+    verifying = False
 
     def configure(self, values: dict, context: BuildContext,
                   sink: DiagnosticSink) -> "PythonFrontend | None":
@@ -288,6 +290,7 @@ class PythonFrontend(Frontend):
 
         clone = copy.copy(self)
         clone.library = bool(values.get("library"))
+        clone.verifying = context.verifying
         return clone
 
     def compile(self, source: SourceFile, sink: DiagnosticSink, *,
@@ -340,7 +343,14 @@ class PythonFrontend(Frontend):
         # WHAT THE LINKER HAS TO BE TOLD. `ctypes.CDLL("m")` is a promise that
         # `-lm` will be there; published here because the driver drives the
         # link and the frontend only knows what the source said.
-        cffi.name_libraries(analyzer.ctypes_libraries)
+        #
+        # NOT ON A VERIFICATION RUN, because the linker is the only thing
+        # that reads it and there will not be one. Analysis still WALKS the
+        # `ctypes` calls -- `E0121` through `E0128` are its diagnostics and
+        # they are the point of verifying -- so what is skipped is the
+        # handoff and nothing else.
+        if not self.verifying:
+            cffi.name_libraries(analyzer.ctypes_libraries)
         if sink.failed:
             # Lowering assumes analysis succeeded. Running it anyway would
             # produce IR that fails the verifier, and the user would see an

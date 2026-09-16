@@ -103,7 +103,7 @@ X86_64_LINUX_CPYEXT = register(Target(
 #: THE ONE THIS SESSION CANNOT LINK: it needs a Windows-targeting C
 #: compiler (`x86_64-w64-mingw32-gcc`, MinGW-w64's cross toolchain) on
 #: PATH, which is not installed everywhere this compiler is. Registered
-#: and code-complete regardless -- `uasm targets`/`uasm backends`
+#: and code-complete regardless -- `uasm plugin targets`/`uasm plugin backends`
 #: should show the whole matrix, and `CPyExtToolchain.link()` refuses with
 #: a named, installable tool rather than a traceback when it is missing,
 #: exactly like every other cross target here (`AARCH64_LINUX` et al.).

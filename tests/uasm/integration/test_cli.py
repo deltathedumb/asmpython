@@ -79,9 +79,10 @@ class TestItRunsAtAll:
         r = run_cli("--help")
         assert r.returncode == 0, r.stderr
         assert "uasm" in r.stdout
-        # `toolchains` exists only in the rewrite. Without a check like this
-        # the test passes against the legacy CLI, which is also `uasm`.
-        assert "toolchains" in r.stdout, "this is the old CLI, not the new one"
+        # `plugin` exists only in the rewrite, and it is where the listings
+        # live now. Without a check like this the test passes against the
+        # legacy CLI, which is also `uasm`.
+        assert "plugin" in r.stdout, "this is the old CLI, not the new one"
 
     def test_build_help_lists_the_build_flags(self):
         r = run_cli("build", "--help")
@@ -92,10 +93,13 @@ class TestItRunsAtAll:
 
     @harness.cases("command", [
         "ops", "types", "passes", "backends", "frontends", "targets",
-        "toolchains",
+        "linkers", "toolchains", "libraries", "port", "list",
     ])
     def test_every_informational_command_runs(self, command):
-        r = run_cli(command)
+        # UNDER `plugin`, all of them: each answers a question about the
+        # INSTALLATION rather than about a program, and a plugin is why the
+        # answer can differ between two machines.
+        r = run_cli("plugin", command)
         assert r.returncode == 0, f"{command}: {r.stderr}"
         assert r.stdout.strip(), f"{command} printed nothing"
 
@@ -108,26 +112,26 @@ class TestItRunsAtAll:
 
 class TestListings:
     def test_targets_lists_the_builtins_and_host(self):
-        out = run_cli("targets").stdout
+        out = run_cli("plugin", "targets").stdout
         for name in ("x86_64-linux", "x86_64-windows", "c", "host"):
             assert name in out, f"{name} missing from `targets`"
 
     def test_targets_shows_abi_and_format(self):
         """The fields a backend reads. Sniffing the name instead was a bug."""
-        out = run_cli("targets").stdout
+        out = run_cli("plugin", "targets").stdout
         assert "abi=win64" in out and "abi=sysv" in out
         assert "format=coff" in out and "format=elf" in out
 
     def test_toolchains_lists_both(self):
-        out = run_cli("toolchains").stdout
+        out = run_cli("plugin", "linkers").stdout
         assert "cc" in out and "none" in out
 
     def test_backends_lists_both(self):
-        out = run_cli("backends").stdout
+        out = run_cli("plugin", "backends").stdout
         assert "x86-64" in out and "c" in out
 
     def test_ops_covers_the_whole_instruction_set(self):
-        out = run_cli("ops").stdout
+        out = run_cli("plugin", "ops").stdout
         assert "39 opcodes" in out
         for op in ("add", "call", "branch", "ftoi", "ret"):
             assert op in out, f"{op} missing from `ops`"
@@ -135,26 +139,26 @@ class TestListings:
 
 class TestCheck:
     def test_a_good_program_checks_clean(self, program):
-        r = run_cli("check", str(program))
+        r = run_cli("verify", str(program))
         assert r.returncode == 0, r.stderr
         assert "ok:" in r.stdout
 
     def test_a_bad_program_fails_with_a_diagnostic(self, tmp_path):
         path = tmp_path / "bad.py"
         path.write_text(BAD_PROGRAM, encoding="utf-8")
-        r = run_cli("check", str(path))
+        r = run_cli("verify", str(path))
         assert r.returncode == 1
         assert "E0031" in (r.stdout + r.stderr)
         assert "Traceback" not in r.stderr
 
     def test_a_missing_file_is_a_diagnostic(self, tmp_path):
-        r = run_cli("check", str(tmp_path / "nope.py"))
+        r = run_cli("verify", str(tmp_path / "nope.py"))
         assert r.returncode == 1
         assert "Traceback" not in r.stderr
 
     def test_check_writes_nothing(self, program, tmp_path):
         before = set(tmp_path.iterdir())
-        run_cli("check", str(program))
+        run_cli("verify", str(program))
         assert set(tmp_path.iterdir()) == before
 
 
@@ -483,3 +487,205 @@ class TestTheCommandLineReachesTheProgram:
             [sys.executable, "-m", "uasm", "run", str(path), raw],
             capture_output=True, env={**os.environ, "PYTHONPATH": str(SRC)})
         assert r.stdout.decode().strip() == want, r.stdout
+
+
+class TestVerifySaysWhatBuildWouldAccept:
+    """`verify` is `build` with everything after the frontend taken off.
+
+    THE PROMISE IS THE POINT: a program it passes is one `build` accepts. So
+    what is tested is not that it prints something, but that its verdict and
+    `build`'s agree -- on a program that compiles and on one that does not.
+    """
+
+    def test_a_good_program_passes(self, tmp_path: Path):
+        path = tmp_path / "prog.py"
+        path.write_text(PROGRAM, encoding="utf-8")
+        r = run_cli("verify", str(path))
+        assert r.returncode == 0, r.stderr
+        assert "ok:" in r.stdout
+
+    def test_it_produces_no_file(self, tmp_path: Path):
+        path = tmp_path / "prog.py"
+        path.write_text(PROGRAM, encoding="utf-8")
+        run_cli("verify", str(path))
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["prog.py"]
+
+    def test_a_bad_program_fails_and_says_why(self, tmp_path: Path):
+        path = tmp_path / "bad.py"
+        path.write_text(BAD_PROGRAM, encoding="utf-8")
+        r = run_cli("verify", str(path))
+        assert r.returncode == 1
+        assert "undefined_name" in r.stdout + r.stderr
+
+    def test_json_carries_the_code_and_the_position(self, tmp_path: Path):
+        # THE CODE IS THE PART THE RENDERED TEXT CANNOT BE PARSED FOR
+        # reliably, and it is what a CI job filters on.
+        import json
+        path = tmp_path / "bad.py"
+        path.write_text(BAD_PROGRAM, encoding="utf-8")
+        r = run_cli("verify", str(path), "--json")
+        assert r.returncode == 1, r.stderr
+        got = json.loads(r.stdout)
+        assert got["ok"] is False and got["errors"] == 1
+        one = got["diagnostics"][0]
+        assert one["code"] == "E0031"
+        assert one["at"]["line"] == 2 and one["at"]["file"].endswith("bad.py")
+
+    def test_json_on_a_good_program_reports_what_it_checked(self,
+                                                            tmp_path: Path):
+        import json
+        path = tmp_path / "prog.py"
+        path.write_text(PROGRAM, encoding="utf-8")
+        r = run_cli("verify", str(path), "--json")
+        assert r.returncode == 0, r.stderr
+        got = json.loads(r.stdout)
+        assert got["ok"] is True and got["diagnostics"] == []
+        # A RUN THAT CHECKED NOTHING would say `null` here, and is not the
+        # same as one that checked a program and found nothing wrong.
+        assert got["statistics"]["functions"] > 0
+
+
+class TestLinkJoinsWhateverItIsHanded:
+    def _ir(self, tmp_path: Path, name: str, source: str) -> Path:
+        src = tmp_path / f"{name}.py"
+        src.write_text(source, encoding="utf-8")
+        out = tmp_path / f"{name}.ir"
+        r = run_cli("build", str(src), "--emit-ir", "-o", str(out),
+                    *(() if name == "main" else ("--library",)))
+        assert r.returncode == 0, r.stderr
+        return out
+
+    def test_two_ir_modules_become_one(self, tmp_path: Path):
+        a = self._ir(tmp_path, "lib", "def helper(x: int) -> int:\n"
+                                      "    return x + 1\n")
+        b = self._ir(tmp_path, "main", PROGRAM)
+        out = tmp_path / "all.ir"
+        r = run_cli("link", str(a), str(b), "-o", str(out))
+        assert r.returncode == 0, r.stderr
+        text = out.read_text(encoding="utf-8")
+        assert "helper" in text and "double" in text
+
+    def test_the_merged_ir_still_runs(self, tmp_path: Path):
+        # THE WHOLE CLAIM: merging does not change what the program means.
+        # `--emit-ir` writes text `run` accepts, so this closes the loop.
+        a = self._ir(tmp_path, "lib", "def helper(x: int) -> int:\n"
+                                      "    return x + 1\n")
+        b = self._ir(tmp_path, "main", PROGRAM)
+        out = tmp_path / "all.ir"
+        assert run_cli("link", str(a), str(b), "-o", str(out)).returncode == 0
+        alone = run_cli("run", str(b))
+        merged = run_cli("run", str(out))
+        assert merged.returncode == alone.returncode
+        assert merged.stdout == alone.stdout
+
+    def test_two_definitions_of_one_name_are_refused(self, tmp_path: Path):
+        a = self._ir(tmp_path, "one", PROGRAM)
+        b = tmp_path / "two.ir"
+        b.write_text(a.read_text(encoding="utf-8"), encoding="utf-8")
+        r = run_cli("link", str(a), str(b), "-o", str(tmp_path / "all.ir"))
+        assert r.returncode == 1
+        said = r.stdout + r.stderr
+        assert "one.ir" in said and "two.ir" in said
+
+    def test_ir_and_objects_together_are_refused(self, tmp_path: Path):
+        a = self._ir(tmp_path, "main", PROGRAM)
+        obj = tmp_path / "x.o"
+        obj.write_bytes(b"")
+        r = run_cli("link", str(a), str(obj), "-o", str(tmp_path / "p"))
+        assert r.returncode == 1
+        said = r.stdout + r.stderr
+        assert "E9112" in said or "cannot link IR and object" in said
+
+    def test_ir_goes_to_stdout_with_no_output(self, tmp_path: Path):
+        a = self._ir(tmp_path, "main", PROGRAM)
+        r = run_cli("link", str(a))
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.startswith("module ")
+
+    @harness.skip_if(not HAS_CC, "no C compiler")
+    def test_objects_link_into_a_program(self, tmp_path: Path):
+        src = tmp_path / "prog.py"
+        src.write_text(PROGRAM, encoding="utf-8")
+        obj = tmp_path / "prog.o"
+        r = run_cli("build", str(src), "--backend", "x86-64", "--emit",
+                    "-o", str(obj))
+        assert r.returncode == 0, r.stderr
+        program = tmp_path / "prog"
+        # `--runtime 1` BECAUSE THE OBJECT NEEDS IT: the IR's `main` is
+        # emitted as `uasm_main`, so nothing in that object defines the
+        # `main` the platform's start files call.
+        r = run_cli("link", str(obj), "-o", str(program), "--runtime", "1")
+        assert r.returncode == 0, r.stderr + r.stdout
+        assert program.exists()
+        done = subprocess.run([str(program)], capture_output=True, text=True)
+        assert done.stdout.strip() == "20", done.stdout
+
+    def test_linking_objects_needs_an_output_path(self, tmp_path: Path):
+        obj = tmp_path / "x.o"
+        obj.write_bytes(b"")
+        r = run_cli("link", str(obj))
+        assert r.returncode == 1
+        assert "-o" in r.stdout + r.stderr
+
+
+class TestTheJsonContractTheEditorReads:
+    """The exact fields `editors/vscode/uasm/src/diagnostics.ts` reads.
+
+    PINNED FROM THIS SIDE because the other side cannot be compiled here.
+    The extension parses `uasm verify --json`, and until this release it
+    parsed a DIFFERENT shape from a `uasm --check --json` that never existed
+    -- which is exactly the failure a contract test catches and a type
+    checker on one side of it does not.
+
+    THE FIELD NAMES ARE THE TEST. Renaming `at.column` to `at.col` would
+    keep every other test in this file passing and silently un-place every
+    squiggle in the editor.
+    """
+
+    def _report(self, tmp_path: Path, source: str):
+        import json
+        path = tmp_path / "prog.py"
+        path.write_text(source, encoding="utf-8")
+        r = run_cli("verify", str(path), "--json")
+        return json.loads(r.stdout)
+
+    def test_the_top_level_is_an_object_with_a_diagnostics_list(self,
+                                                                tmp_path: Path):
+        got = self._report(tmp_path, BAD_PROGRAM)
+        assert isinstance(got, dict)
+        assert isinstance(got["diagnostics"], list)
+        assert set(("ok", "errors", "warnings")) <= set(got)
+
+    def test_each_diagnostic_has_the_fields_the_editor_reads(self,
+                                                             tmp_path: Path):
+        got = self._report(tmp_path, BAD_PROGRAM)
+        one = got["diagnostics"][0]
+        assert set(("code", "severity", "message", "at", "notes", "helps")) \
+            <= set(one)
+        assert isinstance(one["notes"], list)
+        assert isinstance(one["helps"], list)
+
+    def test_a_position_carries_both_ends(self, tmp_path: Path):
+        # THE COMPILER'S OWN END, so the editor underlines what the compiler
+        # pointed at rather than squiggling to the end of the line.
+        got = self._report(tmp_path, BAD_PROGRAM)
+        at = got["diagnostics"][0]["at"]
+        assert set(("file", "line", "column", "end_line", "end_column",
+                    "bytes")) <= set(at)
+        assert at["end_column"] > at["column"]
+
+    def test_severity_is_a_word_the_editor_maps(self, tmp_path: Path):
+        got = self._report(tmp_path, BAD_PROGRAM)
+        assert got["diagnostics"][0]["severity"] in (
+            "error", "warning", "note", "help", "fatal")
+
+    def test_a_warning_is_reported_as_one(self, tmp_path: Path):
+        # `eval()` IN A COMPILED PROGRAM is W0091, and the editor shows a
+        # warning rather than an error for it. A run that reported it as an
+        # error would put a red squiggle on a program that builds.
+        got = self._report(tmp_path,
+                           "def main() -> int:\n"
+                           "    eval('1')\n"
+                           "    return 0\n")
+        severities = {d["severity"] for d in got["diagnostics"]}
+        assert "warning" in severities, got["diagnostics"]

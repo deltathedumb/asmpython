@@ -1,6 +1,6 @@
 # The set, frozenset and dict constructors, in the machine subset.
 #
-# STAGE 5 OF docs/INERT-RUNTIME.md. `uasm port` named `apy_seq_new` and
+# STAGE 5 OF docs/INERT-RUNTIME.md. `uasm plugin port` named `apy_seq_new` and
 # `apy_alloc` as two of the walls in front of the remaining runtime; these are
 # the functions behind them that need nothing else.
 #

@@ -489,7 +489,7 @@ def apy_check_bound(v: ptr, name: ptr) -> ptr:
 #
 # THE STORAGE MOVED FIRST, as it had to: `apy_exc_register` calls nothing the
 # IR lacks, and was still unportable because it names a C static. That is the
-# third kind of dependency `uasm port` now reports, after calls and libc.
+# third kind of dependency `uasm plugin port` now reports, after calls and libc.
 
 
 def apy_user_exc_max() -> i64:

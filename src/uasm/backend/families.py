@@ -122,7 +122,7 @@ def resolve_target(backend: str, bits: int | None, named: str | None,
         # written has no platform registered for it either -- see the
         # `x86_32` and `arm32` docstrings, which say a target naming a
         # platform nothing can compile for is its own failure. Reporting the
-        # missing target would send the user to `uasm targets` to look
+        # missing target would send the user to `uasm plugin targets` to look
         # for something that is deliberately absent, so the backend answers
         # instead, and says what it is waiting on.
         from . import base as backend_registry
@@ -136,7 +136,7 @@ def resolve_target(backend: str, bits: int | None, named: str | None,
                     f"{exc}") from None
         raise SelectionError(
             f"no {bits}-bit target is registered for the {backend} backend; "
-            f"name one with --target, or see `uasm targets`")
+            f"name one with --target, or see `uasm plugin targets`")
     return matching[0]
 
 

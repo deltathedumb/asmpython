@@ -162,7 +162,7 @@
             "enum": [
               "compile",
               "run",
-              "check",
+              "verify",
               "emit-asm"
             ],
             "description": "Which uasm invocation this task runs."

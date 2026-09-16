@@ -12,7 +12,7 @@ cosmetic. An `--import-path` is the user naming a directory and meaning it; a
 library point is a directory the user never typed, whose contents change when
 they run pip, and which may hold several thousand modules written against
 CPython rather than against this compiler. Those differences all show up in
-diagnostics, so the two are kept apart and `uasm libraries` prints the
+diagnostics, so the two are kept apart and `uasm plugin libraries` prints the
 ones in force.
 
 ## Where it sits in the search order, and why it is LAST

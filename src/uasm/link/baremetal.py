@@ -540,8 +540,9 @@ class BareMetalToolchain(Toolchain):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
             inputs.append(str(path))
+        inputs.extend(str(p) for p in request.input_paths)
         if not inputs:
-            raise LinkError("the backend produced nothing to link")
+            raise LinkError("nothing to link")
 
         output = request.output
         run(request, [

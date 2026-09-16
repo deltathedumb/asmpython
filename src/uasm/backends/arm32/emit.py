@@ -1,7 +1,7 @@
 """`arm32` -- 32-bit ARM, and the Raspberry Pi.
 
 NOT WRITTEN YET. This module exists so that 'arm32' is a REGISTERED backend
-that refuses, rather than a name `uasm backends` has never heard of.
+that refuses, rather than a name `uasm plugin backends` has never heard of.
 
 THE FREESTANDING TARGET IS THE INTERESTING ONE. A Raspberry Pi is the
 ARM32 machine most people can actually run bare metal, and it is

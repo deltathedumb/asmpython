@@ -113,7 +113,7 @@ class TestImportingADeclaredLibrary:
         prog = _program(tmp_path, """
             print(1 + 1)
         """)
-        assert _cli("check", str(prog)).returncode == 0
+        assert _cli("verify", str(prog)).returncode == 0
 
 
 class TestWhatADeclarationMayNotDo:
@@ -125,7 +125,7 @@ class TestWhatADeclarationMayNotDo:
             import math
             print(math.pi)
         """)
-        done = _cli("check", str(prog), "--native-library", str(libs))
+        done = _cli("verify", str(prog), "--native-library", str(libs))
         assert done.returncode != 0
         assert "E0131" in done.stdout + done.stderr
 
@@ -135,7 +135,7 @@ class TestWhatADeclarationMayNotDo:
             from plat import sqrt
             print(sqrt(9.0))
         """)
-        done = _cli("check", str(prog), "--native-library", str(libs))
+        done = _cli("verify", str(prog), "--native-library", str(libs))
         assert "E0130" in done.stdout + done.stderr
 
 

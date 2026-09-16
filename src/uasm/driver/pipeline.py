@@ -65,6 +65,14 @@ class Options:
     optimise: bool = False
     #: Produce a program, not just artifacts. False is `--emit`.
     link: bool = False
+    #: THIS RUN WILL BE THROWN AWAY. `uasm verify` stops after the frontend
+    #: and the IR verifier, so anything whose only consumer is a later stage
+    #: is work nobody will read. Passed to the frontend rather than acted on
+    #: here, because only the frontend knows which of its own work that is --
+    #: and nothing that could change a DIAGNOSTIC may be skipped, or the
+    #: command would be saying a program is fine on evidence it did not
+    #: gather.
+    verifying: bool = False
     toolchain: str = "cc"
     #: WHETHER `toolchain` WAS POSITIVELY DETERMINED -- named on the command
     #: line, or claimed by the output's extension. False means it was fallen
@@ -233,7 +241,8 @@ def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
     fe = _configure_frontend(
         fe, opts,
         frontend_registry.BuildContext(source=opts.source,
-                                       target_os=_target_os(opts, selected)),
+                                       target_os=_target_os(opts, selected),
+                                       verifying=opts.verifying),
         sink)
     if fe is None:
         return Result()

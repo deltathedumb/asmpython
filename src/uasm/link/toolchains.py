@@ -76,12 +76,16 @@ class CcToolchain(Toolchain):
             path.write_bytes(data)
             if path.suffix in _COMPILABLE or path.suffix == request.target.object_suffix:
                 inputs.append(str(path))
+        # WHERE THEY ARE, not copied into the workdir: these are files the
+        # caller named, and moving them would break a relative path inside
+        # one and name the wrong file in any error about it.
+        inputs.extend(str(p) for p in request.input_paths)
         for extra in request.runtime_sources:
             inputs.append(str(extra))
 
         if not inputs:
             raise LinkError(
-                "the backend produced nothing this toolchain can link",
+                "nothing this toolchain can link",
                 detail="artifacts: " + (", ".join(request.artifacts) or "(none)"),
                 help="a backend emitting something other than C, assembly or "
                      "objects needs its own toolchain")
@@ -224,6 +228,7 @@ class CPyExtToolchain(Toolchain):
             path.write_bytes(data)
             if path.suffix in _COMPILABLE:
                 inputs.append(str(path))
+        inputs.extend(str(p) for p in request.input_paths)
         if not inputs:
             raise LinkError(
                 "the cpyext backend produced nothing this toolchain can "

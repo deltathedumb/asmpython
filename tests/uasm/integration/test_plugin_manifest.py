@@ -104,7 +104,7 @@ class TestTheManifest:
         for expected in ("my-backend", "my-machine", "my-linker", "mypack 1.0"):
             assert expected in done.stdout
         # Nothing was installed by showing.
-        assert "my-backend" not in run(ws, "backends").stdout
+        assert "my-backend" not in run(ws, "plugin", "backends").stdout
 
     def test_a_module_without_a_manifest_still_works(self, ws):
         """The older style -- register() at import -- is not broken by this."""
@@ -114,13 +114,13 @@ class TestTheManifest:
         done = run(ws, "plugin", "show", "old_style")
         assert done.returncode == 0, done.stderr
         assert "registers on import" in done.stdout
-        assert "old-machine" in run(ws, "--plugin", "old_style", "targets").stdout
+        assert "old-machine" in run(ws, "plugin", "--plugin", "old_style", "targets").stdout
 
 
 class TestAddIsRemembered:
     def test_add_then_no_flag_at_all(self, ws):
         assert run(ws, "plugin", "add", "my_plugin_module").returncode == 0
-        listing = run(ws, "backends")
+        listing = run(ws, "plugin", "backends")
         assert "my-backend" in listing.stdout, listing.stderr
 
     def test_it_survives_into_a_build(self, ws):
@@ -146,7 +146,7 @@ class TestAddIsRemembered:
     def test_remove_undoes_it(self, ws):
         run(ws, "plugin", "add", "my_plugin_module")
         assert run(ws, "plugin", "remove", "my_plugin_module").returncode == 0
-        assert "my-backend" not in run(ws, "backends").stdout
+        assert "my-backend" not in run(ws, "plugin", "backends").stdout
         assert "no plugins installed" in run(ws, "plugin", "list").stdout
 
     def test_removing_something_absent_is_an_error(self, ws):
@@ -230,7 +230,7 @@ class TestBrokenPluginsDoNotTrapYou:
         (ws / "my_plugin_module.py").unlink()
         import shutil
         shutil.rmtree(ws / "cfg" / "cache", ignore_errors=True)
-        done = run(ws, "backends")
+        done = run(ws, "plugin", "backends")
         assert done.returncode == 0, done.stderr
         assert "warning" in done.stderr and "my_plugin_module" in done.stderr
         assert "c" in done.stdout          # built-ins still work
@@ -364,7 +364,7 @@ class TestAddIsCachedAndReplaceable:
         """
         run(ws, "plugin", "add", "my_plugin_module")
         (ws / "my_plugin_module.py").unlink()
-        done = run(ws, "backends")
+        done = run(ws, "plugin", "backends")
         assert done.returncode == 0, done.stderr
         assert "my-backend" in done.stdout
 
@@ -404,10 +404,10 @@ class TestInvalidate:
         run(ws, "plugin", "add", "my_plugin_module")
         self._edit(ws)
         # Until invalidated, the CACHED copy is what loads.
-        assert "my-backend-v2" not in run(ws, "backends").stdout
+        assert "my-backend-v2" not in run(ws, "plugin", "backends").stdout
         done = run(ws, "plugin", "invalidate", "my_plugin_module")
         assert done.returncode == 0, done.stderr
-        assert "my-backend-v2" in run(ws, "backends").stdout
+        assert "my-backend-v2" in run(ws, "plugin", "backends").stdout
 
     @harness.cases("form", [
         ["my_plugin_module"],                      # bare
@@ -441,7 +441,7 @@ class TestInvalidate:
         assert done.returncode == 1
         assert "Traceback" not in done.stderr
         # Still loadable from cache afterwards.
-        assert "my-backend" in run(ws, "backends").stdout
+        assert "my-backend" in run(ws, "plugin", "backends").stdout
 
     def test_an_unknown_id_is_reported(self, ws):
         done = run(ws, "plugin", "invalidate", "nosuch")

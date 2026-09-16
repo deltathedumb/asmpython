@@ -1,7 +1,7 @@
 """`llvm` -- LLVM IR, as text.
 
 NOT WRITTEN YET. This module exists so that 'llvm' is a REGISTERED backend
-that refuses, rather than a name `uasm backends` has never heard of.
+that refuses, rather than a name `uasm plugin backends` has never heard of.
 
 A LANGUAGE BACKEND, so text is the artifact and no encoder is needed --
 the same bargain the C backend takes. It is the cheapest of the six by
