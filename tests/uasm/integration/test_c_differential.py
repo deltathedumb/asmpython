@@ -1356,6 +1356,86 @@ PROGRAMS: dict[str, str] = {
         }
     """,
 
+    "setjmp_and_longjmp": r"""
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <setjmp.h>
+        /* THE FRAMES UNWIND THEMSELVES here and a real implementation
+           restores a stack pointer, so this is the program that says
+           whether the two mean the same thing. Every case that could tell
+           them apart is in it: a jump out of a recursion, a jump within one
+           frame, a jump out of a `qsort` callback -- through the library's
+           own frames -- and `longjmp(env, 0)`, which answers 1. */
+        static jmp_buf outer;
+
+        static int depth(int n, jmp_buf *back)
+        {
+            jmp_buf here;
+            int r = setjmp(here);
+            if (r) { printf("caught at %d with %d\n", n, r); return n * 100 + r; }
+            if (n == 0) longjmp(*back, 7);
+            printf("down %d\n", n);
+            { int got = depth(n - 1, &here); printf("returned %d at %d\n", got, n); }
+            return -1;
+        }
+
+        static int guarded(int c)
+        {
+            jmp_buf local;
+            printf("guarded %d\n", c);     /* a call BEFORE the setjmp */
+            if (c) {
+                int v = setjmp(local);
+                if (v) return v;
+                longjmp(local, 5);         /* and a jump within one frame */
+            }
+            return -1;
+        }
+
+        static int cmp(const void *a, const void *b)
+        {
+            int x = *(const int *)a, y = *(const int *)b;
+            if (x == 99 || y == 99) longjmp(outer, 3);
+            return x - y;
+        }
+
+        int main(void)
+        {
+            int arr[5] = { 4, 2, 99, 1, 3 };
+            int r;
+            printf("%d\n", guarded(1));
+            printf("%d\n", depth(2, &outer));
+            r = setjmp(outer);
+            if (r == 0) {
+                qsort(arr, 5, sizeof(int), cmp);
+                printf("sorted without jumping\n");
+            } else {
+                printf("jumped out of qsort with %d\n", r);
+            }
+            r = setjmp(outer);
+            if (r == 0) longjmp(outer, 0);
+            printf("zero became %d\n", r);
+            return 0;
+        }
+    """,
+
+    "setjmp_keeps_what_the_frame_had": r"""
+        #include <stdio.h>
+        #include <setjmp.h>
+        /* A `volatile` local is the one C promises survives, so it is the
+           one a portable program uses and the one to compare. */
+        static jmp_buf e;
+        static void thrower(int n) { if (n > 2) longjmp(e, n); }
+        int main(void)
+        {
+            volatile int seen = 0;
+            volatile int i;
+            int r = setjmp(e);
+            if (r) { printf("jump %d after %d\n", r, seen); return 0; }
+            for (i = 0; i < 5; i++) { seen = i; thrower(i); }
+            printf("no jump\n");
+            return 0;
+        }
+    """,
     "sscanf_conversions": r"""
         #include <stdio.h>
         #include <string.h>

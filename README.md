@@ -266,8 +266,10 @@ the whole list, rather than the beginning of one:
     wider, so `__SIZEOF_LONG_DOUBLE__` says 8 and `<float.h>`'s `LDBL_*`
     macros carry `double`'s values. A program that asks is told the truth.
   * `_Complex` and `_Imaginary` are refused, with a diagnostic that says why.
-  * `setjmp`/`longjmp` are refused: a non-local jump needs the machine's
-    frame, and the IR deliberately has no way to name one.
+  * A local that is not `volatile` **survives** a `longjmp`. C says its
+    value is indeterminate; here the frame never went away, so it keeps what
+    it had — `setjmp` is compiled into a branch and every call site into a
+    check, rather than into a saved machine frame there is no way to name.
   * `localtime` **is** `gmtime`. The host services can say what time it is
     and cannot say what the local offset from UTC is, so the calendar is UTC
     and `tm_isdst` is 0 — not unknown, not in effect.
@@ -301,10 +303,10 @@ one external name is an error naming both files. It is a flag rather than
 several positional sources because the driver hands each frontend one source,
 and that is what names the output and roots the search path.
 
-All thirty-one headers C23 requires are there. Three of them refuse with a
-reason rather than being absent — `<complex.h>`, `<setjmp.h>` and
-`<threads.h>`, each explaining what the IR cannot express and what to write
-instead — because a missing file is a mystery and a refusal is an answer.
+All thirty-one headers C23 requires are there. Two of them refuse with a
+reason rather than being absent — `<complex.h>` and `<threads.h>`, each
+explaining what the IR cannot express and what to write instead — because a
+missing file is a mystery and a refusal is an answer.
 `<stdatomic.h>` is supported and `<threads.h>` is not, which is not a
 contradiction: with one thread every operation is already atomic.
 

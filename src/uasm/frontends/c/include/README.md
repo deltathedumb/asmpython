@@ -48,7 +48,6 @@ What is still absent says so rather than approximating:
 | absent | because |
 | --- | --- |
 | `rename` | the `file` group has ten operations and no rename; copy-and-remove is not one, and `bundled/os.py` refuses `os.rename` for the same reason |
-| `<setjmp.h>` | `longjmp` restores a machine frame; the IR has no frames |
 | `<threads.h>` | there is no way to create one |
 | `<complex.h>` | the IR has no aggregate type to make a complex value out of |
 
@@ -57,7 +56,13 @@ say what the local offset from UTC is — there is no `TZ` that would mean
 anything on a target without an environment — so the calendar is UTC and
 `tm_isdst` is 0 rather than -1: it is not unknown, it is not in effect.
 
-The three headers that cannot exist at all are PRESENT AND REFUSE, with
+`<setjmp.h>` works, and not by saving a frame: `longjmp` sets a flag, every
+call site in the program checks it as its call returns, and the frame that
+recognises the jump's token branches back to its own `setjmp`. It costs a
+load and a branch per call in a program that uses it, and nothing in one that
+does not. `longjmp.py` says why it is shaped that way.
+
+The two headers that cannot exist at all are PRESENT AND REFUSE, with
 `#error` and a sentence saying what to write instead: a missing file is a
 mystery and a refusal is an answer.
 

@@ -271,7 +271,7 @@ C23_HEADERS = [
 
 #: The three that cannot exist here, and the diagnostic each one gives. A
 #: refusal with a reason is a feature; a missing file is a mystery.
-REFUSING = {"complex.h", "setjmp.h", "threads.h"}
+REFUSING = {"complex.h", "threads.h"}
 
 
 class TestItAlwaysTerminates:
@@ -336,12 +336,33 @@ class TestTheFourDivergences:
         assert [d.code for d in sink.diagnostics] == ["E1214"]
         assert "complex" in sink.diagnostics[0].notes[0]
 
-    def test_setjmp_says_why_rather_than_going_missing(self):
-        """The header exists so the error names the problem instead of
-        `cannot find include file 'setjmp.h'`."""
-        _, sink = compile_c("#include <setjmp.h>\nint main(void){return 0;}")
-        assert [d.code for d in sink.diagnostics] == ["E1112"]
-        assert "machine frame" in sink.diagnostics[0].message
+    def test_setjmp_compiles_into_the_function_that_calls_it(self):
+        """There is no `setjmp` function to call: `longjmp.py` turns the
+        call into a branch and every call site into a check."""
+        module, sink = compile_c(
+            "#include <setjmp.h>\n"
+            "static jmp_buf e;\n"
+            "static void go(void){ longjmp(e, 1); }\n"
+            "int main(void){ if (setjmp(e) == 0) go(); return 0; }")
+        assert not sink.failed, [d.message for d in sink.diagnostics]
+        names = {f.name for f in module.functions}
+        assert "__c_setjmp" not in names and "__c_longjmp" not in names
+        assert {"__c_jmp_active", "__c_jmp_target"} <= {
+            g.name for g in module.globals}
+
+    def test_the_address_of_setjmp_is_refused(self):
+        _, sink = compile_c(
+            "#include <setjmp.h>\n"
+            "int (*f)(void *) = __c_setjmp;\n"
+            "int main(void){ return f == 0; }")
+        assert "E1603" in [d.code for d in sink.diagnostics]
+
+    def test_a_program_without_setjmp_is_not_rewritten(self):
+        """The check after every call is what `setjmp` costs, and a program
+        that does not use it must not pay."""
+        module, _ = compile_c(
+            "#include <stdio.h>\nint main(void){ puts(\"hi\"); return 0; }")
+        assert not [g for g in module.globals if g.name.startswith("__c_jmp")]
 
     def test_main_with_parameters_gets_the_command_line(self):
         """`argc` and `argv` are built from the `env` host service by the
