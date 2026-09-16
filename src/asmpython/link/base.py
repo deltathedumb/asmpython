@@ -33,6 +33,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..options import Option
 from ..target import Target
 
 
@@ -108,6 +109,12 @@ class Toolchain(abc.ABC):
     #: EMPTY MEANS ANY, which only `none` can honestly say -- it writes what
     #: the backend produced and never reads it.
     backends: tuple[str, ...] = ()
+
+    #: OPTIONS THIS LINKER TAKES, declared the way a backend declares its
+    #: own. `--link-input` is this kind of flag and lived on the driver,
+    #: which meant it was offered for `jar` and `pyc` too -- neither of which
+    #: links anything, and neither of which could say so.
+    options: tuple[Option, ...] = ()
 
     @abc.abstractmethod
     def link(self, request: LinkRequest) -> Path:

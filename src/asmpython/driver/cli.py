@@ -29,6 +29,7 @@ from .. import link as link_registry
 from .. import target as target_registry
 from ..diagnostics import DiagnosticSink, Renderer, SourceFile
 from ..ir import opcodes, types as T
+from ..options import Option
 from ..ir.interpreter import Interpreter, Trap
 from ..ir.printer import parse_module
 from ..ir.verifier import VerifyError
@@ -676,46 +677,126 @@ def _wrap(text: str, width: int) -> list[str]:
     return lines
 
 
-class _CollectBackendOption(argparse.Action):
-    """Store a backend's flag into one dict, keyed by the flag's own name.
+class _CollectComponentOption(argparse.Action):
+    """Store one component's flag into that component's own table.
 
-    One `dest` for every backend option, so the driver hands `configure` a
-    table rather than the driver knowing the name of any particular flag.
+    ONE TABLE PER KIND, not one table for everything: the driver hands a
+    backend's `configure` the options a BACKEND declared, and treats anything
+    else in that table as a flag the backend does not take (E9106). A
+    frontend's flag arriving in the backend's table would be reported as the
+    backend's mistake.
+
+    KINDS AND NOT A KIND, because one NAME can span two of them -- `cpyext` is
+    a backend and a linker both -- and `--cpyext:module-name` is one spelling
+    whoever is reading it. If both halves declare the name, both are handed
+    the value; the pipeline gives each component only what that component
+    declared, so the half that does not want it never sees it.
+
+    KEYED BY WHAT THE COMPONENT DECLARED, bound here rather than read back off
+    the flag text, so `--opt-level` and `--pybc:opt-level` are guaranteed to
+    land on the same key -- the component never learns which spelling was
+    used, because the qualifier is for the parser and not for it.
     """
+
+    def __init__(self, option_strings, dest, *, kinds, key, **kw):
+        super().__init__(option_strings, dest, **kw)
+        self.kinds = kinds
+        self.key = key
 
     def __call__(self, parser, namespace, value, option_string=None):
-        table = getattr(namespace, "backend_options", None)
-        if table is None:
-            table = {}
-            setattr(namespace, "backend_options", table)
-        table[option_string.lstrip("-")] = value
+        for kind in self.kinds:
+            table = getattr(namespace, f"{kind}_options", None)
+            if table is None:
+                table = {}
+                setattr(namespace, f"{kind}_options", table)
+            table[self.key] = value
 
 
-def _add_backend_options(parser: argparse.ArgumentParser) -> None:
-    """Give `parser` every registered backend's own flags.
+class _AmbiguousOption(argparse.Action):
+    """A short flag more than one component declares.
 
-    ALL of them, not just the selected backend's: `--backend` is parsed by the
+    REFUSED RATHER THAN AWARDED TO ONE. Registration order is alphabetical and
+    looks deliberate, which is exactly the kind of accident a reader would
+    believe -- and the wrong component would then be configured silently. The
+    qualified spellings say which was meant, and they are always registered.
+    """
+
+    def __init__(self, option_strings, dest, *, owners, key, **kw):
+        super().__init__(option_strings, dest, **kw)
+        self.owners = owners
+        self.key = key
+
+    def __call__(self, parser, namespace, value, option_string=None):
+        parser.error(
+            f"{option_string} is ambiguous: "
+            f"{', '.join(self.owners)} all declare it. Write "
+            + " or ".join(f"--{o}:{self.key}" for o in self.owners) + ".")
+
+
+def _add_component_options(parser: argparse.ArgumentParser) -> None:
+    """Give `parser` every registered component's own flags.
+
+    EVERY COMPONENT, NOT JUST THE BACKENDS. A backend has declared its own
+    flags since the beginning; a frontend and a linker could not, so the flags
+    they needed sat on the driver's parser instead -- `--import-path` was
+    offered to a build using any frontend, and `--link-input` to one that
+    links nothing and could not say so.
+
+    ALL of them, not just the selected one's: `--backend` is parsed by the
     same pass that would have to know the answer, and a parser that rejected
     `--class-version` before reading `--backend jvm` would depend on the order
-    the flags were typed in. Passing one to a backend that does not declare it
-    is caught in the driver, which by then knows which backend was chosen and
-    can say who does take it.
+    the flags were typed in. Passing one to a component that does not declare
+    it is caught in the driver, which by then knows what was chosen and can
+    say who does take it.
     """
-    seen: dict[str, str] = {}
-    group = parser.add_argument_group("backend options")
-    for name, be in sorted(backend_registry.available().items()):
-        for option in be.options:
-            if option.name in seen:
-                # Two backends wanting one flag name is not a conflict worth
-                # failing over -- only the selected backend is ever handed the
-                # value -- but the help text has to come from somewhere, and
-                # first registration is as good a rule as any.
-                continue
-            seen[option.name] = name
+    frontend_registry.load_builtin()
+    link_registry.load_builtin()
+
+    # KEYED BY (OWNER NAME, OPTION NAME) and not by kind, so the two halves of
+    # a name that spans kinds collapse into the one flag a user would expect
+    # rather than colliding inside argparse.
+    declarations: dict[tuple[str, str], tuple[list[str], Option]] = {}
+    for kind, registry in (("backend", backend_registry),
+                           ("frontend", frontend_registry),
+                           ("linker", link_registry)):
+        for name, component in sorted(registry.available().items()):
+            for option in component.options:
+                kinds, _ = declarations.setdefault(
+                    (name, option.name), ([], option))
+                kinds.append(kind)
+
+    claimed: dict[str, list[str]] = {}
+    for name, flag in declarations:
+        claimed.setdefault(flag, []).append(name)
+
+    group = parser.add_argument_group("component options")
+    for (name, flag), (kinds, option) in declarations.items():
+        # THE QUALIFIED SPELLING IS ALWAYS REGISTERED, collision or not, so a
+        # script written against `--pybc:opt-level` keeps working when a
+        # plugin later claims the short name out from under it.
+        group.add_argument(
+            option.qualified(name), action=_CollectComponentOption,
+            kinds=tuple(kinds), key=option.name, dest=argparse.SUPPRESS,
+            metavar=option.metavar,
+            help=f"[{name} {'/'.join(kinds)}] {option.help}")
+    for flag, owned in sorted(claimed.items()):
+        if len(owned) == 1:
+            kinds, option = declarations[owned[0], flag]
             group.add_argument(
-                option.flag, action=_CollectBackendOption,
-                metavar=option.metavar, default=None,
-                help=f"[{name}] {option.help}")
+                option.flag, action=_CollectComponentOption,
+                kinds=tuple(kinds), key=option.name, dest=argparse.SUPPRESS,
+                metavar=option.metavar, help=f"[{owned[0]}] {option.help}")
+            continue
+        # TWO COMPONENTS WANTING ONE NAME IS A QUESTION, not something to
+        # settle by registration order -- the same shape of refusal an
+        # ambiguous `-o` extension gets. `nargs="?"` so that the bare flag
+        # stops here too, rather than argparse complaining about a missing
+        # value before anyone gets to say the name was ambiguous.
+        group.add_argument(
+            "--" + flag, action=_AmbiguousOption, owners=sorted(owned),
+            key=flag, nargs="?", dest=argparse.SUPPRESS,
+            help=("[" + ", ".join(sorted(owned)) + "] ambiguous; write "
+                  + " or ".join(f"--{n}:{flag}" for n in sorted(owned))))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -834,7 +915,7 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--emit-ir", action="store_true")
     b.add_argument("--show-spans", action="store_true",
                    help="annotate each instruction with its source position")
-    _add_backend_options(b)
+    _add_component_options(b)
     b.set_defaults(fn=cmd_build)
 
     r = sub.add_parser("run", help="execute in the reference interpreter")

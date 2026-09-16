@@ -16,11 +16,15 @@ is a library a backend may call; it is not a stage anyone must implement, and
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
 
 from ..diagnostics import is_real
 
 from ..ir import Module
+# SHARED WITH THE FRONTENDS AND THE LINKERS, so re-exported rather than defined
+# here: a backend has declared its own flags since the beginning and every
+# backend imports `Option` from this module. See `asmpython/options.py` for why
+# the other two kinds needed the same thing.
+from ..options import Option, OptionError  # noqa: F401  (re-export)
 # Re-exported so a backend author needs one import. The TYPE belongs to the
 # backend interface -- every `emit` receives one -- but the INSTANCES do not
 # live here: they are registered in `asmpython.targets`, so adding a platform never
@@ -35,37 +39,6 @@ from ..target import Target
 #: writing the symbol and the runtime calling it must agree, and two constants
 #: that must agree are one constant.
 ENTRY_SYMBOL = "asmpython_main"
-
-
-@dataclass(frozen=True, slots=True)
-class Option:
-    """One command-line option a backend takes.
-
-    Declared rather than added to the driver's parser, for the reason every
-    other extension point here exists: a backend that ships outside this
-    repository gets its flags the same way a built-in does, and `asmpython
-    backends` can say what a backend accepts without the driver knowing what
-    any of them mean.
-    """
-
-    #: As typed, without the dashes: "class-version" is `--class-version`.
-    name: str
-    help: str
-    #: What the value is called in `--help`.
-    metavar: str = "VALUE"
-
-    @property
-    def flag(self) -> str:
-        return "--" + self.name
-
-
-class OptionError(Exception):
-    """A backend option nobody can act on.
-
-    Distinct from a crash: the value is the user's and the message says what
-    was wrong with it, so the driver reports it as a diagnostic rather than
-    letting a traceback out.
-    """
 
 
 class Backend(abc.ABC):
