@@ -73,15 +73,25 @@ the next, and one translation unit is the only place that shows.
 
 ## Why the definitions are `static`
 
-A translation unit is the whole program here; there is no separate
-compilation, so a header may carry definitions and not only declarations.
-`static` is what makes those definitions this unit's own: the IR symbol gets a
+A header may carry definitions here, not only declarations, because there is
+no separate `libc` to link: `#include <stdio.h>` compiles `printf`. `static`
+is what makes those definitions this unit's own, and the IR symbol gets a
 `c.` prefix (see `parser._merge`) so that the C backend, whose output is
 self-contained and includes the real `<stdio.h>`, does not end up with two
 `printf`s of different signatures.
 
-Unreachable ones are dropped before the module leaves the frontend
-(`lower._prune`), because a linker would drop them and this frontend emits a
+`c.` AND NOT THE UNIT'S OWN PREFIX, which is the one thing that is not
+obvious. A build with several translation units gives each one a prefix of
+its own — `c0.`, `c1.` — so that two files may each have a `static int
+count`. The bundled headers share `c.` across the whole build instead, and
+`merge.py` keeps one copy: otherwise every file would get its own `errno`,
+its own `malloc` arena and its own `rand` state, and a `fopen` that failed in
+one file could not be diagnosed in another. A real toolchain does not have
+that problem because libc is one archive linked once; this is the same
+answer.
+
+Unreachable definitions are dropped before the module leaves the frontend
+(`lower.prune`), because a linker would drop them and this frontend emits a
 module rather than an object file.
 
 ## The two that are worth reading

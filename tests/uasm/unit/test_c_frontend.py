@@ -391,13 +391,15 @@ class TestTheModuleItProduces:
 
     def test_a_static_initialiser_needing_an_address_runs_before_main(self):
         """`Global.data` is bytes and holds no relocations, so the store goes
-        into a generated `__c_init` that the entry point calls first."""
+        into the unit's own initialiser, which the entry point calls first.
+        The name carries the unit's prefix because a build may have several
+        and the entry point calls all of them."""
         module, _ = compile_c(
             "int v = 7; int *p = &v; int main(void){ return *p; }")
-        assert module.function("__c_init") is not None
+        assert module.function("c0.init") is not None
         entry = module.function("main")
         calls = [i.sym for _, i in entry.instructions() if i.sym]
-        assert calls[0] == "__c_init"
+        assert calls[0] == "c0.init"
 
     def test_a_struct_is_returned_through_a_hidden_parameter(self):
         module, _ = compile_c(

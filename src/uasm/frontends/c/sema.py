@@ -157,10 +157,18 @@ def is_null_constant(e: S.Expr) -> bool:
 class Sema:
     """The type rules. One instance per translation unit."""
 
-    def __init__(self, sink: DiagnosticSink) -> None:
+    def __init__(self, sink: DiagnosticSink, prefix: str = "c0.") -> None:
         self.sink = sink
         self.file_scope = Scope(None, file=True)
         self.scope = self.file_scope
+        #: WHAT THIS UNIT'S OWN NAMES ARE CALLED IN THE IR. A `static` is not
+        #: the platform's name and must not become one (see `parser._merge`),
+        #: and with several translation units in one build it is not the
+        #: OTHER unit's either: two files may each have a `static int count`,
+        #: and the IR has one flat namespace of globals. So each unit has a
+        #: prefix of its own -- `c0.`, `c1.` -- and `c.` is the bundled
+        #: library's, shared by every unit exactly as one `libc.a` is.
+        self.prefix = prefix
         #: Names already given to IR globals, so a `static` inside a function
         #: and a file-scope one of the same name cannot collide.
         self.taken: set[str] = set()

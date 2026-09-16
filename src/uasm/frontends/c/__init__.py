@@ -51,13 +51,17 @@ with a reason rather than being absent -- `<complex.h>`, `<setjmp.h>` and
 answer. `<stdatomic.h>` is supported and `<threads.h>` is not, which is not a
 contradiction: with one thread every operation is already atomic.
 
-ONE TRANSLATION UNIT PER BUILD. `uasm build prog.c` compiles `prog.c`
-and whatever it includes; there is no separate compilation and no linker step
-that joins two objects this frontend produced. A project with several `.c`
-files builds as a unity build -- one file that `#include`s the others -- which
-is what the `static` definitions in `include/` assume and why they may carry
-definitions at all. The driver takes one source for every frontend, so this
-is the shape of the tool rather than a limit of the language.
+SEVERAL TRANSLATION UNITS IN ONE BUILD. `uasm build main.c --c:unit parse.c
+--c:unit emit.c` compiles each file on its own and joins the modules, which is
+what `cc main.c parse.c emit.c` does and means the same things by it: a
+`static` in one file is not the one of that name in the next, a definition in
+one is callable from another, and two definitions of one external name is an
+error naming both files. `merge.py` is that step and says how.
+
+ONE FLAG AND NOT SEVERAL POSITIONAL SOURCES, because the driver hands each
+frontend ONE source -- it is what names the output, what the module search
+path is relative to, and what every other frontend expects. A C build wanting
+more says so with a flag of C's own rather than changing that for everybody.
 
 THE STANDARD LIBRARY IS COMPILED FROM C, by this frontend, from `include/`.
 It sits on the three platform-floor functions and nothing else, so a C program
@@ -68,11 +72,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ...diagnostics import DiagnosticSink, SourceFile, error
+from ...diagnostics import DiagnosticSink, SourceFile, error, warning
 from ...frontend import Frontend, register
 from ...options import Option, OptionError
 from ...ir import Module
 from .lower import Lowerer
+from .merge import merge
 from .parser import parse
 from .preprocess import Preprocessor, Search
 
@@ -100,15 +105,19 @@ class CFrontend(Frontend):
         Option("bundled-headers",
                "search the frontend's own standard headers",
                metavar="1|0"),
+        Option("unit", "another translation unit to compile into this program",
+               metavar="FILE", repeat=True),
     )
 
     def __init__(self, *, include_paths: tuple[Path, ...] = (),
                  defines: tuple[tuple[str, str], ...] = (),
-                 trigraphs: bool = False, bundled: bool = True) -> None:
+                 trigraphs: bool = False, bundled: bool = True,
+                 units: tuple[Path, ...] = ()) -> None:
         self.include_paths = include_paths
         self.defines = defines
         self.trigraphs = trigraphs
         self.bundled = bundled
+        self.units = units
 
     def configure(self, values: dict, sink: DiagnosticSink) -> "CFrontend":
         """A frontend carrying this run's flags. See `Frontend.configure`."""
@@ -117,23 +126,65 @@ class CFrontend(Frontend):
                                 values.get("include-path", ())),
             defines=tuple(_split_define(d) for d in values.get("define", ())),
             trigraphs=_truth(values, "trigraphs", self.trigraphs),
-            bundled=_truth(values, "bundled-headers", self.bundled))
+            bundled=_truth(values, "bundled-headers", self.bundled),
+            units=tuple(Path(u) for u in values.get("unit", ())))
 
     def compile(self, source: SourceFile, sink: DiagnosticSink) -> Module | None:
+        """One module, from this source and any `--c:unit` beside it."""
+        sources = [source]
+        for path in self.units:
+            try:
+                sources.append(SourceFile.read(path))
+            except OSError as exc:
+                sink.report(error("E1602", f"cannot read {path}: "
+                                           f"{exc.strerror}")
+                            .help("--c:unit names another .c file to compile "
+                                  "into the same program"))
+                return None
+        inits = tuple(f"c{i}.init" for i in range(len(sources))) \
+            if len(sources) > 1 else ()
+        modules = []
+        for i, src in enumerate(sources):
+            module = self._one(src, sink, prefix=f"c{i}.", inits=inits)
+            if module is None:
+                return None
+            modules.append(module)
+        if len(modules) == 1:
+            return modules[0]
+        joined = merge(modules, [s.name for s in sources], sink)
+        if sink.failed:
+            return None
+        if joined.function("main") is None:
+            # NOT AN ERROR HERE. A library of several units with no `main` is
+            # a reasonable thing to compile; the driver is what knows whether
+            # a program was wanted, and it says so about a module with no
+            # entry point. This only says the static initialisers nobody will
+            # run, because THAT is invisible otherwise.
+            if any(f.name.endswith(".init") for f in joined.functions):
+                sink.report(
+                    warning("W1500",
+                            "these units have static initialisers that need "
+                            "addresses, and no `main` to run them from")
+                    .note("the entry point calls every unit's initialiser; "
+                          "without one, none of them runs"))
+        return joined
+
+    def _one(self, source: SourceFile, sink: DiagnosticSink, *,
+             prefix: str, inits: tuple[str, ...]) -> Module | None:
         search = Search(angle=list(self.include_paths), bundled=self.bundled)
         pp = Preprocessor(sink, search, trigraphs=self.trigraphs,
                           defines=dict(self.defines))
         tokens = pp.run(source)
         if sink.failed:
             return None
-        unit, parser = parse(tokens, sink)
+        unit, parser = parse(tokens, sink, prefix)
         if sink.failed:
             # Lowering assumes the parser accepted everything it sees. Running
             # it anyway produces IR the verifier rejects, and the user gets an
             # internal-error report on top of their real diagnostics.
             return None
         try:
-            return Lowerer(unit, parser, source, sink).run()
+            return Lowerer(unit, parser, source, sink, inits).run()
         except RecursionError:
             sink.report(
                 error("E1599", "this program is too deeply nested to compile")

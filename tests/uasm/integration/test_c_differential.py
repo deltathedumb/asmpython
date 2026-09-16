@@ -1837,3 +1837,198 @@ class TestTheHostServicesAgreeToo:
         ran = _uasm("build", "-b", "x86-64", "-o", "prog.out", "prog.c",
                          cwd=tmp_path)
         assert ran.returncode == 0, ran.stdout + ran.stderr
+
+
+# ── several translation units ───────────────────────────────────────────────
+#
+# THE ORACLE IS `cc a.c b.c`, which is the thing this is imitating: two files,
+# each compiled on its own, joined into one program. What has to be true is
+# what a C programmer relies on without thinking about it -- that a `static`
+# in one file is not the `static` of the same name in the other, that a
+# function defined in one is callable from the other, and that the LIBRARY is
+# one library: `errno` set by a failing `fopen` over here is readable over
+# there, because there is one `libc.a` and not one per file.
+
+#: name -> (main.c, other.c). Two files is enough to show every rule; three
+#: would show the same ones again.
+UNIT_PROGRAMS: dict[str, tuple[str, str]] = {
+    "statics_do_not_collide": (r"""
+        #include <stdio.h>
+        static int counter = 100;
+        int bump_other(void);
+        int other_counter(void);
+        int main(void) {
+            /* ONE CALL PER STATEMENT: the order in which a call's arguments
+               are evaluated is unspecified, and two of these have an effect
+               on the third. */
+            int bumped = bump_other();
+            printf("%d %d %d\n", counter, bumped, other_counter());
+            counter += 5;
+            printf("%d %d\n", counter, other_counter());
+            return 0;
+        }
+    """, r"""
+        static int counter = 7;
+        int bump_other(void) { return ++counter; }
+        int other_counter(void) { return counter; }
+    """),
+
+    "one_library_between_them": (r"""
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <errno.h>
+        int missing(void);
+        char *borrow(int n);
+        void seed(unsigned s);
+        int draw(void);
+        int draw_here(void);
+        int main(void) {
+            char *p;
+            printf("%d\n", missing());
+            /* `errno` WAS SET IN THE OTHER FILE. One library, so one of it. */
+            printf("%d\n", errno == ENOENT);
+            p = borrow(16);
+            snprintf(p, 16, "%s", "borrowed");
+            printf("%s\n", p);
+            free(p);
+            /* ONE `rand` STATE BETWEEN THE TWO FILES. Not which numbers --
+               C does not say what they are and no two libraries agree -- but
+               that the sequence CONTINUES across the file boundary: seeded
+               twice the same way, the pair (here, here) and the pair (here,
+               there) are the same two numbers. */
+            {
+                int a1, a2, b1, b2;
+                seed(12345u); a1 = draw(); a2 = draw();
+                seed(12345u); b1 = draw(); b2 = draw_here();
+                printf("%d %d\n", a1 == b1, a2 == b2);
+            }
+            return 0;
+        }
+    """, r"""
+        #include <stdio.h>
+        #include <stdlib.h>
+        int missing(void) {
+            FILE *f = fopen("no-such-file-at-all.txt", "r");
+            if (f) { fclose(f); return 0; }
+            return 1;
+        }
+        char *borrow(int n) { return (char *)malloc((size_t)n); }
+        void seed(unsigned s) { srand(s); }
+        int draw(void) { return rand(); }
+        int draw_here(void) { return rand(); }
+    """),
+
+    "initialisers_in_both": (r"""
+        #include <stdio.h>
+        const char *other_msg(void);
+        extern int shared;
+        static const char *mine = "from the first";
+        int main(void) {
+            printf("%s / %s / %d\n", mine, other_msg(), shared);
+            return 0;
+        }
+    """, r"""
+        static const char *msg = "from the second";
+        int shared = 41;
+        const char *other_msg(void) { return msg; }
+    """),
+
+    "a_tentative_definition": (r"""
+        #include <stdio.h>
+        void set(void);
+        extern int total;
+        int main(void) { set(); printf("%d\n", total); return 0; }
+    """, r"""
+        int total = 12;
+        void set(void) { total += 30; }
+    """),
+}
+
+
+class TestSeveralTranslationUnits:
+    """`uasm build main.c --c:unit other.c`, against `cc main.c other.c`."""
+
+    @harness.needs("cc")
+    @harness.cases("name", sorted(UNIT_PROGRAMS))
+    def test_the_interpreter_matches_the_host_compiler(self, name, tmp_path):
+        import textwrap
+        first, second = (textwrap.dedent(t) for t in UNIT_PROGRAMS[name])
+        host = tmp_path / "host"
+        host.mkdir()
+        (host / "main.c").write_text(HOST_PRELUDE + first, encoding="utf-8")
+        (host / "other.c").write_text(second, encoding="utf-8")
+        built = subprocess.run(
+            [HAS_CC, "-std=c11", "-w", "-fcommon", "-o", str(host / "a.out"),
+             str(host / "main.c"), str(host / "other.c")],
+            capture_output=True, text=True)
+        assert built.returncode == 0, built.stderr
+        want = subprocess.run([str(host / "a.out")], capture_output=True,
+                              text=True, cwd=str(host))
+
+        ours = tmp_path / "ours"
+        ours.mkdir()
+        (ours / "main.c").write_text(OURS_PRELUDE + first, encoding="utf-8")
+        (ours / "other.c").write_text(second, encoding="utf-8")
+        ran = _uasm("run", "main.c", "--c:unit", "other.c", cwd=ours)
+        assert (ran.returncode, ran.stdout) == (want.returncode, want.stdout), \
+            ran.stderr
+
+    @harness.needs("cc")
+    @harness.cases("name", sorted(UNIT_PROGRAMS))
+    def test_the_c_backend_matches_the_host_compiler(self, name, tmp_path):
+        import textwrap
+        first, second = (textwrap.dedent(t) for t in UNIT_PROGRAMS[name])
+        host = tmp_path / "host"
+        host.mkdir()
+        (host / "main.c").write_text(HOST_PRELUDE + first, encoding="utf-8")
+        (host / "other.c").write_text(second, encoding="utf-8")
+        built = subprocess.run(
+            [HAS_CC, "-std=c11", "-w", "-fcommon", "-o", str(host / "a.out"),
+             str(host / "main.c"), str(host / "other.c")],
+            capture_output=True, text=True)
+        assert built.returncode == 0, built.stderr
+        want = subprocess.run([str(host / "a.out")], capture_output=True,
+                              text=True, cwd=str(host))
+
+        ours = tmp_path / "ours"
+        ours.mkdir()
+        (ours / "main.c").write_text(OURS_PRELUDE + first, encoding="utf-8")
+        (ours / "other.c").write_text(second, encoding="utf-8")
+        made = _uasm("build", "-b", "c", "-o", "prog.exe", "main.c",
+                     "--c:unit", "other.c", cwd=ours)
+        assert made.returncode == 0, made.stdout + made.stderr
+        ran = subprocess.run([str(ours / "prog.exe")], capture_output=True,
+                             text=True, cwd=str(ours))
+        assert (ran.returncode, ran.stdout) == (want.returncode, want.stdout)
+
+    @harness.needs("cc")
+    def test_two_definitions_of_one_name_are_refused(self, tmp_path):
+        (tmp_path / "main.c").write_text(
+            "int helper(void){ return 1; }\nint main(void){ return helper(); }\n",
+            encoding="utf-8")
+        (tmp_path / "other.c").write_text(
+            "int helper(void){ return 2; }\n", encoding="utf-8")
+        ran = _uasm("run", "main.c", "--c:unit", "other.c", cwd=tmp_path)
+        assert ran.returncode != 0
+        out = ran.stdout + ran.stderr
+        assert "E1600" in out and "'helper'" in out
+
+    @harness.needs("cc")
+    def test_two_mains_are_refused_by_the_name_the_program_used(self, tmp_path):
+        """`main` is compiled under another name, and the diagnostic has to
+        say the one the programmer wrote."""
+        (tmp_path / "main.c").write_text("int main(void){ return 0; }\n",
+                                         encoding="utf-8")
+        (tmp_path / "other.c").write_text("int main(void){ return 1; }\n",
+                                          encoding="utf-8")
+        ran = _uasm("run", "main.c", "--c:unit", "other.c", cwd=tmp_path)
+        assert ran.returncode != 0
+        assert "'main'" in ran.stdout + ran.stderr
+
+    @harness.needs("cc")
+    def test_a_unit_that_cannot_be_read_says_so(self, tmp_path):
+        (tmp_path / "main.c").write_text("int main(void){ return 0; }\n",
+                                         encoding="utf-8")
+        ran = _uasm("run", "main.c", "--c:unit", "absent.c", cwd=tmp_path)
+        assert ran.returncode != 0
+        assert "E1602" in ran.stdout + ran.stderr

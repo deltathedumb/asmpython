@@ -70,7 +70,11 @@ class Unsupported(Exception):
 
 class Lowerer:
     def __init__(self, unit: S.Unit, parser, source: SourceFile,
-                 sink: DiagnosticSink) -> None:
+                 sink: DiagnosticSink, inits: tuple[str, ...] = ()) -> None:
+        #: EVERY UNIT'S INITIALISER, when the build has more than one, so
+        #: that the entry point can call all of them. Empty for a single
+        #: unit, which calls its own or has none. See `_emit_entry`.
+        self.inits = inits
         self.unit = unit
         self.parser = parser
         self.source = source
@@ -96,6 +100,9 @@ class Lowerer:
         self.globals: set[str] = set()
         self.needs_vla = False
         self.needs_args = False
+        #: This unit's initialiser, named with its own prefix so that two
+        #: units' initialisers are two functions.
+        self._init_name = parser.sema.prefix + "init"
         self._temp_n = 0
         #: The register holding this function's variadic argument area.
         self.va_area: int | None = None
@@ -121,58 +128,8 @@ class Lowerer:
         return self.module
 
     def _prune(self) -> None:
-        """Drop what nothing reaches.
-
-        THE STANDARD LIBRARY IS A HEADER, so `#include <stdio.h>` brings in
-        `printf` AND `fprintf` AND `snprintf` AND the whole formatter, as
-        `static` definitions in this one translation unit. Every one of them
-        would reach the backend and be emitted: the C backend writes a
-        function per IR function, and a program that prints one line would
-        carry a `qsort` it never calls.
-
-        A linker drops those, and this frontend produces a module rather than
-        an object file, so nothing downstream would. Reachability from the
-        exported functions is exactly the question a linker asks, and the
-        answer here costs one walk of the instruction stream.
-
-        ONLY INTERNAL ONES GO. Anything with external linkage is part of the
-        artifact's interface whether or not this unit calls it, and an
-        external DECLARATION is kept only while something still calls it --
-        which is what stops `extern` lines for functions the pruning just
-        removed the calls to.
-        """
-        by_name = {f.name: f for f in self.module.functions}
-        roots = [f for f in self.module.functions
-                 if f.linkage is not IRLinkage.INTERNAL and not f.external]
-        seen: set[str] = set()
-        globals_used: set[str] = set()
-        stack = [f.name for f in roots]
-        while stack:
-            name = stack.pop()
-            if name in seen:
-                continue
-            seen.add(name)
-            fn = by_name.get(name)
-            if fn is None:
-                continue
-            for _, ins in fn.instructions():
-                if ins.op in (Op.CALL, Op.FUNC_ADDR) and ins.sym:
-                    if ins.sym not in seen:
-                        stack.append(ins.sym)
-                elif ins.op is Op.GLOBAL_ADDR and ins.sym:
-                    globals_used.add(ins.sym)
-        self.module.functions = [
-            f for f in self.module.functions
-            if f.name in seen or (f.linkage is not IRLinkage.INTERNAL
-                                  and not f.external)]
-        # A global an initialiser points AT is used even when no instruction
-        # names it: `static char *p = msg;` becomes a store in `__c_init`,
-        # which does name it -- but a string only ever reached through
-        # another global's bytes would not be there. Nothing produces that
-        # today; the assertion is the comment.
-        self.module.globals = [
-            g for g in self.module.globals
-            if g.name in globals_used or g.linkage is IRLinkage.EXPORT]
+        """Drop what nothing reaches. The walk itself is `prune` below."""
+        prune(self.module)
 
     def anon_literals(self):
         return list(self.parser.anon)
@@ -495,10 +452,20 @@ class Lowerer:
 
     # ── the entry point and the static initialiser ──────────────────────────
     def _emit_init(self) -> None:
-        if not self.init_stores:
+        """The stores a static initialiser could not put in a global's bytes.
+
+        ALWAYS EMITTED IN A MULTI-UNIT BUILD, even when it is empty, and
+        EXPORTED. The entry point is in whichever unit defines `main`, and it
+        cannot know whether another unit needed one -- so every unit has one
+        and the entry calls them all. An empty one costs a `ret`, which the
+        alternative (working out afterwards which units produced one and
+        editing the entry block) does not come close to.
+        """
+        if not self.init_stores and not self.inits:
             return
-        fn = Function("__c_init", IR.VOID, linkage=IRLinkage.INTERNAL,
-                      span=self.unit.span)
+        fn = Function(self._init_name, IR.VOID, span=self.unit.span,
+                      linkage=(IRLinkage.EXPORT if self.inits
+                               else IRLinkage.INTERNAL))
         self.module.functions.append(fn)
         self.fn = fn
         fn.blocks.append(Block("entry"))
@@ -523,7 +490,10 @@ class Lowerer:
         """
         user = self.module.function(USER_MAIN)
         if user is None:
-            if self.init_stores:
+            # IN A MULTI-UNIT BUILD THIS IS THE ORDINARY CASE -- only one
+            # unit has `main` -- and the frontend says so once, after the
+            # merge, if no unit had one at all.
+            if self.init_stores and not self.inits:
                 self.sink.report(
                     warning("W1500",
                             "this unit has static initialisers that need "
@@ -541,8 +511,13 @@ class Lowerer:
         fn.blocks.append(Block("entry"))
         self.b = Builder(fn)
         self.sret = None
-        if self.init_stores:
-            self.b.call(IR.VOID, "__c_init", [])
+        # EVERY UNIT'S, IN UNIT ORDER. C does not say in what order the
+        # translation units of a program are initialised, only that it
+        # happens before `main` runs; unit order is the one a reader can
+        # predict.
+        for name in (self.inits or
+                     ((self._init_name,) if self.init_stores else ())):
+            self.b.call(IR.VOID, name, [])
         args = self._main_args(user)
         got = self.b.call(user.ret, USER_MAIN, args)
         if user.ret.is_void:
@@ -1731,6 +1706,67 @@ class Lowerer:
         for g in globals_:
             self._add_global(g)
 
+
+
+def prune(module: Module) -> None:
+    """Drop what nothing reaches.
+
+    THE STANDARD LIBRARY IS A HEADER, so `#include <stdio.h>` brings in
+    `printf` AND `fprintf` AND `snprintf` AND the whole formatter, as
+    `static` definitions in this one translation unit. Every one of them
+    would reach the backend and be emitted: the C backend writes a function
+    per IR function, and a program that prints one line would carry a `qsort`
+    it never calls.
+
+    A linker drops those, and this frontend produces a module rather than an
+    object file, so nothing downstream would. Reachability from the exported
+    functions is exactly the question a linker asks, and the answer here
+    costs one walk of the instruction stream.
+
+    ONLY INTERNAL ONES GO. Anything with external linkage is part of the
+    artifact's interface whether or not this unit calls it, and an external
+    DECLARATION is kept only while something still calls it -- which is what
+    stops `extern` lines for functions the pruning just removed the calls to.
+
+    A FREE FUNCTION AND NOT A METHOD because it runs twice when a build has
+    several translation units: once per unit, where it is most of what makes
+    a unit's own copy of the library small, and once over the merged module,
+    where it removes what the merge made unreachable -- a unit's string
+    literals, say, whose only user was its copy of a library function that
+    the merge kept one of.
+    """
+    by_name = {f.name: f for f in module.functions}
+    roots = [f for f in module.functions
+             if f.linkage is not IRLinkage.INTERNAL and not f.external]
+    seen: set[str] = set()
+    globals_used: set[str] = set()
+    stack = [f.name for f in roots]
+    while stack:
+        name = stack.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        fn = by_name.get(name)
+        if fn is None:
+            continue
+        for _, ins in fn.instructions():
+            if ins.op in (Op.CALL, Op.FUNC_ADDR) and ins.sym:
+                if ins.sym not in seen:
+                    stack.append(ins.sym)
+            elif ins.op is Op.GLOBAL_ADDR and ins.sym:
+                globals_used.add(ins.sym)
+    module.functions = [
+        f for f in module.functions
+        if f.name in seen or (f.linkage is not IRLinkage.INTERNAL
+                              and not f.external)]
+    # A global an initialiser points AT is used even when no instruction
+    # names it: `static char *p = msg;` becomes a store in the unit's
+    # initialiser, which does name it -- but a string only ever reached
+    # through another global's bytes would not be there. Nothing produces
+    # that today; the assertion is the comment.
+    module.globals = [
+        g for g in module.globals
+        if g.name in globals_used or g.linkage is IRLinkage.EXPORT]
 
 #: The IR opcode each C operator becomes.
 _ARITH = {

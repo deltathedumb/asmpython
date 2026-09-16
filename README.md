@@ -293,10 +293,13 @@ every finite double is a terminating decimal and `%f` of `1e300` has a right
 answer with 301 digits in it — and `strtod` is exact in the other direction,
 so the round trip through `%.17g` recovers the value it started with.
 
-One translation unit per build: `uasm build prog.c` compiles `prog.c`
-and whatever it includes, and a project with several `.c` files builds as a
-unity build. The driver takes one source for every frontend, so that is the
-shape of the tool rather than a limit of the language.
+Several translation units in one build: `uasm build main.c --c:unit parse.c
+--c:unit emit.c` compiles each on its own and joins the modules, which is what
+`cc main.c parse.c emit.c` does and means the same things by it — a `static`
+in one file is not the one of that name in the next, and two definitions of
+one external name is an error naming both files. It is a flag rather than
+several positional sources because the driver hands each frontend one source,
+and that is what names the output and roots the search path.
 
 All thirty-one headers C23 requires are there. Three of them refuse with a
 reason rather than being absent — `<complex.h>`, `<setjmp.h>` and

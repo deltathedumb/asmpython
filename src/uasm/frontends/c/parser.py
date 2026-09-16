@@ -27,6 +27,7 @@ the only implementation of this that is not a special case per shape.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Callable
 
 from ...diagnostics import DiagnosticSink, Span
@@ -42,6 +43,12 @@ from .literals import (
 )
 from .sema import Linkage, Sema, Storage, Symbol
 from .tokens import KEYWORD_ALIASES, KEYWORDS, Kind, Token
+
+#: Where the bundled standard headers live. NOT imported from `preprocess`,
+#: which imports nothing from here and should keep it that way; the one
+#: sentence that defines it is `Path(__file__).parent / "include"` in both
+#: places, and a test checks that the two agree.
+_BUNDLED = Path(__file__).parent / "include"
 
 #: Storage-class keywords, and the `Storage` each maps to.
 _STORAGE = {
@@ -97,11 +104,12 @@ _ASSIGN_OPS = ("=", "*=", "/=", "%=", "+=", "-=", "<<=", ">>=", "&=", "^=",
 class Parser:
     """One translation unit."""
 
-    def __init__(self, tokens: list[Token], sink: DiagnosticSink) -> None:
+    def __init__(self, tokens: list[Token], sink: DiagnosticSink,
+                 prefix: str = "c0.") -> None:
         self.toks = tokens
         self.i = 0
         self.sink = sink
-        self.sema = Sema(sink)
+        self.sema = Sema(sink, prefix)
         self.unit = S.Unit(tokens[0].span if tokens else None)
         #: The function being parsed, for `return`, labels and `__func__`.
         self.function: S.FunctionDef | None = None
@@ -413,7 +421,7 @@ class Parser:
         node = S.StringLit(span, C.array_of(elem, count), True, prefix, data)
         key = (prefix, data)
         if key not in self.strings:
-            self.strings[key] = f".str.{len(self.strings)}"
+            self.strings[key] = f"{self.sema.prefix}str.{len(self.strings)}"
         node.symbol = self.strings[key]
         return node
 
@@ -450,7 +458,7 @@ class Parser:
         data = name.encode("utf-8") + b"\x00"
         key = ("", data)
         if key not in self.strings:
-            self.strings[key] = f".str.{len(self.strings)}"
+            self.strings[key] = f"{self.sema.prefix}str.{len(self.strings)}"
         node = S.StringLit(t.span, C.array_of(C.CHAR.qualified({"const"}),
                                               len(data)), True, "", data)
         node.symbol = self.strings[key]
@@ -517,7 +525,7 @@ class Parser:
         node = S.CompoundLiteral(span, ty, True, init)
         if self.sema.scope.is_file:
             node.static = True
-            node.symbol = self.sema.unique(".compound")
+            node.symbol = self.sema.unique(self.sema.prefix + "compound")
             self.anon.append(node)
         return node
 
@@ -1884,10 +1892,11 @@ class Parser:
         # block-scope `static` carries its function's name too, because two
         # functions may each have a `static int count;` and the IR has one
         # flat namespace of globals.
+        own = _library_prefix(span) or self.sema.prefix
         sym.ir_name = (
             name if linkage is Linkage.EXTERNAL
-            else self.sema.unique(f"c.{name}" if scope.is_file
-                                  else f"c.{_owner(self)}.{name}"))
+            else self.sema.unique(f"{own}{name}" if scope.is_file
+                                  else f"{own}{_owner(self)}.{name}"))
         if linkage is Linkage.EXTERNAL:
             self.sema.taken.add(name)
         scope.declare(sym)
@@ -2056,6 +2065,30 @@ def _owner(p: Parser) -> str:
     return p.function.name if p.function is not None else "static"
 
 
+def _library_prefix(span: Span | None) -> str | None:
+    """`"c."` for a name declared in a bundled header, else None.
+
+    WHY THE LIBRARY IS NOT A UNIT'S OWN. `static` in `<stdio.h>` means "this
+    translation unit's", and with one unit per build that was the whole
+    story. With several, every unit that includes `<stdio.h>` would get its
+    own `printf`, its own `errno` and its own `malloc` arena -- so a program
+    whose `fopen` fails in one file and whose `perror` is in another would
+    print the wrong thing, and `srand` in one would not reach `rand` in the
+    next. A real toolchain does not have that problem because libc is ONE
+    object linked once, and this is the same answer: the bundled headers are
+    the library, they share a prefix across the build, and `merge.py` keeps
+    one copy of each.
+
+    BY WHERE THE DECLARATION IS, which is the only honest test. A name is the
+    library's because it came out of `include/`, not because it looks
+    standard -- a user may write their own `printf` and it is theirs.
+    """
+    path = getattr(span.file, "path", None) if span is not None else None
+    if path is None:
+        return None
+    return "c." if _BUNDLED in path.parents else None
+
+
 def _prefix_info(prefix: str):
     from .literals import PREFIXES
     return PREFIXES[prefix]
@@ -2096,6 +2129,7 @@ def _entry_size(e: S.InitEntry) -> int:
         return 0
 
 
-def parse(tokens: list[Token], sink: DiagnosticSink) -> tuple[S.Unit, Parser]:
-    p = Parser(tokens, sink)
+def parse(tokens: list[Token], sink: DiagnosticSink,
+          prefix: str = "c0.") -> tuple[S.Unit, Parser]:
+    p = Parser(tokens, sink, prefix)
     return p.translation_unit(), p
