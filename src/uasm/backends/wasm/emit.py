@@ -1,7 +1,7 @@
 """`wasm` -- WebAssembly, as a binary module.
 
 NOT WRITTEN YET. This module exists so that 'wasm' is a REGISTERED backend
-that refuses, rather than a name `uasm backends` has never heard of.
+that refuses, rather than a name `uasm plugin backends` has never heard of.
 
 A BINARY BACKEND, NOT A `.wat` ONE. The text format would be text, which
 `Backend.kind` forbids for anything that is not another language -- and

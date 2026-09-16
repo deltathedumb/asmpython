@@ -2,7 +2,7 @@ import * as path from "path";
 import * as vscode from "vscode";
 
 interface UasmTaskDefinition extends vscode.TaskDefinition {
-  mode: "compile" | "run" | "check" | "emit-asm";
+  mode: "compile" | "run" | "verify" | "emit-asm";
   file?: string;
   target?: string;
 }
@@ -21,7 +21,7 @@ export class UasmTaskProvider implements vscode.TaskProvider {
     return [
       this.buildTask(folder, { type: "uasm", mode: "compile" }, "Compile active file"),
       this.buildTask(folder, { type: "uasm", mode: "run" }, "Run active file"),
-      this.buildTask(folder, { type: "uasm", mode: "check" }, "Check active file"),
+      this.buildTask(folder, { type: "uasm", mode: "verify" }, "Verify active file"),
     ];
   }
 
@@ -43,19 +43,26 @@ export class UasmTaskProvider implements vscode.TaskProvider {
     name: string
   ): vscode.Task {
     const file = def.file ?? "${file}";
+    // EVERY INVOCATION NAMES A VERB. These pushed the file straight after
+    // `-m uasm`, which argparse refuses -- it wants a subcommand first --
+    // so every task here failed before it reached the compiler. `--check`
+    // was never a flag either; the verb is `verify`.
     const args = ["-m", "uasm"];
     switch (def.mode) {
-      case "check":
-        args.push(file, "--check");
+      case "verify":
+        args.push("verify", file);
         break;
       case "emit-asm":
-        args.push(file, "--emit-asm");
+        args.push("build", file, "--emit-asm");
+        break;
+      case "run":
+        args.push("run", file);
         break;
       case "compile":
-      case "run":
       default: {
         const outDir = path.join("${workspaceFolder}", "build");
-        args.push(file, "-o", outDir + "/${fileBasenameNoExtension}");
+        args.push("build", file, "-o",
+                  outDir + "/${fileBasenameNoExtension}");
         break;
       }
     }

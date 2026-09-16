@@ -1,15 +1,26 @@
 """`uasm` -- the command line.
 
+FIVE VERBS, and they are the five things a compiler does:
+
     uasm build prog.py                  source -> IR -> a program you can run
-    uasm build prog.py --emit            stop at the artifacts; do not link
+    uasm build prog.py --emit           stop at the artifacts; do not link
     uasm build prog.py --emit-ir        stop after the IR and print it
     uasm build prog.py -O --time-passes optimise, and show what each pass cost
     uasm build prog.py --target x86_64-linux --backend x86-64
     uasm build prog.py --backend jvm --java-version 21   -> a runnable jar
     uasm run prog.py                    execute in the reference interpreter
-    uasm check prog.py                  analyse and verify, produce nothing
-    uasm ops / types / targets / backends / frontends / toolchains / passes
-    uasm port                     how far the object runtime has moved to IR
+    uasm verify prog.py [--json]        compile and verify, produce nothing
+    uasm link a.ir b.ir -o all.ir       join modules at the IR
+    uasm link a.o b.o -o prog           or objects, into a program
+    uasm plugin add|remove|list|show    install plugins and see what they are
+    uasm plugin backends|frontends|linkers|targets|passes
+    uasm plugin ops|types|libraries|port
+
+THE LISTINGS ARE UNDER `plugin` because every one of them answers a question
+about the INSTALLATION rather than about a program, and a plugin is the
+reason the answer can differ between two machines. They were nine verbs of
+their own, sitting beside `build` and `run` as though listing something were
+the same kind of act as compiling.
 
 Every stage can be stopped at and dumped, and `--emit-ir` writes text that
 `uasm run` accepts. That round trip is what makes a backend debuggable: you can
@@ -27,11 +38,11 @@ from .. import backend as backend_registry
 from .. import frontend as frontend_registry
 from .. import link as link_registry
 from .. import target as target_registry
-from ..diagnostics import DiagnosticSink, Renderer, SourceFile
-from ..ir import opcodes, types as T
+from ..diagnostics import DiagnosticSink, Renderer, SourceFile, error, is_real
+from ..ir import opcodes, types as T, verify
 from ..options import Option
 from ..ir.interpreter import Interpreter, Trap
-from ..ir.printer import parse_module
+from ..ir.printer import ParseError, parse_module, print_module
 from ..ir.verifier import VerifyError
 from ..passes import available as available_passes
 from .pipeline import DEFAULT_PASSES, Options, compile_source
@@ -172,6 +183,170 @@ def cmd_build(args) -> int:
     return 0
 
 
+def _truthy(raw) -> bool:
+    """A `1|0` flag, spelled the way `plugin add --cwd 1|0` spells one."""
+    return str(raw).lower() in ("1", "true", "yes", "on")
+
+
+#: The extensions that hold IR rather than something a platform linker reads.
+#: `.ir` is the text form `--emit-ir` writes and `uasm run` accepts; `.uirb`
+#: is the container the `uir` backend will write.
+_IR_SUFFIXES = (".ir", ".uir", ".uirb")
+
+
+def cmd_link(args) -> int:
+    """Join inputs into one thing, at whichever level they are already at.
+
+    TWO STAGES WEAR THE NAME `link` and this verb reaches both, because from
+    where the user stands they are one act -- "make these into one" -- and
+    which one happens is decided by what they handed over, not by a flag they
+    have to know to pass:
+
+      * IR in, IR out. `uasm link a.ir b.ir -o all.ir` resolves names BETWEEN
+        modules, which is the thing a single-translation-unit compiler can
+        never do: see `ir/link.py` for why that is a stage and not a
+        convenience.
+      * Objects in, a program out. `uasm link a.o b.o -o prog` is the
+        platform link, run through the same toolchain `build` would have
+        used and chosen the same way.
+
+    MIXED IS AN ERROR rather than a guess. `a.ir b.o` could mean compile the
+    IR and then link both, or it could be a typo; doing the first silently
+    would mean a flag nobody passed decided which backend compiled `a.ir`,
+    and the answer would be visible only in the program.
+    """
+    sink = _sink(args)
+    inputs = [Path(p) for p in args.inputs]
+    ir = [p for p in inputs if p.suffix in _IR_SUFFIXES]
+    rest = [p for p in inputs if p.suffix not in _IR_SUFFIXES]
+    if ir and rest:
+        sink.report(
+            error("E9112", "cannot link IR and object files together")
+            .note("IR: " + ", ".join(str(p) for p in ir))
+            .note("objects: " + ", ".join(str(p) for p in rest))
+            .help("build the IR first (`uasm build x.ir -o x.o --emit`), "
+                  "then link the objects"))
+        sink.emit()
+        return 1
+    rc = _link_ir(args, inputs, sink) if ir else _link_objects(args, inputs, sink)
+    sink.emit()
+    return rc
+
+
+def _link_ir(args, inputs, sink) -> int:
+    """Merge IR modules into one, and write the IR out."""
+    from ..ir.link import merge
+
+    loaded = []
+    for path in inputs:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            sink.report(error("E9113", f"cannot read {path}: {exc}"))
+            return 1
+        try:
+            loaded.append((str(path), parse_module(text)))
+        except ParseError as exc:
+            # HAND-EDITED IR IS THE DOCUMENTED WAY to test a backend, so
+            # malformed IR is expected input rather than an internal error.
+            sink.report(error("E9113", f"{path}: {exc}"))
+            return 1
+    module = merge(loaded, sink)
+    if module is None:
+        return 1
+    # VERIFIED BEFORE IT IS WRITTEN. A merge can produce IR that no single
+    # input contained -- a call that was external in one file and is now
+    # resolved -- and writing that out unchecked hands the next stage a file
+    # this one was supposed to vouch for.
+    try:
+        verify(module)
+    except VerifyError as exc:
+        d = error("E9999", "internal error: linking produced invalid IR")
+        d.note("This is a bug in the compiler, not in your inputs.")
+        for problem in exc.problems[:10]:
+            d.note(problem)
+        sink.report(d)
+        return 1
+    text = print_module(module, show_spans=getattr(args, "show_spans", False))
+    if args.output:
+        Path(args.output).write_text(text, encoding="utf-8")
+        print(f"wrote {args.output}")
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
+def _link_objects(args, inputs, sink) -> int:
+    """Hand the inputs to a toolchain, exactly as the build's link stage does."""
+    if not args.output:
+        sink.report(
+            error("E9114", "linking objects needs an output path")
+            .help("name it with -o; there is no source file to name it after"))
+        return 1
+
+    from . import select as selector
+
+    target = (target_registry.get(args.target) if args.target
+              else target_registry.get("host"))
+    # `choose_linker` AND NOT `choose`, because `choose` starts from a SOURCE
+    # and there is not one: nothing here is compiled, so no frontend and no
+    # backend are chosen. What the output spells still picks the linker
+    # exactly as it does for a build -- `-o thing.so` is an extension module
+    # here too -- and `cc` is the fallback for the same reason it is there:
+    # an output with no extension of its own is a native program.
+    name = selector.choose_linker(Path(args.output), args.toolchain,
+                                  link_registry, fallback="cc")
+    toolchain = link_registry.get(name)
+    if not toolchain.supports(target):
+        sink.report(
+            error("E9115",
+                  f"the {toolchain.name} linker cannot produce a program "
+                  f"for {target.name}"))
+        return 1
+
+    workdir = (Path(args.workdir) if args.workdir
+               else Path(args.output).parent / ".uasm")
+    runtime_sources: tuple[Path, ...] = ()
+    if _truthy(args.runtime):
+        from ..objects import support as objects_support
+        # `module=None` MEANS THE WHOLE RUNTIME. The build stage narrows it to
+        # what one module needs; there is no module here, so nothing can be
+        # left out and the linker drops what nothing reaches.
+        runtime_sources = (objects_support.write_runtime(workdir),)
+    request = link_registry.LinkRequest(
+        # NO ARTIFACTS OF OUR OWN: everything being linked was named on the
+        # command line, which is the difference between this and `build`.
+        artifacts={}, target=target, output=Path(args.output),
+        workdir=workdir,
+        # `input_paths` AND NOT `extra_inputs`: these are objects the user
+        # named, which exist where they are. `--link-input` is still the
+        # other thing -- `-l` names and libraries -- and still comes after
+        # them, which is the order a linker wants.
+        input_paths=tuple(inputs),
+        runtime_sources=runtime_sources,
+        extra_inputs=tuple(
+            (getattr(args, "linker_options", None) or {})
+            .get("link-input", ())),
+        keep_intermediates=getattr(args, "keep_intermediates", False),
+        verbose=getattr(args, "verbose", False))
+    try:
+        program = toolchain.link(request)
+    except link_registry.LinkError as exc:
+        d = error("E9104", exc.message)
+        if exc.detail:
+            d.note(exc.detail)
+        if exc.help:
+            d.help(exc.help)
+        sink.report(d)
+        return 1
+    finally:
+        if getattr(args, "verbose", False):
+            for cmd in request.commands:
+                print("$ " + " ".join(cmd), file=sys.stderr)
+    print(f"wrote {program}")
+    return 0
+
+
 def cmd_run(args) -> int:
     path = Path(args.source)
     if path.suffix == ".ir":
@@ -249,18 +424,91 @@ def cmd_run(args) -> int:
     return 0
 
 
-def cmd_check(args) -> int:
+def cmd_verify(args) -> int:
+    """`build` with everything after the frontend taken off.
+
+    IT IS A BUILD AND NOT A SEPARATE ANALYSIS. The same frontend, the same
+    flags, the same imports resolved the same way -- because the one thing
+    this must never do is say a program is fine and then have `build` refuse
+    it. So it runs the whole front half and the IR verifier, and stops where
+    the backend would start.
+
+    THE FRONTEND IS TOLD, through `BuildContext.verifying`, so it can skip
+    work whose only consumer is a stage that will not run. Nothing that could
+    change a diagnostic may be skipped -- that would be the same lie by a
+    shorter route -- and what it costs to say so is one bool.
+    """
     sink = _sink(args)
     opts = _options(args)
     opts.emit_ir = True                     # stop before any backend
     opts.link = False
+    opts.verifying = True
     result = compile_source(opts, sink)
+    if getattr(args, "json", False):
+        # THE DIAGNOSTICS AS DATA, for an editor or a CI job. Printed
+        # INSTEAD of the rendered form rather than beside it: two renderings
+        # of one run on one stream is not something a reader or a parser can
+        # use.
+        print(_diagnostics_as_json(sink, result))
+        return 0 if not sink.failed else 1
     sink.emit()
     if not result.ok:
         return 1
     stats = result.module.statistics()
     print("ok: " + ", ".join(f"{v} {k}" for k, v in stats.items() if v))
     return 0
+
+
+def _diagnostics_as_json(sink, result) -> str:
+    """This run, as one JSON object.
+
+    THE SHAPE IS THE DIAGNOSTIC'S OWN and not a flattened string: `code`,
+    `severity`, `message`, the notes and helps separately, and a position
+    when there is one. A tool that wanted the rendered text could have run
+    without `--json`; what it cannot reconstruct from that text is which
+    code was reported, and that is the part a CI job filters on.
+
+    POSITIONS ARE 1-BASED LINE AND COLUMN, as the rendered form prints them,
+    and `bytes` carries the half-open byte range for an editor that wants to
+    highlight exactly what the compiler pointed at.
+    """
+    import json
+
+    def place(span):
+        if not is_real(span):
+            return None
+        start, end = span.start_loc, span.end_loc
+        return {"file": span.file.name,
+                "line": start.line, "column": start.column,
+                "end_line": end.line, "end_column": end.column,
+                "bytes": [span.start, span.end]}
+
+    items = []
+    for d in sorted(sink.diagnostics, key=lambda x: x.sort_key()):
+        items.append({
+            "code": d.code,
+            "severity": d.severity.label,
+            "message": d.message,
+            "at": place(d.primary_span),
+            "notes": list(d.notes),
+            "helps": list(d.helps),
+            # EVERY LABEL AND NOT JUST THE PRIMARY ONE: a secondary label is
+            # where the OTHER operand was, or where the name was defined
+            # first, and dropping it leaves half the explanation behind.
+            "labels": [{"at": place(label.span), "message": label.message,
+                        "primary": label.primary} for label in d.labels],
+        })
+    return json.dumps({
+        "ok": not sink.failed,
+        "errors": sink.error_count,
+        "warnings": sink.warning_count,
+        "diagnostics": items,
+        # WHAT WAS VERIFIED, when there is anything: a run that reported
+        # nothing and compiled nothing is not the same as one that checked a
+        # program, and the counts say which happened.
+        "statistics": (result.module.statistics() if result.module is not None
+                       else None),
+    }, indent=2)
 
 
 def cmd_ops(args) -> int:
@@ -309,7 +557,7 @@ def _print_options(options, width: int) -> None:
     WITH THE COMPONENT rather than only in `build --help`, where they sit
     among thirty options that apply to every build and give no hint which one
     they belong to. Shared by all three listings now that all three kinds can
-    declare flags -- `uasm frontends` said nothing about
+    declare flags -- `uasm plugin frontends` said nothing about
     `--import-path`, which is the Python frontend's and nobody else's.
     """
     for option in options:
@@ -333,7 +581,7 @@ def cmd_backends(args) -> int:
         _print_options(be.options, width)
     # THE FAMILIES AFTER THE BACKENDS, and marked as not being backends. They
     # are selectable with --backend and are not code generators, so listing
-    # them among the others would make `uasm backends` show six entries
+    # them among the others would make `uasm plugin backends` show six entries
     # for four compilers; leaving them out entirely would hide a name the
     # help text tells the user to type.
     from ..backend.families import DEFAULT_BITS, FAMILIES
@@ -968,7 +1216,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "family, and is checked against --backend and "
                         "--target when those already imply one")
     b.add_argument("--target",
-                   help="platform to emit for; see `uasm targets`")
+                   help="platform to emit for; see `uasm plugin targets`")
     b.add_argument("--emit", action="store_true",
                    help="write backend artifacts and stop; do not link")
     b.add_argument("--emit-asm", action="store_true",
@@ -978,7 +1226,7 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("-ln", "--linker", "--toolchain", dest="toolchain",
                    default=None,
                    help="how to turn artifacts into a program "
-                        "(see `uasm toolchains`). Chosen from the "
+                        "(see `uasm plugin linkers`). Chosen from the "
                         "output's extension when not given")
     # `--link-input` USED TO BE HERE, and was offered for `jar` and `pyc`
     # too -- neither of which links anything, and neither of which could say
@@ -1006,35 +1254,61 @@ def build_parser() -> argparse.ArgumentParser:
     _add_component_options(r, kinds=("frontend",))
     r.set_defaults(fn=cmd_run)
 
-    c = sub.add_parser("check", help="analyse and verify, produce nothing")
-    source_args(c)
-    pass_args(c)
-    _add_component_options(c, kinds=("frontend",))
-    c.set_defaults(fn=cmd_check)
+    ln = sub.add_parser(
+        "link", help="join IR modules, or objects, into one thing")
+    ln.add_argument("inputs", nargs="+", metavar="INPUT",
+                    help="IR files (.ir, .uirb) to merge, or objects and "
+                         "archives to link. Not both: see the refusal")
+    ln.add_argument("-o", "--output",
+                    help="where the result goes; required when linking "
+                         "objects, and IR goes to stdout without it")
+    ln.add_argument("-ln", "--linker", "--toolchain", dest="toolchain",
+                    default=None,
+                    help="how to turn objects into a program (see `uasm "
+                         "plugin linkers`). Chosen from the output's "
+                         "extension when not given")
+    ln.add_argument("--target",
+                    help="platform to link for; see `uasm plugin targets`")
+    # THE ENTRY SHIM AND THE OBJECT RUNTIME, off by default.
+    #
+    # OFF, because `link` means "link what I gave you" and anything else is a
+    # guess about where the objects came from. ON in one word, because
+    # objects from `uasm build --emit` cannot link without it: the IR's
+    # `main` is emitted as `uasm_main` -- it returns i64 where C requires int
+    # -- so nothing defines the `main` the platform's start files call.
+    ln.add_argument("--runtime", metavar="1|0", default="0",
+                    help="also link the object runtime and the `int main` "
+                         "shim that calls uasm_main (default 0). Objects "
+                         "from `uasm build --emit` need it; foreign objects "
+                         "must not have it")
+    ln.add_argument("--workdir", help="where intermediates go (default .uasm)")
+    ln.add_argument("--keep-intermediates", action="store_true")
+    ln.add_argument("-v", "--verbose", action="store_true",
+                    help="print the external commands that were run")
+    ln.add_argument("--show-spans", action="store_true",
+                    help="annotate each instruction with its source position")
+    # THE LINKERS' FLAGS AND NOBODY ELSE'S: nothing is compiled here, so a
+    # frontend's flag or a backend's would name a stage this verb has not got.
+    _add_component_options(ln, kinds=("linker",))
+    ln.set_defaults(fn=cmd_link)
 
-    for name, fn, doc in (
-        ("ops", cmd_ops, "print the instruction set"),
-        ("types", cmd_types, "print the type system"),
-        ("targets", cmd_targets, "list target platforms"),
-        ("backends", cmd_backends, "list backends"),
-        ("toolchains", cmd_toolchains, "list ways of producing a program"),
-        ("port", cmd_port, "how far the object runtime has moved to IR"),
-        ("frontends", cmd_frontends, "list frontends"),
-        ("passes", cmd_passes, "list optimisation passes"),
-    ):
-        p = sub.add_parser(name, help=doc)
-        p.set_defaults(fn=fn)
+    # `check` UNTIL NOW, and renamed because the two words mean different
+    # things: `check` reads as a lint, and this is a BUILD with everything
+    # after the frontend taken off -- same frontend, same flags, same
+    # imports. What it promises is that a program it passes is one `build`
+    # accepts, which is a stronger claim than "looks fine".
+    v = sub.add_parser("verify",
+                       help="compile and verify, produce nothing")
+    source_args(v)
+    pass_args(v)
+    _add_component_options(v, kinds=("frontend",))
+    v.add_argument("--json", action="store_true",
+                   help="print the diagnostics as JSON instead of rendering "
+                        "them, for an editor or a CI job")
+    v.set_defaults(fn=cmd_verify)
 
-    # Not in the loop above: this is the one noun whose answer depends on
-    # WHICH interpreter is asked, so it takes the same flag `build` does.
-    lib = sub.add_parser("libraries",
-                         help="where installed packages are resolved from")
-    lib.add_argument("--host-python", metavar="PATH",
-                     help="the interpreter to ask; default is the one "
-                          "running the compiler")
-    lib.set_defaults(fn=cmd_libraries)
-
-    pl = sub.add_parser("plugin", help="install and inspect plugins")
+    pl = sub.add_parser("plugin",
+                        help="install plugins, and describe this installation")
     pls = pl.add_subparsers(dest="plugin_command", required=True)
 
     def where(p):
@@ -1076,10 +1350,64 @@ def build_parser() -> argparse.ArgumentParser:
     where(sh)
     sh.set_defaults(fn=cmd_plugin_show)
 
+    # ── what this installation is made of ──────────────────────────────────
+    #
+    # NINE VERBS OF THEIR OWN, until now. `uasm backends`, `uasm ops` and
+    # seven more sat beside `build` and `run`, as though listing something
+    # were the same kind of act as compiling. They are here because every one
+    # of them answers a question about the INSTALLATION rather than about a
+    # program, and because a plugin is the reason the answer can differ
+    # between two machines: five of them print a registry a plugin extends,
+    # two print the IR contract a plugin backend is written against, and two
+    # describe the installation a plugin lands in.
+    #
+    # `plugin list` STAYS THE PLUGINS THEMSELVES, and these do not take its
+    # place: "what did I install" and "what can this compiler do" are
+    # different questions, and a plugin's whole point is that the second
+    # answer changes when the first does.
+    for name, fn, doc, aliases in (
+        ("backends", cmd_backends, "code generators, and the flags each takes",
+         ()),
+        ("frontends", cmd_frontends, "languages, and the flags each takes", ()),
+        # THE REGISTRY'S OWN WORD IS `toolchain` and the flag is `--linker`,
+        # so both are accepted here for the same reason `-ln` accepts
+        # `--toolchain`: one thing, and nobody should have to remember which
+        # word this particular command wanted.
+        ("linkers", cmd_toolchains, "ways of turning artifacts into a program",
+         ("toolchains",)),
+        ("targets", cmd_targets, "target platforms, with their aliases", ()),
+        ("passes", cmd_passes, "optimisation passes", ()),
+        ("ops", cmd_ops, "the IR's instruction set", ()),
+        ("types", cmd_types, "the IR's type system", ()),
+        ("port", cmd_port, "how far the object runtime has moved to IR", ()),
+    ):
+        p = pls.add_parser(name, help=doc, aliases=aliases)
+        p.set_defaults(fn=fn)
+
+    # Not in the loop above: this is the one noun whose answer depends on
+    # WHICH interpreter is asked, so it takes the same flag `build` does.
+    lib = pls.add_parser("libraries",
+                         help="where installed packages are resolved from")
+    lib.add_argument("--host-python", metavar="PATH",
+                     help="the interpreter to ask; default is the one "
+                          "running the compiler")
+    lib.set_defaults(fn=cmd_libraries)
+
     # argparse accepts a parser-level flag only BEFORE the subcommand, and
     # `uasm build prog.py --plugin mine` is what people type. So every
     # subparser takes it too, and main() merges the two lists.
-    for p in sub.choices.values():
+    # THE SUBVERBS TOO, not only the verbs: `uasm plugin backends --plugin
+    # mine` is the whole point of the flag for a listing -- see what a plugin
+    # adds without installing it -- and argparse would have taken it only in
+    # front of `backends`, where nobody would think to put it.
+    # BY IDENTITY, because an alias is the same parser under a second name:
+    # `linkers` and `toolchains` are one entry in `choices` twice over, and
+    # adding the flag to it twice is a conflict argparse raises at startup.
+    seen: list[argparse.ArgumentParser] = []
+    for p in list(sub.choices.values()) + list(pls.choices.values()):
+        if any(p is done for done in seen):
+            continue
+        seen.append(p)
         p.add_argument("--plugin", action="append", default=[],
                        metavar="MODULE", help=argparse.SUPPRESS)
     return ap

@@ -20,10 +20,18 @@ uasm build prog.py --emit            # artifacts only; do not link
 uasm build prog.py --backend x86-64 --emit-asm   # read the generated code
 uasm build prog.py --emit-ir         # stop at the IR and read it
 uasm run prog.py                     # execute in the reference interpreter
-uasm check prog.py                   # analyse and verify, produce nothing
-uasm ops | types | passes | backends | frontends | targets | toolchains
-uasm libraries                       # where installed packages resolve from
+uasm verify prog.py --json           # compile and verify; diagnostics as JSON
+uasm link a.ir b.ir -o all.ir        # join modules at the IR
+uasm link a.o b.o -o prog            # or objects, into a program
+uasm plugin add mypack               # install a plugin and remember it
+uasm plugin backends | frontends | linkers | targets | passes
+uasm plugin ops | types | libraries | port
 ```
+
+Five verbs: `build`, `run`, `verify`, `link`, `plugin`. The listings live
+under `plugin` because each answers a question about the installation rather
+than about a program, and a plugin is why the answer can differ between two
+machines.
 
 ## Layout
 

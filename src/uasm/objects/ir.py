@@ -393,7 +393,7 @@ REPLACES: dict[str, tuple[str, ...]] = {
                     # aside -- two bodies for one symbol is a link error.
                     "apy_math_comb", "apy_math_perm",
                     # THE NUMERIC WALLS. `apy_math_arg` is the biggest blocker
-                    # `uasm port` reports and is five lines; what kept it
+                    # `uasm plugin port` reports and is five lines; what kept it
                     # in the C was `static`, not difficulty.
                     "apy_is_big_of", "apy_math_arg_of",
                     # AND THE SIX THAT WERE WAITING ON IT.

@@ -8,7 +8,7 @@ a 64-bit object they asked to be 32-bit, with nothing in the output to say so.
 WHY THE FAMILY IS RESOLVED BEFORE THE REGISTRY. `x86` and `arm` cannot emit
 anything; they are the two architectures, each with a 32- and a 64-bit code
 generator. Registering them would put names in the backend list that answer
-`emit` with a dispatch, so `uasm backends` would show six entries for
+`emit` with a dispatch, so `uasm plugin backends` would show six entries for
 four compilers.
 """
 from __future__ import annotations

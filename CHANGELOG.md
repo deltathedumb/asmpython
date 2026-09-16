@@ -93,6 +93,41 @@ deliverable.
   cannot name; and `main`'s parameters are 0 and a null `argv`, because
   nothing in the platform floor can ask the host for a command line.
 
+- **Thirteen verbs down to five** — `build`, `run`, `verify`, `link`,
+  `plugin`. `check` is `verify`, and renamed because the two words promise
+  different things: `check` reads as a lint, and this is a BUILD with
+  everything after the frontend taken off — same frontend, same flags, same
+  imports — so a program it passes is one `build` accepts. It takes `--json`,
+  which carries each diagnostic's CODE and position rather than its rendered
+  text, because the code is the part a CI job filters on and the part the
+  rendered form cannot be parsed for.
+
+  The frontend is told it is a verification run, through
+  `BuildContext.verifying`, so it can skip work whose only consumer is a
+  stage that will not happen — and nothing that could change a diagnostic,
+  which would be the same lie by a shorter route.
+
+  **`link` is new**, and reaches the two stages that wear the name. IR in, IR
+  out resolves names BETWEEN modules, which is the thing a
+  single-translation-unit compiler can never do: `uasm link a.ir b.ir -o
+  all.ir`. Objects in, a program out is the platform link, through the same
+  toolchain `build` would have used and chosen the same way. Which one
+  happens is decided by what was handed over, not by a flag; mixing the two
+  is an error rather than a guess. `--runtime 1` adds the object runtime and
+  the `int main` shim that calls `uasm_main`, which objects from `uasm build
+  --emit` need and foreign objects must not have.
+
+  **The nine listings are `plugin` subverbs** — `uasm plugin backends`,
+  `plugin frontends`, `plugin linkers` (`toolchains` still accepted),
+  `plugin targets`, `plugin passes`, `plugin ops`, `plugin types`,
+  `plugin libraries`, `plugin port`. Every one answers a question about the
+  INSTALLATION rather than about a program, and a plugin is the reason the
+  answer can differ between two machines: five print a registry a plugin
+  extends, two print the IR contract a plugin backend is written against,
+  and two describe the installation a plugin lands in. `plugin list` still
+  means the plugins themselves — "what did I install" and "what can this
+  compiler do" are different questions.
+
 - **Every component declares its own flags**, and the driver's parser stops
   carrying flags that belong to one language or one linker. `--import-path`,
   `-P`, `--no-site-packages`, `--host-python`, `--native-library` and

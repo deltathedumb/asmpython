@@ -332,7 +332,7 @@ def apy_contains(needle: ptr, hay: ptr) -> ptr:
 
 # ── three predicates the rest of the runtime is waiting on ─────────────────
 #
-# NONE OF THESE IS INTERESTING AND ALL THREE ARE WALLS. `uasm port`
+# NONE OF THESE IS INTERESTING AND ALL THREE ARE WALLS. `uasm plugin port`
 # counts twenty-one functions whose only remaining blocker is one of them --
 # not because they are hard, but because they are `static` in the C and the
 # subset cannot name a static. Each keeps its old name there as a delegate.

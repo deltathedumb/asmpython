@@ -1,7 +1,7 @@
 # The kind names, in the machine subset.
 #
 # WHAT EVERY TypeError SAYS. `apy_kind_name` has sat at the top of
-# `uasm port` since the first survey: a hundred messages name the kind
+# `uasm plugin port` since the first survey: a hundred messages name the kind
 # they were handed, and none of them could move while this did not.
 #
 # A SPLIT, AND ONLY ONE CASE MAKES IT ONE. Every kind here answers with a

@@ -96,11 +96,11 @@ def run(workspace: Path, *args: str, env_plugins: str = "") -> subprocess.Comple
 class TestItIsReachableFromTheCommandLine:
     def test_without_a_plugin_it_is_unknown(self, workspace):
         """The baseline. If this ever passes, the test below proves nothing."""
-        done = run(workspace, "backends")
+        done = run(workspace, "plugin", "backends")
         assert "counting" not in done.stdout
 
     def test_the_flag_works_before_the_command(self, workspace):
-        done = run(workspace, "--plugin", "mypack", "backends")
+        done = run(workspace, "plugin", "--plugin", "mypack", "backends")
         assert "counting" in done.stdout, done.stderr
 
     def test_the_flag_works_after_the_command(self, workspace):
@@ -121,13 +121,13 @@ class TestItIsReachableFromTheCommandLine:
             "from uasm.target import Target, register\n"
             "register(Target('second-machine', arch='second'))\n",
             encoding="utf-8")
-        done = run(workspace, "--plugin", "mypack", "targets",
+        done = run(workspace, "--plugin", "mypack", "plugin", "targets",
                    "--plugin", "second")
         assert "counting-machine" in done.stdout, done.stderr
         assert "second-machine" in done.stdout, done.stderr
 
     def test_the_environment_variable_works(self, workspace):
-        done = run(workspace, "targets", env_plugins="mypack")
+        done = run(workspace, "plugin", "targets", env_plugins="mypack")
         assert "counting-machine" in done.stdout, done.stderr
 
     def test_a_plugin_loads_only_once(self, workspace):
@@ -136,7 +136,7 @@ class TestItIsReachableFromTheCommandLine:
         Naming the same module twice -- easy, when a flag and the environment
         variable disagree -- would otherwise be a crash.
         """
-        done = run(workspace, "--plugin", "mypack", "backends",
+        done = run(workspace, "--plugin", "mypack", "plugin", "backends",
                    "--plugin", "mypack", env_plugins="mypack")
         assert done.returncode == 0, done.stderr
         assert done.stdout.count("counting") == 1
@@ -166,7 +166,7 @@ class TestFailuresAreReported:
         user is looking at in their own file, which sends them to debug the
         wrong thing entirely.
         """
-        done = run(workspace, "--plugin", "nosuchthing", "backends")
+        done = run(workspace, "plugin", "--plugin", "nosuchthing", "backends")
         assert done.returncode == 2
         assert "nosuchthing" in done.stderr
         assert "Traceback" not in done.stderr
@@ -174,7 +174,7 @@ class TestFailuresAreReported:
     def test_a_plugin_that_raises_names_itself(self, workspace):
         (workspace / "broken.py").write_text("raise ValueError('boom')\n",
                                              encoding="utf-8")
-        done = run(workspace, "--plugin", "broken", "backends")
+        done = run(workspace, "plugin", "--plugin", "broken", "backends")
         assert done.returncode == 2
         assert "broken" in done.stderr and "boom" in done.stderr
 
@@ -193,7 +193,7 @@ class TestTheListingsSurviveAThirdParty:
         this column. They are told apart by their indent: a component row
         begins at column two and nothing else does.
         """
-        done = run(workspace, "--plugin", "mypack", "toolchains")
+        done = run(workspace, "plugin", "--plugin", "mypack", "linkers")
         assert done.returncode == 0, done.stderr
         rows = [l for l in done.stdout.splitlines()
                 if l.strip() and l.startswith("  ") and not l.startswith("   ")]

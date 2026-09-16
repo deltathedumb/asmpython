@@ -58,6 +58,17 @@ class BuildContext:
     #: the declarations that named no platform applying.
     target_os: str | None = None
 
+    #: NOTHING AFTER THE FRONTEND WILL RUN. `uasm verify` compiles and then
+    #: throws the result away, so a frontend may skip work whose only
+    #: consumer is a backend or a linker.
+    #:
+    #: WHAT IT DOES NOT LICENSE: skipping anything that could change a
+    #: diagnostic. `verify` exists so that a program it passes is a program
+    #: `build` accepts, and a frontend that analysed less under this flag
+    #: would break exactly that -- silently, and only for the programs where
+    #: it mattered.
+    verifying: bool = False
+
 
 class Frontend(abc.ABC):
     """Turn source text into a Module."""

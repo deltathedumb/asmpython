@@ -219,7 +219,7 @@ class TestBinaryBackendsEmitBytes:
 class TestAnUnfinishedBackendRefuses:
     """A registered name that cannot emit must SAY so, not crash.
 
-    The six stubs exist so `uasm backends` shows the whole matrix rather
+    The six stubs exist so `uasm plugin backends` shows the whole matrix rather
     than four names, with the unfinished half marked. The price of that is a
     name a user can select, so the refusal is part of the contract: it names
     the backend and what is missing, and it arrives as a diagnostic rather

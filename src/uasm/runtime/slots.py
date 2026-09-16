@@ -116,7 +116,7 @@ def apy_descr_new(fn: ptr, kind: i64) -> ptr:
 
 # ── the property decorators, and one list method ───────────────────────────
 #
-# THE FIRST THINGS THE FIXED SURVEY FOUND. `uasm port` was reading a
+# THE FIRST THINGS THE FIXED SURVEY FOUND. `uasm plugin port` was reading a
 # fraction of the C -- its comment-and-literal stripper deleted most of the
 # runtime -- and these four had never once appeared on its list.
 #

@@ -4,16 +4,41 @@ import { runUasm } from "./uasm";
 import { isDiagnosticIgnored, scanIgnoreDirectives } from "./ignoreDirectives";
 import { UasmStatusBar } from "./statusBar";
 
-interface RawDiagnostic {
-  phase: string;
-  message: string;
+/** One entry of `uasm verify --json`'s `diagnostics` list.
+ *
+ * THE SHAPE IS THE COMPILER'S OWN, and this file used to describe a
+ * different one -- a bare array of `{phase, line, col}` -- against a
+ * `uasm --check --json` that never existed. `severity` is exact where
+ * `phase` was guessed at, and `at` is null for a diagnostic with no
+ * position, which a bad flag has.
+ */
+interface RawPlace {
+  file: string;
   line: number;
-  col: number;
-  code: string | null;
+  column: number;
+  end_line: number;
+  end_column: number;
+  bytes: [number, number];
+}
+
+interface RawDiagnostic {
+  code: string;
+  severity: string;
+  message: string;
+  at: RawPlace | null;
+  notes: string[];
+  helps: string[];
+}
+
+interface RawReport {
+  ok: boolean;
+  errors: number;
+  warnings: number;
+  diagnostics: RawDiagnostic[];
 }
 
 /**
- * Runs `uasm --check --json` on .py files and republishes the result
+ * Runs `uasm verify --json` on .py files and republishes the result
  * as native VS Code diagnostics. Debounced per-document so typing doesn't
  * spawn a process per keystroke; cancels an in-flight check if the document
  * changes again before it finishes.
@@ -97,7 +122,7 @@ export class UasmDiagnostics implements vscode.Disposable {
   }
 
   /** Re-sync the status bar to whatever diagnostics are already published
-   * for `doc` (used on editor-focus-change, without re-running --check). */
+   * for `doc` (used on editor-focus-change, without re-running verify). */
   syncStatusBarFor(doc: vscode.TextDocument | undefined): void {
     if (!this.statusBar) {
       return;
@@ -134,7 +159,7 @@ export class UasmDiagnostics implements vscode.Disposable {
 
     const cwd = vscode.workspace.getWorkspaceFolder(doc.uri)?.uri.fsPath ?? path.dirname(doc.uri.fsPath);
     const result = await runUasm(
-      ["--check", "--json", doc.uri.fsPath],
+      ["verify", "--json", doc.uri.fsPath],
       cwd,
       this.output,
       cts.token
@@ -149,7 +174,7 @@ export class UasmDiagnostics implements vscode.Disposable {
     const stdout = result.stdout.trim();
     if (!stdout) {
       if (result.code !== 0) {
-        this.output.appendLine(`[uasm] --check produced no output (exit ${result.code}): ${result.stderr}`);
+        this.output.appendLine(`[uasm] verify produced no output (exit ${result.code}): ${result.stderr}`);
         if (this.isActive(doc)) {
           this.statusBar?.set("idle");
         }
@@ -159,9 +184,10 @@ export class UasmDiagnostics implements vscode.Disposable {
 
     let raw: RawDiagnostic[];
     try {
-      raw = JSON.parse(stdout);
+      const report: RawReport = JSON.parse(stdout);
+      raw = report.diagnostics ?? [];
     } catch {
-      this.output.appendLine(`[uasm] could not parse --check --json output: ${stdout}`);
+      this.output.appendLine(`[uasm] could not parse verify --json output: ${stdout}`);
       return;
     }
 
@@ -171,7 +197,9 @@ export class UasmDiagnostics implements vscode.Disposable {
     const ignores = scanIgnoreDirectives(doc);
     const filtered = ignores.ignoreAll
       ? []
-      : raw.filter((d) => !isDiagnosticIgnored(ignores, Math.max(0, (d.line ?? 1) - 1)));
+      : raw.filter(
+          (d) => !isDiagnosticIgnored(ignores, Math.max(0, (d.at?.line ?? 1) - 1))
+        );
 
     const diagnostics = filtered.map((d) => this.toVscodeDiagnostic(doc, d));
     this.collection.set(doc.uri, diagnostics);
@@ -188,23 +216,32 @@ export class UasmDiagnostics implements vscode.Disposable {
 
   private toVscodeDiagnostic(doc: vscode.TextDocument, d: RawDiagnostic): vscode.Diagnostic {
     // uasm positions are 1-based; VS Code Positions are 0-based.
-    const line = Math.max(0, (d.line ?? 1) - 1);
-    const col = Math.max(0, (d.col ?? 1) - 1);
-    const lineText = line < doc.lineCount ? doc.lineAt(line).text : "";
-    const endCol = Math.max(col + 1, lineText.length);
-    const range = new vscode.Range(line, col, line, endCol);
+    const line = Math.max(0, (d.at?.line ?? 1) - 1);
+    const col = Math.max(0, (d.at?.column ?? 1) - 1);
+    // THE COMPILER'S OWN END, not the rest of the line. It underlines
+    // exactly what it pointed at, and squiggling to the end of the line
+    // instead was the old shape's workaround for not being told.
+    const endLine = Math.max(0, (d.at?.end_line ?? d.at?.line ?? 1) - 1);
+    const endCol = Math.max(col + 1, d.at?.end_column ?? col + 1);
+    const range = new vscode.Range(line, col, endLine, endCol);
 
     const severity =
-      d.phase === "lexical" || d.phase === "syntax" || d.phase === "semantic"
-        ? vscode.DiagnosticSeverity.Error
-        : vscode.DiagnosticSeverity.Warning;
+      d.severity === "warning"
+        ? vscode.DiagnosticSeverity.Warning
+        : d.severity === "note" || d.severity === "help"
+        ? vscode.DiagnosticSeverity.Information
+        : vscode.DiagnosticSeverity.Error;
 
-    const message = d.code ? `${d.message} [${d.code}]` : d.message;
+    // THE NOTES AND HELPS BELONG IN THE HOVER. They are most of what makes
+    // a uasm diagnostic useful -- "= help: pass --backend jvm" is the
+    // answer, and the message alone is only the complaint.
+    const extra = [...(d.notes ?? []), ...(d.helps ?? [])];
+    const message = extra.length
+      ? `${d.message}\n${extra.join("\n")}`
+      : d.message;
     const diag = new vscode.Diagnostic(range, message, severity);
-    diag.source = `uasm (${d.phase})`;
-    if (d.code) {
-      diag.code = d.code;
-    }
+    diag.source = "uasm";
+    diag.code = d.code;
     return diag;
   }
 }

@@ -1,7 +1,7 @@
 """`x86-32` -- 32-bit x86, as a real object file.
 
 NOT WRITTEN YET. This module exists so that 'x86-32' is a REGISTERED backend
-that refuses, rather than a name `uasm backends` has never heard of.
+that refuses, rather than a name `uasm plugin backends` has never heard of.
 
 PLANNED TO SHARE THE x86-64 ENCODER rather than have one of its own. The
 instruction encoding is the same problem in a narrower default operand
