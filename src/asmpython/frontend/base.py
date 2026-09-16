@@ -31,7 +31,7 @@ from pathlib import Path
 
 from ..diagnostics import DiagnosticSink, SourceFile
 from ..ir import Module
-from ..options import Option
+from ..options import Option, OptionError  # noqa: F401  (re-export)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,25 +75,30 @@ class Frontend(abc.ABC):
     #: nothing to it.
     options: tuple[Option, ...] = ()
 
-    def configure(self, values: dict, context: BuildContext,
+    def configure(self, values: dict, context: "BuildContext",
                   sink: DiagnosticSink) -> "Frontend | None":
         """The frontend to compile with, given this run's option values.
 
-        `values` holds only the options this frontend declared, keyed by name
-        without the dashes. Return None having reported to `sink` for
-        anything that stops the build -- an interpreter that would not run,
-        a declaration file that will not parse. Raise `OptionError` for a
-        value that is simply unusable.
+        THE MIRROR OF `Backend.configure`, and for the same reasons. `values`
+        holds only the options this frontend declared, keyed by name without
+        the dashes; a repeatable one arrives as a list and a switch as True.
+        Raise `OptionError` for a value that cannot be used, and report
+        anything advisory to `sink`.
 
-        RETURN A NEW INSTANCE rather than mutating `self`, for the reason
-        `Backend.configure` does: the registry holds one shared object, so a
-        frontend that stored this run's flags on itself would leak them into
-        the next compilation in the same process -- invisible in a
-        command-line run and wrong in every test suite and embedding tool.
+        `context` IS WHAT A FRONTEND NEEDS THAT IS NOT ITS OWN FLAG -- the
+        source, and the platform being built for. See `BuildContext` for why
+        the driver hands them over rather than the frontend looking them up.
 
-        The default ignores all three, which is right for a frontend with no
-        options: the driver rejects a flag no frontend declared before it
-        ever gets here.
+        RETURN A NEW INSTANCE rather than mutating `self`. The registry holds
+        one shared frontend object, so a frontend that stored its flags on
+        itself would leak them into the next compilation in the same process
+        -- invisible in a command-line run and wrong in every test suite and
+        every embedding tool.
+
+        RETURN None, having reported to `sink`, for anything that stops the
+        build before compiling: an interpreter that would not run, a
+        declaration file that will not parse. A diagnostic and a return are
+        the two halves of one refusal.
         """
         return self
 
@@ -135,4 +140,4 @@ def available() -> dict[str, Frontend]:
 
 
 def load_builtin() -> None:
-    from ..frontends import python  # noqa: F401
+    from ..frontends import c, python  # noqa: F401

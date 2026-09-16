@@ -24,6 +24,7 @@ loop will exhaust the arena, which is a correct diagnosis of the program.
 """
 from __future__ import annotations
 
+import math
 import struct
 from dataclasses import dataclass, field
 
@@ -99,18 +100,40 @@ class Frame:
 
 
 class Memory:
-    """A flat address space. Address 0 is reserved so null always faults."""
+    """A flat address space. Address 0 is reserved so null always faults.
+
+    TWO ALLOCATORS, GROWING TOWARDS EACH OTHER. Globals and `alloca` bump
+    `brk` up from the bottom and a frame's are given back when it returns;
+    `plat_heap` takes from the top and NOTHING gives those back. The floor's
+    contract says so in as many words -- "The region is never freed" -- and
+    one allocator for both breaks it in a way that is invisible until a
+    program calls `plat_heap` from inside a function, which is where every
+    real `malloc` calls it from: the frame teardown below resets `brk`, so
+    the block the caller is still holding is handed out again to the next
+    `alloca` and quietly overwritten. That is exactly what happened to a C
+    program whose `malloc`ed array came back with four elements replaced by
+    the text of its own `printf` buffer.
+    """
 
     def __init__(self, size: int = 1 << 22) -> None:
         self.buf = bytearray(size)
         self.brk = 8            # never hand out 0
+        self.heap_top = len(self.buf)
 
     def alloc(self, nbytes: int, align: int = 8) -> int:
         addr = (self.brk + align - 1) & ~(align - 1)
         end = addr + max(1, nbytes)
-        if end >= len(self.buf):
+        if end >= self.heap_top:
             raise Trap(f"out of memory: {nbytes} bytes at {addr:#x}")
         self.brk = end
+        return addr
+
+    def heap(self, nbytes: int, align: int = 16) -> int:
+        """`plat_heap`. Outlives every frame; see the class docstring."""
+        addr = (self.heap_top - max(1, nbytes)) & ~(align - 1)
+        if addr <= self.brk:
+            raise Trap(f"out of memory: {nbytes} bytes from the heap")
+        self.heap_top = addr
         return addr
 
     def _check(self, addr: int, n: int) -> None:
@@ -220,7 +243,7 @@ class Interpreter:
             if n <= 0:
                 return 0
             try:
-                return self.mem.alloc(n)
+                return self.mem.heap(n)
             except Trap:
                 return 0            # null, by contract -- not a crash
         if name == "putchar":
@@ -365,6 +388,18 @@ class Interpreter:
             raise Trap(f"no function named {entry!r}")
         try:
             got = self._call(fn, args or [])
+        except RecursionError:
+            # THE INTERPRETER'S OWN STACK, not the program's. A call here is a
+            # Python call, so a program a few hundred frames deep exhausts the
+            # host interpreter -- which reaches the user as a traceback ending
+            # somewhere in `_exec`, reading as a compiler crash. It is a real
+            # limit of this execution path and it has a real remedy: the
+            # compiled paths have a real stack.
+            raise Trap(
+                "the reference interpreter ran out of stack; this program "
+                "recurses deeper than it can follow. Build it instead of "
+                "running it -- a compiled program has the machine's stack"
+            ) from None
         except _Exited as done:
             # `plat_exit` unwound every frame. The status is RECORDED as well
             # as returned, because a caller cannot otherwise tell it apart
@@ -1398,13 +1433,22 @@ def _arith(op: Op, ty: T.Type, x, y):
         if op is Op.SUB: return x - y
         if op is Op.MUL: return x * y
         if op is Op.DIV:
+            # IEEE, WHICH MEANS DIVIDING BY ZERO IS AN ANSWER. The opcode
+            # table says "IEEE on f*" and every backend's `/` on a double
+            # already produces an infinity or a NaN, so trapping here made the
+            # interpreter the one execution path that disagreed -- and the
+            # suite compares the paths against each other. A language whose
+            # `x / 0.0` raises lowers a CHECK before the divide; that is the
+            # frontend's business and not this opcode's.
             if y == 0:
-                raise Trap("float division by zero")
+                if x != x or x == 0:
+                    return float("nan")
+                sign = -1.0 if (x < 0) != (math.copysign(1.0, y) < 0) else 1.0
+                return sign * float("inf")
             return x / y
         if op is Op.REM:
             if y == 0:
-                raise Trap("float remainder by zero")
-            import math
+                return float("nan")
             return math.fmod(x, y)
         raise Trap(f"{op.value} is not defined on {ty}")
     x, y = int(x), int(y)

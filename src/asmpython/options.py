@@ -31,6 +31,16 @@ class Option:
     help: str
     #: What the value is called in `--help`.
     metavar: str = "VALUE"
+    #: True when the flag may be given more than once and every value counts.
+    #: The component is then handed a LIST rather than a string.
+    #:
+    #: NOT EVERY OPTION IS ONE VALUE, and the two flags this module's own
+    #: docstring names as belonging to a frontend -- `--import-path` and a C
+    #: frontend's `--include-path` -- are both search paths, which are lists
+    #: by nature. Without this they would have to be one string with a
+    #: separator in it, and `-D NAME=a,b` shows why that does not generalise:
+    #: a macro body may contain any separator you pick.
+    repeat: bool = False
 
     #: A ONE-LETTER SPELLING, without the dash: "P" is `-P`. Rare and worth
     #: being rare -- there are 26 of them and no namespace to escape into, so
@@ -45,12 +55,6 @@ class Option:
     #: it as a value-taking option would have made `--library yes` the
     #: spelling of something every other compiler spells `--library`.
     switch: bool = False
-
-    #: REPEATABLE: every occurrence is kept and the component is handed a
-    #: list, rather than the last one winning. `--import-path` is one -- a
-    #: search path is a sequence by nature, and "the last --import-path wins"
-    #: is not a rule anybody would guess.
-    repeatable: bool = False
 
     @property
     def flag(self) -> str:

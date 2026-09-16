@@ -23,7 +23,7 @@ from .registry import register
 #: class files and one writes a `.pyc`, and an object file handed to either has
 #: nowhere to go. That used to be found out at link time, as a LinkError about
 #: inputs; a declaration lets it be said before anything is built.
-LINK_INPUT = Option("link-input", metavar="INPUT", repeatable=True,
+LINK_INPUT = Option("link-input", metavar="INPUT", repeat=True,
                     help="extra object, archive or -l name for the link step")
 
 #: Suffixes a C driver knows how to consume directly. Anything else is passed

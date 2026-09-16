@@ -194,7 +194,7 @@ class PythonFrontend(Frontend):
     #: them, which meant a second frontend would inherit `--host-python` and
     #: have nothing to do with it.
     options = (
-        Option("import-path", metavar="DIR", repeatable=True,
+        Option("import-path", metavar="DIR", repeat=True,
                help="where to find the program's own modules; the source's "
                     "own directory is searched too unless -P"),
         # CPYTHON'S OWN FLAG, spelled the same. `-P` is what a program uses
@@ -217,7 +217,7 @@ class PythonFrontend(Frontend):
         # discovered: a foreign symbol's argument kinds cannot be read out of
         # the library, and guessing them is how a native call corrupts a
         # stack. See `nativelib.py`.
-        Option("native-library", metavar="FILE", repeatable=True,
+        Option("native-library", metavar="FILE", repeat=True,
                help="JSON declaring shared libraries this program may "
                     "import, and the signatures it calls in them"),
         # A LIBRARY HAS NO ENTRY AND IS NOT SUPPOSED TO. Every top-level

@@ -716,6 +716,10 @@ class _CollectComponentOption(argparse.Action):
     def __init__(self, option_strings, dest, *, kinds, option, **kw):
         super().__init__(option_strings, dest, **kw)
         self.kinds = kinds
+        # THE WHOLE DECLARATION and not its name alone: what to do with the
+        # value is the option's own business -- a switch is its own value, a
+        # repeatable one appends -- and carrying the `Option` means a shape
+        # added to it is not also a constructor argument added here.
         self.option = option
 
     def __call__(self, parser, namespace, value, option_string=None):
@@ -729,7 +733,9 @@ class _CollectComponentOption(argparse.Action):
                 # storing that would make `--library` read as falsey to a
                 # component that asked whether it was given.
                 table[self.option.name] = True
-            elif self.option.repeatable:
+            elif self.option.repeat:
+                # A REPEATABLE FLAG KEEPS EVERY VALUE, and in the order it was
+                # typed: a search path is a list and its order is its meaning.
                 table.setdefault(self.option.name, []).append(value)
             else:
                 table[self.option.name] = value
@@ -820,7 +826,13 @@ def _add_component_options(parser: argparse.ArgumentParser,
                  else {"metavar": option.metavar})
         group.add_argument(*spellings, action=_CollectComponentOption,
                            kinds=tuple(owned), option=option,
-                           dest=argparse.SUPPRESS, help=help, **extra)
+                           dest=argparse.SUPPRESS, **extra,
+                           # SAID IN THE HELP because it changes what the
+                           # flag MEANS: giving `--import-path` twice adds a
+                           # second directory, where giving `--host-python`
+                           # twice replaces the first.
+                           help=help + (" (repeatable)" if option.repeat
+                                        else ""))
 
     def agreed(claims: list[tuple[str, str]]):
         """The one option every claimant declared, or None if they differ.
@@ -911,11 +923,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     def source_args(p):
         # `--import-path`, `-P`, `--no-site-packages`, `--host-python`,
-        # `--native-library` and `--library` USED TO BE HERE. Every one of
-        # them is about resolving Python names or compiling Python, so every
-        # one is the Python frontend's: see `PythonFrontend.options`, and
-        # `_add_component_options` for how a component's flags reach this
-        # parser.
+        # `--native-library` and `--library` USED TO BE HERE, as did the C
+        # frontend's `-I` and `-D`. Every one of them is about resolving
+        # names in, or compiling, ONE language, so every one belongs to its
+        # frontend: see `PythonFrontend.options` and the C frontend's, and
+        # `_add_component_options` for how a component's flags reach a
+        # parser. Registered per verb rather than here, because which STAGES
+        # a verb has decides which kinds of component it can be given flags
+        # for -- `run` and `check` stop at the IR.
         p.add_argument("source")
         p.add_argument("--frontend")
         p.add_argument("--max-errors", type=int, default=100)
@@ -976,6 +991,7 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--emit-ir", action="store_true")
     b.add_argument("--show-spans", action="store_true",
                    help="annotate each instruction with its source position")
+    # EVERY KIND, because `build` is the verb that has every stage.
     _add_component_options(b)
     b.set_defaults(fn=cmd_build)
 

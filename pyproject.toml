@@ -25,6 +25,15 @@ asmpython = "asmpython.driver.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# THE BUNDLED SOURCE IS NOT PYTHON THE INTERPRETER IMPORTS -- it is text a
+# frontend reads and compiles -- so `packages.find` does not see it: neither
+# directory has an `__init__.py`, and `include/` holds `.h` files besides.
+# Without this an installed wheel has a C frontend whose `#include <stdio.h>`
+# finds nothing and a Python frontend with no standard library.
+[tool.setuptools.package-data]
+"asmpython.frontends.c" = ["include/*.h"]
+"asmpython.frontends.python" = ["bundled/*.py"]
+
 # The suite runs through `python -m tests.harness` -- see
 # `tests/harness/README.md` for why this project has a runner of its own. The
 # short version: its failures are diffs between four execution paths, and it
