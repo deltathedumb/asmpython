@@ -388,6 +388,18 @@ class Interpreter:
             raise Trap(f"no function named {entry!r}")
         try:
             got = self._call(fn, args or [])
+        except RecursionError:
+            # THE INTERPRETER'S OWN STACK, not the program's. A call here is a
+            # Python call, so a program a few hundred frames deep exhausts the
+            # host interpreter -- which reaches the user as a traceback ending
+            # somewhere in `_exec`, reading as a compiler crash. It is a real
+            # limit of this execution path and it has a real remedy: the
+            # compiled paths have a real stack.
+            raise Trap(
+                "the reference interpreter ran out of stack; this program "
+                "recurses deeper than it can follow. Build it instead of "
+                "running it -- a compiled program has the machine's stack"
+            ) from None
         except _Exited as done:
             # `plat_exit` unwound every frame. The status is RECORDED as well
             # as returned, because a caller cannot otherwise tell it apart

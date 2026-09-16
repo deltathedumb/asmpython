@@ -164,6 +164,9 @@ class Param:
     name: str | None
     type: CType
     span: Any = None
+    #: The `Symbol` the prototype scope declared, so a definition can reuse
+    #: it rather than shadowing it. See `parser._parameters`.
+    sym: Any = None
 
 
 @dataclass(frozen=True, slots=True)

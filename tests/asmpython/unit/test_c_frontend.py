@@ -224,6 +224,17 @@ CORPUS = [
     "#define M(a) a\nint main(void){ return M(M(M(1))); }",
     "int main(void){ return sizeof(void); }",
     "typedef int T; int main(void){ T T; return 0; }",
+    # ── malformed struct bodies, because a parser loop that consumes
+    # nothing does not fail, it HANGS -- and a compiler that hangs is the
+    # one failure a user cannot diagnose. A mis-indented `return` in
+    # `struct_or_union` made `struct s { struct s *p; };` do exactly that.
+    "struct s { struct s *next; }; int main(void){ return 0; }",
+    "struct s { int; };",
+    "struct s { int x };",
+    "struct s { ; };",
+    "struct s { int x; ) };",
+    "union u { struct u *p; };",
+    "struct s { struct { struct s *q; } in; };",
 ]
 
 
@@ -242,6 +253,67 @@ class TestNothingCrashes:
             verify(module)
         else:
             assert sink.failed, "returned None without reporting anything"
+
+
+#: Every header C23 requires. The two that refuse do so with `#error` and a
+#: reason; the rest have to compile on their own, because a header that only
+#: works when something else was included first is a trap.
+C23_HEADERS = [
+    "assert.h", "complex.h", "ctype.h", "errno.h", "fenv.h", "float.h",
+    "inttypes.h", "iso646.h", "limits.h", "locale.h", "math.h", "setjmp.h",
+    "signal.h", "stdalign.h", "stdarg.h", "stdatomic.h", "stdbit.h",
+    "stdbool.h", "stdckdint.h", "stddef.h", "stdint.h", "stdio.h", "stdlib.h",
+    "stdnoreturn.h", "string.h", "tgmath.h", "threads.h", "time.h", "uchar.h",
+    "wchar.h", "wctype.h",
+]
+
+#: The three that cannot exist here, and the diagnostic each one gives. A
+#: refusal with a reason is a feature; a missing file is a mystery.
+REFUSING = {"complex.h", "setjmp.h", "threads.h"}
+
+
+class TestItAlwaysTerminates:
+    """A parser loop bounded by a closing token must consume something.
+
+    Every one of these reached the end at some point only because a loop
+    spun: the test is that the call RETURNS, and the harness's own timeout is
+    what fails it if the guard is ever removed.
+    """
+
+    @harness.cases("source", [
+        "struct s { struct s *next; };",
+        "struct s { int x",
+        "union u { int",
+        "enum e { A, ",
+        "struct s { int x; struct s y; };",
+        "int f(void) { struct q { struct q *p; } v; return 0; }",
+    ])
+    def test_a_malformed_aggregate_still_finishes(self, source):
+        module, sink = compile_c(source)
+        assert module is not None or sink.failed
+
+
+class TestTheStandardHeaders:
+    @harness.cases("name", C23_HEADERS)
+    def test_each_one_is_there_and_stands_alone(self, name):
+        module, sink = compile_c(f"#include <{name}>\nint main(void){{return 0;}}")
+        codes_ = [d.code for d in sink.diagnostics]
+        if name in REFUSING:
+            assert codes_ == ["E1112"], codes_
+            assert len(sink.diagnostics[0].message) > 40, "the reason is missing"
+            return
+        assert module is not None, codes_
+        assert not sink.failed, codes_
+
+    def test_all_of_them_at_once(self):
+        """Including every header a program could include, together. A macro
+        one of them defines can break the next; the only way to know is to
+        put them all in one translation unit."""
+        includes = "".join(f"#include <{h}>\n"
+                           for h in C23_HEADERS if h not in REFUSING)
+        module, sink = compile_c(includes + "int main(void){ return 0; }")
+        assert module is not None, [d.message for d in sink.diagnostics]
+        assert not sink.failed, [d.message for d in sink.diagnostics]
 
 
 class TestTheFourDivergences:

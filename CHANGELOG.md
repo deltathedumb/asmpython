@@ -51,9 +51,17 @@ deliverable.
   with 301 digits in it) and rounds ties to even, and a `<math.h>` written
   over `+ - * /` because there is no libm below it.
 
-  Twenty programs are compiled three ways — the host's `cc`, this frontend's
-  IR in the reference interpreter, and this frontend's IR through the C
-  backend and then `cc` — and all three must agree on output and exit status.
+  All thirty-one headers C23 requires are present; three refuse with a
+  reason rather than being absent (`<complex.h>`, `<setjmp.h>`,
+  `<threads.h>`), because a missing file is a mystery and a refusal is an
+  answer. GNU's `__typeof__`, `__restrict` and the rest of the
+  double-underscore spellings are keywords, because real headers use them.
+
+  Eighty-six programs are compiled three ways — the host's `cc`, this
+  frontend's IR in the reference interpreter, and this frontend's IR through
+  the C backend and then `cc` — and all three must agree on output and exit
+  status. One is built through the **x86-64** backend and the **jvm** one as
+  well, and prints the same thing.
   Struct layout is compared against the host compiler's `sizeof` and
   `_Alignof` for twelve declarations, because a struct's layout is an ABI and
   a frontend can be self-consistently wrong about one.

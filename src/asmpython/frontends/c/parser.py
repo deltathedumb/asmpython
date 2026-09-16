@@ -27,21 +27,20 @@ the only implementation of this that is not a special case per shape.
 """
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Any, Callable
 
-from ...diagnostics import DiagnosticSink, Span, error, warning
+from ...diagnostics import DiagnosticSink, Span
 from . import ctype as C
 from . import syntax as S
 from .builtin_check import TYPE_BUILTINS, check_builtin, parse_type_builtin
 from .builtins import BUILTINS, FUNCTION_NAME_IDENTIFIERS
 from .ctype import CType, IncompleteType
-from .fold import Address, fold, fold_int
+from .fold import fold, fold_int
 from .literals import (
-    CharConst, FloatConst, IntConst, LiteralError, decode_char, encode,
+    FloatConst, LiteralError, decode_char, encode,
     join_strings, parse_number,
 )
-from .sema import Linkage, Scope, Sema, Storage, Symbol, is_null_constant
+from .sema import Linkage, Sema, Storage, Symbol
 from .tokens import KEYWORD_ALIASES, KEYWORDS, Kind, Token
 
 #: Storage-class keywords, and the `Storage` each maps to.
@@ -106,9 +105,10 @@ class Parser:
         self.unit = S.Unit(tokens[0].span if tokens else None)
         #: The function being parsed, for `return`, labels and `__func__`.
         self.function: S.FunctionDef | None = None
-        #: Innermost `break`/`continue` targets, as labels handed to lowering.
-        self.breaks: list[str] = []
-        self.continues: list[str] = []
+        #: Whether a `break` or a `continue` has anywhere to go. See
+        #: `_loop_body`: the parser counts, lowering names.
+        self.breaks: list[bool] = []
+        self.continues: list[bool] = []
         self.switches: list[S.Switch] = []
         self._label_n = 0
         #: Anonymous globals -- string literals, compound literals at file
@@ -252,7 +252,7 @@ class Parser:
                      operand: S.Expr | None = None) -> S.Expr:
         node = S.SizeofType(span, C.SIZE_T, False, ty, None, alignment)
         if ty.is_vla and not alignment:
-            node.dynamic = self._vla_size(ty, span)
+            node.dynamic = self.sema.vla_size(ty, span)
             return node
         try:
             ty.size if not alignment else ty.align
@@ -264,17 +264,6 @@ class Parser:
                             note="its size is not known here")
             return self.sema.poison(span)
         return node
-
-    def _vla_size(self, ty: CType, span: Span) -> S.Expr:
-        """The run-time byte count of a variable-length array."""
-        count = ty.vla
-        elem = ty.of
-        if elem.is_vla:
-            inner = self._vla_size(elem, span)
-        else:
-            inner = S.IntLit(span, C.SIZE_T, False, elem.size)
-        size = self.sema.convert(count, C.SIZE_T, "array size")
-        return S.Binary(span, C.SIZE_T, False, "*", size, inner)
 
     def postfix(self, e: S.Expr) -> S.Expr:
         while True:
@@ -316,7 +305,8 @@ class Parser:
                 if not self.sema.modifiable(
                         e, "increment" if t.text == "++" else "decrement"):
                     return self.sema.poison(t.span)
-                scale = e.type.of.size if e.type.is_pointer else 1
+                scale = (self.sema.scale_of(e.type.of, t.span)
+                         if e.type.is_pointer else 1)
                 node = S.Unary(t.span, e.type.unqualified(), False, t.text, e,
                                True)
                 node.scale = scale
@@ -764,7 +754,6 @@ class Parser:
                 # definition anywhere, and creates an incomplete type.
                 tag = C.Tag(kind, name, span=kw.span)
                 self.sema.scope.declare_tag(tag)
-                self.unit.tags.append(tag)
             return C.record(tag)
         # A definition. `struct s { ... }` in an inner scope declares a NEW
         # tag even if an outer one has the same name.
@@ -772,7 +761,6 @@ class Parser:
         if tag is None or tag.kind is not kind:
             tag = C.Tag(kind, name, span=kw.span)
             self.sema.scope.declare_tag(tag)
-            self.unit.tags.append(tag)
         elif tag.complete:
             self.sema.error("E1219", f"{kw.text} {name} is defined twice",
                             kw.span,
@@ -788,6 +776,14 @@ class Parser:
 
     def _members(self, tag: C.Tag) -> None:
         while not self.at("}") and self.tok.kind is not Kind.EOF:
+            # NEVER SPIN. Every loop in this parser that is bounded by a
+            # closing token needs this: if one pass consumes nothing -- which
+            # a malformed member or a bug in a declarator can both cause --
+            # the loop runs for ever and the compiler HANGS, which is the one
+            # failure a user cannot diagnose. `translation_unit` has had the
+            # same guard since the first version; this one had not, and a
+            # mis-indented `return` in `struct_or_union` found that out.
+            before = self.i
             if self.at_kw("_Static_assert"):
                 self._static_assert()
                 continue
@@ -828,6 +824,8 @@ class Parser:
                 if not self.eat(","):
                     break
             self.expect(";", "a member declaration ends with `;`")
+            if self.i == before:
+                self.next()
 
     def _bitfield_width(self, ty: CType, span: Span) -> int:
         got = fold_int(self.conditional())
@@ -893,13 +891,11 @@ class Parser:
             if tag is None or tag.kind is not C.K.ENUM:
                 tag = C.Tag(C.K.ENUM, name, span=kw.span, base=base or C.INT)
                 self.sema.scope.declare_tag(tag)
-                self.unit.tags.append(tag)
             return C.record(tag)
         tag = self.sema.scope.lookup_tag(name, here=True) if name else None
         if tag is None or tag.kind is not C.K.ENUM:
             tag = C.Tag(C.K.ENUM, name, span=kw.span)
             self.sema.scope.declare_tag(tag)
-            self.unit.tags.append(tag)
         elif tag.complete:
             self.sema.error("E1219", f"enum {name} is defined twice", kw.span)
         self.next()
@@ -975,7 +971,7 @@ class Parser:
 
     def _direct_declarator(self, *, abstract: bool, start: Span):
         name: str | None = None
-        core: Callable[[CType], CType] = lambda t: t
+        core: Callable[[CType], CType] = _same_type
         span = start
         if self.tok.kind is Kind.IDENT and not self.tok.is_keyword and \
                 not self.is_typedef(self.tok):
@@ -1010,15 +1006,19 @@ class Parser:
     def _suffixes(self) -> Callable[[CType], CType]:
         if self.at("["):
             open_tok = self.next()
-            quals: set[str] = set()
-            static = False
+            # `int a[static 3]` and `int a[const 4]` -- legal only in a
+            # parameter, where the brackets describe the POINTER the array
+            # decays to. Both are accepted and neither is represented:
+            # `static` is a promise about the caller that changes no code
+            # here, and the qualifiers would have to land on the pointer
+            # rather than the element, which is the same field `const A x`
+            # (for an array typedef) needs for the OPPOSITE meaning. The cost
+            # is accepting `a = p` inside a function that wrote `int a[const
+            # 4]`, which gcc refuses; laxity, not a wrong answer.
             while self.tok.kind is Kind.IDENT and (
-                    _kw(self.tok.text) in _QUALIFIERS or _kw(self.tok.text) == "static"):
-                word = _kw(self.next().text)
-                if word == "static":
-                    static = True
-                else:
-                    quals.add(word)
+                    _kw(self.tok.text) in _QUALIFIERS
+                    or _kw(self.tok.text) == "static"):
+                self.next()
             count: int | None = None
             vla: S.Expr | None = None
             if self.at("*") and self.peek().is_punct("]"):
@@ -1121,10 +1121,17 @@ class Parser:
                 if name and self.sema.scope.names.get(name) is not None:
                     self.sema.error("E1276", f"{name!r} is declared twice",
                                     span)
-                params.append(C.Param(name, ty, span))
-                if name:
-                    self.sema.scope.declare(
-                        Symbol(name, ty, Storage.PARAM, span=span))
+                # THE SYMBOL TRAVELS WITH THE PARAMETER. A variable-length
+                # parameter type names an EARLIER PARAMETER -- `int m[n][n]`
+                # -- and the expression that does so captured the symbol from
+                # this prototype scope. A definition that made fresh symbols
+                # for its body would leave that expression reading a
+                # parameter with no storage in the function it is used in.
+                psym = (Symbol(name, ty, Storage.PARAM, span=span)
+                        if name else None)
+                params.append(C.Param(name, ty, span, psym))
+                if psym is not None:
+                    self.sema.scope.declare(psym)
                 if not self.eat(","):
                     break
         finally:
@@ -1469,9 +1476,15 @@ class Parser:
         return node
 
     def _loop_body(self) -> S.Stmt:
-        brk, cont = self.label("brk"), self.label("cont")
-        self.breaks.append(brk)
-        self.continues.append(cont)
+        """Parse a loop's body with `break` and `continue` legal inside it.
+
+        THE STACKS COUNT, they do not name. Where each one JUMPS is lowering's
+        question and lowering keeps its own stack of blocks; all the parser
+        needs to know is whether there is a loop to break out of, because
+        `break;` at file scope is a diagnostic and not a jump to nowhere.
+        """
+        self.breaks.append(True)
+        self.continues.append(True)
         try:
             return self.statement()
         finally:
@@ -1528,8 +1541,7 @@ class Parser:
         # match when the expression is `unsigned`.
         e = self.sema.convert(e, C.promote(e.type), "promotion")
         node = S.Switch(span, e, None)
-        node.break_label = self.label("brk")
-        self.breaks.append(node.break_label)
+        self.breaks.append(True)
         self.switches.append(node)
         try:
             node.body = self.statement()
@@ -1768,7 +1780,7 @@ class Parser:
                 sym.init = init
             self._check_static_init(sym, init)
         elif sym.type.is_vla:
-            decl.vla_size = self._vla_size(sym.type, span)
+            decl.vla_size = self.sema.vla_size(sym.type, span)
             if sym.is_global:
                 self.sema.error("E1271",
                                 "a variable-length array cannot have static "
@@ -2016,7 +2028,8 @@ class Parser:
                                     f"{p.name!r} is declared twice",
                                     p.span or span)
                     continue
-                psym = Symbol(p.name, p.type, Storage.PARAM, span=p.span)
+                psym = p.sym or Symbol(p.name, p.type, Storage.PARAM,
+                                       span=p.span)
                 self.sema.scope.declare(psym)
                 fn.params.append(psym)
             fn.body = self.compound_statement()
@@ -2028,6 +2041,11 @@ class Parser:
                 self.sema.error("E1283", f"no label {label!r} in this function",
                                 where)
         self.unit.decls.append(fn)
+
+
+def _same_type(ty: CType) -> CType:
+    """The identity, as the starting point of a declarator's composition."""
+    return ty
 
 
 def _kw(text: str) -> str:

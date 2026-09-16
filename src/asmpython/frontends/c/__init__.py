@@ -1,17 +1,29 @@
 """The C frontend: it compiles C.
 
+    tokens.py        what a preprocessing token is, and why it is not a token
     lexer.py         phases 1-3: source text -> preprocessing tokens
     preprocess.py    phase 4: directives and macro expansion
-    parser.py        phases 7a: the grammar, typed as it is parsed
+    ppexpr.py        `#if` arithmetic, which is not the constant folder
+    literals.py      decoding the four kinds of literal, for both of those
+    ctype.py         the C type system: sizes, layout, conversions
+    syntax.py        the tree, already typed
+    parser.py        phase 7: the grammar, typed as it is parsed
     sema.py          the type rules the parser calls into
     fold.py          constant expressions, which C requires in six places
     lower.py         typed tree -> APIR
+    lower_builtins.py  code for the `__builtin_*` names
+    builtins.py      which of them exist; `__has_builtin` reads this
+    builtin_check.py their type rules, including the three taking a TYPE
+    support.py       the VLA arena, written in C and compiled by this frontend
     include/         the standard headers, written in C
 
 WHAT IT ACCEPTS is C23, which is to say C: every version's syntax, every
 version's semantics where they agree, and the newer one where they do not.
-`asmpython frontends -v` prints the four places it knowingly differs from a
-hosted implementation on x86-64 Linux, and they are all here in one list:
+
+FOUR PLACES THE LANGUAGE DIFFERS from a hosted implementation on x86-64
+Linux, and this is the whole list rather than the beginning of one. What the
+LIBRARY cannot do -- read, tell the time, start a thread -- is a different
+list, and it is in `include/README.md` beside the headers that say so:
 
   * `long double` IS `double`. The IR has `f32` and `f64` and nothing wider.
     `__SIZEOF_LONG_DOUBLE__` says 8 and `<float.h>`'s `LDBL_*` macros have
@@ -26,9 +38,23 @@ hosted implementation on x86-64 Linux, and they are all here in one list:
 
 Everything else -- VLAs, flexible array members, bit-fields, anonymous
 members, `_Generic`, designated initialisers, compound literals, `__VA_OPT__`,
-K&R definitions, statement expressions, `__attribute__` where it is advisory
--- is implemented, and the four above are the whole list rather than the
-beginning of one.
+K&R definitions, statement expressions, `__attribute__` where it is advisory,
+and GNU's `__typeof__`/`__restrict` spellings because real headers use them
+-- is implemented.
+
+ALL THIRTY-ONE HEADERS C23 REQUIRES are in `include/`. Three of them refuse
+with a reason rather than being absent -- `<complex.h>`, `<setjmp.h>` and
+`<threads.h>` -- because a missing file is a mystery and a refusal is an
+answer. `<stdatomic.h>` is supported and `<threads.h>` is not, which is not a
+contradiction: with one thread every operation is already atomic.
+
+ONE TRANSLATION UNIT PER BUILD. `asmpython build prog.c` compiles `prog.c`
+and whatever it includes; there is no separate compilation and no linker step
+that joins two objects this frontend produced. A project with several `.c`
+files builds as a unity build -- one file that `#include`s the others -- which
+is what the `static` definitions in `include/` assume and why they may carry
+definitions at all. The driver takes one source for every frontend, so this
+is the shape of the tool rather than a limit of the language.
 
 THE STANDARD LIBRARY IS COMPILED FROM C, by this frontend, from `include/`.
 It sits on the three platform-floor functions and nothing else, so a C program
@@ -44,7 +70,7 @@ from ...frontend import Frontend, register
 from ...ir import Module
 from .lower import Lowerer
 from .parser import parse
-from .preprocess import BUNDLED, Preprocessor, Search
+from .preprocess import Preprocessor, Search
 
 #: Set by the driver before a compile. A module global for the same reason
 #: `frontends/python/imports.py` uses one: a frontend is handed a source and a

@@ -271,8 +271,9 @@ the whole list, rather than the beginning of one:
 
 Everything else is implemented — VLAs, flexible array members, bit-fields,
 anonymous members, `_Generic`, designated initialisers, compound literals,
-`__VA_OPT__`, K&R definitions, statement expressions — and the preprocessor
-is Prosser's algorithm, which is to say it agrees with the standard's own
+`__VA_OPT__`, K&R definitions, statement expressions, and GNU's `__typeof__`
+and `__restrict` spellings because real headers use them — and the
+preprocessor is Prosser's algorithm, which is to say it agrees with the standard's own
 worked examples rather than with an opinion about what recursive macro
 expansion should mean.
 
@@ -284,11 +285,29 @@ interpreter: a backend that can run a Python program can already run a C one.
 every finite double is a terminating decimal and `%f` of `1e300` has a right
 answer with 301 digits in it.
 
+One translation unit per build: `asmpython build prog.c` compiles `prog.c`
+and whatever it includes, and a project with several `.c` files builds as a
+unity build. The driver takes one source for every frontend, so that is the
+shape of the tool rather than a limit of the language.
+
+All thirty-one headers C23 requires are there. Three of them refuse with a
+reason rather than being absent — `<complex.h>`, `<setjmp.h>` and
+`<threads.h>`, each explaining what the IR cannot express and what to write
+instead — because a missing file is a mystery and a refusal is an answer.
+`<stdatomic.h>` is supported and `<threads.h>` is not, which is not a
+contradiction: with one thread every operation is already atomic.
+
 Three paths are compared for every test program — the host's `cc`, the
 reference interpreter, and the C backend's output compiled by `cc` — and all
-three must agree on output and exit status. Struct layout is checked against
-the host compiler's own `sizeof` and `_Alignof`, because a struct's layout is
-an ABI and a frontend can be self-consistently wrong about one.
+three must agree on output and exit status. One program goes further and is
+also built through the **x86-64** backend, which encodes its own instructions
+and writes its own ELF object with no assembler in the path, and through the
+**jvm** backend into a jar; both print what `cc` prints, which is the point of
+a language-independent IR stated as a test rather than as a claim.
+
+Struct layout is checked against the host compiler's own `sizeof` and
+`_Alignof`, because a struct's layout is an ABI and a frontend can be
+self-consistently wrong about one.
 
 ## Running the tests
 

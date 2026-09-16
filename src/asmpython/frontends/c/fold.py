@@ -107,7 +107,8 @@ def fold(e: S.Expr) -> Const:
         case S.Index():
             base = fold(e.base)
             index = fold(e.index)
-            if not isinstance(base, Address) or not isinstance(index, int):
+            if not isinstance(base, Address) or not isinstance(index, int) \
+                    or not isinstance(e.scale, int):
                 return None
             return Address(base.symbol, base.offset + index * e.scale)
         case S.BuiltinCall():
@@ -269,6 +270,8 @@ def _binary(e: S.Binary) -> Const:
         if b < 0 or b >= e.type.bits:
             return None
         return wrap(a << b if op == "<<" else a >> b, e.type)
+    if not isinstance(e.scale, int):
+        return None             # a variable-length stride is not a constant
     table = {"+": lambda: a + b * e.scale, "-": lambda: a - b * e.scale,
              "*": lambda: a * b, "&": lambda: a & b, "|": lambda: a | b,
              "^": lambda: a ^ b}
@@ -281,6 +284,8 @@ def _binary(e: S.Binary) -> Const:
 
 def _address_arith(op: str, a: Const, b: Const, e: S.Binary) -> Const:
     """`&x + 3` and `(char *)&s.m - (char *)&s`. The only two that fold."""
+    if not isinstance(e.scale, int):
+        return None
     if op == "+" and isinstance(a, Address) and isinstance(b, int):
         return Address(a.symbol, a.offset + b * e.scale, a.function)
     if op == "+" and isinstance(b, Address) and isinstance(a, int):

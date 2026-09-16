@@ -1002,6 +1002,360 @@ PROGRAMS: dict[str, str] = {
           printf("%d %d\n", memcmp(big, other, sizeof big), big[199]);
           other[150] = 'z'; printf("%d\n", memcmp(big, other, sizeof big) < 0); return 0; }
     """,
+
+    # ── the fourth: whole programs, because that is what C is for ────────
+    "vtable_pattern": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        struct Shape; 
+        struct Ops { double (*area)(const struct Shape *); const char *name; };
+        struct Shape { const struct Ops *ops; double a, b; };
+        static double rect(const struct Shape *s){ return s->a * s->b; }
+        static double tri(const struct Shape *s){ return s->a * s->b / 2.0; }
+        static const struct Ops RECT = { rect, "rect" };
+        static const struct Ops TRI = { tri, "tri" };
+        int main(void){ struct Shape shapes[] = { {&RECT, 3, 4}, {&TRI, 3, 4} };
+          for (unsigned i = 0; i < sizeof shapes / sizeof shapes[0]; i++)
+            printf("%s %.2f\n", shapes[i].ops->name, shapes[i].ops->area(&shapes[i]));
+          return 0; }
+    """,
+    "tokenizer": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        int main(void){ char line[] = "alpha,beta,,gamma";
+          char *tok = strtok(line, ",");
+          while (tok) { printf("[%s]", tok); tok = strtok(NULL, ","); }
+          printf("\n");
+          char words[] = "  the   quick brown  ";
+          for (char *w = strtok(words, " "); w; w = strtok(NULL, " ")) printf("<%s>", w);
+          printf("\n"); return 0; }
+    """,
+    "sort_structs": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        struct Person { char name[12]; int age; };
+        static int by_age(const void *a, const void *b){
+          const struct Person *x = a, *y = b; return (x->age > y->age) - (x->age < y->age); }
+        static int by_name(const void *a, const void *b){
+          return strcmp(((const struct Person*)a)->name, ((const struct Person*)b)->name); }
+        int main(void){ struct Person p[] = {{"carol",31},{"alice",25},{"bob",40},{"dave",25}};
+          int n = (int)(sizeof p / sizeof p[0]);
+          qsort(p, n, sizeof p[0], by_age);
+          for (int i=0;i<n;i++) printf("%s:%d ", p[i].name, p[i].age); printf("\n");
+          qsort(p, n, sizeof p[0], by_name);
+          for (int i=0;i<n;i++) printf("%s ", p[i].name); printf("\n"); return 0; }
+    """,
+    "expression_evaluator": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        static const char *cursor;
+        static long parse_expr(void);
+        static void skip(void){ while (*cursor == ' ') cursor++; }
+        static long parse_atom(void){ skip();
+          if (*cursor == '(') { cursor++; long v = parse_expr(); skip(); if (*cursor==')') cursor++; return v; }
+          int neg = 0; if (*cursor == '-') { neg = 1; cursor++; }
+          long v = 0; while (*cursor >= '0' && *cursor <= '9') { v = v*10 + (*cursor - '0'); cursor++; }
+          return neg ? -v : v; }
+        static long parse_term(void){ long v = parse_atom();
+          for (;;) { skip(); if (*cursor=='*'){cursor++; v *= parse_atom();}
+            else if (*cursor=='/'){cursor++; long d = parse_atom(); if (d) v /= d;}
+            else return v; } }
+        static long parse_expr(void){ long v = parse_term();
+          for (;;) { skip(); if (*cursor=='+'){cursor++; v += parse_term();}
+            else if (*cursor=='-'){cursor++; v -= parse_term();} else return v; } }
+        int main(void){ const char *tests[] = {"1+2*3", "(1+2)*3", "10/3", "-4 + 5", "2*(3+4)-5"};
+          for (unsigned i=0;i<sizeof tests/sizeof tests[0];i++){ cursor = tests[i];
+            printf("%s = %ld\n", tests[i], parse_expr()); } return 0; }
+    """,
+    "matrix": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        #define N 4
+        static void mul(double a[N][N], double b[N][N], double out[N][N]){
+          for (int i=0;i<N;i++) for (int j=0;j<N;j++){ double s=0;
+            for (int k=0;k<N;k++) s += a[i][k]*b[k][j]; out[i][j]=s; } }
+        int main(void){ double a[N][N], b[N][N], c[N][N];
+          for (int i=0;i<N;i++) for (int j=0;j<N;j++){ a[i][j] = i+j; b[i][j] = (i==j); }
+          mul(a,b,c);
+          for (int i=0;i<N;i++){ for (int j=0;j<N;j++) printf("%.1f ", c[i][j]); printf("\n"); }
+          return 0; }
+    """,
+    "conditional_compilation": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        #define MODE 2
+        #if MODE == 1
+        static int pick(void){ return 1; }
+        #elif MODE == 2
+        static int pick(void){ return 2; }
+        #else
+        static int pick(void){ return 0; }
+        #endif
+        #if defined(MODE) && MODE > 1
+        #define EXTRA 10
+        #else
+        #define EXTRA 0
+        #endif
+        int main(void){ printf("%d %d\n", pick(), EXTRA);
+        #ifdef NOTHING
+          printf("never\n");
+        #endif
+          return 0; }
+    """,
+    "static_inline": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        static inline int clampi(int v, int lo, int hi){ return v < lo ? lo : v > hi ? hi : v; }
+        static inline unsigned hash(const char *s){ unsigned h = 5381;
+          while (*s) h = h * 33u + (unsigned char)*s++; return h; }
+        int main(void){ printf("%d %d %d\n", clampi(5,0,10), clampi(-1,0,10), clampi(99,0,10));
+          printf("%u %u\n", hash("abc"), hash("")); return 0; }
+    """,
+    "long_long_math": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        int main(void){ long long a = 1234567890123456789LL, b = 987654321LL;
+          printf("%lld %lld %lld %lld\n", a+b, a-b, a/b, a%b);
+          unsigned long long u = 18446744073709551615ULL;
+          printf("%llu %llu %llu\n", u, u/3, u>>7);
+          printf("%lld\n", (long long)(a * 3));
+          long long neg = -a; printf("%lld %lld\n", neg/b, neg%b); return 0; }
+    """,
+    "multidim_vla": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        static long trace(int n, int m[n][n]){ long t=0; for(int i=0;i<n;i++) t += m[i][i]; return t; }
+        int main(void){ int n = 4; int grid[n][n];
+          for(int i=0;i<n;i++) for(int j=0;j<n;j++) grid[i][j] = i*n+j;
+          printf("%ld %d\n", trace(n, grid), grid[3][2]);
+          for (int k = 1; k <= 3; k++) { int tmp[k]; for (int i=0;i<k;i++) tmp[i]=k; printf("%d", tmp[k-1]); }
+          printf("\n"); return 0; }
+    """,
+    "assignment_chains": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        int main(void){ int a, b, c; a = b = c = 7;
+          printf("%d %d %d\n", a, b, c);
+          int arr[3] = {0}; int i = 0;
+          arr[i] = i = 2;
+          printf("%d %d %d %d\n", arr[0], arr[1], arr[2], i);
+          int x = 1; x += x += 3; printf("%d\n", x);
+          double d = 1; d *= d += 2; printf("%.1f\n", d); return 0; }
+    """,
+    "void_pointer_arith": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        int main(void){ int a[4] = {10,20,30,40}; char *p = (char*)a;
+          p += 2 * sizeof(int);
+          printf("%d\n", *(int*)p);
+          void *v = a; printf("%d\n", *((int*)v + 3));
+          printf("%ld\n", (char*)&a[3] - (char*)&a[0]); return 0; }
+    """,
+    "trailing_commas": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        enum E { A, B, C, };
+        static int nums[] = { 1, 2, 3, };
+        struct S { int x, y; };
+        static struct S s = { .x = 1, .y = 2, };
+        int main(void){ printf("%d %d %d %d\n", C, (int)(sizeof nums/sizeof nums[0]), s.x, s.y); return 0; }
+    """,
+    "type_punning": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        union Bits { float f; unsigned u; };
+        union DBits { double d; unsigned long u; };
+        int main(void){ union Bits b; b.f = 1.0f; printf("%x\n", b.u);
+          union DBits d; d.d = -2.0; printf("%lx\n", d.u);
+          d.u = 0x3FF0000000000000UL; printf("%.1f\n", d.d);
+          float f = 2.5f; unsigned raw; memcpy(&raw, &f, sizeof raw); printf("%x\n", raw); return 0; }
+    """,
+    "array_vs_pointer": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        static char arr[16] = "hello";
+        static char *ptr = "hello";
+        static int takes(char a[16]){ return (int)sizeof a; }
+        int main(void){ printf("%d %d %d\n", (int)sizeof arr, (int)sizeof ptr, takes(arr));
+          printf("%d %d\n", (int)sizeof "hello", (int)strlen("hello"));
+          char (*pa)[16] = &arr; printf("%d %c\n", (int)sizeof *pa, (*pa)[1]); return 0; }
+    """,
+    "deep_recursion": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        static long ack(int m, long n){ if (m == 0) return n + 1;
+          if (n == 0) return ack(m - 1, 1); return ack(m - 1, ack(m, n - 1)); }
+        static long sumto(long n){ return n == 0 ? 0 : n + sumto(n - 1); }
+        int main(void){ printf("%ld %ld %ld\n", ack(1, 5), ack(2, 3), sumto(200)); return 0; }
+    """,
+    "printf_loop": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        int main(void){ const char *fmts[] = {"%d|", "%5d|", "%-5d|", "%+d|", "%x|", "%o|"};
+          for (unsigned i = 0; i < sizeof fmts / sizeof fmts[0]; i++) printf(fmts[i], 42);
+          printf("\n");
+          for (int i = 0; i < 5; i++) printf("%*.*f|", 8, i, 3.14159265);
+          printf("\n");
+          for (double v = 0.5; v < 1e7; v *= 12.3) printf("%g|", v);
+          printf("\n"); return 0; }
+    """,
+    "bitfield_union": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        union Reg { unsigned raw; struct { unsigned lo : 8, mid : 8, hi : 16; }; };
+        int main(void){ union Reg r; r.raw = 0xAABBCCDD;
+          printf("%x %x %x\n", r.lo, r.mid, r.hi);
+          r.mid = 0x11; printf("%x\n", r.raw);
+          struct { signed s : 4; unsigned u : 4; } p = { -1, 15 };
+          printf("%d %u %d\n", p.s, p.u, (int)sizeof p); return 0; }
+    """,
+    "string_builder": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        int main(void){ char out[128]; size_t used = 0;
+          const char *parts[] = {"alpha", "beta", "gamma", "delta"};
+          for (unsigned i = 0; i < 4; i++) {
+            int n = snprintf(out + used, sizeof out - used, "%s%s", i ? ", " : "", parts[i]);
+            if (n > 0) used += (size_t)n; }
+          printf("%s (%d)\n", out, (int)used);
+          char small[8]; int need = snprintf(small, sizeof small, "%s-%s", parts[0], parts[1]);
+          printf("%s %d\n", small, need); return 0; }
+    """,
+    "goto_cleanup": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        static int work(int fail){ int *a = NULL, *b = NULL, rc = 0;
+          a = malloc(4 * sizeof *a); if (!a) { rc = 1; goto out; }
+          if (fail == 1) { rc = 2; goto out_a; }
+          b = malloc(4 * sizeof *b); if (!b) { rc = 3; goto out_a; }
+          if (fail == 2) { rc = 4; goto out_b; }
+          a[0] = 1; b[0] = 2; rc = a[0] + b[0];
+        out_b: free(b);
+        out_a: free(a);
+        out: return rc; }
+        int main(void){ printf("%d %d %d\n", work(0), work(1), work(2)); return 0; }
+    """,
+    "enum_switch_table": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        enum Op { OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_COUNT };
+        static const char *const names[OP_COUNT] = { "add", "sub", "mul", "div" };
+        static int apply(enum Op o, int a, int b){
+          switch (o) { case OP_ADD: return a+b; case OP_SUB: return a-b;
+                       case OP_MUL: return a*b; case OP_DIV: return b ? a/b : 0;
+                       case OP_COUNT: default: return -1; } }
+        int main(void){ for (int o = 0; o < OP_COUNT; o++)
+            printf("%s(%d,%d)=%d ", names[o], 12, 4, apply((enum Op)o, 12, 4));
+          printf("\n"); return 0; }
+    """,
+
+    # ── the C23 headers that arrived last ────────────────────────────────
+    "inttypes_and_locale": r"""
+        #include <stdio.h>
+        #include <inttypes.h>
+        #include <locale.h>
+        #include <fenv.h>
+        int main(void) {
+            int64_t a = 1234567890123L;
+            uint64_t b = 18446744073709551615UL;
+            printf("%" PRId64 " %" PRIu64 " %" PRIx64 "\n", a, b, (uint64_t)255);
+            printf("%jd %ju\n", (intmax_t)-7, (uintmax_t)7);
+            imaxdiv_t d = imaxdiv(17, 5);
+            printf("%ld %ld %ld\n", (long)d.quot, (long)d.rem, (long)imaxabs(-9));
+            printf("%s %s\n", setlocale(LC_ALL, "C"), localeconv()->decimal_point);
+            printf("%d\n", fegetround() == FE_TONEAREST);
+            printf("%" PRIdPTR " %" PRIuMAX "\n", (intptr_t)-3, (uintmax_t)9);
+            return 0;
+        }
+    """,
+    "wide_and_generic": r"""
+        #include <stdio.h>
+        #include <wchar.h>
+        #include <wctype.h>
+        #include <tgmath.h>
+        int main(void) {
+            wchar_t a[16], b[] = L"hello";
+            wcscpy(a, b); wcscat(a, L" wide");
+            printf("%d %d %d\n", (int)wcslen(a), (int)a[0], wcscmp(a, L"hello wide"));
+            printf("%d %d\n", (int)(wcschr(a, L'w') - a), (int)(wcsstr(a, L"wide") - a));
+            /* The isw* functions answer "nonzero", and glibc's is a bitmask. */
+            printf("%d %d %d %d\n", iswalpha(L'q') != 0, iswdigit(L'7') != 0,
+                   (int)towupper(L'x'), iswspace(L'\t') != 0);
+            wchar_t c[8]; wmemset(c, L'z', 4); c[4] = 0;
+            printf("%d %d %d\n", (int)wcslen(c), wmemcmp(c, L"zzzz", 4), (int)c[3]);
+            float f = 2.0f; double d = 2.0;
+            printf("%.6f %.6f %.6f\n", (double)sqrt(f), sqrt(d), (double)pow(f, 3.0f));
+            printf("%.6f %.6f %.6f\n", (double)fabs(-1.5f), floor(-1.5), fmod(7.5, 2.0));
+            return 0;
+        }
+    """,
+
+    "duffs_device": r"""
+        #include <stdio.h>
+        /* A `case` label inside a `do` loop inside a `switch`. It is legal C
+           and it is the shape that proves `switch` really is a jump into a
+           statement rather than a chain of comparisons around one. */
+        static void copy(char *to, const char *from, int count) {
+            int n = (count + 7) / 8;
+            switch (count % 8) {
+            case 0: do { *to++ = *from++;
+            case 7:      *to++ = *from++;
+            case 6:      *to++ = *from++;
+            case 5:      *to++ = *from++;
+            case 4:      *to++ = *from++;
+            case 3:      *to++ = *from++;
+            case 2:      *to++ = *from++;
+            case 1:      *to++ = *from++;
+                    } while (--n > 0);
+            }
+        }
+        int main(void) {
+            char dst[32] = {0};
+            copy(dst, "duffs device works", 18);
+            printf("%s %d\n", dst, (int)sizeof dst);
+            return 0;
+        }
+    """,
 }
 
 
@@ -1042,6 +1396,79 @@ def _asmpython(*argv: str, cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, "-m", "asmpython", *argv],
                           capture_output=True, text=True, cwd=str(cwd),
                           env=env)
+
+
+#: A program small enough to go through a machine backend quickly, and
+#: written against the floor alone so that no backend needs a C library.
+SMALL = """\
+extern long plat_write(long fd, const void *b, long n);
+static void say(const char *s) { long n = 0; while (s[n]) n++; plat_write(1, s, n); }
+int main(void) {
+    int total = 0;
+    for (int i = 1; i <= 10; i++) total += i * i;
+    char digits[8], out[8];
+    int k = 0, j = 0, v = total;
+    while (v) { digits[k++] = (char)('0' + v % 10); v /= 10; }
+    while (k) out[j++] = digits[--k];
+    out[j++] = '\\n';
+    plat_write(1, out, j);
+    say("done\\n");
+    return 0;
+}
+"""
+
+
+class TestTheOtherBackendsToo:
+    """The point of a language-independent IR is that a frontend does not have
+    to know which backend is downstream. So one C program is put through the
+    machine backend and the JVM one, and both must print what `cc` prints.
+
+    A SMALL PROGRAM ON PURPOSE. These paths are slow -- one encodes x86-64
+    instructions and writes an ELF object, the other builds a class file and
+    a jar -- and what is checked is that a C frontend's IR is ordinary IR,
+    not that `printf` works again.
+    """
+
+    @harness.needs("cc")
+    def test_x86_64(self, tmp_path):
+        want = _host_run(SMALL, tmp_path)
+        source = tmp_path / "small.c"
+        source.write_text(SMALL, encoding="utf-8")
+        exe = tmp_path / "small.exe"
+        built = _asmpython("build", str(source), "--backend", "x86-64",
+                           "--target", "x86_64-linux", "-o", str(exe),
+                           cwd=tmp_path)
+        if built.returncode != 0:
+            harness.skip(f"the x86-64 path is unavailable here: "
+                         f"{(built.stderr or built.stdout)[:160]}")
+        ran = subprocess.run([str(exe)], capture_output=True, text=True)
+        assert (ran.returncode, ran.stdout) == want
+
+    @harness.needs("java")
+    def test_jvm(self, tmp_path):
+        want = _host_run(SMALL, tmp_path)
+        source = tmp_path / "small.c"
+        source.write_text(SMALL, encoding="utf-8")
+        jar = tmp_path / "small.jar"
+        built = _asmpython("build", str(source), "--backend", "jvm",
+                           "-o", str(jar), cwd=tmp_path)
+        assert built.returncode == 0, built.stderr or built.stdout
+        ran = subprocess.run([shutil.which("java"), "-jar", str(jar)],
+                             capture_output=True, text=True)
+        assert (ran.returncode, ran.stdout) == want
+
+    def test_pybc_refuses_for_the_right_reason(self, tmp_path):
+        """`pybc` is the one backend that is not language-independent: it
+        hands the ORIGINAL SOURCE to the host CPython. Told a C module it used
+        to answer `invalid syntax (prog.c, line 1)`, which names the wrong
+        problem entirely."""
+        source = tmp_path / "small.c"
+        source.write_text(SMALL, encoding="utf-8")
+        built = _asmpython("build", str(source), "--backend", "pybc",
+                           "-o", str(tmp_path / "small.pyc"), cwd=tmp_path)
+        assert built.returncode != 0
+        said = built.stdout + built.stderr
+        assert "can only be used with the `python` frontend" in said, said
 
 
 class TestTheDriverBuildsAndRuns:

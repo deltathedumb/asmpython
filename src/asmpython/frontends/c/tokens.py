@@ -25,7 +25,7 @@ token loses exactly the cases the algorithm exists for.
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 
 from ...diagnostics import Span
 
@@ -87,6 +87,14 @@ KEYWORDS: frozenset[str] = frozenset({
     "alignas", "alignof", "bool", "constexpr", "false", "nullptr", "static_assert",
     "thread_local", "true", "typeof", "typeof_unqual", "_BitInt", "_Decimal32",
     "_Decimal64", "_Decimal128",
+    # GNU's double-underscore spellings. They are keywords because a real
+    # header writes `__typeof__(x)` and `__restrict` where the standard
+    # spells them without the underscores -- and the reason the underscores
+    # exist is that the plain names are not reserved, so a header cannot use
+    # them. Folded to the standard spelling by `KEYWORD_ALIASES` below.
+    "__typeof__", "__typeof", "__inline__", "__inline", "__const__",
+    "__const", "__restrict__", "__restrict", "__volatile__", "__volatile",
+    "__signed__", "__signed", "__alignof__", "__alignof", "__complex__",
 })
 
 #: C23 spells several C11 keywords without the underscore, and the two are the
@@ -96,6 +104,14 @@ KEYWORD_ALIASES: dict[str, str] = {
     "alignas": "_Alignas", "alignof": "_Alignof",
     "static_assert": "_Static_assert", "thread_local": "_Thread_local",
     "bool": "_Bool",
+    "__typeof__": "typeof", "__typeof": "typeof",
+    "__inline__": "inline", "__inline": "inline",
+    "__const__": "const", "__const": "const",
+    "__restrict__": "restrict", "__restrict": "restrict",
+    "__volatile__": "volatile", "__volatile": "volatile",
+    "__signed__": "signed", "__signed": "signed",
+    "__alignof__": "_Alignof", "__alignof": "_Alignof",
+    "__complex__": "_Complex",
 }
 
 

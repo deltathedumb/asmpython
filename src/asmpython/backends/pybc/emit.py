@@ -106,6 +106,18 @@ class PycBackend(Backend):
         """
 
     def emit(self, module: Module, target: Target) -> dict[str, bytes]:
+        # THIS BACKEND IS THE ONE THAT IS NOT LANGUAGE-INDEPENDENT. It does
+        # not lower the IR at all: it hands the module's ORIGINAL SOURCE to
+        # the host CPython and ships what comes back. That works only when
+        # the source was Python, and the module says which frontend produced
+        # it -- so a C program gets this sentence rather than `invalid syntax
+        # (prog.c, line 1)`, which names the wrong problem entirely.
+        frontend = module.metadata.get("frontend")
+        if frontend not in (None, "python"):
+            raise BackendUnsupported(
+                f"the pybc backend recompiles the original source with the "
+                f"host CPython, so it can only be used with the `python` "
+                f"frontend; this module came from `{frontend}`")
         source = source_file_of(module)
         if source is None or not source.text.strip():
             raise BackendUnsupported(

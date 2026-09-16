@@ -27,10 +27,24 @@ It is also why some things are missing rather than approximated:
 | `time`, `clock` | nothing can ask the host what time it is |
 | `getenv`, `system` | there is no environment and no command processor |
 | `<setjmp.h>` | `longjmp` restores a machine frame; the IR has no frames |
+| `<threads.h>` | the floor cannot create one |
+| `<complex.h>` | the IR has no aggregate type to make a complex value out of |
 
 Each of those returns the value the standard defines for "unavailable" --
 `NULL`, `EOF`, `(time_t)-1` -- rather than something plausible a program would
-go on to do arithmetic with.
+go on to do arithmetic with. The three headers that cannot exist at all are
+PRESENT AND REFUSE, with `#error` and a sentence saying what to write instead:
+a missing file is a mystery and a refusal is an answer.
+
+`<stdatomic.h>` is supported and `<threads.h>` is not, which is not a
+contradiction. With one thread a plain load is indivisible with respect to
+every other operation in the program, which is the whole of what
+`atomic_load` promises; the memory orders are accepted and ignored because
+there is no second observer for them to order anything against.
+
+All thirty-one headers C23 requires are here, and a test includes every one
+of them alone and then all of them together -- a macro one defines can break
+the next, and one translation unit is the only place that shows.
 
 ## Why the definitions are `static`
 

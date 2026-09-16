@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...diagnostics import Span
-from .ctype import CType, Member, Tag
+from .ctype import CType, Member
 
 
 @dataclass(slots=True)
@@ -91,7 +91,7 @@ class Unary(Expr):
     postfix: bool = False
     #: `++`/`--` only: 1 for an arithmetic operand, the element size for a
     #: pointer. Lowering adds this rather than recomputing a layout.
-    scale: int = 1
+    scale: Any = 1
 
 
 @dataclass(slots=True)
@@ -101,7 +101,9 @@ class Binary(Expr):
     right: Expr | None = None
     #: Pointer arithmetic: the size of the element, so lowering multiplies by
     #: a number rather than recomputing a layout it has no business knowing.
-    scale: int = 1
+    #: AN `int`, OR AN EXPRESSION when the element is a variable-length array
+    #: -- `int (*p)[n]` has an element whose size is not known until `n` is.
+    scale: Any = 1
 
 
 @dataclass(slots=True)
@@ -127,7 +129,7 @@ class Assign(Expr):
     target: Expr | None = None
     value: Expr | None = None
     #: For `+=` on a pointer, the element size; see `Binary.scale`.
-    scale: int = 1
+    scale: Any = 1
     #: The type the operation is performed IN, which is not the target's type:
     #: `char c; c += 1` computes in `int` and converts back.
     compute: CType | None = None
@@ -190,7 +192,7 @@ class Index(Expr):
 
     base: Expr | None = None
     index: Expr | None = None
-    scale: int = 1
+    scale: Any = 1
 
 
 @dataclass(slots=True)
@@ -329,8 +331,6 @@ class Switch(Stmt):
     #: emits one `Op.SWITCH` rather than a chain of comparisons.
     cases: list[tuple[int, str]] = field(default_factory=list)
     default_label: str | None = None
-    #: The label every `break` in this statement jumps to.
-    break_label: str = ""
 
 
 @dataclass(slots=True)
@@ -410,8 +410,6 @@ class FunctionDef(Node):
     #: True if the function is variadic; lowering gives it the extra argument
     #: area parameter described in `lower.py`.
     variadic: bool = False
-    #: Set when the body mentions `__func__`.
-    func_name_symbol: str | None = None
 
 
 @dataclass(slots=True)
@@ -419,6 +417,3 @@ class Unit(Node):
     """A translation unit: what the frontend hands to lowering."""
 
     decls: list[Any] = field(default_factory=list)
-    #: Every tag defined anywhere, for `--emit-ir` commentary and for the
-    #: layout tests that compare this compiler's offsets against the host's.
-    tags: list[Tag] = field(default_factory=list)

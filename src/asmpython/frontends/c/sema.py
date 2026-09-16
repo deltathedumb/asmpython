@@ -21,12 +21,12 @@ program rather than a missed opportunity.
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 from typing import Any
 
 from ...diagnostics import DiagnosticSink, Span, error, warning
 from . import ctype as C
-from .ctype import CType, IncompleteType
+from .ctype import CType
 from . import syntax as S
 
 
@@ -418,7 +418,7 @@ class Sema:
                            f"cannot {what} a pointer to the incomplete type "
                            f"{C.spell(t.of)}", span)
                 return self.poison(span)
-            scale = t.of.size
+            scale = self.scale_of(t.of, span)
         elif t.is_arithmetic:
             scale = 1
         else:
@@ -509,7 +509,7 @@ class Sema:
                 return self.poison(span)
             return S.Binary(span, a.type, False, op, a,
                             self.convert(b, C.PTRDIFF_T, "index"),
-                            a.type.of.size)
+                            self.scale_of(a.type.of, span))
         if op == "-" and a.type.is_pointer and b.type.is_pointer:
             if not C.compatible(a.type.of.unqualified(), b.type.of.unqualified()):
                 self.error("E1417",
@@ -519,7 +519,8 @@ class Sema:
                 return self.poison(span)
             if not self._pointee_sized(a, span, op):
                 return self.poison(span)
-            return S.Binary(span, C.PTRDIFF_T, False, "-p", a, b, a.type.of.size)
+            return S.Binary(span, C.PTRDIFF_T, False, "-p", a, b,
+                            self.scale_of(a.type.of, span))
         self.error("E1418",
                    f"cannot apply `{op}` to {C.spell(a.type)} and "
                    f"{C.spell(b.type)}", span)
@@ -538,6 +539,24 @@ class Sema:
                        f"type {C.spell(target)}", span)
             return False
         return True
+
+    def scale_of(self, ty: CType, span: Span):
+        """The element size to multiply an index by: a number, or code.
+
+        A VLA HAS A SIZE AND NOT A `sizeof`. `int m[n][n]` as a parameter is
+        `int (*m)[n]`, so `m[i]` steps by `n * sizeof(int)` -- which is not
+        known until the program runs. Asking `CType.size` for it raises, and
+        that exception reached the user as a traceback before this existed.
+        """
+        return self.vla_size(ty, span) if ty.is_vla else ty.size
+
+    def vla_size(self, ty: CType, span: Span) -> S.Expr:
+        """The run-time byte count of a variable-length array."""
+        elem = ty.of
+        inner = (self.vla_size(elem, span) if elem.is_vla
+                 else S.IntLit(span, C.SIZE_T, False, elem.size))
+        count = self.convert(ty.vla, C.SIZE_T, "array size")
+        return S.Binary(span, C.SIZE_T, False, "*", count, inner)
 
     def _relational(self, op: str, a: S.Expr, b: S.Expr, span: Span) -> S.Expr:
         if a.type.is_arithmetic and b.type.is_arithmetic:
@@ -710,7 +729,8 @@ class Sema:
         if not self._pointee_sized(a, span, "[]"):
             return self.poison(span)
         return S.Index(span, a.type.of, True, a,
-                       self.convert(b, C.PTRDIFF_T, "index"), a.type.of.size)
+                       self.convert(b, C.PTRDIFF_T, "index"),
+                       self.scale_of(a.type.of, span))
 
     def build_member(self, base: S.Expr, name: str, arrow: bool,
                      span: Span) -> S.Expr:

@@ -36,9 +36,8 @@ support routine that its own front end would reject.
 from __future__ import annotations
 
 import struct as _struct
-from dataclasses import dataclass
 
-from ...diagnostics import DiagnosticSink, SourceFile, Span, error, warning
+from ...diagnostics import DiagnosticSink, SourceFile, Span, warning
 from ...ir import types as IR
 from ...ir.builder import Builder
 from ...ir.module import (
@@ -83,6 +82,10 @@ class Lowerer:
         #: Labels for the innermost loop and switch.
         self.break_to: list[str] = []
         self.continue_to: list[str] = []
+        #: `Case.label` -> the block it starts. Filled by `_switch` before the
+        #: body is walked, because a `case` may sit anywhere inside it --
+        #: including inside a nested block, which is what Duff's device is.
+        self._case_blocks: dict[str, Block] = {}
         #: goto targets in the function being lowered: C name -> Block.
         self.labels: dict[str, Block] = {}
         #: Stores that a static initialiser could not put in the global's
@@ -205,20 +208,39 @@ class Lowerer:
             size = sym.type.size
         except C.IncompleteType:
             return
+        mark = len(self.init_stores)
         data = self._static_bytes(sym, sym.init, size)
         linkage = (IRLinkage.EXPORT if sym.linkage is Linkage.EXTERNAL
                    else IRLinkage.INTERNAL)
         self._add_global(Global(sym.ir_name or sym.name, max(1, size), data,
-                                readonly=sym.type.is_const,
+                                readonly=self._readonly(sym, mark),
                                 linkage=linkage,
                                 align=sym.align or sym.type.align,
                                 span=sym.span or self.unit.span))
 
     def _compound_global(self, node: S.CompoundLiteral) -> None:
         size = node.type.size
+        mark = len(self.init_stores)
         data = self._init_bytes(node.symbol, node.init, size)
         self._add_global(Global(node.symbol, max(1, size), data,
-                                readonly=True, align=node.type.align))
+                                readonly=len(self.init_stores) == mark,
+                                align=node.type.align))
+
+    def _readonly(self, sym: Symbol, mark: int) -> bool:
+        """Whether a global may go in read-only storage.
+
+        A `const` OBJECT WHOSE INITIALISER NEEDS AN ADDRESS IS NOT ONE.
+        `Global.data` is bytes and holds no relocations, so
+
+            static const struct Ops RECT = { rect, "rect" };
+
+        is filled in by `__c_init` at run time -- and a backend that put it in
+        `.rodata` because it is `const` produced a program that SEGFAULTED on
+        the store. The interpreter does not enforce read-only storage, so only
+        the compiled path found it; that is what the three-way comparison is
+        for.
+        """
+        return sym.type.is_const and len(self.init_stores) == mark
 
     def _static_bytes(self, sym: Symbol, init, size: int) -> bytes | None:
         if init is None:
@@ -391,9 +413,10 @@ class Lowerer:
         if sym.is_global:
             # A block-scope `static`: an ordinary global with a private name.
             size = sym.type.size
+            mark = len(self.init_stores)
             data = self._static_bytes(sym, sym.init, size)
             self._add_global(Global(sym.ir_name, max(1, size), data,
-                                    readonly=sym.type.is_const,
+                                    readonly=self._readonly(sym, mark),
                                     align=sym.align or sym.type.align,
                                     span=sym.span or self.unit.span))
             sym.in_register = False
@@ -466,7 +489,7 @@ class Lowerer:
             for i, lbl in enumerate(t.labels):
                 if lbl not in live:
                     t.labels[i] = kept[0].label
-            t.cases = [(v, l) for v, l in t.cases if l in live]
+            t.cases = [(v, lbl) for v, lbl in t.cases if lbl in live]
         self.fn.blocks = kept
 
     # ── the entry point and the static initialiser ──────────────────────────
@@ -760,7 +783,6 @@ class Lowerer:
     def _switch(self, node: S.Switch) -> None:
         value = self._value(node.expr)
         after = self.b.new_block("endswitch")
-        self._case_blocks = getattr(self, "_case_blocks", {})
         blocks: dict[str, Block] = {}
         for _, label in node.cases:
             blocks.setdefault(label, self.b.new_block("case"))
@@ -768,13 +790,12 @@ class Lowerer:
             blocks.setdefault(node.default_label, self.b.new_block("default"))
         self._case_blocks.update(blocks)
         default = blocks.get(node.default_label) if node.default_label else after
-        cases = [(v, blocks[l].label) for v, l in node.cases]
+        cases = [(v, blocks[label].label) for v, label in node.cases]
         self.b.emit(Instruction(Op.SWITCH, C.to_ir(node.expr.type),
                                 args=[value], labels=[default.label],
                                 cases=cases))
         self._open(self.b.new_block("swbody"))
         self.break_to.append(after.label)
-        self._labels_for_switch = node.break_label
         self._stmt(node.body)
         self.break_to.pop()
         if self.b.current.terminator is None:
@@ -782,7 +803,7 @@ class Lowerer:
         self._open(after)
 
     def _case(self, node) -> None:
-        block = getattr(self, "_case_blocks", {}).get(node.label)
+        block = self._case_blocks.get(node.label)
         if block is None:
             self._stmt(node.body)
             return
@@ -972,10 +993,16 @@ class Lowerer:
             return base
         return self.b.offset(base, self.b.const(IR.I64, byte_offset))
 
-    def _scaled(self, base: int, index: int, index_ty: CType, scale: int) -> int:
+    def _scaled(self, base: int, index: int, index_ty: CType, scale) -> int:
         idx = self._ir_convert(index, index_ty, IR.I64)
-        if scale != 1:
-            idx = self.b.mul(IR.I64, idx, self.b.const(IR.I64, scale))
+        if isinstance(scale, int):
+            if scale != 1:
+                idx = self.b.mul(IR.I64, idx, self.b.const(IR.I64, scale))
+        else:
+            # A VARIABLE-LENGTH ELEMENT: the stride is an expression, so it is
+            # computed here and multiplied in. See `sema.scale_of`.
+            width = self._ir_convert(self._value(scale), scale.type, IR.I64)
+            idx = self.b.mul(IR.I64, idx, width)
         return self.b.offset(base, idx)
 
     # ── conversions ─────────────────────────────────────────────────────────
@@ -1104,9 +1131,18 @@ class Lowerer:
             snapshot = self.b.reg(ir)
             self.b.copy(snapshot, old)
             old = snapshot
-        step = e.scale if ty.is_pointer else 1
         if ty.is_pointer:
-            delta = self.b.const(IR.I64, step if e.op == "++" else -step)
+            if isinstance(e.scale, int):
+                step = e.scale if e.op == "++" else -e.scale
+                delta = self.b.const(IR.I64, step)
+            else:
+                delta = self._ir_convert(self._value(e.scale), e.scale.type,
+                                         IR.I64)
+                if e.op == "--":
+                    neg = self.b.reg(IR.I64)
+                    self.b.emit(Instruction(Op.NEG, IR.I64, dst=neg,
+                                            args=[delta]))
+                    delta = neg
             new = self.b.offset(old, delta)
         else:
             one = self.b.const(ir, 1.0 if ir.is_float else 1)
@@ -1139,8 +1175,14 @@ class Lowerer:
             b = self._bitcast(right, IR.I64) if self.fn.register_type(right).is_ptr \
                 else right
             diff = self.b.sub(IR.I64, a, b)
-            if e.scale != 1:
-                diff = self.b.div(IR.I64, diff, self.b.const(IR.I64, e.scale))
+            if isinstance(e.scale, int):
+                if e.scale != 1:
+                    diff = self.b.div(IR.I64, diff,
+                                      self.b.const(IR.I64, e.scale))
+            else:
+                width = self._ir_convert(self._value(e.scale), e.scale.type,
+                                         IR.I64)
+                diff = self.b.div(IR.I64, diff, width)
             return diff
         left = self._value(e.left)
         if e.left.type.is_pointer and op in ("+", "-"):
@@ -1263,7 +1305,6 @@ class Lowerer:
             return new
         compute = e.compute or ty
         cir = C.to_ir(compute)
-        bitfield = _bitfield_of(target)
         addr = None if _in_register(target) else self._address(target)
         old = self._read_through(target, addr)
         old = self._ir_convert(old, ty, cir)
