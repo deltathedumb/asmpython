@@ -40,7 +40,7 @@ time, by name:
 | `main(argc, argv)` | `env` | declaring parameters |
 | `system` | `proc` | running another program |
 
-`lower._prune` drops the declaration of a host service nothing reaches, which
+`lower.prune` drops the declaration of a host service nothing reaches, which
 is what makes the second column true rather than aspirational: `printf`
 reaches the write path through a function pointer that only `fopen` ever sets,
 so hello world names no group at all.
