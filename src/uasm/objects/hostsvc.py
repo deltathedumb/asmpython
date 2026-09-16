@@ -239,6 +239,53 @@ GROUPS: dict[str, dict[str, tuple[tuple[str, ...], str]]] = {
         "host_net_port":    (("i64",), "i64"),
         "host_net_ready":   (("i64", "i64", "i64"), "i64"),
     },
+    # ── threads ─────────────────────────────────────────────────────────
+    #
+    # THE ONE GROUP WHOSE ABSENCE IS NOT ABOUT HARDWARE. A target without a
+    # filesystem is a target without a filesystem; a target without threads
+    # is usually one whose RUNTIME cannot be re-entered, which is a property
+    # of the backend rather than of the machine. Either way the answer is
+    # the same as for the rest: declare it, or be refused by name.
+    #
+    # A HANDLE IS OPAQUE, as everywhere else in this file: the C backend
+    # widens a `pthread_t`, another may answer an index into a table. A
+    # caller may only hand it back.
+    #
+    # THE THREAD FUNCTION IS A FUNCTION POINTER AND AN ARGUMENT, which is
+    # what `Op.FUNC_ADDR` already produces and `Op.CALL_PTR` already calls:
+    # nothing new is needed in the instruction set to start one. It takes a
+    # `ptr` and answers an `i64`, which is `thrd_start_t` with the
+    # `void *`/`int` spelled as the machine words they are.
+    #
+    # WHY MUTEXES AND CONDITION VARIABLES ARE HERE and not built above this
+    # line out of something smaller. A spin lock needs an atomic exchange,
+    # which the IR does not have and should not grow for one caller; a
+    # condition variable needs a way to sleep until woken, which nothing
+    # here can express. Both are primitive to the host, so both are named.
+    #
+    # `host_mutex_new` TAKES A KIND: 0 is plain and 1 is recursive, which is
+    # C's `mtx_plain` and `mtx_recursive`. A timed mutex is not a kind --
+    # `host_mutex_timedlock` takes the timeout, so the same mutex can be
+    # waited on either way.
+    "thread": {
+        "host_thread_start":  (("ptr", "ptr"), "i64"),
+        "host_thread_join":   (("i64", "ptr"), "i64"),
+        "host_thread_detach": (("i64",), "i64"),
+        "host_thread_self":   ((), "i64"),
+        "host_thread_yield":  ((), "i64"),
+        "host_thread_exit":   (("i64",), "i64"),
+        "host_mutex_new":     (("i64",), "i64"),
+        "host_mutex_lock":    (("i64",), "i64"),
+        "host_mutex_trylock": (("i64",), "i64"),
+        "host_mutex_timedlock": (("i64", "i64"), "i64"),
+        "host_mutex_unlock":  (("i64",), "i64"),
+        "host_mutex_free":    (("i64",), "i64"),
+        "host_cond_new":      ((), "i64"),
+        "host_cond_wait":     (("i64", "i64", "i64"), "i64"),
+        "host_cond_signal":   (("i64",), "i64"),
+        "host_cond_broadcast": (("i64",), "i64"),
+        "host_cond_free":     (("i64",), "i64"),
+    },
     # ── another program ─────────────────────────────────────────────────
     #
     # RUN TO COMPLETION AND CAPTURE, which is one operation rather than the
@@ -326,7 +373,7 @@ MANDATORY = ("core",)
 
 #: The groups a backend may or may not offer.
 OPTIONAL = tuple(g for g in ("file", "time", "random", "env", "net",
-                             "proc", "dynlib", "text"))
+                             "proc", "dynlib", "text", "thread"))
 
 #: Every operation, flattened, for the places that want one dictionary.
 ALL: dict[str, tuple[tuple[str, ...], str]] = {

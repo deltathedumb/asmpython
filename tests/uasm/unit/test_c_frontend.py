@@ -319,17 +319,34 @@ class TestTheStandardHeaders:
 
 
 class TestTheFourDivergences:
-    """`frontends/c/__init__.py` names four places this frontend differs from
+    """`frontends/c/__init__.py` names the places this frontend differs from
     a hosted implementation, and calls that list complete. A list nothing
     checks becomes a list of the ones somebody remembered."""
 
-    def test_long_double_is_double(self):
-        assert C.LDOUBLE.size == C.DOUBLE.size
+    def test_long_double_is_eighty_bit_extended(self):
+        """x86-64's format, in software: sixteen bytes, ten in use, and a
+        64-bit significand -- so a program's `sizeof` and `LDBL_*` agree
+        with a hosted compiler's."""
+        assert C.LDOUBLE.size == 16 and C.LDOUBLE.align == 16
+        assert C.LDOUBLE.in_memory        # no IR type; it is carried by address
         module, sink = compile_c(
             "#include <float.h>\n"
-            "_Static_assert(sizeof(long double) == 8, \"\");\n"
-            "_Static_assert(LDBL_MAX == DBL_MAX, \"\");\n")
+            "_Static_assert(sizeof(long double) == 16, \"\");\n"
+            "_Static_assert(LDBL_MANT_DIG == 64, \"\");\n"
+            "_Static_assert(LDBL_MAX_EXP == 16384, \"\");\n"
+            "long double f(long double a, long double b){ return a * b; }\n")
         assert not sink.failed, [d.message for d in sink.diagnostics]
+        names = {fn.name for fn in module.functions}
+        assert "__c_ldmul" in names, sorted(names)
+
+    def test_a_long_double_constant_keeps_all_its_bits(self):
+        """A `Fraction`, not a Python float: folding through a double would
+        lose eleven of the sixty-four before the program ever ran."""
+        module, _ = compile_c(
+            "long double pi = 3.14159265358979323846L;\n"
+            "int main(void){ return 0; }\n")
+        got = [g for g in module.globals if g.name.endswith("pi")]
+        assert got and got[0].data[:10].hex() == "35c26821a2da0fc90040"
 
     def test_complex_is_two_of_its_element(self):
         """The layout C requires, which is what `creal` and `CMPLX` read."""

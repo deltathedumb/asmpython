@@ -262,9 +262,14 @@ It compiles C, and `src/uasm/frontends/c/__init__.py` lists the four
 places it knowingly differs from a hosted implementation on x86-64 Linux —
 the whole list, rather than the beginning of one:
 
-  * `long double` **is** `double`. The IR has `f32` and `f64` and nothing
-    wider, so `__SIZEOF_LONG_DOUBLE__` says 8 and `<float.h>`'s `LDBL_*`
-    macros carry `double`'s values. A program that asks is told the truth.
+  * `long double` is **software**. The format is x86-64's — 80-bit
+    extended, sixteen bytes, a 64-bit significand — so `sizeof`, `LDBL_*`
+    and every printed digit agree with a hosted compiler; the arithmetic is
+    a support unit written in C, because the IR has `f32` and `f64` and a
+    third width would have to be implemented by every backend. The `l`
+    functions in `<math.h>` compute in double and are accurate to about a
+    double's precision; `sqrtl`, the conversions and the four operators are
+    exact.
   * `_Imaginary` is not there, which is conforming rather than missing:
     imaginary types are Annex G, supported only by an implementation that
     says so, and gcc has never had them either. `_Complex` is complete,

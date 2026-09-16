@@ -85,7 +85,12 @@ _SCALAR: dict[K, tuple[int, bool]] = {
     K.ULLONG: (8, False),
     K.FLOAT: (4, True),
     K.DOUBLE: (8, True),
-    K.LDOUBLE: (8, True),
+    #: SIXTEEN BYTES WITH TEN IN THEM, which is x86-64's `long double`: an
+    #: 80-bit extended value padded to a 16-byte slot, aligned to 16. The
+    #: value itself is software (`support.py`'s `ldouble` unit); the size
+    #: and alignment are the ABI's so that a program's `sizeof` and layouts
+    #: agree with a hosted compiler's.
+    K.LDOUBLE: (16, True),
 }
 
 #: Integer conversion rank (6.3.1.1). Equal-rank signed and unsigned types
@@ -223,6 +228,19 @@ class CType:
     def is_complex(self) -> bool: return self.kind is K.COMPLEX
 
     @property
+    def is_ldouble(self) -> bool:
+        """`long double`, which is 80-bit extended and lives in memory.
+
+        THE IR HAS `f32` AND `f64` AND NOTHING WIDER, and a third width
+        would have to be implemented by every backend -- x86-64 has the
+        hardware, the JVM does not have it at all, and a WebAssembly target
+        never will. So this width is built out of the two every machine has,
+        in C, and is carried as sixteen bytes with an address like an
+        aggregate. `support.py`'s `ldouble` unit is the arithmetic.
+        """
+        return self.kind is K.LDOUBLE
+
+    @property
     def is_arithmetic(self) -> bool:
         # C CALLS A COMPLEX TYPE ARITHMETIC, and every rule that says
         # "arithmetic type" -- the usual conversions, what `+` takes, what a
@@ -239,7 +257,8 @@ class CType:
         way -- so everything that asks this question about a struct has the
         same answer for a complex, and asks it in one place.
         """
-        return self.is_record or self.is_array or self.is_complex
+        return (self.is_record or self.is_array or self.is_complex
+                or self.is_ldouble)
 
     @property
     def is_pointer(self) -> bool: return self.kind is K.POINTER
@@ -564,8 +583,14 @@ def to_ir(ty: CType) -> IR.Type:
         return to_ir(ty.tag.base if ty.tag and ty.tag.base else INT)
     if k is K.FLOAT:
         return IR.F32
-    if k in (K.DOUBLE, K.LDOUBLE):
+    if k is K.DOUBLE:
         return IR.F64
+    if k is K.LDOUBLE:
+        # NO IR TYPE AT ALL, on purpose: 80-bit extended is wider than
+        # anything the IR has, so a value of it lives in memory and is
+        # reached by its address, exactly as an aggregate is. Asking for one
+        # is a bug in the caller -- see `CType.is_ldouble`.
+        raise ValueError("long double has no IR type; it is carried in memory")
     if k in (K.POINTER, K.ARRAY, K.FUNCTION):
         return IR.PTR
     if k is K.VOID:

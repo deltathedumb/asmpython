@@ -34,10 +34,14 @@ from .lower import USER_MAIN, prune
 #: The prefix the bundled headers' own names carry, from `parser._merge`.
 LIBRARY = "c."
 
-#: What the frontend's own support code is called -- `support.py`'s arena and
-#: command line. Every unit that needs one splices its own copy, and they are
-#: the same code, so the merge keeps one without complaining.
+#: What the frontend's own support code is called -- `support.py`'s arena,
+#: command line, complex arithmetic and `long double`. Every unit that needs
+#: one splices its own copy and they are the same code, so the merge keeps
+#: one without complaining. Two prefixes: the functions a program's IR calls
+#: are `__c_` and have external linkage, and the helpers inside them are
+#: `static` and get the support units' own `cs.` prefix (see `support.py`).
 SUPPORT = "__c_"
+SUPPORT_STATIC = "cs."
 
 
 def merge(modules: list[Module], sources: list[str],
@@ -67,7 +71,8 @@ def _shared(name: str) -> bool:
     unit and are the same text each time, so the second copy is not a
     program saying two different things -- it is one thing said twice.
     """
-    return name.startswith(LIBRARY) or name.startswith(SUPPORT)
+    return (name.startswith(LIBRARY) or name.startswith(SUPPORT)
+            or name.startswith(SUPPORT_STATIC))
 
 
 def _add_function(out: Module, fn: Function, source: str,

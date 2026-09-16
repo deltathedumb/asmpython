@@ -22,6 +22,8 @@ data in any real program.
 """
 from __future__ import annotations
 
+from fractions import Fraction
+
 from dataclasses import dataclass
 
 from . import ctype as C
@@ -180,6 +182,14 @@ def _convert(value: Const, source: C.CType, target: C.CType) -> Const:
         # 6.3.1.7p2: a complex converts to a real by discarding the
         # imaginary part. Every branch below works on a real number.
         value = value.real
+    if target.is_ldouble:
+        from .ldouble import round_to
+        return round_to(value)
+    if isinstance(value, Fraction):
+        # OUT OF THE EXACT FORM. Everything below this line works on a
+        # Python number, and a `Fraction` only ever arrives from a
+        # `long double`, whose value is exact until it stops being one.
+        value = int(value) if target.is_integer else float(value)
     if target.is_integer:
         if isinstance(value, float):
             if value != value or value in (float("inf"), float("-inf")):
@@ -271,6 +281,19 @@ def _binary(e: S.Binary) -> Const:
         r = {"==": a == b, "!=": a != b, "<": a < b,
              ">": a > b, "<=": a <= b, ">=": a >= b}[op]
         return 1 if r else 0
+    if e.type.is_ldouble:
+        # EXACT, AND ROUNDED ONCE PER OPERATION, which is what C says an
+        # operation on this type does -- and what the run-time arithmetic in
+        # `support.py` does, so the two agree about every constant.
+        from .ldouble import round_to
+        try:
+            a, b = Fraction(a), Fraction(b)
+            v = {"+": lambda: a + b, "-": lambda: a - b, "*": lambda: a * b,
+                 "/": lambda: a / b}[op]()
+        except (KeyError, ZeroDivisionError, TypeError, OverflowError,
+                ValueError):
+            return None
+        return round_to(v)
     if e.type.is_float or e.type.is_complex:
         try:
             v = {"+": lambda: a + b, "-": lambda: a - b, "*": lambda: a * b,

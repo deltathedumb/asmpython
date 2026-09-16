@@ -255,7 +255,9 @@ class IntConst:
 @dataclass(frozen=True, slots=True)
 class FloatConst:
     value: float
-    #: 4 for an `f` suffix, 8 otherwise. `long double` IS double here.
+    #: 4 for an `f` suffix, 16 for an `l` one, 8 otherwise -- the SIZE of
+    #: the type the constant gets, which is how the parser tells the three
+    #: apart. 16 is `long double`, and see `exact` for why it needs one.
     size: int
     spelling: str
     #: An `i` or `j` suffix: `1.0i` is `0 + 1i`, a complex constant. NOT in
@@ -264,6 +266,11 @@ class FloatConst:
     #: glibc's own `<complex.h>` defines `_Complex_I` as `1.0iF`, and a
     #: header that does that is the reason to support it.
     imaginary: bool = False
+    #: THE VALUE AGAIN, EXACTLY, as a `Fraction`. `value` is a Python float
+    #: and has 53 bits of significand; a `long double` has 64, so a constant
+    #: of that type would lose eleven bits before it reached the program.
+    #: Only filled in for an `l` suffix, because only that type needs it.
+    exact: object = None
 
 
 def _strip_separators(text: str) -> str:
@@ -322,6 +329,8 @@ def _float(raw: str, spelling: str) -> FloatConst:
     letters = "".join(c for c in suffix if c not in "iIjJ")
     if letters.lower() == "f":
         size = 4
+    elif letters.lower() == "l":
+        size = 16
     elif letters.lower() not in ("", "l"):
         raise LiteralError(f"invalid suffix {suffix!r} on floating constant")
     if len(letters) > 1 or len(suffix) - len(letters) > 1:
@@ -341,7 +350,14 @@ def _float(raw: str, spelling: str) -> FloatConst:
         raise
     except ValueError:
         raise LiteralError(f"{spelling!r} is not a valid floating constant") from None
-    return FloatConst(value, size, spelling, imaginary)
+    exact = None
+    if size == 16:
+        from .ldouble import from_decimal, round_to
+        try:
+            exact = round_to(from_decimal(body))
+        except (ValueError, ArithmeticError):
+            exact = None
+    return FloatConst(value, size, spelling, imaginary, exact)
 
 
 def _integer(raw: str, spelling: str) -> IntConst:

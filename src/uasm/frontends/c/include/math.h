@@ -41,13 +41,80 @@
 #define FP_SUBNORMAL 3
 #define FP_NORMAL    4
 
-#define isnan(x)    __builtin_isnan((double)(x))
-#define isinf(x)    __builtin_isinf((double)(x))
-#define isfinite(x) __builtin_isfinite((double)(x))
-#define signbit(x)  __builtin_signbit((double)(x))
-#define isnormal(x) (__builtin_isfinite((double)(x)) && (x) != 0.0)
-#define fpclassify(x) (isnan(x) ? FP_NAN : isinf(x) ? FP_INFINITE : \
-                       (x) == 0.0 ? FP_ZERO : FP_NORMAL)
+/* THE ONE PLACE THE 80-BIT ENCODING IS READ IN A HEADER. `long double` is
+   software here (`support.py`'s `ldouble` unit) and these four questions are
+   the only ones a header has to answer about its bits: eight bytes of
+   significand, then a sixteen-bit word of sign and exponent. */
+union __ld_bits { long double __v;
+                  struct { unsigned long __m; unsigned short __se; } __r; };
+
+static int __ld_isnan(long double __x)
+{
+    union __ld_bits __u;
+    __u.__v = __x;
+    return (__u.__r.__se & 0x7fff) == 0x7fff
+        && (__u.__r.__m & ~((unsigned long)1 << 63)) != 0;
+}
+static int __ld_isinf(long double __x)
+{
+    union __ld_bits __u;
+    __u.__v = __x;
+    return (__u.__r.__se & 0x7fff) == 0x7fff
+        && (__u.__r.__m & ~((unsigned long)1 << 63)) == 0;
+}
+static int __ld_isfinite(long double __x)
+{
+    union __ld_bits __u;
+    __u.__v = __x;
+    return (__u.__r.__se & 0x7fff) != 0x7fff;
+}
+static int __ld_signbit(long double __x)
+{
+    union __ld_bits __u;
+    __u.__v = __x;
+    return (__u.__r.__se >> 15) & 1;
+}
+static int __ld_class(long double __x)
+{
+    union __ld_bits __u;
+    __u.__v = __x;
+    if ((__u.__r.__se & 0x7fff) == 0x7fff)
+        return __ld_isinf(__x) ? 1 : 0;             /* FP_INFINITE, FP_NAN */
+    if ((__u.__r.__se & 0x7fff) == 0)
+        return __u.__r.__m == 0 ? 2 : 3;            /* FP_ZERO, FP_SUBNORMAL */
+    return 4;                                       /* FP_NORMAL */
+}
+
+/* AND THE SAME FOUR FOR THE TWO WIDTHS THE MACHINE HAS, as functions rather
+   than as the builtins themselves: a `_Generic` names its branches without
+   calling them, and a builtin is not a value. */
+static int __c_isnan(double __x) { return __builtin_isnan(__x); }
+static int __c_isinf(double __x) { return __builtin_isinf(__x); }
+static int __c_isfinite(double __x) { return __builtin_isfinite(__x); }
+static int __c_signbit(double __x) { return __builtin_signbit(__x); }
+static int __c_class(double __x)
+{
+    if (__builtin_isnan(__x)) return FP_NAN;
+    if (__builtin_isinf(__x)) return FP_INFINITE;
+    if (__x == 0.0) return FP_ZERO;
+    if (__builtin_fabs(__x) < 2.2250738585072014e-308) return FP_SUBNORMAL;
+    return FP_NORMAL;
+}
+
+/* THE CLASSIFICATION MACROS READ THE TYPE, and they have to: a `long double`
+   bigger than `DBL_MAX` would look infinite to a test that converted it to
+   double first, and one smaller than `DBL_TRUE_MIN` would look like zero. */
+#define isnan(x)    _Generic((x), \
+    long double: __ld_isnan, default: __c_isnan)(x)
+#define isinf(x)    _Generic((x), \
+    long double: __ld_isinf, default: __c_isinf)(x)
+#define isfinite(x) _Generic((x), \
+    long double: __ld_isfinite, default: __c_isfinite)(x)
+#define signbit(x)  _Generic((x), \
+    long double: __ld_signbit, default: __c_signbit)(x)
+#define fpclassify(x) _Generic((x), \
+    long double: __ld_class, default: __c_class)(x)
+#define isnormal(x) (fpclassify(x) == FP_NORMAL)
 #define isgreater(a, b)      ((a) > (b))
 #define isgreaterequal(a, b) ((a) >= (b))
 #define isless(a, b)         ((a) < (b))
@@ -530,18 +597,75 @@ __C_MATH2(remainder)
 
 /* THE ONES THE MACRO CANNOT WRITE, because their signatures are not the two
    shapes above: a different return type, a pointer, or a third argument. */
-static long double sqrtl(long double __x) { return sqrt((double)__x); }
-static long double fabsl(long double __x) { return fabs((double)__x); }
+/* NEWTON FROM A DOUBLE'S ANSWER, which is 53 correct bits: each step
+   doubles them, so two steps pass the 64 this format holds. The scaling is
+   done on the EXPONENT rather than by dividing, because a value this type
+   can hold may be far outside double's range -- and an even power of two
+   comes out of a square root exactly. */
+static long double sqrtl(long double __x)
+{
+    union __ld_bits __u;
+    int __e, __half;
+    long double __y, __r;
+    if (__ld_isnan(__x) || __x == 0.0L || __ld_isinf(__x)) {
+        if (__ld_isinf(__x) && __ld_signbit(__x)) return __builtin_nan("");
+        return __x;
+    }
+    if (__ld_signbit(__x)) return __builtin_nan("");
+    __u.__v = __x;
+    if ((__u.__r.__se & 0x7fff) == 0) {
+        /* A SUBNORMAL HAS NO LEADING BIT: scaling it up by 2^64 makes it a
+           normal one exactly, and the exponent below pays it back. */
+        __u.__v = __x * 18446744073709551616.0L;
+        __e = (int)(__u.__r.__se & 0x7fff) - 16383 - 64;
+    } else {
+        __e = (int)(__u.__r.__se & 0x7fff) - 16383;
+    }
+    __half = __e >> 1;                          /* floor, for a negative e */
+    __u.__r.__se = (unsigned short)(16383 + (__e - 2 * __half));
+    __y = __u.__v;                              /* now in [1, 4) */
+    __r = (long double)sqrt((double)__y);
+    __r = 0.5L * (__r + __y / __r);
+    __r = 0.5L * (__r + __y / __r);
+    __u.__v = __r;
+    __u.__r.__se = (unsigned short)((int)(__u.__r.__se & 0x7fff) + __half);
+    return __u.__v;
+}
+/* ON THE BITS, not through double: `fabsl` and `copysignl` of a value
+   outside double's range must still be that value. */
+static long double fabsl(long double __x)
+{
+    union __ld_bits __u;
+    __u.__v = __x;
+    __u.__r.__se &= 0x7fff;
+    return __u.__v;
+}
 static long double powl(long double __x, long double __y)
 { return pow((double)__x, (double)__y); }
 static long double copysignl(long double __x, long double __y)
-{ return copysign((double)__x, (double)__y); }
+{
+    union __ld_bits __u, __v;
+    __u.__v = __x;
+    __v.__v = __y;
+    __u.__r.__se = (unsigned short)((__u.__r.__se & 0x7fff)
+                                    | (__v.__r.__se & 0x8000));
+    return __u.__v;
+}
+/* SCALING BY A POWER OF TWO IS EXPONENT ARITHMETIC, and doing it through
+   double would overflow for a value this type can hold and double cannot.
+   The multiply-by-two loop is the honest way to say it with the arithmetic
+   this library has; the count is bounded by the exponent range. */
 static long double ldexpl(long double __x, int __n)
-{ return ldexp((double)__x, __n); }
-static long double scalbnl(long double __x, int __n)
-{ return ldexp((double)__x, __n); }
+{
+    long double __r = __x;
+    if (!__ld_isfinite(__x) || __x == 0.0L) return __x;
+    while (__n > 0) { __r *= 2.0L; __n--; if (__ld_isinf(__r)) return __r; }
+    while (__n < 0) { __r *= 0.5L; __n++; if (__r == 0.0L) return __r; }
+    return __r;
+}
+static long double scalbnl(long double __x, int __n) { return ldexpl(__x, __n); }
 static long double scalblnl(long double __x, long __n)
-{ return ldexp((double)__x, (int)__n); }
+{ return ldexpl(__x, (int)__n); }
 static float frexpf(float __x, int *__e) { return (float)frexp((double)__x, __e); }
 static long double frexpl(long double __x, int *__e)
 { return frexp((double)__x, __e); }

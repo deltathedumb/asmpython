@@ -51,6 +51,12 @@ What is still absent says so rather than approximating:
 | `<threads.h>` | there is no way to create one |
 | `_Imaginary` | Annex G, which an implementation may leave out, as gcc does |
 
+`long double` is 80-bit extended, in software: `support.py`'s `ldouble` unit
+is the format written out in C, and the differential suite checks it against
+x87 hardware. The `l` functions in `<math.h>` compute in double and are
+accurate to about a double's precision — `sqrtl`, `fabsl`, `copysignl`,
+`ldexpl`, the four operators, the conversions, `strtold` and `%Lf` are exact.
+
 `localtime` is `gmtime`. The host services can say what time it is and cannot
 say what the local offset from UTC is — there is no `TZ` that would mean
 anything on a target without an environment — so the calendar is UTC and

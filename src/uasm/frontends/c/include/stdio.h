@@ -180,8 +180,19 @@ static void __sink_end(__sink *__s)
    multiply by 2^e or by 5^-e in chunks that keep every product under 2^64.
    768 digits is the worst case (`5^1074` times a 53-bit mantissa), so 96
    limbs is room to spare. */
-#define __BN_LIMBS 96
-#define __DIG_BUF (__BN_LIMBS * 9 + 4)
+/* 1290 LIMBS, AND THE WORST CASE IS NOT A DOUBLE. What this holds is the
+   INTEGER `m * 5^-e`, not the printed value: a double's smallest subnormal
+   makes `5^1074`, which is 751 digits, and the 96 limbs this had were sized
+   for that. An 80-bit `long double`'s smallest subnormal makes `5^16445`,
+   which is 11494 -- so 1290 limbs of nine digits, and the array is 5160
+   bytes in the one function that holds one.
+
+   TWO DIGIT BUFFERS, because the CALLER's array is sized by what it prints:
+   a double needs 868 characters and paying 11614 for every `printf` of one
+   would be the wrong trade. */
+#define __BN_LIMBS 1290
+#define __DIG_BUF 868
+#define __LD_DIG_BUF (__BN_LIMBS * 9 + 4)
 
 typedef struct { unsigned int __d[__BN_LIMBS]; int __n; } __bignum;
 
@@ -251,17 +262,13 @@ static int __float_negative(double __v)
 
 /* The exact decimal digits of a positive finite `__v`, with `*__e10` set so
    that __v == 0.d[0]d[1]... * 10^(*__e10). Returns how many digits. */
-static int __float_digits(double __v, char *__out, int *__e10)
+/* THE DIGITS OF `m * 2^e`, EXACTLY, for whichever format took it apart.
+   A double and an 80-bit extended differ in how wide the significand is and
+   in nothing else that matters here, so the bignum work is written once. */
+static int __digits_from(unsigned long m, int e, char *__out, int *__e10)
 {
-    union { double __d; unsigned long __u; } x;
     __bignum b;
-    unsigned long frac, m;
-    int biased, e, k, nd, left;
-    x.__d = __v;
-    biased = (int)((x.__u >> 52) & 0x7FFUL);
-    frac = x.__u & 0xFFFFFFFFFFFFFUL;
-    if (biased == 0) { m = frac; e = -1074; }
-    else { m = frac | 0x10000000000000UL; e = biased - 1075; }
+    int k, nd, left;
     if (m == 0) { __out[0] = '0'; *__e10 = 1; return 1; }
     __bn_from(&b, m);
     k = 0;
@@ -279,6 +286,50 @@ static int __float_digits(double __v, char *__out, int *__e10)
     nd = __bn_digits(&b, __out);
     *__e10 = nd - k;
     return nd;
+}
+
+static int __float_digits(double __v, char *__out, int *__e10)
+{
+    union { double __d; unsigned long __u; } x;
+    unsigned long frac, m;
+    int biased, e;
+    x.__d = __v;
+    biased = (int)((x.__u >> 52) & 0x7FFUL);
+    frac = x.__u & 0xFFFFFFFFFFFFFUL;
+    if (biased == 0) { m = frac; e = -1074; }
+    else { m = frac | 0x10000000000000UL; e = biased - 1075; }
+    return __digits_from(m, e, __out, __e10);
+}
+
+/* THE 80-BIT FORM TAKEN APART. The leading bit is EXPLICIT in this format,
+   so there is nothing to put back; the exponent is biased by 16383 and the
+   point sits after bit 63. */
+union __ld_split { long double __v;
+                   struct { unsigned long __m; unsigned short __se; } __r; };
+
+static int __ld_digits(long double __v, char *__out, int *__e10)
+{
+    union __ld_split u;
+    int biased;
+    u.__v = __v;
+    biased = u.__r.__se & 0x7fff;
+    if (biased == 0) return __digits_from(u.__r.__m, -16382 - 63, __out, __e10);
+    return __digits_from(u.__r.__m, biased - 16383 - 63, __out, __e10);
+}
+
+static int __ld_fclass(long double __v)
+{
+    union __ld_split u;
+    u.__v = __v;
+    if ((u.__r.__se & 0x7fff) != 0x7fff) return 0;
+    return (u.__r.__m & ~((unsigned long)1 << 63)) ? 2 : 1;
+}
+
+static int __ld_fnegative(long double __v)
+{
+    union __ld_split u;
+    u.__v = __v;
+    return (u.__r.__se >> 15) & 1;
 }
 
 /* Round the digit string to `__keep` digits. TIES GO TO EVEN, which is the
@@ -363,13 +414,122 @@ static void __emit_padded(__sink *__s, const char *__body, int __len,
     if (__flags & __F_LEFT) __sink_pad(__s, ' ', pad);
 }
 
+/* THE PART THAT ONLY LOOKS AT DIGITS, which is every conversion but `%a`.
+   `%f`, `%e` and `%g` differ in where the point goes and in nothing else, so
+   they are written once and both widths hand them a digit string.
+
+   `__zero` RATHER THAN A COMPARISON, because the value is gone by this point
+   and a zero needs three special cases -- `%f`'s exponent, `%e`'s and `%g`'s
+   -- that a digit string cannot answer for itself. */
+/* THE EXPONENT'S DIGITS, AT LEAST TWO AND AS MANY AS IT TAKES. Three was
+   enough while the widest type was a double, whose exponent stops at 308; a
+   `long double` reaches 4932, and `'0' + 49` is not a digit. */
+static int __emit_exp(char *body, int len, int expo)
+{
+    char tmp[8];
+    int tn = 0, i;
+    if (expo < 0) expo = -expo;         /* the sign is already written */
+    do { tmp[tn++] = (char)('0' + expo % 10); expo /= 10; } while (expo);
+    while (tn < 2) tmp[tn++] = '0';
+    for (i = tn - 1; i >= 0; i--) body[len++] = tmp[i];
+    return len;
+}
+
+static int __format_body(__sink *__s, char *digits, int n, int e10, int __zero,
+                         char *prefix, int plen, char __conv, int __prec,
+                         int __flags, int __width)
+{
+    /* THE WIDEST LINE THIS CAN PRODUCE is `%.300Lf` of the largest
+       `long double`: 4932 digits, a point, and 300 more. */
+    char body[5400];
+    int i, len = 0, keep, expo;
+    if (__prec < 0) __prec = 6;
+    if (__prec > 300) __prec = 300;
+
+    
+    if (__conv == 'f' || __conv == 'F') {
+        keep = e10 + __prec;
+        if (keep > n) keep = n;
+        n = __float_round(digits, n, keep, &e10);
+        if (e10 <= 0) {
+            body[len++] = '0';
+        } else {
+            for (i = 0; i < e10; i++)
+                body[len++] = i < n ? digits[i] : '0';
+        }
+        if (__prec > 0 || (__flags & __F_ALT)) body[len++] = '.';
+        for (i = 0; i < __prec; i++) {
+            int at = e10 + i;
+            body[len++] = (at >= 0 && at < n) ? digits[at] : '0';
+        }
+        __emit_padded(__s, body, len, prefix, plen, __flags, __width, 0);
+        return 0;
+    }
+    if (__conv == 'e' || __conv == 'E') {
+        n = __float_round(digits, n, __prec + 1, &e10);
+        expo = e10 - 1;
+        if (__zero) expo = 0;
+        body[len++] = n > 0 ? digits[0] : '0';
+        if (__prec > 0 || (__flags & __F_ALT)) body[len++] = '.';
+        for (i = 1; i <= __prec; i++) body[len++] = i < n ? digits[i] : '0';
+        body[len++] = (__conv == 'E') ? 'E' : 'e';
+        body[len++] = expo < 0 ? '-' : '+';
+        if (expo < 0) expo = -expo;
+        len = __emit_exp(body, len, expo);
+        __emit_padded(__s, body, len, prefix, plen, __flags, __width, 0);
+        return 0;
+    }
+    /* %g and %G: the standard's own rule, written as it is written. */
+    {
+        int prec = __prec == 0 ? 1 : __prec;
+        int keepg, x, alt = __flags & __F_ALT;
+        n = __float_round(digits, n, prec, &e10);
+        x = (__zero) ? 0 : e10 - 1;
+        if (x < -4 || x >= prec) {
+            int p = prec - 1;
+            expo = x;
+            body[len++] = n > 0 ? digits[0] : '0';
+            keepg = p;
+            if (!alt) { while (keepg > 0 && (keepg >= n || digits[keepg] == '0')) keepg--; }
+            if (keepg > 0 || alt) body[len++] = '.';
+            for (i = 1; i <= (alt ? p : keepg); i++)
+                body[len++] = i < n ? digits[i] : '0';
+            body[len++] = (__conv == 'G') ? 'E' : 'e';
+            body[len++] = expo < 0 ? '-' : '+';
+            if (expo < 0) expo = -expo;
+            len = __emit_exp(body, len, expo);
+        } else {
+            int p = prec - 1 - x;
+            if (e10 <= 0) body[len++] = '0';
+            else for (i = 0; i < e10; i++) body[len++] = i < n ? digits[i] : '0';
+            keepg = p;
+            if (!alt) {
+                while (keepg > 0) {
+                    int at = e10 + keepg - 1;
+                    if (at < n && digits[at] != '0') break;
+                    keepg--;
+                }
+            }
+            if (keepg > 0 || alt) body[len++] = '.';
+            for (i = 0; i < (alt ? p : keepg); i++) {
+                int at = e10 + i;
+                body[len++] = (at >= 0 && at < n) ? digits[at] : '0';
+            }
+        }
+        __emit_padded(__s, body, len, prefix, plen, __flags, __width, 0);
+    }
+    return 0;
+}
+
 static int __format_float(__sink *__s, double __v, char __conv, int __prec,
                           int __flags, int __width)
 {
     char digits[__DIG_BUF];
-    char body[1200];
+    /* ONLY `%a` AND THE THREE WORDS ARE WRITTEN HERE; everything else goes
+       through `__format_body`, which has the large one. */
+    char body[64];
     char prefix[4];
-    int plen = 0, n, e10, i, len = 0, cls, keep, expo;
+    int plen = 0, i, len = 0, cls;
     int negative = __float_negative(__v);
 
     if (negative) prefix[plen++] = '-';
@@ -462,98 +622,109 @@ static int __format_float(__sink *__s, double __v, char __conv, int __prec,
         __emit_padded(__s, body, len, prefix, plen, __flags, __width, 0);
         return 0;
     }
-    if (__prec < 0) __prec = 6;
-    if (__prec > 300) __prec = 300;
-
-    n = __float_digits(__v, digits, &e10);
-    if (__v == 0.0) e10 = 1;
-
-    if (__conv == 'f' || __conv == 'F') {
-        keep = e10 + __prec;
-        if (keep > n) keep = n;
-        n = __float_round(digits, n, keep, &e10);
-        if (e10 <= 0) {
-            body[len++] = '0';
-        } else {
-            for (i = 0; i < e10; i++)
-                body[len++] = i < n ? digits[i] : '0';
-        }
-        if (__prec > 0 || (__flags & __F_ALT)) body[len++] = '.';
-        for (i = 0; i < __prec; i++) {
-            int at = e10 + i;
-            body[len++] = (at >= 0 && at < n) ? digits[at] : '0';
-        }
-        __emit_padded(__s, body, len, prefix, plen, __flags, __width, 0);
-        return 0;
-    }
-    if (__conv == 'e' || __conv == 'E') {
-        n = __float_round(digits, n, __prec + 1, &e10);
-        expo = e10 - 1;
-        if (__v == 0.0) expo = 0;
-        body[len++] = n > 0 ? digits[0] : '0';
-        if (__prec > 0 || (__flags & __F_ALT)) body[len++] = '.';
-        for (i = 1; i <= __prec; i++) body[len++] = i < n ? digits[i] : '0';
-        body[len++] = (__conv == 'E') ? 'E' : 'e';
-        body[len++] = expo < 0 ? '-' : '+';
-        if (expo < 0) expo = -expo;
-        if (expo >= 100) {
-            body[len++] = (char)('0' + expo / 100);
-            body[len++] = (char)('0' + (expo / 10) % 10);
-            body[len++] = (char)('0' + expo % 10);
-        } else {
-            body[len++] = (char)('0' + expo / 10);
-            body[len++] = (char)('0' + expo % 10);
-        }
-        __emit_padded(__s, body, len, prefix, plen, __flags, __width, 0);
-        return 0;
-    }
-    /* %g and %G: the standard's own rule, written as it is written. */
     {
-        int prec = __prec == 0 ? 1 : __prec;
-        int keepg, x, alt = __flags & __F_ALT;
-        n = __float_round(digits, n, prec, &e10);
-        x = (__v == 0.0) ? 0 : e10 - 1;
-        if (x < -4 || x >= prec) {
-            int p = prec - 1;
-            expo = x;
-            body[len++] = n > 0 ? digits[0] : '0';
-            keepg = p;
-            if (!alt) { while (keepg > 0 && (keepg >= n || digits[keepg] == '0')) keepg--; }
-            if (keepg > 0 || alt) body[len++] = '.';
-            for (i = 1; i <= (alt ? p : keepg); i++)
-                body[len++] = i < n ? digits[i] : '0';
-            body[len++] = (__conv == 'G') ? 'E' : 'e';
-            body[len++] = expo < 0 ? '-' : '+';
-            if (expo < 0) expo = -expo;
-            if (expo >= 100) {
-                body[len++] = (char)('0' + expo / 100);
-                body[len++] = (char)('0' + (expo / 10) % 10);
-                body[len++] = (char)('0' + expo % 10);
-            } else {
-                body[len++] = (char)('0' + expo / 10);
-                body[len++] = (char)('0' + expo % 10);
-            }
-        } else {
-            int p = prec - 1 - x;
-            if (e10 <= 0) body[len++] = '0';
-            else for (i = 0; i < e10; i++) body[len++] = i < n ? digits[i] : '0';
-            keepg = p;
-            if (!alt) {
-                while (keepg > 0) {
-                    int at = e10 + keepg - 1;
-                    if (at < n && digits[at] != '0') break;
-                    keepg--;
+        int n, e10, zero = (__v == 0.0);
+        n = __float_digits(__v, digits, &e10);
+        if (zero) e10 = 1;
+        return __format_body(__s, digits, n, e10, zero, prefix, plen,
+                             __conv, __prec, __flags, __width);
+    }
+}
+
+
+/* AND THE SAME FOR THE WIDEST TYPE, which is 80-bit extended here. The
+   digits come from the same bignum; what differs is taking the value apart
+   -- this format's leading bit is EXPLICIT, so there is nothing to put back
+   -- and `%La`, whose leading digit is that bit rather than always 1. */
+static int __format_ld(__sink *__s, long double __v, char __conv, int __prec,
+                       int __flags, int __width)
+{
+    char digits[__LD_DIG_BUF];
+    char body[64];
+    char prefix[4];
+    int plen = 0, i, len = 0, cls;
+    int negative = __ld_fnegative(__v);
+
+    if (negative) prefix[plen++] = '-';
+    else if (__flags & __F_PLUS) prefix[plen++] = '+';
+    else if (__flags & __F_SPACE) prefix[plen++] = ' ';
+
+    cls = __ld_fclass(__v);
+    if (cls != 0) {
+        const char *text;
+        if (cls == 2) text = (__conv >= 'A' && __conv <= 'Z') ? "NAN" : "nan";
+        else text = (__conv >= 'A' && __conv <= 'Z') ? "INF" : "inf";
+        for (i = 0; text[i]; i++) body[len++] = text[i];
+        __emit_padded(__s, body, len, prefix, plen, __flags & ~__F_ZERO,
+                      __width, 0);
+        return 0;
+    }
+    if (__conv == 'a' || __conv == 'A') {
+        /* SIXTEEN HEX DIGITS AND A LEADING ONE THAT IS NOT 1. An 80-bit
+           significand is 64 bits, which is exactly sixteen nibbles, so the
+           first digit is the top FOUR bits -- `0x8p-3` for one, and
+           `0xc.90fdaa22168c235p-2` for pi. A double's `%a` leads with a
+           single bit because its significand is 53; this one does not, and
+           a hosted implementation prints it the same way. */
+        union __ld_split u;
+        unsigned long keep;
+        const char *hexd = (__conv == 'A') ? "0123456789ABCDEF"
+                                           : "0123456789abcdef";
+        int expo2, lead, nib, i2;
+        u.__v = __v;
+        u.__r.__se &= 0x7fff;
+        expo2 = (u.__r.__se == 0 ? -16382 : (int)u.__r.__se - 16383) - 3;
+        /* A ZERO HAS NO EXPONENT, and `0x0p+0` is what every
+           implementation writes: the subnormal exponent would be true
+           arithmetically and is not what a reader expects to see. */
+        if (u.__r.__m == 0) expo2 = 0;
+        lead = (int)(u.__r.__m >> 60);
+        keep = u.__r.__m & 0x0FFFFFFFFFFFFFFFUL;        /* fifteen nibbles */
+        nib = 15;
+        if (__prec >= 0 && __prec < 15) {
+            int drop = 4 * (15 - __prec);
+            unsigned long rest = keep & (((unsigned long)1 << drop) - 1);
+            unsigned long half = (unsigned long)1 << (drop - 1);
+            keep >>= drop;
+            if (rest > half || (rest == half && (keep & 1))) {
+                keep++;
+                if (__prec == 0 ? (keep != 0)
+                                : ((keep >> (4 * __prec)) != 0)) {
+                    keep = 0;
+                    lead++;
+                    if (lead > 15) { lead = 1; expo2 += 4; }
                 }
             }
-            if (keepg > 0 || alt) body[len++] = '.';
-            for (i = 0; i < (alt ? p : keepg); i++) {
-                int at = e10 + i;
-                body[len++] = (at >= 0 && at < n) ? digits[at] : '0';
-            }
+            nib = __prec;
+        } else if (__prec < 0) {
+            while (nib > 0 && (keep & 0xFUL) == 0) { keep >>= 4; nib--; }
+        }
+        prefix[plen++] = '0';
+        prefix[plen++] = (__conv == 'A') ? 'X' : 'x';
+        body[len++] = hexd[lead & 0xF];
+        if (nib > 0 || __prec > 0 || (__flags & __F_ALT)) body[len++] = '.';
+        for (i2 = 0; i2 < nib; i2++)
+            body[len++] = hexd[(keep >> (4 * (nib - 1 - i2))) & 0xFUL];
+        for (i2 = nib; i2 < __prec; i2++) body[len++] = '0';
+        body[len++] = (__conv == 'A') ? 'P' : 'p';
+        body[len++] = expo2 < 0 ? '-' : '+';
+        {
+            int e = expo2 < 0 ? -expo2 : expo2, at = len, j, tn = 0;
+            char tmp[8];
+            do { tmp[tn++] = (char)('0' + e % 10); e /= 10; } while (e);
+            for (j = tn - 1; j >= 0; j--) body[at++] = tmp[j];
+            len = at;
         }
         __emit_padded(__s, body, len, prefix, plen, __flags, __width, 0);
+        return 0;
     }
-    return 0;
+    {
+        int n, e10, zero = (__v == 0.0L);
+        n = __ld_digits(__v, digits, &e10);
+        if (zero) e10 = 1;
+        return __format_body(__s, digits, n, e10, zero, prefix, plen,
+                             __conv, __prec, __flags, __width);
+    }
 }
 
 static int __vformat(__sink *__s, const char *__fmt, va_list __ap)
@@ -598,7 +769,11 @@ static int __vformat(__sink *__s, const char *__fmt, va_list __ap)
         }
         if (*p == 'h') { p++; lmod = -1; if (*p == 'h') { p++; lmod = -2; } }
         else if (*p == 'l') { p++; lmod = 1; if (*p == 'l') { p++; lmod = 2; } }
-        else if (*p == 'z' || *p == 't' || *p == 'j' || *p == 'L') { p++; lmod = 1; }
+        else if (*p == 'z' || *p == 't' || *p == 'j') { p++; lmod = 1; }
+        /* `L` IS ITS OWN LENGTH and not another spelling of `l`: a
+           `long double` is sixteen bytes here and reaching one as a double
+           would read the wrong argument and every one after it. */
+        else if (*p == 'L') { p++; lmod = 3; }
         conv = *p;
         if (conv == 0) break;
         p++;
@@ -643,7 +818,12 @@ static int __vformat(__sink *__s, const char *__fmt, va_list __ap)
         } else if (conv == 'f' || conv == 'F' || conv == 'e' || conv == 'E'
                    || conv == 'g' || conv == 'G' || conv == 'a'
                    || conv == 'A') {
-            __format_float(__s, va_arg(__ap, double), conv, prec, flags, width);
+            if (lmod == 3)
+                __format_ld(__s, va_arg(__ap, long double), conv, prec,
+                            flags, width);
+            else
+                __format_float(__s, va_arg(__ap, double), conv, prec,
+                               flags, width);
             continue;
         } else if (conv == 'n') {
             int *where = va_arg(__ap, int *);
@@ -1400,10 +1580,16 @@ static int __scan_float(__scan *__sc, int __width, void *__out, int __len)
         buf[n] = 0;
         if (!any) return 0;
     }
+    if (__out != NULL && __len == __LEN_LDBL) {
+        /* THE WIDEST CONVERSION READS THE TEXT ITSELF, rather than taking a
+           double and widening it: `%Lf` of a number with twenty significant
+           digits has to keep them. */
+        *(long double *)__out = __num_strtold(buf, NULL);
+        return 1;
+    }
     v = __num_strtod(buf, NULL);
     if (__out != NULL) {
-        if (__len == __LEN_LDBL) *(long double *)__out = (long double)v;
-        else if (__len == __LEN_LONG) *(double *)__out = v;
+        if (__len == __LEN_LONG) *(double *)__out = v;
         else *(float *)__out = (float)v;
     }
     return 1;

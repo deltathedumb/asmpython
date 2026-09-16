@@ -1,9 +1,15 @@
 /* <float.h>.
 
-   `long double` IS `double` in this frontend -- the IR has f32 and f64 and
-   nothing wider -- so the LDBL_* macros have double's values. That is written
-   here rather than pretended: a program that prints LDBL_MAX gets a number it
-   can rely on, and `__SIZEOF_LONG_DOUBLE__` says 8 to match. */
+   `long double` IS 80-BIT EXTENDED, which is x86-64's, so the LDBL_* macros
+   below are that format's: 64 bits of significand, an exponent range far
+   wider than double's, and a size of 16 with 10 bytes in use. The arithmetic
+   is software (`support.py`'s `ldouble` unit) and the format is the ABI's, so
+   a program that prints LDBL_MAX prints what a hosted compiler would.
+
+   FLT_EVAL_METHOD IS 0: an operation is evaluated in its own type and not in
+   a wider one. The x87 hardware would say 2 (everything in long double) and
+   this does not use the x87 hardware.
+*/
 #ifndef _UASM_FLOAT_H
 #define _UASM_FLOAT_H
 
@@ -36,16 +42,16 @@
 #define DBL_TRUE_MIN 4.94065645841246544177e-324
 #define DBL_DECIMAL_DIG 17
 
-#define LDBL_MANT_DIG DBL_MANT_DIG
-#define LDBL_DIG DBL_DIG
-#define LDBL_MIN_EXP DBL_MIN_EXP
-#define LDBL_MIN_10_EXP DBL_MIN_10_EXP
-#define LDBL_MAX_EXP DBL_MAX_EXP
-#define LDBL_MAX_10_EXP DBL_MAX_10_EXP
-#define LDBL_MAX DBL_MAX
-#define LDBL_MIN DBL_MIN
-#define LDBL_EPSILON DBL_EPSILON
-#define LDBL_TRUE_MIN DBL_TRUE_MIN
-#define LDBL_DECIMAL_DIG DBL_DECIMAL_DIG
+#define LDBL_MANT_DIG 64
+#define LDBL_DIG 18
+#define LDBL_MIN_EXP (-16381)
+#define LDBL_MIN_10_EXP (-4931)
+#define LDBL_MAX_EXP 16384
+#define LDBL_MAX_10_EXP 4932
+#define LDBL_MAX 1.18973149535723176502e+4932L
+#define LDBL_MIN 3.36210314311209350626e-4932L
+#define LDBL_EPSILON 1.08420217248550443401e-19L
+#define LDBL_TRUE_MIN 3.64519953188247460253e-4951L
+#define LDBL_DECIMAL_DIG 21
 
 #endif

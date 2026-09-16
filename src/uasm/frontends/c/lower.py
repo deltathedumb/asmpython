@@ -101,6 +101,7 @@ class Lowerer:
         self.needs_vla = False
         self.needs_args = False
         self.needs_complex = False
+        self.needs_ldouble = False
         #: Complex temporaries, by position in the expression being lowered.
         #: See `_cx_temp` for why they are pooled and where they live.
         self._cx_pool: list[dict[int, int]] = []
@@ -127,7 +128,8 @@ class Lowerer:
         self._declare_externals()
         self._emit_init()
         self._emit_entry()
-        if self.needs_vla or self.needs_args or self.needs_complex:
+        if (self.needs_vla or self.needs_args or self.needs_complex
+                or self.needs_ldouble):
             self._splice_support()
         self._prune()
         return self.module
@@ -243,6 +245,12 @@ class Lowerer:
             mask = ((1 << bits) - 1) << bit_offset
             unit = (unit & ~mask) | ((int(value) << bit_offset) & mask)
             out[offset:offset + size] = unit.to_bytes(size, "little")
+            return
+        if ty.is_ldouble:
+            # THE SIXTEEN BYTES THE FORMAT SAYS, which `ldouble.py` writes
+            # and `support.py`'s arithmetic reads.
+            from .ldouble import encode
+            out[offset:offset + 16] = encode(value)
             return
         if ty.is_complex:
             # TWO NUMBERS IN THE BYTES, real part first, which is the layout
@@ -881,6 +889,8 @@ class Lowerer:
 
     def _rvalue(self, e: S.Expr, want: CType) -> int:
         """A value converted to `want`. Only the scalar case needs anything."""
+        if want.is_ldouble or e.type.is_ldouble:
+            return self._ld_convert(e, want)
         if want.is_complex:
             # A REAL VALUE WIDENS INTO A COMPLEX ONE with a zero imaginary
             # part. Sema usually inserts the conversion node, but an
@@ -898,6 +908,8 @@ class Lowerer:
                 return self.b.const(C.to_ir(e.type), wrap(e.value, e.type)
                                     if e.type.is_integer else e.value)
             case S.FloatLit():
+                if e.type.is_ldouble:
+                    return self._ld_const(e.value)
                 if e.type.is_complex:
                     elem = C.to_ir(e.type.of)
                     return self._cx_make(
@@ -1050,6 +1062,8 @@ class Lowerer:
             # evaluates to its address.
             return self._value(src) if src.type.is_function else \
                 self._address(src) if _addressable(src) else self._value(src)
+        if e.type.is_ldouble or src.type.is_ldouble:
+            return self._ld_convert(src, e.type)
         if e.type.is_complex or src.type.is_complex:
             return self._cx_convert(src, e.type)
         if e.type.is_record or e.type.is_array:
@@ -1143,6 +1157,8 @@ class Lowerer:
             self.b.emit(Instruction(Op.XOR, IR.I1, dst=flipped,
                                     args=[got, one]))
             return self._int_convert(flipped, IR.I1, C.to_ir(e.type))
+        if e.type.is_ldouble:
+            return self._ld_unary(e)
         if e.type.is_complex:
             return self._cx_unary(e)
         value = self._value(e.operand)
@@ -1210,6 +1226,10 @@ class Lowerer:
 
     def _binary(self, e: S.Binary) -> int:
         op = e.op
+        if e.type.is_ldouble:
+            return self._ld_binary(e)
+        if e.left.type.is_ldouble and op in _CMP:
+            return self._ld_compare(e)
         if e.type.is_complex or e.left.type.is_complex \
                 or e.right.type.is_complex:
             return self._cx_binary(e)
@@ -1348,6 +1368,17 @@ class Lowerer:
             self._write_through(target, addr, new)
             return new
         compute = e.compute or ty
+        if compute.is_ldouble or ty.is_ldouble:
+            # `x *= y` ON A LONG DOUBLE. The target always has an address --
+            # `in_memory` says so -- so there is no register case here.
+            wide = self._ld_binary(S.Binary(e.span, compute, False, binop,
+                                            target, e.value))
+            dst = self._address(target)
+            if ty.is_ldouble:
+                self._copy(dst, wide, 16, 16)
+                return dst
+            self.b.store(C.to_ir(ty), self._ld_to(wide, ty), dst)
+            return self._ld_to(wide, ty)
         if compute.is_complex or ty.is_complex:
             # `z *= w` COMPUTES IN THE COMMON COMPLEX TYPE and converts back,
             # exactly as `c += 1` computes in `int`. The target of a complex
@@ -1439,13 +1470,26 @@ class Lowerer:
         return d
 
     def _cx_parts(self, addr: int, ty: CType) -> tuple[int, int]:
-        """The two halves of the complex value at `addr`."""
+        """The two halves of the complex value at `addr`.
+
+        AN ELEMENT THAT LIVES IN MEMORY -- `long double` -- IS ITS ADDRESS,
+        which is the same convention the whole file uses for a value with no
+        IR type. So the halves of a `long double _Complex` come back as two
+        pointers and everything below reads them the same way.
+        """
+        if ty.of.in_memory:
+            return addr, self._offset(addr, ty.of.size)
         elem = C.to_ir(ty.of)
         return (self.b.load(elem, addr),
                 self.b.load(elem, self._offset(addr, ty.of.size)))
 
     def _cx_make(self, ty: CType, re: int, im: int) -> int:
         addr = self._cx_temp(ty)
+        if ty.of.in_memory:
+            self._copy(addr, re, ty.of.size, ty.of.align)
+            self._copy(self._offset(addr, ty.of.size), im, ty.of.size,
+                       ty.of.align)
+            return addr
         elem = C.to_ir(ty.of)
         self.b.store(elem, re, addr)
         self.b.store(elem, im, self._offset(addr, ty.of.size))
@@ -1453,11 +1497,25 @@ class Lowerer:
 
     def _cx_pair(self, e: S.Expr, ty: CType) -> tuple[int, int]:
         """`e` as (real, imaginary) in `ty`'s element type, whatever `e` is."""
+        if ty.of.in_memory:
+            if e.type.is_complex:
+                re, im = self._cx_parts(self._value(e), e.type)
+                return (self._ld_from(re, e.type.of),
+                        self._ld_from(im, e.type.of))
+            zero = self._ld_temp()
+            self._ld_call("__c_ldfromi", [self.b.const(IR.I64, 0), zero])
+            return self._ld_from(self._value(e), e.type), zero
         elem = C.to_ir(ty.of)
         if e.type.is_complex:
             re, im = self._cx_parts(self._value(e), e.type)
+            if e.type.of.in_memory:
+                # NARROWING FROM A LONG DOUBLE COMPLEX: each half is an
+                # address and `_ld_to` is what reads one.
+                return self._ld_to(re, ty.of), self._ld_to(im, ty.of)
             return (self._ir_convert(re, e.type.of, elem),
                     self._ir_convert(im, e.type.of, elem))
+        if e.type.is_ldouble:
+            return self._ld_to(self._value(e), ty.of), self.b.const(elem, 0.0)
         got = self._ir_convert(self._value(e), e.type, elem)
         return got, self.b.const(elem, 0.0)
 
@@ -1472,7 +1530,10 @@ class Lowerer:
             got = self._value(e)
             if not imaginary:
                 return got
-            self._discard(e)
+            if e.type.is_ldouble:
+                zero = self._ld_temp()
+                self._ld_call("__c_ldfromi", [self.b.const(IR.I64, 0), zero])
+                return zero
             return self.b.const(C.to_ir(e.type), 0.0)
         re, im = self._cx_parts(self._value(e), e.type)
         return im if imaginary else re
@@ -1482,6 +1543,14 @@ class Lowerer:
         if want.is_complex:
             re, im = self._cx_pair(src, want)
             return self._cx_make(want, re, im)
+        if src.type.of.in_memory:
+            # A COMPLEX LONG DOUBLE NARROWING: the real half is an address
+            # and `_ld_to` is what reads one.
+            re, im = self._cx_parts(self._value(src), src.type)
+            if want.is_bool:
+                return self._int_convert(
+                    self._cx_nonzero(re, im, src.type), IR.I1, C.to_ir(want))
+            return self._ld_to(re, want)
         # COMPLEX TO REAL DISCARDS THE IMAGINARY PART, 6.3.1.7p2 -- except
         # for `_Bool`, where the question is whether the value is zero and
         # BOTH parts answer it.
@@ -1492,6 +1561,12 @@ class Lowerer:
         return self._ir_convert(re, src.type.of, C.to_ir(want), target=want)
 
     def _cx_nonzero(self, re: int, im: int, ty: CType) -> int:
+        if ty.of.in_memory:
+            a = self._ld_nonzero(re)
+            b = self._ld_nonzero(im)
+            d = self.b.reg(IR.I1)
+            self.b.emit(Instruction(Op.OR, IR.I1, dst=d, args=[a, b]))
+            return d
         elem = C.to_ir(ty.of)
         zero = self.b.const(elem, 0.0)
         a = self.b.cmp(Op.NE, elem, re, zero)
@@ -1502,6 +1577,8 @@ class Lowerer:
 
     def _truth_of(self, e: S.Expr) -> int:
         """`e != 0` as an i1. The one place that knows a complex has two."""
+        if e.type.is_ldouble:
+            return self._ld_nonzero(self._value(e))
         if e.type.is_complex:
             re, im = self._cx_parts(self._value(e), e.type)
             return self._cx_nonzero(re, im, e.type)
@@ -1513,8 +1590,15 @@ class Lowerer:
             return self._value(e.operand)
         if op == "-":
             ty = e.type
-            elem = C.to_ir(ty.of)
             re, im = self._cx_pair(e.operand, ty)
+            if ty.of.in_memory:
+                out = []
+                for half in (re, im):
+                    d = self._ld_temp()
+                    self._ld_call("__c_ldneg", [half, d])
+                    out.append(d)
+                return self._cx_make(ty, out[0], out[1])
+            elem = C.to_ir(ty.of)
             out = []
             for half in (re, im):
                 d = self.b.reg(elem)
@@ -1524,8 +1608,12 @@ class Lowerer:
         if op == "~":
             # gcc's CONJUGATE, which `<complex.h>`'s `conj` is written with.
             ty = e.type
-            elem = C.to_ir(ty.of)
             re, im = self._cx_pair(e.operand, ty)
+            if ty.of.in_memory:
+                d = self._ld_temp()
+                self._ld_call("__c_ldneg", [im, d])
+                return self._cx_make(ty, re, d)
+            elem = C.to_ir(ty.of)
             d = self.b.reg(elem)
             self.b.emit(Instruction(Op.NEG, elem, dst=d, args=[im]))
             return self._cx_make(ty, re, d)
@@ -1535,12 +1623,20 @@ class Lowerer:
         op = e.op
         if op in ("==", "!="):
             ty = C.usual_arithmetic(e.left.type, e.right.type)
-            elem = C.to_ir(ty.of)
             a = self._cx_pair(e.left, ty)
             b = self._cx_pair(e.right, ty)
             want = Op.EQ if op == "==" else Op.NE
-            re = self.b.cmp(want, elem, a[0], b[0])
-            im = self.b.cmp(want, elem, a[1], b[1])
+            if ty.of.in_memory:
+                halves = []
+                for x, y in ((a[0], b[0]), (a[1], b[1])):
+                    got = self._ld_call("__c_ldcmp", [x, y])
+                    halves.append(self.b.cmp(want, IR.I32, got,
+                                             self.b.const(IR.I32, 0)))
+                re, im = halves
+            else:
+                elem = C.to_ir(ty.of)
+                re = self.b.cmp(want, elem, a[0], b[0])
+                im = self.b.cmp(want, elem, a[1], b[1])
             d = self.b.reg(IR.I1)
             # BOTH HALVES FOR `==`, EITHER FOR `!=`, which is the same test
             # written the two ways round.
@@ -1564,6 +1660,25 @@ class Lowerer:
         Both are in `support.py`'s `complex` unit, written in C, which is
         also what makes them agree with gcc's answers rather than nearly.
         """
+        if ty.of.in_memory:
+            # AN ELEMENT WITH NO IR TYPE: every half is an address and every
+            # operation on one is a call, which is what `long double` is.
+            if op in ("+", "-"):
+                out = []
+                for x, y in ((a[0], b[0]), (a[1], b[1])):
+                    d = self._ld_temp()
+                    self._ld_call("__c_ldadd" if op == "+" else "__c_ldsub",
+                                  [x, y, d])
+                    out.append(d)
+                return out[0], out[1]
+            if op not in ("*", "/"):
+                raise Unsupported(f"complex operator {op}")
+            self.needs_complex = True
+            name = "__c_cmull" if op == "*" else "__c_cdivl"
+            self._ensure_extern(name, IR.VOID, [IR.PTR] * 5)
+            out = self._cx_temp(ty)
+            self.b.call(IR.VOID, name, [a[0], a[1], b[0], b[1], out])
+            return self._cx_parts(out, ty)
         elem = C.to_ir(ty.of)
         if op in ("+", "-"):
             out = []
@@ -1588,11 +1703,181 @@ class Lowerer:
                    compute: CType) -> None:
         """Store a computed pair into a complex object, converting if the
         object is narrower than the type the arithmetic happened in."""
+        if ty.of.in_memory:
+            self._copy(dst, got[0], ty.of.size, ty.of.align)
+            self._copy(self._offset(dst, ty.of.size), got[1], ty.of.size,
+                       ty.of.align)
+            return
         elem = C.to_ir(ty.of)
         re = self._ir_convert(got[0], compute.of, elem)
         im = self._ir_convert(got[1], compute.of, elem)
         self.b.store(elem, re, dst)
         self.b.store(elem, im, self._offset(dst, ty.of.size))
+
+    # ── long double ─────────────────────────────────────────────────────────
+    #
+    # SIXTEEN BYTES WITH AN ADDRESS, like an aggregate, because 80-bit
+    # extended is wider than anything the IR has -- and a third floating
+    # width would have to be implemented by every backend, including the
+    # ones whose machine has no such thing. So the value lives in memory and
+    # every operation on it is a call into `support.py`'s `ldouble` unit,
+    # which is the format written out in C. `ctype.CType.is_ldouble` says
+    # the same thing from the other end.
+
+    #: name -> (argument IR types, result). The declarations the calls need,
+    #: kept here rather than spelled at each site so that a signature cannot
+    #: be right in one place and wrong in another.
+    _LD_CALLS = {
+        "__c_ldadd": ((IR.PTR, IR.PTR, IR.PTR), IR.VOID),
+        "__c_ldsub": ((IR.PTR, IR.PTR, IR.PTR), IR.VOID),
+        "__c_ldmul": ((IR.PTR, IR.PTR, IR.PTR), IR.VOID),
+        "__c_lddiv": ((IR.PTR, IR.PTR, IR.PTR), IR.VOID),
+        "__c_ldneg": ((IR.PTR, IR.PTR), IR.VOID),
+        "__c_ldcmp": ((IR.PTR, IR.PTR), IR.I32),
+        "__c_ldnz": ((IR.PTR,), IR.I32),
+        "__c_ldtod": ((IR.PTR,), IR.F64),
+        "__c_ldfromd": ((IR.F64, IR.PTR), IR.VOID),
+        "__c_ldtoi": ((IR.PTR,), IR.I64),
+        "__c_ldtou": ((IR.PTR,), IR.U64),
+        "__c_ldfromi": ((IR.I64, IR.PTR), IR.VOID),
+        "__c_ldfromu": ((IR.U64, IR.PTR), IR.VOID),
+    }
+
+    def _ld_call(self, name: str, args: list[int]) -> int | None:
+        params, ret = self._LD_CALLS[name]
+        self.needs_ldouble = True
+        self._ensure_extern(name, ret, list(params))
+        return self.b.call(ret, name, args)
+
+    def _ld_temp(self) -> int:
+        return self._cx_temp(C.LDOUBLE)
+
+    def _ld_binary(self, e: S.Binary) -> int:
+        """`+ - * /`, with both operands already this type."""
+        name = {"+": "__c_ldadd", "-": "__c_ldsub",
+                "*": "__c_ldmul", "/": "__c_lddiv"}.get(e.op)
+        if name is None:
+            raise Unsupported(f"long double operator {e.op}")
+        left = self._value(e.left)
+        right = self._value(e.right)
+        out = self._ld_temp()
+        self._ld_call(name, [left, right, out])
+        return out
+
+    def _ld_compare(self, e: S.Binary) -> int:
+        """The six orderings, out of one three-way answer.
+
+        `__c_ldcmp` answers -1, 0 or 1, and 2 for UNORDERED -- which is not
+        a value an ordering can take, so one call decides every operator and
+        a NaN comes out false for all of them but `!=`.
+        """
+        left = self._value(e.left)
+        right = self._value(e.right)
+        got = self._ld_call("__c_ldcmp", [left, right])
+        zero = self.b.const(IR.I32, 0)
+        one = self.b.const(IR.I32, 1)
+        if e.op == "==":
+            r = self.b.cmp(Op.EQ, IR.I32, got, zero)
+        elif e.op == "!=":
+            r = self.b.cmp(Op.NE, IR.I32, got, zero)
+        elif e.op == "<":
+            r = self.b.cmp(Op.LT, IR.I32, got, zero)
+        elif e.op == "<=":
+            r = self.b.cmp(Op.LE, IR.I32, got, zero)
+        elif e.op == ">":
+            r = self.b.cmp(Op.EQ, IR.I32, got, one)
+        else:                                       # ">="
+            # UNSIGNED, WHICH IS THE WHOLE TRICK: 0 and 1 are both at most
+            # one, -1 is enormous and 2 is two, so one comparison rules out
+            # both "less" and "unordered".
+            wide = self._bitcast(got, IR.U32)
+            r = self.b.cmp(Op.LE, IR.U32, wide, self.b.const(IR.U32, 1))
+        return self._int_convert(r, IR.I1, C.to_ir(e.type))
+
+    def _ld_unary(self, e: S.Unary) -> int:
+        if e.op == "+":
+            return self._value(e.operand)
+        if e.op == "-":
+            out = self._ld_temp()
+            self._ld_call("__c_ldneg", [self._value(e.operand), out])
+            return out
+        raise Unsupported(f"long double unary {e.op}")
+
+    def _ld_nonzero(self, addr: int) -> int:
+        """`x != 0` as an i1. A NaN is not zero, which is what C wants."""
+        got = self._ld_call("__c_ldnz", [addr])
+        return self.b.cmp(Op.NE, IR.I32, got, self.b.const(IR.I32, 0))
+
+    def _ld_from(self, reg: int, have: CType) -> int:
+        """A scalar value of `have`, widened into a fresh long double."""
+        out = self._ld_temp()
+        if have.is_ldouble:
+            self._copy(out, reg, 16, 16)
+            return out
+        if have.is_float:
+            self._ld_call("__c_ldfromd",
+                          [self._ir_convert(reg, have, IR.F64), out])
+            return out
+        if have.is_pointer:
+            reg = self._bitcast(reg, IR.U64)
+            self._ld_call("__c_ldfromu", [reg, out])
+            return out
+        # AN INTEGER, SIGNED OR NOT, and which one matters: the same 64 bits
+        # are two different numbers, and the conversion has to know.
+        want = IR.U64 if not have.signed else IR.I64
+        self._ld_call("__c_ldfromu" if want is IR.U64 else "__c_ldfromi",
+                      [self._ir_convert(reg, have, want), out])
+        return out
+
+    def _ld_to(self, addr: int, want: CType) -> int:
+        """A long double as `want`, which is usually narrower."""
+        if want.is_ldouble:
+            return addr                 # already this type: nothing to do
+        if want.is_bool:
+            return self._int_convert(self._ld_nonzero(addr), IR.I1,
+                                     C.to_ir(want))
+        if want.is_float:
+            return self._ir_convert(self._ld_call("__c_ldtod", [addr]),
+                                    C.DOUBLE, C.to_ir(want))
+        if want.is_complex:
+            re = self._ld_to(addr, want.of)
+            if want.of.in_memory:
+                zero = self._ld_temp()
+                self._ld_call("__c_ldfromi", [self.b.const(IR.I64, 0), zero])
+                return self._cx_make(want, re, zero)
+            return self._cx_make(want, re, self.b.const(C.to_ir(want.of), 0.0))
+        # UNSIGNED GOES THROUGH THE UNSIGNED CONVERSION, because a value
+        # above 2^63 is not the same number read as signed.
+        name = "__c_ldtoi" if want.signed else "__c_ldtou"
+        got = self._ld_call(name, [addr])
+        return self._ir_convert(got, C.LONG if want.signed else C.ULONG,
+                                C.to_ir(want))
+
+    def _ld_convert(self, src: S.Expr, want: CType) -> int:
+        if want.is_ldouble:
+            if src.type.is_complex:
+                # A COMPLEX NARROWS TO ITS REAL PART, and then widens.
+                re, _ = self._cx_parts(self._value(src), src.type)
+                return self._ld_from(re, src.type.of)
+            return self._ld_from(self._value(src), src.type)
+        return self._ld_to(self._value(src), want)
+
+    def _ld_const(self, value) -> int:
+        """A literal, as the sixteen bytes it is.
+
+        THROUGH A GLOBAL AND NOT THROUGH ARITHMETIC, because the value has
+        64 significant bits and the IR's widest constant has 53. The bytes
+        are what `ldouble.py` encodes, which is what the format says.
+        """
+        from .ldouble import encode
+        data = encode(value)
+        name = f"{self.parser.sema.prefix}ld.{len(self.module.globals)}"
+        have = next((g for g in self.module.globals
+                     if g.data == data and g.readonly and g.size == 16), None)
+        if have is not None:
+            return self._global_addr(have.name)
+        self._add_global(Global(name, 16, data, readonly=True, align=16))
+        return self._global_addr(name)
 
     # ── bit-fields ──────────────────────────────────────────────────────────
     def _load_bitfield(self, addr: int, ty: CType, bits: int,
@@ -1646,7 +1931,7 @@ class Lowerer:
         ret = sig.ret
         sret = None
         args: list[int] = []
-        if ret.is_record or ret.is_complex:
+        if ret.is_record or ret.is_complex or ret.is_ldouble:
             sret = self.b.alloca(max(1, ret.size))
             args.append(sret)
         for arg in e.args:
@@ -1668,7 +1953,7 @@ class Lowerer:
         return got if got is not None else self.b.const(IR.I64, 0)
 
     def _argument(self, arg: S.Expr) -> int:
-        if arg.type.is_record or arg.type.is_complex:
+        if arg.type.is_record or arg.type.is_complex or arg.type.is_ldouble:
             # BY VALUE MEANS A FRESH COPY. The callee receives a pointer and
             # is entitled to write through it, so handing it the caller's own
             # object would make `f(s)` able to change `s`.
@@ -1684,7 +1969,8 @@ class Lowerer:
         area = self.b.alloca(VA_SLOT * len(varargs))
         for i, arg in enumerate(varargs):
             slot = self._offset(area, i * VA_SLOT)
-            if arg.type.is_record or arg.type.is_complex:
+            if (arg.type.is_record or arg.type.is_complex
+                    or arg.type.is_ldouble):
                 copy = self.b.alloca(max(1, arg.type.size))
                 self._copy(copy, self._value(arg), arg.type.size,
                            arg.type.align)
@@ -1709,7 +1995,7 @@ class Lowerer:
         nxt = self.b.offset(cursor, self.b.const(IR.I64, VA_SLOT))
         self.b.store(IR.PTR, nxt, addr)
         ty = e.type
-        if ty.is_record or ty.is_complex:
+        if ty.is_record or ty.is_complex or ty.is_ldouble:
             return self.b.load(IR.PTR, cursor)
         ir = C.to_ir(ty)
         if ir.is_float:
@@ -1944,7 +2230,8 @@ class Lowerer:
         from .support import compile_support
         units = ((("vla",) if self.needs_vla else ())
                  + (("args",) if self.needs_args else ())
-                 + (("complex",) if self.needs_complex else ()))
+                 + (("complex",) if self.needs_complex else ())
+                 + (("ldouble",) if self.needs_ldouble else ()))
         functions, globals_ = compile_support(self.sink, units)
         for fn in functions:
             existing = self.module.function(fn.name)
@@ -2060,7 +2347,7 @@ def _chunks(size: int, align: int):
 
 def _signature(ty: CType) -> tuple[IR.Type, list[IR.Type], bool]:
     """The IR signature of a C function type. See the module docstring."""
-    sret = ty.ret.is_record or ty.ret.is_complex
+    sret = ty.ret.is_record or ty.ret.is_complex or ty.ret.is_ldouble
     ret = IR.VOID if (sret or ty.ret.is_void) else C.to_ir(ty.ret)
     params: list[IR.Type] = [IR.PTR] if sret else []
     for p in (ty.params or ()):
