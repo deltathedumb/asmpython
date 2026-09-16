@@ -72,6 +72,12 @@ typedef struct __FILE {
     int __used;            /* this slot is open; see `__file_slot`       */
     int __tmp;             /* `tmpfile`: remove it on close              */
     int __rd, __rn;        /* the read buffer: cursor, and bytes in it   */
+    /* THE ORIENTATION, WHICH IS RECORDED AND NOT ENFORCED. C sets it on
+       the first operation and leaves a stream used the other way
+       undefined; here there is ONE buffer under both faces, so both keep
+       working and `fwide` can still answer truthfully. `<wchar.h>` says
+       so where the wide functions are. */
+    int __ori;             /* 0 none, -1 byte, +1 wide                    */
     char __name[L_tmpnam]; /* `tmpfile`'s, so close can remove it        */
     char __rbuf[BUFSIZ];
 } FILE;
@@ -81,9 +87,9 @@ typedef struct __FILE {
    a long is the honest spelling of what this one is. */
 typedef long fpos_t;
 
-static FILE __stdin_file = { 0, 0, 0, 0, 1, 0, 0, 0, { 0 }, { 0 } };
-static FILE __stdout_file = { 1, 0, 0, 0, 1, 0, 0, 0, { 0 }, { 0 } };
-static FILE __stderr_file = { 2, 0, 0, 0, 1, 0, 0, 0, { 0 }, { 0 } };
+static FILE __stdin_file = { 0, 0, 0, 0, 1, 0, 0, 0, 0, { 0 }, { 0 } };
+static FILE __stdout_file = { 1, 0, 0, 0, 1, 0, 0, 0, 0, { 0 }, { 0 } };
+static FILE __stderr_file = { 2, 0, 0, 0, 1, 0, 0, 0, 0, { 0 }, { 0 } };
 
 #define stdin  (&__stdin_file)
 #define stdout (&__stdout_file)
@@ -925,6 +931,9 @@ static __sink __make_stream_sink(long __h)
 
 static int vfprintf(FILE *__f, const char *__fmt, va_list __ap)
 {
+    /* THE STREAM TAKES ITS ORIENTATION FROM ITS FIRST OPERATION, 7.21.2p4.
+       Recorded and not enforced; `<wchar.h>` says why. */
+    if (__f != NULL && __f->__ori == 0) __f->__ori = -1;
     __sink s;
     __stream_prepare(__f);
     s = __make_stream_sink(__f ? __f->__h : 1);
@@ -934,6 +943,7 @@ static int vfprintf(FILE *__f, const char *__fmt, va_list __ap)
 static int vprintf(const char *__fmt, va_list __ap)
 {
     __sink s = __make_stream_sink(1);
+    if (stdout->__ori == 0) stdout->__ori = -1;
     return __vformat(&s, __fmt, __ap);
 }
 
@@ -988,6 +998,9 @@ static int sprintf(char *__buf, const char *__fmt, ...)
 /* ── the small output functions ───────────────────────────────────────── */
 static int fputc(int __c, FILE *__f)
 {
+    /* THE STREAM TAKES ITS ORIENTATION FROM ITS FIRST OPERATION, 7.21.2p4.
+       Recorded and not enforced; `<wchar.h>` says why. */
+    if (__f != NULL && __f->__ori == 0) __f->__ori = -1;
     char b = (char)__c;
     if (__stream_write(__f, &b, 1) < 0) { if (__f) __f->__err = 1; return EOF; }
     return (unsigned char)b;
@@ -997,6 +1010,9 @@ static int putchar(int __c) { return fputc(__c, stdout); }
 
 static int fputs(const char *__s, FILE *__f)
 {
+    /* THE STREAM TAKES ITS ORIENTATION FROM ITS FIRST OPERATION, 7.21.2p4.
+       Recorded and not enforced; `<wchar.h>` says why. */
+    if (__f != NULL && __f->__ori == 0) __f->__ori = -1;
     long n = 0;
     while (__s[n]) n++;
     if (__stream_write(__f, __s, n) < 0) { if (__f) __f->__err = 1; return EOF; }
@@ -1011,6 +1027,9 @@ static int puts(const char *__s)
 
 static size_t fwrite(const void *__p, size_t __size, size_t __n, FILE *__f)
 {
+    /* THE STREAM TAKES ITS ORIENTATION FROM ITS FIRST OPERATION, 7.21.2p4.
+       Recorded and not enforced; `<wchar.h>` says why. */
+    if (__f != NULL && __f->__ori == 0) __f->__ori = -1;
     long got;
     if (__size == 0 || __n == 0) return 0;
     got = __stream_write(__f, __p, (long)(__size * __n));
@@ -1194,6 +1213,7 @@ static int __refill(FILE *__f)
 static int fgetc(FILE *__f)
 {
     if (__f == NULL) return EOF;
+    if (__f->__ori == 0) __f->__ori = -1;
     if (__f->__rd >= __f->__rn && !__refill(__f)) return EOF;
     return (unsigned char)__f->__rbuf[__f->__rd++];
 }
@@ -1639,6 +1659,55 @@ static int __scan_float(__scan *__sc, int __width, void *__out, int __len)
     return 1;
 }
 
+/* ONE WIDE CHARACTER OFF THE BYTE STREAM, which is what `%lc`, `%ls` and
+   `%l[` read: C says the input is a multibyte sequence however wide the
+   destination is, so the decoding happens here rather than in `<wchar.h>`.
+   Answers 1 for a character, 0 at end of file and -1 for a byte that cannot
+   begin or continue one. */
+static int __scan_wchar(__scan *__sc, wchar_t *__out)
+{
+    int c = __scan_get(__sc), k, i, need;
+    unsigned int v;
+    if (c == EOF) return 0;
+    if ((unsigned int)c < 0x80u) { if (__out) *__out = (wchar_t)c; return 1; }
+    if (((unsigned int)c & 0xE0u) == 0xC0u) { need = 1; v = (unsigned int)c & 0x1Fu; }
+    else if (((unsigned int)c & 0xF0u) == 0xE0u) { need = 2; v = (unsigned int)c & 0x0Fu; }
+    else if (((unsigned int)c & 0xF8u) == 0xF0u) { need = 3; v = (unsigned int)c & 0x07u; }
+    else { __scan_unget(__sc, c); return -1; }
+    for (i = 0; i < need; i++) {
+        k = __scan_get(__sc);
+        if (k == EOF || ((unsigned int)k & 0xC0u) != 0x80u) {
+            __scan_unget(__sc, k);
+            return -1;
+        }
+        v = (v << 6) | ((unsigned int)k & 0x3Fu);
+    }
+    if (__out) *__out = (wchar_t)v;
+    return 1;
+}
+
+/* AND PUTTING ONE BACK IS PUTTING ITS BYTES BACK, which the two kinds of
+   source do differently: a stream has `ungetc` and takes several, and a
+   string has a cursor to wind back. `__scan_unget`'s one slot is for a BYTE
+   and cannot hold four, which is why this is not written in terms of it. */
+static void __scan_unget_wchar(__scan *__sc, wchar_t __w)
+{
+    char __buf[8];
+    mbstate_t __ws;
+    int __k, __i;
+    __ws.__count = 0;
+    __ws.__value = 0;
+    __k = (int)wcrtomb(__buf, __w, &__ws);
+    if (__k <= 0) return;
+    if (__sc->__f != NULL) {
+        for (__i = __k - 1; __i >= 0; __i--)
+            ungetc((unsigned char)__buf[__i], __sc->__f);
+    } else if ((size_t)__k <= __sc->__at) {
+        __sc->__at -= (size_t)__k;
+    }
+    __sc->__taken -= __k;
+}
+
 static int __vscan(__scan *__sc, const char *__fmt, va_list __ap)
 {
     int done = 0, c;
@@ -1739,9 +1808,18 @@ static int __vscan(__scan *__sc, const char *__fmt, va_list __ap)
                    many characters as its width says. */
                 int want = width ? width : 1, i;
                 char *dst = (char *)out;
+                wchar_t *wdst = (wchar_t *)out;
                 ok = 1;
                 for (i = 0; i < want; i++) {
-                    int got = __scan_get(__sc);
+                    int got;
+                    if (len == __LEN_LONG) {
+                        wchar_t w = 0;
+                        got = __scan_wchar(__sc, &w);
+                        if (got <= 0) { ok = i > 0 ? 0 : -1; break; }
+                        if (wdst) wdst[i] = w;
+                        continue;
+                    }
+                    got = __scan_get(__sc);
                     if (got == EOF) { ok = i > 0 ? 0 : -1; break; }
                     if (dst) dst[i] = (char)got;
                 }
@@ -1750,10 +1828,25 @@ static int __vscan(__scan *__sc, const char *__fmt, va_list __ap)
             }
             case 's': {
                 char *dst = (char *)out;
+                wchar_t *wdst = (wchar_t *)out;
                 int i = 0;
                 if (__scan_skip(__sc) == EOF) return done ? done : EOF;
                 while (!width || i < width) {
-                    int got = __scan_get(__sc);
+                    int got;
+                    if (len == __LEN_LONG) {
+                        wchar_t w = 0;
+                        got = __scan_wchar(__sc, &w);
+                        if (got <= 0) break;
+                        if (w < 128 && __scan_space((int)w)) {
+                            __scan_unget(__sc, (int)w);
+                            break;
+                        }
+
+                        if (wdst) wdst[i] = w;
+                        i++;
+                        continue;
+                    }
+                    got = __scan_get(__sc);
                     if (got == EOF || __scan_space(got)) {
                         __scan_unget(__sc, got);
                         break;
@@ -1761,7 +1854,8 @@ static int __vscan(__scan *__sc, const char *__fmt, va_list __ap)
                     if (dst) dst[i] = (char)got;
                     i++;
                 }
-                if (dst) dst[i] = 0;
+                if (len == __LEN_LONG) { if (wdst) wdst[i] = 0; }
+                else if (dst) dst[i] = 0;
                 ok = i > 0;
                 break;
             }
@@ -1771,6 +1865,7 @@ static int __vscan(__scan *__sc, const char *__fmt, va_list __ap)
                    range -- the three rules C gives, and no others. */
                 char member[256];
                 char *dst = (char *)out;
+                wchar_t *wdst = (wchar_t *)out;
                 int negate = 0, i, prev = -1;
                 for (i = 0; i < 256; i++) member[i] = 0;
                 if (*f == '^') { negate = 1; f++; }
@@ -1790,7 +1885,27 @@ static int __vscan(__scan *__sc, const char *__fmt, va_list __ap)
                 if (*f == ']') f++;
                 i = 0;
                 while (!width || i < width) {
-                    int got = __scan_get(__sc);
+                    int got;
+                    if (len == __LEN_LONG) {
+                        /* THE SCANSET IS OVER THE WIDE CHARACTERS, and it is
+                           written with narrow ones -- so a character outside
+                           the byte range is never a member, whichever way the
+                           set is negated. */
+                        wchar_t w = 0;
+                        int member_p;
+                        got = __scan_wchar(__sc, &w);
+                        if (got <= 0) break;
+                        member_p = (unsigned int)w < 256u
+                            && member[(unsigned int)w] != 0;
+                        if (member_p == (negate != 0)) {
+                            __scan_unget_wchar(__sc, w);
+                            break;
+                        }
+                        if (wdst) wdst[i] = w;
+                        i++;
+                        continue;
+                    }
+                    got = __scan_get(__sc);
                     if (got == EOF) { __scan_unget(__sc, got); break; }
                     if ((member[got] != 0) == (negate != 0)) {
                         __scan_unget(__sc, got);
@@ -1799,7 +1914,8 @@ static int __vscan(__scan *__sc, const char *__fmt, va_list __ap)
                     if (dst) dst[i] = (char)got;
                     i++;
                 }
-                if (dst) dst[i] = 0;
+                if (len == __LEN_LONG) { if (wdst) wdst[i] = 0; }
+                else if (dst) dst[i] = 0;
                 ok = i > 0;
                 break;
             }

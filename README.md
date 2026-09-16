@@ -266,7 +266,7 @@ Python and the machine disagree.
 
 ## The C frontend
 
-It compiles C, and `src/uasm/frontends/c/__init__.py` lists the five
+It compiles C, and `src/uasm/frontends/c/__init__.py` lists the six
 places it knowingly differs from a hosted implementation on x86-64 Linux —
 the whole list, rather than the beginning of one:
 
@@ -291,6 +291,11 @@ the whole list, rather than the beginning of one:
   * `localtime` **is** `gmtime`. The host services can say what time it is
     and cannot say what the local offset from UTC is, so the calendar is UTC
     and `tm_isdst` is 0 — not unknown, not in effect.
+  * A stream's orientation is **recorded and not enforced**. C says a
+    stream takes one on its first operation and leaves the other kind
+    undefined afterwards; glibc makes the second call fail. Here there is
+    one buffer under both faces, so a program that writes with `printf` and
+    then with `fwprintf` gets both — and `fwide` still answers truthfully.
   * The execution character set **is UTF-8, always**, and so is the
     multibyte encoding. C leaves both to the implementation and this one
     chose the source's: `"caf\u00e9"` is six bytes, `mbrtowc` decodes UTF-8,

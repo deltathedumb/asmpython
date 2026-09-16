@@ -24,7 +24,7 @@
 WHAT IT ACCEPTS is C23, which is to say C: every version's syntax, every
 version's semantics where they agree, and the newer one where they do not.
 
-FIVE PLACES THIS IMPLEMENTATION DIFFERS from a hosted one on x86-64 Linux,
+SIX PLACES THIS IMPLEMENTATION DIFFERS from a hosted one on x86-64 Linux,
 and this is the whole list rather than the beginning of one. What the
 LIBRARY needs from the TARGET -- a filesystem, a clock, an environment -- is a
 different list, and it is in `include/README.md`: those are
@@ -56,6 +56,12 @@ compile time rather than failing to link.
   * `localtime` IS `gmtime`. The host services can say what time it is and
     cannot say what the local offset from UTC is, so the calendar is UTC and
     `tm_isdst` is 0 -- not unknown, not in effect.
+  * A STREAM'S ORIENTATION IS RECORDED AND NOT ENFORCED. C says a stream
+    takes one on its first operation and leaves the other kind undefined
+    afterwards; glibc makes the second call fail. Here there is one buffer
+    under both faces, so a program that writes with `printf` and then with
+    `fwprintf` gets both -- stricter than the standard in the safe
+    direction, as the `longjmp` case is. `fwide` still answers truthfully.
   * THE EXECUTION CHARACTER SET IS UTF-8, ALWAYS, and so is the multibyte
     encoding. C leaves both to the implementation and this one chose the
     source's: `"caf\u00e9"` is six bytes, `'é'` is the multi-character
@@ -86,8 +92,9 @@ warn and `attributes.py` saying why the rest do not; `nullptr` and
 type after decay and lvalue conversion rather than being a storage class;
 `typeof` and `typeof_unqual`; an `enum` with a fixed underlying type; a label
 before a declaration and at the end of a block; `u8` character constants and
-strings, binary literals and digit separators; `unreachable()`; and
-`mbrtoc8`/`c8rtomb` for the code units `char8_t` holds.
+strings, binary literals and digit separators; `unreachable()`;
+`mbrtoc8`/`c8rtomb` for the code units `char8_t` holds; and `%b`, `%ls` and
+`%lc` in `printf` with `%ls`, `%lc` and `%l[` in `scanf`.
 
 IN THE PREPROCESSOR: `#embed`, with `limit`, `prefix`, `suffix` and
 `if_empty` and with `__has_embed` to ask first -- a file's bytes as integer

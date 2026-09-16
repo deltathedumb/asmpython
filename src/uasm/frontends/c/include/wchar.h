@@ -11,6 +11,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <time.h>
 #include <__uasm_wide.h>
 
@@ -285,6 +286,330 @@ static size_t wcsftime(wchar_t *__d, size_t __n, const wchar_t *__fmt,
     for (i = 0; i < got; i++) __d[i] = (wchar_t)(unsigned char)out[i];
     __d[got] = 0;
     return got;
+}
+
+
+/* ── the wide streams ─────────────────────────────────────────────────── */
+/* A WIDE STREAM IS A BYTE STREAM WITH A CONVERSION ON IT, which is what C
+   says it is and what makes this layer short: writing a wide character means
+   writing its multibyte encoding, reading one means decoding the next
+   sequence, and `fwprintf` is `fprintf` with the format converted. The bytes
+   go through `<stdio.h>`'s own machinery, so a wide-oriented stream and a
+   byte-oriented one are the same file with the same buffer.
+
+   THE ONE REWRITE IS `%c`. In a wide `printf` an `int` argument to `%c` is
+   converted to `wchar_t` and written -- so above 127 it is a multibyte
+   sequence, where the narrow `%c` would write one byte. `%lc` in the narrow
+   formatter does exactly that, so the conversion becomes one. `%s` needs no
+   rewrite: a narrow `%s` in a wide `printf` takes a multibyte string and
+   writes it back, which is a copy either way.
+
+   THE ORIENTATION IS RECORDED AND NOT ENFORCED, which is the one place this
+   is laxer than C: a stream takes one on its first operation and using the
+   other kind afterwards is undefined, and glibc makes the second call FAIL.
+   Here there is one buffer under both faces, so both keep working --
+   stricter-than-the-standard in the safe direction, like a local surviving a
+   `longjmp`. `fwide` still answers truthfully, which is what a program that
+   asks actually wants to know. */
+#define __W_FMT 512
+
+static size_t __w_narrow_format(char *__d, size_t __n, const wchar_t *__f)
+{
+    mbstate_t __ws;
+    char __one[8];
+    size_t __i = 0, __k, __j;
+    int __in = 0, __length = 0;
+    __ws.__count = 0;
+    __ws.__value = 0;
+    while (*__f && __i + 8 < __n) {
+        wchar_t __c = *__f++;
+        if (!__in) {
+            if (__c == L'%') { __in = 1; __length = 0; }
+        } else if (__c == L'%') {
+            __in = 0;
+        } else if (__c == L'h' || __c == L'l' || __c == L'j' || __c == L'z'
+                   || __c == L't' || __c == L'L') {
+            __length = 1;
+        } else if ((__c >= L'a' && __c <= L'z') || (__c >= L'A' && __c <= L'Z')) {
+            if (__c == L'c' && !__length) __d[__i++] = 'l';
+            __in = 0;
+        }
+        __k = wcrtomb(__one, __c, &__ws);
+        if (__k == (size_t)-1) break;
+        for (__j = 0; __j < __k; __j++) __d[__i++] = __one[__j];
+    }
+    __d[__i] = 0;
+    return __i;
+}
+
+static int fputwc(wchar_t __c, FILE *__f)
+{
+    mbstate_t __ws;
+    char __buf[8];
+    size_t __k, __i;
+    __ws.__count = 0;
+    __ws.__value = 0;
+    __k = wcrtomb(__buf, __c, &__ws);
+    if (__k == (size_t)-1) return WEOF;
+    if (__f != NULL && __f->__ori == 0) __f->__ori = 1;
+    for (__i = 0; __i < __k; __i++)
+        if (fputc((unsigned char)__buf[__i], __f) == EOF) return WEOF;
+    return (wint_t)__c;
+}
+
+static wint_t putwc(wchar_t __c, FILE *__f) { return (wint_t)fputwc(__c, __f); }
+static wint_t putwchar(wchar_t __c) { return (wint_t)fputwc(__c, stdout); }
+
+static int fputws(const wchar_t *__s, FILE *__f)
+{
+    while (*__s)
+        if (fputwc(*__s++, __f) == (int)WEOF) return WEOF;
+    return 0;
+}
+
+static int fwide(FILE *__f, int __mode)
+{
+    if (__f == NULL) return 0;
+    if (__f->__ori == 0 && __mode != 0)
+        __f->__ori = __mode > 0 ? 1 : -1;
+    return __f->__ori;
+}
+
+static int vfwprintf(FILE *__f, const wchar_t *__fmt, va_list __ap)
+{
+    char __small[__W_FMT], *__buf = __small;
+    if (__f != NULL && __f->__ori == 0) __f->__ori = 1;
+    size_t __need = wcslen(__fmt) * 4 + 16;
+    int __r;
+    if (__need > sizeof __small) {
+        __buf = (char *)malloc(__need);
+        if (__buf == NULL) return -1;
+    }
+    __w_narrow_format(__buf, __need > sizeof __small ? __need : sizeof __small,
+                      __fmt);
+    __r = vfprintf(__f, __buf, __ap);
+    if (__buf != __small) free(__buf);
+    return __r;
+}
+
+static int vwprintf(const wchar_t *__fmt, va_list __ap)
+{ return vfwprintf(stdout, __fmt, __ap); }
+
+/* `swprintf` COUNTS WIDE CHARACTERS AND `snprintf` COUNTS BYTES, so the
+   narrow buffer is four times as long -- no character is more -- and the
+   answer is the wide length or a negative number, never a "would have
+   been" count. C is explicit about that difference from `snprintf`. */
+static int vswprintf(wchar_t *__s, size_t __n, const wchar_t *__fmt,
+                     va_list __ap)
+{
+    char __fsmall[__W_FMT], *__fbuf = __fsmall, *__out;
+    size_t __fneed = wcslen(__fmt) * 4 + 16, __bytes = __n * 4 + 4, __left;
+    const char *__p;
+    mbstate_t __ws;
+    int __r;
+    size_t __i = 0, __k;
+    wchar_t __w;
+    if (__n == 0) return -1;
+    if (__fneed > sizeof __fsmall) {
+        __fbuf = (char *)malloc(__fneed);
+        if (__fbuf == NULL) return -1;
+    }
+    __w_narrow_format(__fbuf,
+                      __fneed > sizeof __fsmall ? __fneed : sizeof __fsmall,
+                      __fmt);
+    __out = (char *)malloc(__bytes);
+    if (__out == NULL) {
+        if (__fbuf != __fsmall) free(__fbuf);
+        return -1;
+    }
+    __r = vsnprintf(__out, __bytes, __fbuf, __ap);
+    if (__fbuf != __fsmall) free(__fbuf);
+    if (__r < 0 || (size_t)__r >= __bytes) { free(__out); return -1; }
+    __ws.__count = 0;
+    __ws.__value = 0;
+    __p = __out;
+    __left = (size_t)__r + 1;
+    while (__i + 1 < __n) {
+        __k = mbrtowc(&__w, __p, __left, &__ws);
+        if (__k == (size_t)-1 || __k == (size_t)-2) { free(__out); return -1; }
+        if (__k == 0) break;
+        __s[__i++] = __w;
+        __p += __k;
+        __left -= __k;
+    }
+    __s[__i] = 0;
+    free(__out);
+    return (size_t)__i == __n - 1 && __left > 1 ? -1 : (int)__i;
+}
+
+static int fwprintf(FILE *__f, const wchar_t *__fmt, ...)
+{
+    va_list ap;
+    int r;
+    va_start(ap, __fmt);
+    r = vfwprintf(__f, __fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+static int wprintf(const wchar_t *__fmt, ...)
+{
+    va_list ap;
+    int r;
+    va_start(ap, __fmt);
+    r = vfwprintf(stdout, __fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+static int swprintf(wchar_t *__s, size_t __n, const wchar_t *__fmt, ...)
+{
+    va_list ap;
+    int r;
+    va_start(ap, __fmt);
+    r = vswprintf(__s, __n, __fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+static wint_t fgetwc(FILE *__f)
+{
+    int __c, __k, __i, __need;
+    unsigned int __v;
+    if (__f != NULL && __f->__ori == 0) __f->__ori = 1;
+    __c = fgetc(__f);
+    if (__c == EOF) return WEOF;
+    if ((unsigned int)__c < 0x80u) return (wint_t)__c;
+    if (((unsigned int)__c & 0xE0u) == 0xC0u) { __need = 1; __v = (unsigned int)__c & 0x1Fu; }
+    else if (((unsigned int)__c & 0xF0u) == 0xE0u) { __need = 2; __v = (unsigned int)__c & 0x0Fu; }
+    else if (((unsigned int)__c & 0xF8u) == 0xF0u) { __need = 3; __v = (unsigned int)__c & 0x07u; }
+    else return WEOF;
+    for (__i = 0; __i < __need; __i++) {
+        __k = fgetc(__f);
+        if (__k == EOF || ((unsigned int)__k & 0xC0u) != 0x80u) return WEOF;
+        __v = (__v << 6) | ((unsigned int)__k & 0x3Fu);
+    }
+    return (wint_t)__v;
+}
+
+static wint_t getwc(FILE *__f) { return fgetwc(__f); }
+static wint_t getwchar(void) { return fgetwc(stdin); }
+
+static wint_t ungetwc(wint_t __c, FILE *__f)
+{
+    mbstate_t __ws;
+    char __buf[8];
+    size_t __k;
+    int __i;
+    if (__c == WEOF) return WEOF;
+    __ws.__count = 0;
+    __ws.__value = 0;
+    __k = wcrtomb(__buf, (wchar_t)__c, &__ws);
+    if (__k == (size_t)-1) return WEOF;
+    /* THE BYTES GO BACK IN REVERSE, so that the next read takes the lead
+       byte first. `ungetc` here keeps several, which is what makes a
+       multibyte character pushable at all. */
+    for (__i = (int)__k - 1; __i >= 0; __i--)
+        if (ungetc((unsigned char)__buf[__i], __f) == EOF) return WEOF;
+    return __c;
+}
+
+static wchar_t *fgetws(wchar_t *__s, int __n, FILE *__f)
+{
+    int __i = 0;
+    wint_t __c;
+    if (__n <= 0) return NULL;
+    while (__i < __n - 1) {
+        __c = fgetwc(__f);
+        if (__c == WEOF) break;
+        __s[__i++] = (wchar_t)__c;
+        if (__c == L'\n') break;
+    }
+    if (__i == 0) return NULL;
+    __s[__i] = 0;
+    return __s;
+}
+
+/* THE SCANNER NEEDS NO REWRITE AT ALL: C gives `%c`, `%s` and `%[` the same
+   meaning in the wide functions as in the narrow ones -- an `l` means a
+   `wchar_t` array and its absence means a `char` one, in both -- and the
+   input is a multibyte sequence either way. `<stdio.h>`'s `__scan_wchar` is
+   what reads one. */
+static int vfwscanf(FILE *__f, const wchar_t *__fmt, va_list __ap)
+{
+    char __small[__W_FMT], *__buf = __small;
+    size_t __need = wcslen(__fmt) * 4 + 16;
+    int __r;
+    if (__need > sizeof __small) {
+        __buf = (char *)malloc(__need);
+        if (__buf == NULL) return EOF;
+    }
+    __w_narrow_format(__buf, __need > sizeof __small ? __need : sizeof __small,
+                      __fmt);
+    __r = vfscanf(__f, __buf, __ap);
+    if (__buf != __small) free(__buf);
+    return __r;
+}
+
+static int vwscanf(const wchar_t *__fmt, va_list __ap)
+{ return vfwscanf(stdin, __fmt, __ap); }
+
+static int vswscanf(const wchar_t *__s, const wchar_t *__fmt, va_list __ap)
+{
+    char __fsmall[__W_FMT], *__fbuf = __fsmall, *__in;
+    size_t __fneed = wcslen(__fmt) * 4 + 16, __bytes = wcslen(__s) * 4 + 4;
+    mbstate_t __ws;
+    const wchar_t *__p = __s;
+    int __r;
+    if (__fneed > sizeof __fsmall) {
+        __fbuf = (char *)malloc(__fneed);
+        if (__fbuf == NULL) return EOF;
+    }
+    __w_narrow_format(__fbuf,
+                      __fneed > sizeof __fsmall ? __fneed : sizeof __fsmall,
+                      __fmt);
+    __in = (char *)malloc(__bytes);
+    if (__in == NULL) {
+        if (__fbuf != __fsmall) free(__fbuf);
+        return EOF;
+    }
+    __ws.__count = 0;
+    __ws.__value = 0;
+    wcsrtombs(__in, &__p, __bytes, &__ws);
+    __r = vsscanf(__in, __fbuf, __ap);
+    if (__fbuf != __fsmall) free(__fbuf);
+    free(__in);
+    return __r;
+}
+
+static int fwscanf(FILE *__f, const wchar_t *__fmt, ...)
+{
+    va_list ap;
+    int r;
+    va_start(ap, __fmt);
+    r = vfwscanf(__f, __fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+static int wscanf(const wchar_t *__fmt, ...)
+{
+    va_list ap;
+    int r;
+    va_start(ap, __fmt);
+    r = vfwscanf(stdin, __fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+static int swscanf(const wchar_t *__s, const wchar_t *__fmt, ...)
+{
+    va_list ap;
+    int r;
+    va_start(ap, __fmt);
+    r = vswscanf(__s, __fmt, ap);
+    va_end(ap);
+    return r;
 }
 
 #endif

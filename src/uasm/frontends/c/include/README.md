@@ -120,10 +120,21 @@ software arithmetic over several registers, which is the `long double` story
 again for a type whose whole appeal is being a machine integer with a
 narrower range.
 
-The wide functions are the non-stream half of `<wchar.h>` plus `wcsftime`:
-there is no `fwprintf` and no `fgetwc`, for the same two reasons as ever —
-one needs a wide formatter and the other needs input. `%ls` and `%lc` in the
-narrow `printf` are there, and convert through the same UTF-8 encoder.
+`<wchar.h>` is complete, wide streams included. A wide stream is a byte
+stream with a conversion on it, which is what C says it is and what makes
+the layer short: `fputwc` writes a character's multibyte encoding through
+the same buffer `printf` uses, `fgetwc` decodes the next sequence, and
+`fwprintf` is `fprintf` with the format converted — the one rewrite being
+`%c`, which in a wide `printf` converts an `int` to `wchar_t` and is
+therefore the narrow `%lc`. `%ls`, `%lc` and `%l[` work in the narrow
+`printf` and `scanf` too, which is what C asks for and what the wide
+scanner is built on.
+
+A stream's **orientation is recorded and not enforced**, which is the one
+place this is laxer than the standard: C says a stream takes one on its
+first operation and leaves the other kind undefined afterwards, and glibc
+makes the second call fail. Here there is one buffer under both faces, so
+both keep working, and `fwide` still answers truthfully.
 
 `<stdatomic.h>` is the one to read carefully now that there can be two
 threads: its operations are ordinary loads and stores with the right names,

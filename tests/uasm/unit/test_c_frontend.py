@@ -641,6 +641,23 @@ class TestTheDivergences:
         with harness.raises(LiteralError, match="not a character"):
             decode_escapes("\\ud800", max_value=0x10FFFF)
 
+    def test_a_streams_orientation_is_recorded_and_not_enforced(self):
+        """C says a stream takes an orientation from its first operation
+        and leaves the other kind undefined afterwards. There is one buffer
+        under both faces here, so both keep working -- and `fwide` still
+        has to answer truthfully, which is what a program that asks wants
+        to know."""
+        module, sink = compile_c(
+            "#include <stdio.h>\n#include <wchar.h>\n"
+            "int main(void){\n"
+            "  if (fwide(stdout, 0) != 0) return 1;\n"
+            "  printf(\"x\");\n"
+            "  if (fwide(stdout, 1) != -1) return 2;\n"
+            "  fwprintf(stdout, L\"y\");\n"
+            "  return 0; }\n")
+        assert module is not None, [d.message for d in sink.diagnostics]
+        assert not sink.failed, [d.message for d in sink.diagnostics]
+
     def test_the_multibyte_encoding_is_utf_8(self):
         """C leaves the execution character set to the implementation, and
         this one chose the source's. glibc's `"C"` locale chose one byte per

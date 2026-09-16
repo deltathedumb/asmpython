@@ -1697,6 +1697,82 @@ PROGRAMS: dict[str, str] = {
         }
     """,
 
+    "wide_formatting_and_scanning": r"""
+        /* `swprintf`, `swscanf` and the narrow scanner's `%ls`,
+           `%lc` and `%l[`, which C gives the same meaning in both
+           families: an `l` means a `wchar_t` array and its absence
+           a `char` one, and the input is a multibyte sequence
+           either way. */
+        #include <stdio.h>
+        #include <wchar.h>
+
+        int main(void) {
+            wchar_t buf[64], w[16];
+            char nar[16];
+            int n, a;
+            double d;
+
+            /* `swprintf` AND `swscanf` TOUCH NO STREAM, so a program may use them
+               beside `printf` -- which one that used `wprintf` could not, because a
+               stream takes its orientation from its first operation and using the
+               other kind afterwards is undefined. */
+            n = swprintf(buf, 64, L"%d %s %ls %c %lc %.2f %5.1f|%-6d|", 42, "nar",
+                         L"wide", 65, (wint_t)L'Z', 1.5, 2.25, 7);
+            printf("%d [%ls]\n", n, buf);
+
+            n = swprintf(buf, 8, L"%d", 1234567);
+            printf("%d\n", n < 0);
+            n = swprintf(buf, 8, L"%d", 123);
+            printf("%d [%ls]\n", n, buf);
+            n = swprintf(buf, 64, L"");
+            printf("%d %d\n", n, (int)buf[0]);
+
+            n = swscanf(L"12 word 3.5 x", L"%d %ls %lf %lc", &a, w, &d, buf);
+            printf("%d %d %d %.1f %d\n", n, a, (int)wcslen(w), d, (int)buf[0]);
+            n = swscanf(L"42 tail", L"%d %s", &a, nar);
+            printf("%d %d %s\n", n, a, nar);
+            n = swscanf(L"abc123", L"%l[a-c]%d", w, &a);
+            printf("%d %d %d\n", n, (int)wcslen(w), a);
+            n = swscanf(L"zz", L"%d", &a);
+            printf("%d\n", n);
+
+            /* The narrow scanner reading into wide arrays, which is the same
+               machinery the wide one uses. */
+            n = sscanf("77 word x", "%d %ls %lc", &a, w, buf);
+            printf("%d %d %d %d\n", n, a, (int)wcslen(w), (int)buf[0]);
+
+            printf("%d %d\n", fwide(stdout, 0), fwide(stdout, 1));
+            return 0;
+        }
+    """,
+
+    "wide_output_to_a_stream": r"""
+        /* `wprintf`, `fwprintf`, `fputws`, `fputwc`, `putwc` and
+           `putwchar` -- a wide stream is a byte stream with a
+           conversion on it, so these write the multibyte encoding
+           through the same buffer `printf` uses. */
+        #include <stdio.h>
+        #include <wchar.h>
+
+        /* NOTHING NARROW TOUCHES `stdout` HERE. A stream takes its orientation from
+           its first operation and C leaves the other kind undefined afterwards --
+           glibc makes the second call fail, which is what a test that mixed them
+           would be comparing. */
+        int main(void) {
+            wint_t got;
+            wprintf(L"%d %s %ls %c %lc %.3f\n", 42, "narrow", L"wide", 65,
+                    (wint_t)L'Z', 2.5);
+            fwprintf(stdout, L"%5d|%-5d|%05.1f|%x\n", 7, 7, 1.5, 255);
+            fputws(L"fputws and no newline", stdout);
+            fputwc(L'\n', stdout);
+            putwchar(L'!');
+            got = putwc(L'?', stdout);
+            putwchar(L'\n');
+            wprintf(L"%d %d\n", (int)got, fwide(stdout, 0));
+            return 0;
+        }
+    """,
+
     "macro_expansion_corners": r"""
         /* The preprocessor under load: `##` with an empty
            operand, `#` and the spacing it collapses, `__VA_OPT__`

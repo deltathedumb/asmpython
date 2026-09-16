@@ -128,7 +128,7 @@ deliverable.
   `_Alignof` for twelve declarations, because a struct's layout is an ABI and
   a frontend can be self-consistently wrong about one.
 
-  FIVE KNOWN DIVERGENCES, and they are the whole list: `long double` is
+  SIX KNOWN DIVERGENCES, and they are the whole list: `long double` is
   software rather than the machine's (the format is x86-64's, so `sizeof`,
   `LDBL_*` and every printed digit agree with a hosted compiler, and the `l`
   SERIES in `<math.h>` answer to about a double's precision in the wider
@@ -139,7 +139,9 @@ deliverable.
   `gmtime`, because the host services can say what time it is and cannot say
   what the local offset from UTC is; and the multibyte encoding is UTF-8
   always, which C leaves to the implementation and glibc's `"C"` locale
-  answers differently.
+  answers differently; and a stream's orientation is recorded and not
+  enforced, so a program that writes to one with both `printf` and
+  `fwprintf` gets both rather than the second failing.
 
 - **Thirteen verbs down to five** — `build`, `run`, `verify`, `link`,
   `plugin`. `check` is `verify`, and renamed because the two words promise
