@@ -2,6 +2,15 @@
    uasm C frontend. See frontends/c/include/README.md. */
 #ifndef _UASM_STDDEF_H
 #define _UASM_STDDEF_H
+/* THE VERSION MACRO C23 ASKS FOR. The standard gives several headers one so
+   a program can test whether THIS header has its C23 contents rather than
+   asking the compiler how old it is -- the two answers come apart when a
+   library is older than its compiler. Every header here has one, including
+   the few the standard may not name: the `__STDC_` prefix is reserved to
+   the implementation, so an extra one cannot collide with a program, and
+   each of them answers truthfully. A missing one is the failure that
+   matters, and there are none. */
+#define __STDC_VERSION_STDDEF_H__ 202311L
 
 /* THESE SPELLINGS COME FROM THE COMPILER, not from this file. `__SIZE_TYPE__`
    and the rest are predefined by `preprocess.py` from the same table the

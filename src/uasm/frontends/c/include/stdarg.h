@@ -9,6 +9,7 @@
    are for; see `lower.py` on the argument-area convention. */
 #ifndef _UASM_STDARG_H
 #define _UASM_STDARG_H
+#define __STDC_VERSION_STDARG_H__ 202311L
 
 typedef char *va_list;
 

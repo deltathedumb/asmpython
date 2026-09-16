@@ -32,6 +32,7 @@
    `thrd_create` already takes. */
 #ifndef _UASM_THREADS_H
 #define _UASM_THREADS_H
+#define __STDC_VERSION_THREADS_H__ 202311L
 
 #include <stddef.h>
 #include <time.h>

@@ -6,6 +6,7 @@
    checks the return value gets a correct answer rather than a wrong one. */
 #ifndef _UASM_LOCALE_H
 #define _UASM_LOCALE_H
+#define __STDC_VERSION_LOCALE_H__ 202311L
 
 #include <stddef.h>
 

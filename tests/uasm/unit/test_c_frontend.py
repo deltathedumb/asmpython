@@ -295,6 +295,184 @@ class TestItAlwaysTerminates:
         assert module is not None or sink.failed
 
 
+#: Every macro C23 requires a header to define. NOT `NDEBUG`, which the
+#: PROGRAM defines and the header only reads; not `FP_FAST_FMA` and its
+#: two friends, which are defined only where `fma` is FASTER than the
+#: multiply and add written out and this one is exactly that; and not
+#: `thread_local`, which C23 made a keyword, so a header need not and
+#: `#ifndef` could not see it.
+C23_MACROS: dict[str, str] = {
+    "assert.h": """
+        __STDC_VERSION_ASSERT_H__ assert static_assert
+    """,
+    "complex.h": """
+        CMPLX CMPLXF CMPLXL I _Complex_I __STDC_VERSION_COMPLEX_H__
+        complex
+    """,
+    "errno.h": """
+        EDOM EILSEQ ERANGE __STDC_VERSION_ERRNO_H__ errno
+    """,
+    "fenv.h": """
+        FE_ALL_EXCEPT FE_DFL_ENV FE_DIVBYZERO FE_INEXACT FE_INVALID
+        FE_OVERFLOW FE_UNDERFLOW __STDC_VERSION_FENV_H__
+    """,
+    "float.h": """
+        DBL_DECIMAL_DIG DBL_DIG DBL_EPSILON DBL_HAS_SUBNORM
+        DBL_IS_IEC_60559 DBL_MANT_DIG DBL_MAX DBL_MAX_10_EXP DBL_MAX_EXP
+        DBL_MIN DBL_MIN_10_EXP DBL_MIN_EXP DBL_NORM_MAX DBL_TRUE_MIN
+        DECIMAL_DIG FLT_DECIMAL_DIG FLT_DIG FLT_EPSILON FLT_EVAL_METHOD
+        FLT_HAS_SUBNORM FLT_IS_IEC_60559 FLT_MANT_DIG FLT_MAX
+        FLT_MAX_10_EXP FLT_MAX_EXP FLT_MIN FLT_MIN_10_EXP FLT_MIN_EXP
+        FLT_NORM_MAX FLT_RADIX FLT_ROUNDS FLT_TRUE_MIN INFINITY
+        LDBL_DECIMAL_DIG LDBL_DIG LDBL_EPSILON LDBL_HAS_SUBNORM
+        LDBL_IS_IEC_60559 LDBL_MANT_DIG LDBL_MAX LDBL_MAX_10_EXP
+        LDBL_MAX_EXP LDBL_MIN LDBL_MIN_10_EXP LDBL_MIN_EXP LDBL_NORM_MAX
+        LDBL_TRUE_MIN NAN __STDC_VERSION_FLOAT_H__
+    """,
+    # ALL TWO HUNDRED, because the header's table is generated and a
+    # generated table is exactly the kind with a hole in one corner. Eight
+    # conversions for `printf`, six for `scanf`, fourteen widths each.
+    "inttypes.h": """
+       
+        __STDC_VERSION_INTTYPES_H__ PRId8 PRId16 PRId32 PRId64 PRIdLEAST8
+        PRIdLEAST16 PRIdLEAST32 PRIdLEAST64 PRIdFAST8 PRIdFAST16
+        PRIdFAST32 PRIdFAST64 PRIdMAX PRIdPTR PRIi8 PRIi16 PRIi32 PRIi64
+        PRIiLEAST8 PRIiLEAST16 PRIiLEAST32 PRIiLEAST64 PRIiFAST8
+        PRIiFAST16 PRIiFAST32 PRIiFAST64 PRIiMAX PRIiPTR PRIo8 PRIo16
+        PRIo32 PRIo64 PRIoLEAST8 PRIoLEAST16 PRIoLEAST32 PRIoLEAST64
+        PRIoFAST8 PRIoFAST16 PRIoFAST32 PRIoFAST64 PRIoMAX PRIoPTR PRIu8
+        PRIu16 PRIu32 PRIu64 PRIuLEAST8 PRIuLEAST16 PRIuLEAST32
+        PRIuLEAST64 PRIuFAST8 PRIuFAST16 PRIuFAST32 PRIuFAST64 PRIuMAX
+        PRIuPTR PRIx8 PRIx16 PRIx32 PRIx64 PRIxLEAST8 PRIxLEAST16
+        PRIxLEAST32 PRIxLEAST64 PRIxFAST8 PRIxFAST16 PRIxFAST32 PRIxFAST64
+        PRIxMAX PRIxPTR PRIX8 PRIX16 PRIX32 PRIX64 PRIXLEAST8 PRIXLEAST16
+        PRIXLEAST32 PRIXLEAST64 PRIXFAST8 PRIXFAST16 PRIXFAST32 PRIXFAST64
+        PRIXMAX PRIXPTR PRIb8 PRIb16 PRIb32 PRIb64 PRIbLEAST8 PRIbLEAST16
+        PRIbLEAST32 PRIbLEAST64 PRIbFAST8 PRIbFAST16 PRIbFAST32 PRIbFAST64
+        PRIbMAX PRIbPTR PRIB8 PRIB16 PRIB32 PRIB64 PRIBLEAST8 PRIBLEAST16
+        PRIBLEAST32 PRIBLEAST64 PRIBFAST8 PRIBFAST16 PRIBFAST32 PRIBFAST64
+        PRIBMAX PRIBPTR SCNd8 SCNd16 SCNd32 SCNd64 SCNdLEAST8 SCNdLEAST16
+        SCNdLEAST32 SCNdLEAST64 SCNdFAST8 SCNdFAST16 SCNdFAST32 SCNdFAST64
+        SCNdMAX SCNdPTR SCNi8 SCNi16 SCNi32 SCNi64 SCNiLEAST8 SCNiLEAST16
+        SCNiLEAST32 SCNiLEAST64 SCNiFAST8 SCNiFAST16 SCNiFAST32 SCNiFAST64
+        SCNiMAX SCNiPTR SCNo8 SCNo16 SCNo32 SCNo64 SCNoLEAST8 SCNoLEAST16
+        SCNoLEAST32 SCNoLEAST64 SCNoFAST8 SCNoFAST16 SCNoFAST32 SCNoFAST64
+        SCNoMAX SCNoPTR SCNu8 SCNu16 SCNu32 SCNu64 SCNuLEAST8 SCNuLEAST16
+        SCNuLEAST32 SCNuLEAST64 SCNuFAST8 SCNuFAST16 SCNuFAST32 SCNuFAST64
+        SCNuMAX SCNuPTR SCNx8 SCNx16 SCNx32 SCNx64 SCNxLEAST8 SCNxLEAST16
+        SCNxLEAST32 SCNxLEAST64 SCNxFAST8 SCNxFAST16 SCNxFAST32 SCNxFAST64
+        SCNxMAX SCNxPTR SCNb8 SCNb16 SCNb32 SCNb64 SCNbLEAST8 SCNbLEAST16
+        SCNbLEAST32 SCNbLEAST64 SCNbFAST8 SCNbFAST16 SCNbFAST32 SCNbFAST64
+        SCNbMAX SCNbPTR
+    """,
+    "iso646.h": """
+        __STDC_VERSION_ISO646_H__ and and_eq bitand bitor compl not not_eq
+        or or_eq xor xor_eq
+    """,
+    "limits.h": """
+        BITINT_MAXWIDTH BOOL_MAX BOOL_WIDTH CHAR_BIT CHAR_MAX CHAR_MIN
+        CHAR_WIDTH INT_MAX INT_MIN INT_WIDTH LLONG_MAX LLONG_MIN
+        LLONG_WIDTH LONG_MAX LONG_MIN LONG_WIDTH MB_LEN_MAX SCHAR_MAX
+        SCHAR_MIN SCHAR_WIDTH SHRT_MAX SHRT_MIN SHRT_WIDTH UCHAR_MAX
+        UCHAR_WIDTH UINT_MAX UINT_WIDTH ULLONG_MAX ULLONG_WIDTH ULONG_MAX
+        ULONG_WIDTH USHRT_MAX USHRT_WIDTH __STDC_VERSION_LIMITS_H__
+    """,
+    "locale.h": """
+        LC_ALL LC_COLLATE LC_CTYPE LC_MONETARY LC_NUMERIC LC_TIME NULL
+        __STDC_VERSION_LOCALE_H__
+    """,
+    "math.h": """
+        FP_ILOGB0 FP_ILOGBNAN FP_INFINITE FP_NAN FP_NORMAL FP_SUBNORMAL
+        FP_ZERO HUGE_VAL HUGE_VALF HUGE_VALL INFINITY MATH_ERREXCEPT
+        MATH_ERRNO NAN __STDC_VERSION_MATH_H__ fpclassify isfinite
+        isgreater isgreaterequal isinf isless islessequal islessgreater
+        isnan isnormal isunordered math_errhandling signbit
+    """,
+    "setjmp.h": """
+        __STDC_VERSION_SETJMP_H__ setjmp
+    """,
+    "signal.h": """
+        SIGABRT SIGFPE SIGILL SIGINT SIGSEGV SIGTERM SIG_DFL SIG_ERR
+        SIG_IGN __STDC_VERSION_SIGNAL_H__
+    """,
+    "stdalign.h": """
+        __STDC_VERSION_STDALIGN_H__ __alignas_is_defined
+        __alignof_is_defined alignas alignof
+    """,
+    "stdarg.h": """
+        __STDC_VERSION_STDARG_H__ va_arg va_copy va_end va_start
+    """,
+    "stdatomic.h": """
+        ATOMIC_BOOL_LOCK_FREE ATOMIC_CHAR_LOCK_FREE ATOMIC_FLAG_INIT
+        ATOMIC_INT_LOCK_FREE ATOMIC_LLONG_LOCK_FREE ATOMIC_LONG_LOCK_FREE
+        ATOMIC_POINTER_LOCK_FREE ATOMIC_SHORT_LOCK_FREE ATOMIC_VAR_INIT
+        __STDC_VERSION_STDATOMIC_H__ atomic_compare_exchange_strong
+        atomic_exchange atomic_fetch_add atomic_init atomic_is_lock_free
+        atomic_load atomic_store kill_dependency
+    """,
+    "stdbit.h": """
+        __STDC_ENDIAN_BIG__ __STDC_ENDIAN_LITTLE__ __STDC_ENDIAN_NATIVE__
+        __STDC_VERSION_STDBIT_H__
+    """,
+    "stdbool.h": """
+        __STDC_VERSION_STDBOOL_H__ __bool_true_false_are_defined bool
+        false true
+    """,
+    "stdckdint.h": """
+        __STDC_VERSION_STDCKDINT_H__ ckd_add ckd_mul ckd_sub
+    """,
+    "stddef.h": """
+        NULL __STDC_VERSION_STDDEF_H__ offsetof unreachable
+    """,
+    "stdint.h": """
+        INT16_MAX INT16_MIN INT32_MAX INT32_MIN INT64_C INT64_MAX
+        INT64_MIN INT8_C INT8_MAX INT8_MIN INT8_WIDTH INTMAX_C INTMAX_MAX
+        INTMAX_MIN INTMAX_WIDTH INTPTR_MAX INTPTR_MIN INTPTR_WIDTH
+        INT_FAST8_MAX INT_FAST8_MIN INT_FAST8_WIDTH INT_LEAST8_MAX
+        INT_LEAST8_MIN INT_LEAST8_WIDTH PTRDIFF_MAX PTRDIFF_MIN
+        PTRDIFF_WIDTH SIG_ATOMIC_MAX SIG_ATOMIC_MIN SIG_ATOMIC_WIDTH
+        SIZE_MAX SIZE_WIDTH UINT16_MAX UINT32_MAX UINT64_C UINT64_MAX
+        UINT8_C UINT8_MAX UINT8_WIDTH UINTMAX_C UINTMAX_MAX UINTPTR_MAX
+        UINT_FAST8_MAX UINT_LEAST8_MAX WCHAR_MAX WCHAR_MIN WCHAR_WIDTH
+        WINT_MAX WINT_MIN WINT_WIDTH __STDC_VERSION_STDINT_H__
+    """,
+    "stdio.h": """
+        BUFSIZ EOF FILENAME_MAX FOPEN_MAX L_tmpnam NULL SEEK_CUR SEEK_END
+        SEEK_SET TMP_MAX _IOFBF _IOLBF _IONBF __STDC_VERSION_STDIO_H__
+        stderr stdin stdout
+    """,
+    "stdlib.h": """
+        EXIT_FAILURE EXIT_SUCCESS MB_CUR_MAX NULL RAND_MAX
+        __STDC_VERSION_STDLIB_H__
+    """,
+    "stdnoreturn.h": """
+        __STDC_VERSION_STDNORETURN_H__ noreturn
+    """,
+    "string.h": """
+        NULL __STDC_VERSION_STRING_H__
+    """,
+    "tgmath.h": """
+        __STDC_VERSION_TGMATH_H__
+    """,
+    "threads.h": """
+        ONCE_FLAG_INIT TSS_DTOR_ITERATIONS __STDC_VERSION_THREADS_H__
+    """,
+    "time.h": """
+        CLOCKS_PER_SEC NULL TIME_MONOTONIC TIME_UTC
+        __STDC_VERSION_TIME_H__
+    """,
+    "uchar.h": """
+        __STDC_VERSION_UCHAR_H__
+    """,
+    "wchar.h": """
+        NULL WCHAR_MAX WCHAR_MIN WEOF __STDC_VERSION_WCHAR_H__
+    """,
+    "wctype.h": """
+        WEOF __STDC_VERSION_WCTYPE_H__
+    """,
+}
+
+
 #: Every function C23 requires a header to declare, by header. The list
 #: is the standard's synopsis for each one, with the conditional
 #: families left out: `<fenv.h>`'s Annex F pragmas, the `_s` functions
@@ -414,6 +592,28 @@ class TestTheStandardHeaders:
             return
         assert module is not None, codes_
         assert not sink.failed, codes_
+
+    def test_every_macro_c23_requires_is_defined(self):
+        """Asked with `#ifndef`, which is the only thing that can tell a
+        macro from a name that merely exists: `INFINITY` has to be one, and
+        a `static const float` of the same value would answer every test but
+        this one.
+
+        ONE TRANSLATION UNIT AGAIN, and it includes every header at once --
+        which the test below this one relies on anyway.
+        """
+        body = [f"#include <{h}>" for h in sorted(C23_MACROS)]
+        for header, names in sorted(C23_MACROS.items()):
+            for name in names.split():
+                if name.startswith("/*") or name.endswith("*/"):
+                    continue
+                body.append(f"#ifndef {name}")
+                body.append(f'#error "{header} does not define {name}"')
+                body.append("#endif")
+        body.append("int main(void){ return 0; }")
+        module, sink = compile_c("\n".join(body) + "\n")
+        assert module is not None, [d.message for d in sink.diagnostics][:6]
+        assert not sink.failed, [d.message for d in sink.diagnostics][:6]
 
     def test_every_function_c23_requires_is_declared(self, tmp_path):
         """THE NAMES, ALL FOUR HUNDRED AND FIFTY, asked for by taking each

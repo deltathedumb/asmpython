@@ -72,6 +72,21 @@ lists. `fmal` is the one that is not fused, and says so where it is written.
 `l` function, which is what makes the paragraph above visible to a program
 that only ever writes `sqrt`.
 
+`math_errhandling` is **`MATH_ERRNO`**, and the functions really do set
+`errno`. C offers two ways to report a domain or a range error — `errno`,
+and the floating-point exception flags — and an implementation says which it
+uses; the flags need an instruction that reads a status word and the IR has
+none, which is the same sentence `*_SNAN` is absent for. So the macro cannot
+be 3 and it cannot be 0 either, since C requires it to name at least one:
+every domain error sets `EDOM` and every pole and overflow sets `ERANGE`,
+because declaring a mechanism and not implementing it is the one answer that
+would be wrong. glibc says 3 and then leans on the flags for part of it —
+`pow(2.0, 2000.0)` overflows to infinity and leaves `errno` alone there,
+and `pow(+0.0, -1.0)` is a pole with no error where `pow(-0.0, -3.0)` is a
+pole with one. This follows C, so those three are the differential suite's
+one program that is checked against a written-down answer rather than
+against the host.
+
 The execution character set is UTF-8, and so is the multibyte encoding:
 `"caf\u00e9"` and a literal `café` in the source are the same six bytes,
 `'é'` is the multi-character constant those two bytes make, `mbrtowc`

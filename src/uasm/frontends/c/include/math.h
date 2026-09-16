@@ -15,6 +15,25 @@
    it; one doing arithmetic will not. */
 #ifndef _UASM_MATH_H
 #define _UASM_MATH_H
+#define __STDC_VERSION_MATH_H__ 202311L
+
+/* THESE FUNCTIONS SET `errno`, which is what `math_errhandling` below
+   promises and why this header includes `<errno.h>`. C offers two ways to
+   report a domain or range error -- `errno`, and the floating-point
+   exception flags -- and an implementation says which it uses. There are no
+   exception flags here (`<fenv.h>` and `<float.h>` both say why: the IR has
+   no instruction that reads a floating-point status word), so `errno` is
+   the only one left, and `math_errhandling` cannot be zero: C requires it
+   to name at least one. So every domain error below actually sets EDOM and
+   every pole and overflow sets ERANGE, rather than the header claiming a
+   mechanism it does not implement.
+
+   WHERE glibc DIFFERS. It sets `math_errhandling` to 3 and then leans on
+   the exception flags for some of it: `pow(2.0, 2000.0)` overflows to
+   infinity and leaves `errno` alone, and `pow(+0.0, -1.0)` is a pole with
+   no error while `pow(-0.0, -3.0)` is a pole with one. C asks for ERANGE in
+   all three. This follows C. */
+#include <errno.h>
 
 #define M_E        2.7182818284590452354
 #define M_LOG2E    1.4426950408889634074
@@ -32,14 +51,39 @@
 
 #define HUGE_VAL  __builtin_huge_val()
 #define HUGE_VALF __builtin_huge_valf()
+#define HUGE_VALL ((long double)__builtin_huge_val())
 #define INFINITY  __builtin_inff()
 #define NAN       __builtin_nanf("")
+
+/* `ilogb` HAS TO ANSWER SOMETHING for a zero, a NaN and an infinity, and
+   these are the three answers. They are `INT_MIN` and `INT_MAX` spelled
+   out rather than included from `<limits.h>`, because a program that
+   includes `<math.h>` has not asked for `<limits.h>`. */
+#define FP_ILOGB0   (-2147483647 - 1)
+/* C LETS THIS BE `INT_MAX` OR `INT_MIN` and this is `INT_MIN`, which is
+   glibc's choice too. AN INFINITY IS A SEPARATE CASE and always answers
+   `INT_MAX`, whichever way this one goes -- 7.12.6.5 spells out all
+   three, and reading `FP_ILOGBNAN` as the infinity's answer is the slip
+   this note exists to stop. */
+#define FP_ILOGBNAN (-2147483647 - 1)
+
+#define MATH_ERRNO     1
+#define MATH_ERREXCEPT 2
+#define math_errhandling MATH_ERRNO
 
 #define FP_NAN       0
 #define FP_INFINITE  1
 #define FP_ZERO      2
 #define FP_SUBNORMAL 3
 #define FP_NORMAL    4
+
+/* THE TWO WAYS A RESULT IS WRONG, as one-line functions rather than a
+   statement at each site: a domain or range error is a `return` in every
+   place one happens, and `return __math_dom(nan)` keeps it one. */
+static double __math_dom(double __r) { errno = EDOM; return __r; }
+static double __math_ran(double __r) { errno = ERANGE; return __r; }
+static long double __math_doml(long double __r) { errno = EDOM; return __r; }
+static long double __math_ranl(long double __r) { errno = ERANGE; return __r; }
 
 /* THE ONE PLACE THE 80-BIT ENCODING IS READ IN A HEADER. `long double` is
    software here (`support.py`'s `ldouble` unit) and these four questions are
@@ -145,11 +189,16 @@ static double ldexp(double __x, int __n)
     e = 1023 + __n;
     if (e < 1) { /* subnormal territory: halve the hard way */
         while (__n < 0) { __x *= 0.5; __n++; }
-        return __x;
+        return __x == 0.0 ? __math_ran(__x) : __x;
     }
-    if (e > 2046) return __x * 8.98846567431158e307 * 8.98846567431158e307;
+    if (e > 2046)
+        return __math_ran(__x * 8.98846567431158e307 * 8.98846567431158e307);
     v.__u = ((unsigned long)e) << 52;
-    return __x * v.__d;
+    /* THE STEP-DOWN LOOP ABOVE CAN HAVE REACHED ZERO ALREADY, so the test
+       is here and not only in the subnormal branch. A zero argument went
+       home at the top, so a zero HERE is an underflow. */
+    __x = __x * v.__d;
+    return (__x == 0.0 || __builtin_isinf(__x)) ? __math_ran(__x) : __x;
 }
 static double scalbn(double __x, int __n) { return ldexp(__x, __n); }
 static double scalbln(double __x, long __n) { return ldexp(__x, (int)__n); }
@@ -263,8 +312,14 @@ static double fmod(double __x, double __y)
 {
     unsigned long k;
     double r;
-    if (__builtin_isnan(__x) || __builtin_isnan(__y) || __y == 0.0
-        || __builtin_isinf(__x)) return __builtin_nan("");
+    if (__builtin_isnan(__x) || __builtin_isnan(__y))
+        return __builtin_nan("");
+    /* A ZERO DIVISOR OR AN INFINITE DIVIDEND IS A DOMAIN ERROR. C makes
+       this one a "may" and glibc takes it, so both report EDOM and a
+       program can rely on it. A NaN argument is NOT an error and is
+       answered above, which is why the two tests are not one. */
+    if (__y == 0.0 || __builtin_isinf(__x))
+        return __math_dom(__builtin_nan(""));
     if (__builtin_isinf(__y) || __x == 0.0) return __x;
     r = __c_divrem(__x, __y, &k);
     return __builtin_signbit(__x) ? -r : r;
@@ -277,8 +332,14 @@ static double remainder(double __x, double __y)
 {
     unsigned long k;
     double r, b;
-    if (__builtin_isnan(__x) || __builtin_isnan(__y) || __y == 0.0
-        || __builtin_isinf(__x)) return __builtin_nan("");
+    if (__builtin_isnan(__x) || __builtin_isnan(__y))
+        return __builtin_nan("");
+    /* A ZERO DIVISOR OR AN INFINITE DIVIDEND IS A DOMAIN ERROR. C makes
+       this one a "may" and glibc takes it, so both report EDOM and a
+       program can rely on it. A NaN argument is NOT an error and is
+       answered above, which is why the two tests are not one. */
+    if (__y == 0.0 || __builtin_isinf(__x))
+        return __math_dom(__builtin_nan(""));
     if (__builtin_isinf(__y) || __x == 0.0) return __x;
     b = fabs(__y);
     r = __c_divrem(__x, __y, &k);
@@ -305,7 +366,7 @@ static double sqrt(double __x)
     double y;
     int i;
     if (__builtin_isnan(__x)) return __x;
-    if (__x < 0.0) return __builtin_nan("");
+    if (__x < 0.0) return __math_dom(__builtin_nan(""));
     if (__x == 0.0 || __builtin_isinf(__x)) return __x;
     /* HALVE THE EXPONENT to get the first three bits right, then Newton. Five
        iterations take a 3-bit guess past 53 bits, because each one doubles
@@ -337,11 +398,18 @@ static double hypot(double __a, double __b)
 }
 
 /* ── exponential and logarithm ────────────────────────────────────────── */
-static double exp(double __x)
+/* THE EXPONENTIAL WITH NOTHING SAID ABOUT `errno`, because two callers
+   want different things from it. `exp` below reports the overflow and the
+   underflow; `pow` calls THIS one, since an underflow inside `pow` is not
+   `pow`'s to report -- C makes that one optional and glibc leaves it
+   alone, so a program checking `errno` after `pow(2.0, -2000.0)` sees the
+   same nothing from either. */
+static double __exp_core(double __x)
 {
     double r, term, sum;
     int k, i;
     if (__builtin_isnan(__x)) return __x;
+    if (__builtin_isinf(__x)) return __x > 0.0 ? __x : 0.0;
     if (__x > 709.782712893384) return __builtin_huge_val();
     if (__x < -745.133219101941) return 0.0;
     /* x = k*ln2 + r with |r| <= ln2/2, so the series converges in a dozen
@@ -362,9 +430,26 @@ static double exp(double __x)
     }
     return ldexp(sum, k);
 }
+/* AND THE REPORTING WRAPPER. A FINITE argument that comes out infinite
+   overflowed, and one that comes out zero underflowed; an infinite
+   argument did neither -- `exp(INFINITY)` is exactly the infinity it
+   returns and nothing went wrong on the way. */
+static double exp(double __x)
+{
+    double __r = __exp_core(__x);
+    if (__builtin_isfinite(__x) && (__builtin_isinf(__r) || __r == 0.0))
+        return __math_ran(__r);
+    return __r;
+}
 static double exp2(double __x) { return exp(__x * 0.69314718055994530942); }
 static double expm1(double __x)
 {
+    /* ANSWERED DIRECTLY FAR BELOW ZERO, not as `exp(x) - 1`: `exp(-1000)`
+       underflows to zero and reports a range error for it, and `expm1` of
+       the same argument is exactly -1 with nothing wrong. Below -40 the
+       exponential is under 5e-18, which is smaller than the last bit of 1,
+       so -1.0 IS the correctly rounded answer. */
+    if (__x < -40.0) return -1.0;
     if (fabs(__x) > 0.25) return exp(__x) - 1.0;
     { double term = __x, sum = __x; int i;
       for (i = 2; i <= 18; i++) { term = term * __x / (double)i; sum += term; }
@@ -376,8 +461,8 @@ static double log(double __x)
     int e, i;
     double m, s, s2, sum, p;
     if (__builtin_isnan(__x)) return __x;
-    if (__x < 0.0) return __builtin_nan("");
-    if (__x == 0.0) return -__builtin_huge_val();
+    if (__x < 0.0) return __math_dom(__builtin_nan(""));
+    if (__x == 0.0) return __math_ran(-__builtin_huge_val());
     if (__builtin_isinf(__x)) return __x;
     m = frexp(__x, &e);
     /* Keep the mantissa near 1 so the atanh series converges fast: below
@@ -402,23 +487,57 @@ static double log1p(double __x)
 
 static double pow(double __x, double __y)
 {
-    long n;
+    int __whole, __odd;
+    double __r;
     if (__y == 0.0) return 1.0;
     if (__builtin_isnan(__x) || __builtin_isnan(__y)) return __builtin_nan("");
     if (__x == 1.0) return 1.0;
+    /* IS THE EXPONENT A WHOLE NUMBER, AND IS IT ODD -- asked of `__y`
+       itself and not of a `long` it might not fit in. `pow(-2.0, 2000.0)`
+       is an ordinary overflow to infinity, and a range check on the cast
+       would turn it into a domain error instead, which is the bug this
+       shape exists to avoid. Above 2^53 every double is an even whole
+       number, so `__odd` is false there without being asked. */
+    __whole = (__y == floor(__y));
+    __odd = __whole && fabs(__y) < 9007199254740992.0
+            && fmod(fabs(__y), 2.0) == 1.0;
+    if (__x == 0.0) {
+        if (__y > 0.0) return __odd ? __x : 0.0;
+        /* A POLE: the limit is infinite and C asks for ERANGE. `-0.0` to an
+           odd negative power keeps the sign, which is why the zero's own
+           sign is read rather than assumed positive. */
+        return __math_ran(__odd
+                          ? __builtin_copysign(__builtin_huge_val(), __x)
+                          : __builtin_huge_val());
+    }
+    if (__x < 0.0 && !__whole) return __math_dom(__builtin_nan(""));
     /* AN INTEGER EXPONENT IS DONE BY SQUARING, not by exp(y*log x): the
        latter is wrong for a negative base and loses precision for a small
        one, and `pow(x, 2)` appearing in a loop is the common case. */
-    n = (long)__y;
-    if ((double)n == __y && n > -1024 && n < 1024) {
+    if (__whole && __y > -1024.0 && __y < 1024.0) {
+        /* THE CAST IS INSIDE THE RANGE TEST and not above it: converting a
+           double too big for a `long` -- an infinite exponent, say -- is
+           undefined, and `pow(x, INFINITY)` is an ordinary call. */
+        long n = (long)__y;
         double r = 1.0, b = __x;
         long k = n < 0 ? -n : n;
         while (k) { if (k & 1L) r *= b; b *= b; k >>= 1; }
-        return n < 0 ? 1.0 / r : r;
+        __r = n < 0 ? 1.0 / r : r;
+    } else if (__x < 0.0) {
+        __r = __exp_core(__y * log(-__x));
+        if (__odd) __r = -__r;
+    } else {
+        __r = __exp_core(__y * log(__x));
     }
-    if (__x < 0.0) return __builtin_nan("");
-    if (__x == 0.0) return __y > 0.0 ? 0.0 : __builtin_huge_val();
-    return exp(__y * log(__x));
+    /* `exp` MAY HAVE REPORTED THE OVERFLOW ALREADY and the squaring path
+       never does, so it is settled here for both: a finite base and
+       exponent that produce an infinity overflowed. Underflow to zero is
+       left alone -- C makes that one optional and glibc does not report it
+       either, so a program that checks `errno` after `pow` sees the same
+       thing from both. */
+    if (__builtin_isinf(__r) && !__builtin_isinf(__x) && !__builtin_isinf(__y))
+        return __math_ran(__r);
+    return __r;
 }
 static float powf(float __x, float __y) { return (float)pow(__x, __y); }
 
@@ -529,14 +648,14 @@ static double atan2(double __y, double __x)
 
 static double asin(double __x)
 {
-    if (__x > 1.0 || __x < -1.0) return __builtin_nan("");
+    if (__x > 1.0 || __x < -1.0) return __math_dom(__builtin_nan(""));
     if (__x == 1.0) return 1.57079632679489661923;
     if (__x == -1.0) return -1.57079632679489661923;
     return atan(__x / sqrt(1.0 - __x * __x));
 }
 static double acos(double __x)
 {
-    if (__x > 1.0 || __x < -1.0) return __builtin_nan("");
+    if (__x > 1.0 || __x < -1.0) return __math_dom(__builtin_nan(""));
     return 1.57079632679489661923 - asin(__x);
 }
 
@@ -556,10 +675,18 @@ static double asinh(double __x)
 { return __x < 0.0 ? -log(-__x + sqrt(__x * __x + 1.0))
                    : log(__x + sqrt(__x * __x + 1.0)); }
 static double acosh(double __x)
-{ return __x < 1.0 ? __builtin_nan("") : log(__x + sqrt(__x * __x - 1.0)); }
+{ return __x < 1.0 ? __math_dom(__builtin_nan(""))
+                   : log(__x + sqrt(__x * __x - 1.0)); }
 static double atanh(double __x)
 {
-    if (__x >= 1.0 || __x <= -1.0) return __builtin_nan("");
+    /* THE TWO ENDS ARE DIFFERENT ERRORS. `atanh(1)` is a POLE -- the limit
+       exists and is infinite -- and `atanh(2)` is outside the domain
+       altogether. C asks for ERANGE and an infinity for the first and EDOM
+       and a NaN for the second, and one test for both would give the
+       wrong one of the two. */
+    if (__x == 1.0 || __x == -1.0)
+        return __math_ran(__builtin_copysign(__builtin_huge_val(), __x));
+    if (__x > 1.0 || __x < -1.0) return __math_dom(__builtin_nan(""));
     return 0.5 * log((1.0 + __x) / (1.0 - __x));
 }
 
@@ -643,10 +770,11 @@ static long double sqrtl(long double __x)
     int __e, __half;
     long double __y, __r;
     if (__ld_isnan(__x) || __x == 0.0L || __ld_isinf(__x)) {
-        if (__ld_isinf(__x) && __ld_signbit(__x)) return __builtin_nan("");
+        if (__ld_isinf(__x) && __ld_signbit(__x))
+            return __math_doml(__builtin_nan(""));
         return __x;
     }
-    if (__ld_signbit(__x)) return __builtin_nan("");
+    if (__ld_signbit(__x)) return __math_doml(__builtin_nan(""));
     __u.__v = __x;
     if ((__u.__r.__se & 0x7fff) == 0) {
         /* A SUBNORMAL HAS NO LEADING BIT: scaling it up by 2^64 makes it a
@@ -705,7 +833,8 @@ static long double ldexpl(long double __x, int __n)
     }
     __e = (int)(__u.__r.__se & 0x7fff) + __n;
     if (__e >= 0x7fff)
-        return __ld_signbit(__x) ? -__builtin_inf() : __builtin_inf();
+        return __math_ranl(__ld_signbit(__x) ? -__builtin_inf()
+                                             : __builtin_inf());
     if (__e <= 0) {
         __u.__r.__se = (unsigned short)((__u.__r.__se & 0x8000) | 1);
         __r = __u.__v;
@@ -713,7 +842,7 @@ static long double ldexpl(long double __x, int __n)
             __r *= 0.5L;
             if (__r == 0.0L) break;
         }
-        return __r;
+        return __r == 0.0L ? __math_ranl(__r) : __r;
     }
     __u.__r.__se = (unsigned short)((__u.__r.__se & 0x8000) | (unsigned)__e);
     return __u.__v;
@@ -760,8 +889,9 @@ static long double frexpl(long double __x, int *__e)
 static int ilogbl(long double __x)
 {
     int __b;
-    if (__x == 0.0L) return -2147483647 - 1;     /* FP_ILOGB0 */
-    if (!__ld_isfinite(__x)) return 2147483647;  /* FP_ILOGBNAN, and inf */
+    if (__x == 0.0L) { errno = EDOM; return FP_ILOGB0; }
+    if (__ld_isnan(__x)) { errno = EDOM; return FP_ILOGBNAN; }
+    if (__ld_isinf(__x)) { errno = EDOM; return 2147483647; }
     __b = __ld_biased(__x);
     if (__b == 0) {
         __x *= 18446744073709551616.0L;
@@ -928,8 +1058,9 @@ static long double fmodl(long double __x, long double __y)
 {
     unsigned long __k;
     long double __r;
-    if (__ld_isnan(__x) || __ld_isnan(__y) || __ld_isinf(__x) || __y == 0.0L)
-        return __builtin_nan("");
+    if (__ld_isnan(__x) || __ld_isnan(__y)) return __builtin_nan("");
+    if (__ld_isinf(__x) || __y == 0.0L)
+        return __math_doml(__builtin_nan(""));
     if (__ld_isinf(__y) || __x == 0.0L) return __x;
     __r = __ld_divrem(__x, __y, &__k);
     return __ld_signbit(__x) ? -__r : __r;
@@ -940,8 +1071,9 @@ static long double remainderl(long double __x, long double __y)
 {
     unsigned long __k;
     long double __r, __b;
-    if (__ld_isnan(__x) || __ld_isnan(__y) || __ld_isinf(__x) || __y == 0.0L)
-        return __builtin_nan("");
+    if (__ld_isnan(__x) || __ld_isnan(__y)) return __builtin_nan("");
+    if (__ld_isinf(__x) || __y == 0.0L)
+        return __math_doml(__builtin_nan(""));
     if (__ld_isinf(__y) || __x == 0.0L) return __x;
     __b = fabsl(__y);
     __r = __ld_divrem(__x, __y, &__k);
@@ -952,9 +1084,13 @@ static long double remquol(long double __x, long double __y, int *__quo)
 {
     unsigned long __k = 0;
     long double __r, __b;
-    if (__ld_isnan(__x) || __ld_isnan(__y) || __ld_isinf(__x) || __y == 0.0L) {
+    if (__ld_isnan(__x) || __ld_isnan(__y)) {
         if (__quo) *__quo = 0;
         return __builtin_nan("");
+    }
+    if (__ld_isinf(__x) || __y == 0.0L) {
+        if (__quo) *__quo = 0;
+        return __math_doml(__builtin_nan(""));
     }
     if (__ld_isinf(__y) || __x == 0.0L) {
         if (__quo) *__quo = 0;
@@ -1018,8 +1154,12 @@ static long double nanl(const char *__tag) { (void)__tag; return __builtin_nan("
 static int ilogb(double __x)
 {
     int __e = 0;
-    if (__x == 0.0) return -2147483647 - 1;      /* FP_ILOGB0 */
-    if (__builtin_isnan(__x) || __builtin_isinf(__x)) return 2147483647;
+    /* NONE OF THE THREE HAS AN EXPONENT, so each is a domain error as well
+       as a named answer -- C allows either a domain or a range error here
+       and glibc chooses the domain one. */
+    if (__x == 0.0) { errno = EDOM; return FP_ILOGB0; }
+    if (__builtin_isnan(__x)) { errno = EDOM; return FP_ILOGBNAN; }
+    if (__builtin_isinf(__x)) { errno = EDOM; return 2147483647; }
     frexp(__x, &__e);
     return __e - 1;
 }
@@ -1126,6 +1266,11 @@ __C_MATH1(erfc)
 
 static double lgamma(double __x)
 {
+    /* EVERY NON-POSITIVE WHOLE NUMBER IS A POLE of the gamma function, and
+       the logarithm of a pole is an infinity: ERANGE and +HUGE_VAL, for
+       -0.0 as much as for -3.0. */
+    if (__x <= 0.0 && __x == floor(__x))
+        return __math_ran(__builtin_huge_val());
     /* Lanczos, g = 7, nine coefficients -- the usual set. */
     static const double __g[9] = {
         0.99999999999980993, 676.5203681218851, -1259.1392167224028,
@@ -1144,10 +1289,23 @@ static double lgamma(double __x)
 }
 static double tgamma(double __x)
 {
+    double __r;
+    if (__builtin_isnan(__x)) return __x;
+    /* ZERO IS A POLE AND A NEGATIVE WHOLE NUMBER IS OUTSIDE THE DOMAIN --
+       different errors for the same shape of argument, because at zero the
+       one-sided limit is infinite and its sign is the zero's, while at -1
+       the two sides go opposite ways and there is no value to return. */
+    if (__x == 0.0)
+        return __math_ran(__builtin_copysign(__builtin_huge_val(), __x));
+    if (__x < 0.0 && __x == floor(__x)) return __math_dom(__builtin_nan(""));
     if (__x < 0.5)
         return 3.14159265358979323846
                / (sin(3.14159265358979323846 * __x) * tgamma(1.0 - __x));
-    return exp(lgamma(__x)) * ((__x - floor(__x) == 0.0 && __x < 0.0) ? 0.0 : 1.0);
+    /* `lgamma` REPORTS NOTHING HERE -- its argument is positive -- so an
+       infinity out of `exp` is this function's overflow to report. */
+    __r = __exp_core(lgamma(__x));
+    return __builtin_isinf(__r) && !__builtin_isinf(__x)
+           ? __math_ran(__r) : __r;
 }
 __C_MATH1(lgamma)
 __C_MATH1(tgamma)

@@ -7,6 +7,7 @@
    difference between a limitation and a wrong answer. */
 #ifndef _UASM_FENV_H
 #define _UASM_FENV_H
+#define __STDC_VERSION_FENV_H__ 202311L
 
 #define FE_TONEAREST 0
 #define FE_DOWNWARD 1

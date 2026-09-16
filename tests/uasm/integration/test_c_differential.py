@@ -1697,6 +1697,118 @@ PROGRAMS: dict[str, str] = {
         }
     """,
 
+    "binary_conversions_and_the_width_modifiers": r"""
+        /* C23's `%b` and `%B`, its `wN` and `wfN` length
+           modifiers, the `0b` prefix in the scanner and in
+           `strtol`, and enough of `<inttypes.h>`'s two hundred
+           conversion macros to catch a wrong modifier in the
+           table -- which is what a generated table gets wrong. */
+        #include <stdio.h>
+        #include <stdint.h>
+        #include <inttypes.h>
+        #include <stdlib.h>
+
+        int main(void) {
+            unsigned v; int n;
+            printf("[%b][%B][%#b][%#B][%08b][%-8b|]\n", 5u, 5u, 5u, 5u, 5u, 5u);
+            printf("[%b][%b][%b]\n", 0u, 1u, 4294967295u);
+            printf("[%lb][%hhb][%hb][%jb][%zb]\n", 9ul, 300u, 70000u,
+                   (uintmax_t)9, (size_t)9);
+            printf("[%w8d][%w16d][%w32d][%w64d]\n", (int8_t)-1, (int16_t)-2,
+                   (int32_t)-3, (int64_t)-4);
+            printf("[%wf8d][%wf16d][%wf32d][%wf64d]\n", (int_fast8_t)1,
+                   (int_fast16_t)2, (int_fast32_t)3, (int_fast64_t)4);
+            printf("[%w32x][%w64u][%w16b]\n", (uint32_t)255, (uint64_t)9, (uint16_t)5);
+            printf("[%" PRIb32 "][%" PRIB32 "][%" PRIb64 "][%" PRIbLEAST16 "]"
+                   "[%" PRIbFAST32 "][%" PRIbMAX "][%" PRIbPTR "]\n",
+                   (uint32_t)5, (uint32_t)5, (uint64_t)5, (uint_least16_t)5,
+                   (uint_fast32_t)5, (uintmax_t)5, (uintptr_t)5);
+            printf("[%" PRIi32 "][%" PRIo16 "][%" PRIX8 "][%" PRIdFAST16 "]\n",
+                   (int32_t)-7, (uint16_t)8, (uint8_t)255, (int_fast16_t)-9);
+
+            v = 99; n = sscanf("0b1011", "%b", &v);  printf("b1 %d %u\n", n, v);
+            v = 99; n = sscanf("1011", "%b", &v);    printf("b2 %d %u\n", n, v);
+            v = 99; n = sscanf("0b1011", "%i", &v);  printf("b3 %d %u\n", n, v);
+            v = 99; n = sscanf("0b", "%b", &v);      printf("b4 %d %u\n", n, v);
+            v = 99; n = sscanf("0x", "%x", &v);      printf("b5 %d %u\n", n, v);
+            {   char ch = '?'; v = 99;
+                n = sscanf("0xz", "%x%c", &v, &ch);  printf("b6 %d %u %c\n", n, v, ch); }
+            {   int32_t a = 0; int_fast16_t b = 0; int8_t c8 = 0;
+                n = sscanf("-3 -4 -5", "%w32d %wf16d %w8d", &a, &b, &c8);
+                printf("w %d %d %d %d\n", n, (int)a, (int)b, (int)c8); }
+            {   uint32_t u32 = 0;
+                n = sscanf("101", "%" SCNb32, &u32); printf("s %d %u\n", n, (unsigned)u32); }
+            {   int_least8_t l8 = 0; uint_fast32_t f32 = 0;
+                n = sscanf("-9 77", "%" SCNdLEAST8 " %" SCNuFAST32, &l8, &f32);
+                printf("t %d %d %u\n", n, (int)l8, (unsigned)f32); }
+            printf("l %ld %ld %ld %ld\n", strtol("0b101", 0, 0), strtol("0b101", 0, 2),
+                   strtol("0b101", 0, 16), strtol("0B11", 0, 0));
+            printf("m %lu %ld %ld\n", strtoul("0b11", 0, 2), strtol("0b", 0, 2),
+                   strtol("0b101", 0, 10));
+            return 0;
+        }
+    """,
+
+    "the_errors_the_math_functions_report": r"""
+        /* Every domain, pole and overflow error C asks `<math.h>`
+           to report through `errno` -- which is what this library's
+           `math_errhandling` promises and the only mechanism it
+           has, there being no floating-point exception flags. */
+        #include <stdio.h>
+        #include <math.h>
+        #include <errno.h>
+
+        static const char *e(void) {
+            return errno == EDOM ? "EDOM" : errno == ERANGE ? "ERANGE"
+                 : errno == 0 ? "-" : "?";
+        }
+        /* THE SIGN OF A NaN IS NOT PRINTED, because C does not say what it is:
+           glibc's `sqrt(-1)` answers a negative NaN and this one answers a
+           positive NaN, and both are right. What is being compared here is the
+           ERROR, so a NaN is reported as the word. */
+        static void show(const char *what, const char *err, double r) {
+            if (isnan(r)) printf("%-26s %-7s nan\n", what, err);
+            else printf("%-26s %-7s %g\n", what, err, r);
+        }
+        #define T(x) do { double r_; const char *e_; \
+            errno = 0; r_ = (x); e_ = e(); show(#x, e_, r_); } while (0)
+        #define TI(x) do { int r_; const char *e_; \
+            errno = 0; r_ = (x); e_ = e(); \
+            printf("%-26s %-7s %d\n", #x, e_, r_); } while (0)
+
+        int main(void) {
+            T(sqrt(-1.0)); T(sqrt(-0.0)); T(sqrt(4.0));
+            T(log(0.0)); T(log(-1.0)); T(log10(0.0)); T(log2(-1.0));
+            T(log1p(-1.0)); T(log1p(-2.0));
+            T(acos(2.0)); T(asin(-2.0)); T(acosh(0.5)); T(atanh(1.0));
+            T(atanh(-1.0)); T(atanh(2.0));
+            T(exp(1000.0)); T(exp(-1000.0)); T(exp2(5000.0));
+            T(exp(INFINITY)); T(exp(-INFINITY)); T(expm1(-1000.0));
+            T(pow(-0.0, -3.0)); T(pow(-0.0, -2.0)); T(pow(0.0, -2.0));
+            T(pow(-2.0, 0.5)); T(pow(2.0, -2000.0)); T(pow(0.0, 2.0));
+            T(pow(-0.0, 3.0)); T(pow(2.0, 3.0)); T(pow(-2.0, 3.0));
+            T(pow(-2.0, INFINITY)); T(pow(INFINITY, 2.0));
+            T(fmod(1.0, 0.0)); T(remainder(1.0, 0.0)); T(fmod(INFINITY, 2.0));
+            T(fmod(7.0, 3.0)); T(fmod(0.0, 3.0));
+            T(tgamma(0.0)); T(tgamma(-0.0)); T(tgamma(-1.0)); T(tgamma(5.0));
+            T(lgamma(0.0)); T(lgamma(-1.0)); T(lgamma(5.0));
+            T(ldexp(1.0, 5000)); T(ldexp(1.0, -5000)); T(scalbn(1.0, 5000));
+            T(ldexp(3.0, 2)); T(ldexp(0.0, 5));
+            T(cosh(1000.0)); T(sinh(1000.0)); T(tanh(1000.0));
+            TI(ilogb(0.0)); TI(ilogb(1.0));
+            T(logb(0.0));
+            T(sqrt(NAN)); T(log(NAN)); T(fmod(NAN, 0.0)); T(pow(NAN, 0.0));
+            T(fdim(INFINITY, 1.0)); T(hypot(3.0, 4.0));
+            T(sqrtf(-1.0f)); T(logf(0.0f)); T(acosf(2.0f));
+            T((double)sqrtl(-1.0L)); T((double)logl(0.0L)); T((double)acosl(2.0L));
+            printf("FP_ILOGB0=%d FP_ILOGBNAN=%d\n", FP_ILOGB0, FP_ILOGBNAN);
+            printf("huge %d %d %d\n", (int)(HUGE_VAL > 0 && isinf(HUGE_VAL)),
+                   (int)(HUGE_VALF > 0 && isinf(HUGE_VALF)),
+                   (int)(HUGE_VALL > 0 && isinf((double)HUGE_VALL)));
+            return 0;
+        }
+    """,
+
     "classification_by_name": r"""
         /* The four `<wctype.h>` functions that take a property at
            RUN time rather than naming one at compile time, the two
@@ -3874,6 +3986,52 @@ class TestSeveralTranslationUnits:
 #: reason that is its own choice rather than C's. So the expected text is
 #: written out, and the two paths that ARE comparable still are.
 NO_ORACLE: dict[str, tuple[str, str]] = {
+    "the_pow_errors_glibc_does_not_report": (r"""
+        /* NOT AGAINST THE HOST, because glibc disagrees with C here
+           and this follows C. glibc sets `math_errhandling` to 3 and
+           then leans on the floating-point exception flags for part
+           of it: `pow(2.0, 2000.0)` overflows to infinity and leaves
+           `errno` alone, and `pow(+0.0, -1.0)` is a pole with no
+           error where `pow(-0.0, -3.0)` is a pole with one. C asks
+           for ERANGE in every one of these -- 7.12.1 makes an
+           overflow and a pole a `shall` once
+           `math_errhandling & MATH_ERRNO` is nonzero, which here it
+           always is: there are no exception flags to report through
+           instead, so `math_errhandling` is 1 and not 3.
+
+           THE UNDERFLOW GOES THE OTHER WAY and is in the
+           host-compared program instead: C makes reporting that one
+           optional, so `pow(2.0, -2000.0)` sets nothing here either
+           and the two agree. */
+        #include <stdio.h>
+        #include <math.h>
+        #include <errno.h>
+
+        static const char *e(void) {
+            return errno == EDOM ? "EDOM" : errno == ERANGE ? "ERANGE"
+                 : errno == 0 ? "-" : "?";
+        }
+        #define T(x) do { double r_; const char *e_; errno = 0; r_ = (x); e_ = e(); \
+            printf("%-22s %-7s %g\n", #x, e_, r_); } while (0)
+
+        int main(void) {
+            T(pow(2.0, 2000.0));
+            T(pow(-2.0, 2000.0));
+            T(pow(-2.0, 2001.0));
+            T(pow(0.0, -1.0));
+            T(pow(0.0, -3.0));
+            printf("%d\n", math_errhandling);
+            return 0;
+        }
+    """, """\
+pow(2.0, 2000.0)       ERANGE  inf
+pow(-2.0, 2000.0)      ERANGE  inf
+pow(-2.0, 2001.0)      ERANGE  -inf
+pow(0.0, -1.0)         ERANGE  inf
+pow(0.0, -3.0)         ERANGE  inf
+1
+"""),
+
     "utf8_is_the_execution_encoding": (r"""
     #include <stdio.h>
     #include <stdlib.h>

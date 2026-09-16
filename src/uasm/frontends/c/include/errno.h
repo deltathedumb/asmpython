@@ -12,6 +12,7 @@
    fail: there is no locale to be wrong about and no syscall of our own. */
 #ifndef _UASM_ERRNO_H
 #define _UASM_ERRNO_H
+#define __STDC_VERSION_ERRNO_H__ 202311L
 
 static int __errno_storage;
 #define errno __errno_storage

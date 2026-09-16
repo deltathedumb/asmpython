@@ -27,6 +27,7 @@
    correct for every year in a 64-bit time_t, not only for 1970-2038. */
 #ifndef _UASM_TIME_H
 #define _UASM_TIME_H
+#define __STDC_VERSION_TIME_H__ 202311L
 
 #include <stddef.h>
 #include <__uasm_host.h>
@@ -39,6 +40,15 @@ typedef long clock_t;
    C only requires that `clock()/CLOCKS_PER_SEC` be a number of seconds. */
 #define CLOCKS_PER_SEC 1000000000L
 #define TIME_UTC 1
+
+/* A SECOND TIME BASE, AND ONLY BECAUSE THERE IS ONE TO HAVE. C23 lets an
+   implementation offer bases beyond `TIME_UTC` and `clock()` already reads
+   one -- `host_time_monotonic`, a count that never goes backwards and has
+   no epoch. Defining the macro is a promise that `timespec_get` supports
+   it, so `TIME_ACTIVE` and `TIME_THREAD_ACTIVE` are NOT defined here: there
+   is no host service that answers process or thread CPU time, and a macro
+   for a base that always fails would be worse than no macro at all. */
+#define TIME_MONOTONIC 2
 
 struct tm {
     int tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year;
@@ -60,10 +70,16 @@ static clock_t clock(void) { return (clock_t)host_time_monotonic(); }
 static int timespec_get(struct timespec *__ts, int __base)
 {
     long now;
-    if (__ts == NULL || __base != TIME_UTC) return 0;
-    now = host_time_unix();
+    if (__ts == NULL) return 0;
+    if (__base == TIME_UTC) now = host_time_unix();
+    else if (__base == TIME_MONOTONIC) now = host_time_monotonic();
+    else return 0;
     __ts->tv_sec = (time_t)(now / 1000000000L);
     __ts->tv_nsec = now % 1000000000L;
+    /* THE MONOTONIC CLOCK NEVER NEEDS THIS and the wall clock before 1970
+       does: a negative nanosecond count is a C division truncating toward
+       zero, and `struct timespec` wants the remainder non-negative with the
+       seconds carrying the borrow. */
     if (__ts->tv_nsec < 0) { __ts->tv_nsec += 1000000000L; __ts->tv_sec--; }
     return __base;
 }
@@ -76,7 +92,8 @@ static int timespec_get(struct timespec *__ts, int __base)
    is not something this side can see. */
 static int timespec_getres(struct timespec *__ts, int __base)
 {
-    if (__ts == NULL || __base != TIME_UTC) return 0;
+    if (__ts == NULL) return 0;
+    if (__base != TIME_UTC && __base != TIME_MONOTONIC) return 0;
     __ts->tv_sec = 0;
     __ts->tv_nsec = 1;
     return __base;

@@ -12,6 +12,7 @@
    circle. */
 #ifndef _UASM_STDLIB_H
 #define _UASM_STDLIB_H
+#define __STDC_VERSION_STDLIB_H__ 202311L
 
 #include <stddef.h>
 #include <string.h>
@@ -126,6 +127,13 @@ static unsigned long strtoul(const char *__s, char **__end, int __base)
     if ((__base == 0 || __base == 16) && p[0] == '0'
         && (p[1] == 'x' || p[1] == 'X') && __digit_value(p[2], 16) >= 0) {
         p += 2; __base = 16;
+    /* `0b` IS C23's, and it is accepted for base 2 as well as base 0 --
+       the same rule `0x` has had for base 16. A digit must follow: `"0b"`
+       alone is the number zero with a `b` left over, not a failure, which
+       is why the prefix is only taken when `p[2]` is a binary digit. */
+    } else if ((__base == 0 || __base == 2) && p[0] == '0'
+               && (p[1] == 'b' || p[1] == 'B') && __digit_value(p[2], 2) >= 0) {
+        p += 2; __base = 2;
     } else if (__base == 0) {
         __base = (p[0] == '0') ? 8 : 10;
     }

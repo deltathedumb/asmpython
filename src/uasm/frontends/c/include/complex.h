@@ -28,6 +28,7 @@
    not depend on this one. Said here rather than discovered later. */
 #ifndef _UASM_COMPLEX_H
 #define _UASM_COMPLEX_H
+#define __STDC_VERSION_COMPLEX_H__ 202311L
 
 #include <math.h>
 

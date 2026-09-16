@@ -29,6 +29,7 @@
    or a conversion cannot be right in one of them and wrong in another. */
 #ifndef _UASM_STDIO_H
 #define _UASM_STDIO_H
+#define __STDC_VERSION_STDIO_H__ 202311L
 
 #include <stddef.h>
 #include <stdarg.h>
@@ -781,6 +782,20 @@ static int __vformat(__sink *__s, const char *__fmt, va_list __ap)
            `long double` is sixteen bytes here and reaching one as a double
            would read the wrong argument and every one after it. */
         else if (*p == 'L') { p++; lmod = 3; }
+        /* C23's `wN` AND `wfN` NAME A WIDTH instead of a C type: `%w32d`
+           takes an `int32_t` and `%wf16d` an `int_fast16_t`. They are
+           turned into the modifier that type would have needed here --
+           which is the whole point of the spelling: a program says the
+           width it means and does not have to know that `int_fast16_t`
+           happens to be a `long` on this target and an `int` on the next. */
+        else if (*p == 'w') {
+            int __wb = 0, __wf = 0;
+            p++;
+            if (*p == 'f') { __wf = 1; p++; }
+            while (*p >= '0' && *p <= '9') { __wb = __wb * 10 + (*p - '0'); p++; }
+            lmod = (__wb == 64 || (__wf && __wb > 8)) ? 1
+                 : __wb == 16 ? -1 : __wb == 8 ? -2 : 0;
+        }
         conv = *p;
         if (conv == 0) break;
         p++;
@@ -792,12 +807,14 @@ static int __vformat(__sink *__s, const char *__fmt, va_list __ap)
             else if (lmod == -2) sv = (long)(signed char)sv;
             if (sv < 0) { negative = 1; uv = (unsigned long)(-(sv + 1)) + 1UL; }
             else uv = (unsigned long)sv;
-        } else if (conv == 'u' || conv == 'o' || conv == 'x' || conv == 'X') {
+        } else if (conv == 'u' || conv == 'o' || conv == 'x' || conv == 'X'
+                   || conv == 'b' || conv == 'B') {
             if (lmod >= 1) uv = va_arg(__ap, unsigned long);
             else uv = (unsigned long)va_arg(__ap, unsigned int);
             if (lmod == -1) uv &= 0xFFFFUL;
             else if (lmod == -2) uv &= 0xFFUL;
             if (conv == 'o') base = 8;
+            else if (conv == 'b' || conv == 'B') base = 2;
             else if (conv != 'u') base = 16;
             if (conv == 'X') base_digits = "0123456789ABCDEF";
         } else if (conv == 'c') {
@@ -890,13 +907,20 @@ static int __vformat(__sink *__s, const char *__fmt, va_list __ap)
         /* The integer conversions share this tail. */
         if (negative) prefix[plen++] = '-';
         else if (conv != 'u' && conv != 'o' && conv != 'x' && conv != 'X'
-                 && conv != 'p') {
+                 && conv != 'b' && conv != 'B' && conv != 'p') {
             if (flags & __F_PLUS) prefix[plen++] = '+';
             else if (flags & __F_SPACE) prefix[plen++] = ' ';
         }
         if ((flags & __F_ALT) && base == 16 && uv != 0 && conv != 'p') {
             prefix[plen++] = '0';
             prefix[plen++] = (conv == 'X') ? 'X' : 'x';
+        }
+        /* `%#b` IS `0b` AND `%#B` IS `0B`, the same rule `x` and `X` follow:
+           the prefix takes the case of the conversion, not of the digits --
+           binary has no letter digits for it to match. */
+        if ((flags & __F_ALT) && base == 2 && uv != 0) {
+            prefix[plen++] = '0';
+            prefix[plen++] = (conv == 'B') ? 'B' : 'b';
         }
         {
             char tmp[72];
@@ -1409,14 +1433,21 @@ typedef struct {
     FILE *__f;              /* NULL when the source is a string */
     const char *__s;
     size_t __at;
-    int __back;             /* the string's one pushback slot, or -1 */
+    /* THE STRING'S PUSHBACK, FOUR DEEP. One slot is enough for almost
+       every conversion and for two it is not: `%x` on `"0xz"` has to put
+       BOTH the `x` and the `z` back once the subject sequence turns out to
+       be just the `0`, and putting a wide character back is putting its
+       one to four UTF-8 bytes back. A stream needs none of this -- `ungetc`
+       above pushes into the read buffer and holds as many as fit. */
+    int __back[4];
+    int __nback;
     long __taken;           /* characters consumed, for `%n` */
 } __scan;
 
 static int __scan_get(__scan *__sc)
 {
     int c;
-    if (__sc->__back >= 0) { c = __sc->__back; __sc->__back = -1; }
+    if (__sc->__nback > 0) c = __sc->__back[--__sc->__nback];
     else if (__sc->__f != NULL) c = fgetc(__sc->__f);
     else c = __sc->__s[__sc->__at] ? (unsigned char)__sc->__s[__sc->__at++] : EOF;
     if (c != EOF) __sc->__taken++;
@@ -1428,7 +1459,7 @@ static void __scan_unget(__scan *__sc, int __c)
     if (__c == EOF) return;
     __sc->__taken--;
     if (__sc->__f != NULL) ungetc(__c, __sc->__f);
-    else __sc->__back = __c;
+    else if (__sc->__nback < 4) __sc->__back[__sc->__nback++] = __c;
 }
 
 static int __scan_space(int __c)
@@ -1499,18 +1530,37 @@ static int __scan_int(__scan *__sc, int __base, int __width, int __want_signed,
         c = __scan_get(__sc);
         used++;
     }
-    if ((__base == 0 || __base == 16) && c == '0') {
-        int save;
+    /* THE PREFIXES. `0x` for base 16 or base 0, and -- C23 -- `0b` for base
+       2 or base 0. `%i` is base 0 and so reads both, which is the reason
+       the two are decided here rather than by the caller. */
+    if ((__base == 0 || __base == 16 || __base == 2) && c == '0') {
+        int save, __pb;
         any = 1;
         v = 0;
         if (!__width || used < __width) {
             save = __scan_get(__sc);
             used++;
-            if (save == 'x' || save == 'X') {
-                __base = 16;
-                any = 0;
-                c = (!__width || used < __width) ? __scan_get(__sc) : EOF;
-                if (c != EOF) used++;
+            __pb = ((save == 'x' || save == 'X') && __base != 2) ? 16
+                 : ((save == 'b' || save == 'B') && __base != 16) ? 2 : 0;
+            if (__pb) {
+                int nxt = (!__width || used < __width) ? __scan_get(__sc) : EOF;
+                if (nxt != EOF) used++;
+                if (__scan_digit(nxt, __pb) >= 0) { __base = __pb; c = nxt; }
+                else {
+                    /* `0x` WITH NO HEX DIGIT AFTER IT. What has been read is
+                       a PREFIX of something that would have matched, and C
+                       lets a conversion consume one of those -- an input
+                       item is the longest sequence that is, "or is a prefix
+                       of", a matching sequence. So the `x` stays eaten, the
+                       value is the zero already in hand, and only the
+                       character AFTER the prefix goes back. `strtol` is the
+                       other way and reports `"0x"` as the number zero with
+                       the `x` left in the string; the two really do differ,
+                       and glibc draws the line in the same place. */
+                    __scan_unget(__sc, nxt);
+                    if (__base == 0) __base = 8;
+                    c = EOF;
+                }
             } else {
                 if (__base == 0) __base = 8;
                 c = save;
@@ -1686,10 +1736,9 @@ static int __scan_wchar(__scan *__sc, wchar_t *__out)
     return 1;
 }
 
-/* AND PUTTING ONE BACK IS PUTTING ITS BYTES BACK, which the two kinds of
-   source do differently: a stream has `ungetc` and takes several, and a
-   string has a cursor to wind back. `__scan_unget`'s one slot is for a BYTE
-   and cannot hold four, which is why this is not written in terms of it. */
+/* AND PUTTING ONE BACK IS PUTTING ITS BYTES BACK, last one first, through
+   the same pushback every other conversion uses. It holds four, which is
+   the longest a UTF-8 character gets. */
 static void __scan_unget_wchar(__scan *__sc, wchar_t __w)
 {
     char __buf[8];
@@ -1699,13 +1748,8 @@ static void __scan_unget_wchar(__scan *__sc, wchar_t __w)
     __ws.__value = 0;
     __k = (int)wcrtomb(__buf, __w, &__ws);
     if (__k <= 0) return;
-    if (__sc->__f != NULL) {
-        for (__i = __k - 1; __i >= 0; __i--)
-            ungetc((unsigned char)__buf[__i], __sc->__f);
-    } else if ((size_t)__k <= __sc->__at) {
-        __sc->__at -= (size_t)__k;
-    }
-    __sc->__taken -= __k;
+    for (__i = __k - 1; __i >= 0; __i--)
+        __scan_unget(__sc, (int)(unsigned char)__buf[__i]);
 }
 
 static int __vscan(__scan *__sc, const char *__fmt, va_list __ap)
@@ -1750,6 +1794,18 @@ static int __vscan(__scan *__sc, const char *__fmt, va_list __ap)
             else if (*f == 'z') { f++; len = __LEN_SIZE; }
             else if (*f == 't') { f++; len = __LEN_PTRD; }
             else if (*f == 'L') { f++; len = __LEN_LDBL; }
+            /* `wN` AND `wfN` AGAIN, and here the width matters for a
+               second reason: the scanner writes THROUGH the pointer, so
+               naming one byte too many corrupts whatever follows it. */
+            else if (*f == 'w') {
+                int __wb = 0, __wf = 0;
+                f++;
+                if (*f == 'f') { __wf = 1; f++; }
+                while (*f >= '0' && *f <= '9') { __wb = __wb * 10 + (*f++ - '0'); }
+                len = (__wb == 64 || (__wf && __wb > 8)) ? __LEN_LONG
+                    : __wb == 16 ? __LEN_SHORT
+                    : __wb == 8 ? __LEN_CHAR : __LEN_INT;
+            }
             if (*f == 0) return done;
             c = *f++;
             /* THE POINTER IS TAKEN BEFORE THE CONVERSION RUNS and only when
@@ -1938,7 +1994,7 @@ static int __vscan(__scan *__sc, const char *__fmt, va_list __ap)
 static int vfscanf(FILE *__f, const char *__fmt, va_list __ap)
 {
     __scan sc;
-    sc.__f = __f; sc.__s = NULL; sc.__at = 0; sc.__back = -1; sc.__taken = 0;
+    sc.__f = __f; sc.__s = NULL; sc.__at = 0; sc.__nback = 0; sc.__taken = 0;
     return __vscan(&sc, __fmt, __ap);
 }
 
@@ -1950,7 +2006,7 @@ static int vscanf(const char *__fmt, va_list __ap)
 static int vsscanf(const char *__s, const char *__fmt, va_list __ap)
 {
     __scan sc;
-    sc.__f = NULL; sc.__s = __s; sc.__at = 0; sc.__back = -1; sc.__taken = 0;
+    sc.__f = NULL; sc.__s = __s; sc.__at = 0; sc.__nback = 0; sc.__taken = 0;
     return __vscan(&sc, __fmt, __ap);
 }
 

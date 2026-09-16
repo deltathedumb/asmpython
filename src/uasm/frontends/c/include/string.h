@@ -5,6 +5,7 @@
    so none of them needs anything from the platform. */
 #ifndef _UASM_STRING_H
 #define _UASM_STRING_H
+#define __STDC_VERSION_STRING_H__ 202311L
 
 #include <stddef.h>
 #include <errno.h>

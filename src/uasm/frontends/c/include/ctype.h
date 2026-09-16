@@ -11,6 +11,7 @@
    than reading off the front of a table -- there is no table, so it is free. */
 #ifndef _UASM_CTYPE_H
 #define _UASM_CTYPE_H
+#define __STDC_VERSION_CTYPE_H__ 202311L
 
 static int isdigit(int __c) { return __c >= '0' && __c <= '9'; }
 static int isxdigit(int __c)

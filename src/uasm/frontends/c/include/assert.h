@@ -10,6 +10,8 @@
 
 #ifndef _UASM_ASSERT_DECLARED
 #define _UASM_ASSERT_DECLARED
+#define __STDC_VERSION_ASSERT_H__ 202311L
+#define __STDC_VERSION_ASSERT_H__ 202311L
 
 static void __assert_write(const char *__s)
 {

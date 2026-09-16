@@ -23,6 +23,15 @@
 #ifndef _UASM_FLOAT_H
 #define _UASM_FLOAT_H
 
+#define __STDC_VERSION_FLOAT_H__ 202311L
+
+/* INFINITY AND NAN LIVE IN BOTH HEADERS in C23. `<math.h>` had them and
+   this one has them too, so a program that wants a quiet NaN need not
+   drag in a library of transcendental functions to get one. Same
+   spellings, so including both is not a redefinition. */
+#define INFINITY __builtin_inff()
+#define NAN      __builtin_nanf("")
+
 #define FLT_RADIX 2
 #define FLT_ROUNDS 1
 #define FLT_EVAL_METHOD 0

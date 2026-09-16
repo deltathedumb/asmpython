@@ -32,6 +32,7 @@
    sigmask; this one is a number, and `sizeof (jmp_buf)` says 8. */
 #ifndef _UASM_SETJMP_H
 #define _UASM_SETJMP_H
+#define __STDC_VERSION_SETJMP_H__ 202311L
 
 /* AN ARRAY, as C requires -- which is what makes `jmp_buf env;` and then
    `setjmp(env)` pass the address without an `&`, and what stops a program

@@ -20,6 +20,7 @@
    `<math.h>` and `<complex.h>`, so `I` and `creal` are in scope too. */
 #ifndef _UASM_TGMATH_H
 #define _UASM_TGMATH_H
+#define __STDC_VERSION_TGMATH_H__ 202311L
 
 #include <math.h>
 #include <complex.h>

@@ -6,6 +6,18 @@
    functions are: the platform floor cannot read. */
 #ifndef _UASM_WCHAR_H
 #define _UASM_WCHAR_H
+#define __STDC_VERSION_WCHAR_H__ 202311L
+
+/* WCHAR_MIN AND WCHAR_MAX ARE IN BOTH HEADERS, here and in `<stdint.h>`,
+   and C says so: the range of `wchar_t` is this header's business as much
+   as the integer ranges are that one's. Written from the compiler's own
+   macros, so the two spellings cannot drift apart. */
+#ifndef WCHAR_MAX
+#define WCHAR_MAX __WCHAR_MAX__
+#endif
+#ifndef WCHAR_MIN
+#define WCHAR_MIN __WCHAR_MIN__
+#endif
 
 #include <stddef.h>
 #include <stdarg.h>

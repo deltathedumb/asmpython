@@ -2,6 +2,7 @@
    Written in terms of __*_MAX__ so this file cannot disagree with `sizeof`. */
 #ifndef _UASM_LIMITS_H
 #define _UASM_LIMITS_H
+#define __STDC_VERSION_LIMITS_H__ 202311L
 
 #define CHAR_BIT   __CHAR_BIT__
 #define SCHAR_MAX  __SCHAR_MAX__

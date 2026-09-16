@@ -28,6 +28,7 @@
    looks like a whole one is the worse trade. */
 #ifndef _UASM_STDATOMIC_H
 #define _UASM_STDATOMIC_H
+#define __STDC_VERSION_STDATOMIC_H__ 202311L
 
 #include <stdint.h>
 #include <stddef.h>
@@ -64,9 +65,40 @@ typedef uintptr_t atomic_uintptr_t;
 typedef intmax_t atomic_intmax_t;
 typedef uintmax_t atomic_uintmax_t;
 
+/* AND THE REST OF THE NAMES C LISTS: the character types the wide and
+   UTF headers use, and one for every exact, least and fast integer in
+   `<stdint.h>`. Written out rather than left to whoever needs one,
+   because a program that says `atomic_uint_least16_t` and gets a
+   parse error has found a hole in the header, not in itself. */
+typedef unsigned short atomic_char16_t;
+typedef unsigned int atomic_char32_t;
+typedef wchar_t atomic_wchar_t;
+typedef int_least8_t atomic_int_least8_t;
+typedef uint_least8_t atomic_uint_least8_t;
+typedef int_fast8_t atomic_int_fast8_t;
+typedef uint_fast8_t atomic_uint_fast8_t;
+typedef int_least16_t atomic_int_least16_t;
+typedef uint_least16_t atomic_uint_least16_t;
+typedef int_fast16_t atomic_int_fast16_t;
+typedef uint_fast16_t atomic_uint_fast16_t;
+typedef int_least32_t atomic_int_least32_t;
+typedef uint_least32_t atomic_uint_least32_t;
+typedef int_fast32_t atomic_int_fast32_t;
+typedef uint_fast32_t atomic_uint_fast32_t;
+typedef int_least64_t atomic_int_least64_t;
+typedef uint_least64_t atomic_uint_least64_t;
+typedef int_fast64_t atomic_int_fast64_t;
+typedef uint_fast64_t atomic_uint_fast64_t;
+
 typedef struct { _Bool __v; } atomic_flag;
 #define ATOMIC_FLAG_INIT { 0 }
 #define ATOMIC_VAR_INIT(v) (v)
+
+/* `kill_dependency` CUTS A DEPENDENCY CHAIN, which is what a program using
+   `memory_order_consume` needs to say. There is no consume ordering to cut
+   here -- see the top of this file -- so it is the identity, which is also
+   what it is on every implementation that maps consume to acquire. */
+#define kill_dependency(y) (y)
 
 #define atomic_init(p, v) ((void)(*(p) = (v)))
 #define atomic_is_lock_free(p) ((void)(p), 1)

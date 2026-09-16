@@ -6,6 +6,7 @@
    real work in this file. */
 #ifndef _UASM_UCHAR_H
 #define _UASM_UCHAR_H
+#define __STDC_VERSION_UCHAR_H__ 202311L
 
 #include <wchar.h>
 

@@ -317,6 +317,13 @@ constant expression; `[[...]]` attributes everywhere C allows them;
 with a fixed underlying type, and a label before a declaration. In the preprocessor: `#embed` with all four of its
 parameters and `__has_embed`, `#elifdef`, `__VA_OPT__` and `_Pragma`.
 
+`printf` and `scanf` are C23's: `%b` and `%B` for binary with `%#b` writing
+the `0b`, the `wN` and `wfN` length modifiers that name a width instead of a
+C type, `0b` accepted by the scanner and by `strtol` in base 2 and base 0,
+and all two hundred of `<inttypes.h>`'s conversion macros — which are two
+tables and not one, because `printf` sees a promoted argument and `scanf`
+writes through a pointer.
+
 The preprocessor is Prosser's algorithm, which is to say it agrees with the
 standard's own worked examples rather than with an opinion about what
 recursive macro expansion should mean.

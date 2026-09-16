@@ -1,6 +1,7 @@
 /* <stdint.h> -- exact-width types, from the compiler's own table. */
 #ifndef _UASM_STDINT_H
 #define _UASM_STDINT_H
+#define __STDC_VERSION_STDINT_H__ 202311L
 
 typedef signed char        int8_t;
 typedef short              int16_t;
@@ -92,6 +93,50 @@ typedef __UINTMAX_TYPE__   uintmax_t;
 #define WINT_MIN    INT32_MIN
 #define SIG_ATOMIC_MAX INT32_MAX
 #define SIG_ATOMIC_MIN INT32_MIN
+
+/* THE WIDTHS, which C23 asks for beside every limit above. A width
+   counts the sign bit where there is one, so a signed type and its
+   unsigned counterpart have the SAME width -- `INT8_WIDTH` and
+   `UINT8_WIDTH` are both 8, and neither is 7. */
+#define INT8_WIDTH  8
+#define UINT8_WIDTH 8
+#define INT16_WIDTH  16
+#define UINT16_WIDTH 16
+#define INT32_WIDTH  32
+#define UINT32_WIDTH 32
+#define INT64_WIDTH  64
+#define UINT64_WIDTH 64
+#define INT_LEAST8_WIDTH  8
+#define UINT_LEAST8_WIDTH 8
+#define INT_LEAST16_WIDTH  16
+#define UINT_LEAST16_WIDTH 16
+#define INT_LEAST32_WIDTH  32
+#define UINT_LEAST32_WIDTH 32
+#define INT_LEAST64_WIDTH  64
+#define UINT_LEAST64_WIDTH 64
+
+/* AND THE FAST ONES ARE THE WIDTHS OF THE TYPES ABOVE and not of the
+   numbers they were asked for: `int_fast16_t` is a `long` here, so
+   `INT_FAST16_WIDTH` is 64. A macro saying 16 would be describing a
+   different type from the one the header declares. */
+#define INT_FAST8_WIDTH  8
+#define UINT_FAST8_WIDTH 8
+#define INT_FAST16_WIDTH  64
+#define UINT_FAST16_WIDTH 64
+#define INT_FAST32_WIDTH  64
+#define UINT_FAST32_WIDTH 64
+#define INT_FAST64_WIDTH  64
+#define UINT_FAST64_WIDTH 64
+
+#define INTPTR_WIDTH     64
+#define UINTPTR_WIDTH    64
+#define INTMAX_WIDTH     64
+#define UINTMAX_WIDTH    64
+#define PTRDIFF_WIDTH    64
+#define SIZE_WIDTH       64
+#define SIG_ATOMIC_WIDTH 32
+#define WCHAR_WIDTH      32
+#define WINT_WIDTH       32
 
 #define INT8_C(v)   v
 #define INT16_C(v)  v

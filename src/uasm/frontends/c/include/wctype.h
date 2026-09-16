@@ -7,6 +7,7 @@
    which is worth knowing before relying on it. */
 #ifndef _UASM_WCTYPE_H
 #define _UASM_WCTYPE_H
+#define __STDC_VERSION_WCTYPE_H__ 202311L
 
 #include <wchar.h>
 

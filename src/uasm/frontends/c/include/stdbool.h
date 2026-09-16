@@ -1,6 +1,7 @@
 /* <stdbool.h> -- C99's spelling of what C23 made keywords. */
 #ifndef _UASM_STDBOOL_H
 #define _UASM_STDBOOL_H
+#define __STDC_VERSION_STDBOOL_H__ 202311L
 #define bool _Bool
 #define true 1
 #define false 0

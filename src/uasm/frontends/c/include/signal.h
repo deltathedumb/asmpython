@@ -7,6 +7,7 @@
    non-zero, which means it failed. */
 #ifndef _UASM_SIGNAL_H
 #define _UASM_SIGNAL_H
+#define __STDC_VERSION_SIGNAL_H__ 202311L
 
 typedef int sig_atomic_t;
 
