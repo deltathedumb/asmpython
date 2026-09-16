@@ -448,6 +448,69 @@ class TestTheDivergences:
         codes = [d.code for d in sink.diagnostics]
         assert codes.count("W1218") == 1, codes
 
+    def test_embed_is_the_file_s_bytes(self, tmp_path):
+        """`#embed` IS A DIRECTIVE AND NOT A FUNCTION, which is why it needs
+        a file on disk to test: the bytes are read at translation time and
+        come out as a comma-separated list of integer constants.
+
+        gcc 13 HAS NO `#embed` -- it landed in 15 -- so there is no oracle
+        for it and this checks the bytes in the module directly."""
+        (tmp_path / "data.bin").write_bytes(b"ABCDE")
+        (tmp_path / "empty.bin").write_bytes(b"")
+        src = tmp_path / "t.c"
+        src.write_text(
+            'static const unsigned char all[] = {\n#embed "data.bin"\n};\n'
+            'static const unsigned char some[] = {\n'
+            '#embed "data.bin" limit(3)\n};\n'
+            'static const unsigned char both[] = {\n'
+            '#embed "data.bin" prefix(1, ) suffix(, 2)\n};\n'
+            'static const unsigned char none[] = {\n'
+            '#embed "empty.bin" if_empty(9)\n};\n'
+            '#if __has_embed("data.bin") != __STDC_EMBED_FOUND__\n'
+            '#error "should have been found"\n#endif\n'
+            '#if __has_embed("empty.bin") != __STDC_EMBED_EMPTY__\n'
+            '#error "should have been found and empty"\n#endif\n'
+            '#if __has_embed("nope.bin") != __STDC_EMBED_NOT_FOUND__\n'
+            '#error "should not have been found"\n#endif\n'
+            "int main(void){ return all[0] + some[0] + both[0] + none[0]; }\n",
+            encoding="utf-8")
+        sink = DiagnosticSink()
+        module = c_frontend.CFrontend().compile(SourceFile.read(src), sink)
+        assert module is not None, [d.message for d in sink.diagnostics]
+        assert not sink.failed, [d.message for d in sink.diagnostics]
+        data = {g.name.split(".")[-1]: bytes(g.data or b"")
+                for g in module.globals}
+        assert data["all"] == b"ABCDE", data
+        assert data["some"] == b"ABC", data
+        # `prefix` AND `suffix` ARE DROPPED WHEN THE RESOURCE IS EMPTY, which
+        # is the difference between them and writing the values by hand.
+        assert data["both"] == b"\x01ABCDE\x02", data
+        assert data["none"] == b"\x09", data
+
+    def test_pragma_operator_is_a_pragma(self, tmp_path):
+        """`_Pragma("once")` is `#pragma once` written where a token goes,
+        and it is processed AFTER macro replacement -- which is why a header
+        may write `_Pragma(STRINGIFY(x))` and why this lives in the
+        expander rather than in the directive loop."""
+        header = tmp_path / "guarded.h"
+        header.write_text('_Pragma("once")\nstatic int guarded_value = 7;\n',
+                          encoding="utf-8")
+        src = tmp_path / "t.c"
+        src.write_text('#include "guarded.h"\n#include "guarded.h"\n'
+                       '#define P(x) _Pragma(#x)\nP(pack(1))\n'
+                       "int main(void){ _Pragma(\"STDC FP_CONTRACT ON\")\n"
+                       "                return guarded_value - 7; }\n",
+                       encoding="utf-8")
+        sink = DiagnosticSink()
+        module = c_frontend.CFrontend().compile(SourceFile.read(src), sink)
+        assert module is not None, [d.message for d in sink.diagnostics]
+        assert not sink.failed, [d.message for d in sink.diagnostics]
+
+        # AND IT IS AN OPERATOR, so a bare one is not an identifier the
+        # parser should be left to puzzle over two phases later.
+        _, sink = compile_c("int main(void){ return _Pragma; }")
+        assert "E1148" in [d.code for d in sink.diagnostics]
+
     def test_a_bitint_wider_than_the_maximum_is_refused_by_name(self):
         """`BITINT_MAXWIDTH` is 64 here, which C23 permits -- it requires
         only `ULLONG_WIDTH`. The refusal names the number rather than

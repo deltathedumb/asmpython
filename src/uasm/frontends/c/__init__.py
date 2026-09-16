@@ -82,9 +82,17 @@ always produced the same code and never been one; `[[...]]` attributes
 everywhere C allows them, with `nodiscard` and `deprecated` the two that
 warn and `attributes.py` saying why the rest do not; `nullptr` and
 `nullptr_t`; `typeof` and `typeof_unqual`; an `enum` with a fixed underlying
-type; `#elifdef`, `#embed`, `__has_include` and `__has_c_attribute`; a label
-before a declaration and at the end of a block; `u8` character constants,
-binary literals and digit separators; and `unreachable()`.
+type; a label before a declaration and at the end of a block; `u8` character
+constants, binary literals and digit separators; and `unreachable()`.
+
+IN THE PREPROCESSOR: `#embed`, with `limit`, `prefix`, `suffix` and
+`if_empty` and with `__has_embed` to ask first -- a file's bytes as integer
+constants, which is a DIRECTIVE because the script that used to write that
+array wrote a C file with a hundred thousand tokens in it that every build
+then had to lex; `#elifdef` and `#elifndef`; `__VA_OPT__`; `#warning`;
+`__has_include`, `__has_c_attribute` and `__has_builtin`; and `_Pragma`,
+processed after macro replacement because that is where a header's
+`_Pragma(STRINGIFY(x))` needs it to be.
 
 ALL THIRTY-ONE HEADERS C23 REQUIRES are in `include/`, and all thirty-one
 work. `<threads.h>` is `objects/hostsvc.py`'s `thread` group: threads are a

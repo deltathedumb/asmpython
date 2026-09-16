@@ -253,3 +253,22 @@ class PPExpr:
 def evaluate(tokens: list[Token], sink: DiagnosticSink) -> bool:
     """The truth value of a `#if` line whose macros are already expanded."""
     return PPExpr(tokens, sink).run()
+
+
+def evaluate_value(tokens: list[Token], sink: DiagnosticSink) -> int | None:
+    """The VALUE of the same grammar, for `#embed`'s `limit(n)`.
+
+    `#if` WANTS A TRUTH AND `limit` WANTS A NUMBER, and they are the same
+    arithmetic: the same operators, the same `intmax_t` width, the same
+    rule that an undefined identifier is 0. None on a line this reports
+    a diagnostic about.
+    """
+    p = PPExpr(tokens, sink)
+    if not p.toks:
+        p._error("E1100", "#embed limit with no expression")
+        return None
+    value = p.conditional(True)
+    left = p.peek()
+    if left is not None and not p.failed:
+        p._error("E1101", f"unexpected {left.text!r} after the limit", left)
+    return None if p.failed else value.as_signed()

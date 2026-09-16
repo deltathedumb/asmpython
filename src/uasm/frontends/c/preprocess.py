@@ -44,7 +44,7 @@ from ...diagnostics import (
 )
 from .lexer import lex
 from .literals import LiteralError, decode_string
-from .ppexpr import evaluate
+from .ppexpr import evaluate, evaluate_value
 from .tokens import Kind, Token
 
 #: Where the bundled standard headers live. Searched LAST, after everything the
@@ -169,6 +169,13 @@ class Preprocessor:
             "__STDC_VERSION__": "202311L",
             "__STDC_HOSTED__": "1",
             "__STDC_UTF_16__": "1",
+            # `#embed` AND `__has_embed` ANSWER WITH THESE, which C23 makes
+            # predefined so that a program can compare without naming a
+            # header -- `__has_embed` is a preprocessor operator and there is
+            # no header it could have been told to include first.
+            "__STDC_EMBED_NOT_FOUND__": "0",
+            "__STDC_EMBED_FOUND__": "1",
+            "__STDC_EMBED_EMPTY__": "2",
             "__STDC_UTF_32__": "1",
             "__uasm__": "1",
             "__UIR__": "1",
@@ -360,10 +367,7 @@ class Preprocessor:
         elif word == "pragma":
             self._pragma(rest, name)
         elif word == "embed":
-            self.sink.report(
-                error("E1114", "#embed is not supported")
-                .at(name.span)
-                .help("read the file at run time, or generate a C array"))
+            out.extend(self._embed(rest, name))
         elif name.kind is Kind.NUMBER:
             # `# 1 "file.h"` -- the line marker gcc's own preprocessor emits.
             # Accepted and ignored so preprocessed source can be fed back in.
@@ -418,6 +422,10 @@ class Preprocessor:
             if t.kind is Kind.IDENT and t.text == "defined":
                 name, i = self._query_name(toks, i + 1, t)
                 out.append(_number(1 if name in self.macros else 0, t.span))
+                continue
+            if t.kind is Kind.IDENT and t.text == "__has_embed":
+                got, i = self._has_embed(toks, i + 1, t)
+                out.append(_number(got, t.span))
                 continue
             if t.kind is Kind.IDENT and t.text in ("__has_include",
                                                    "__has_include_next"):
@@ -681,6 +689,169 @@ class Preprocessor:
             self._including.pop()
             self.depth -= 1
 
+    # ── #embed ──────────────────────────────────────────────────────────────
+    def _embed(self, rest: list[Token], at: Token) -> list[Token]:
+        """`#embed "file"` -- the file's bytes, as integer constants.
+
+        IT IS A DIRECTIVE AND NOT A FUNCTION, which is the whole reason it
+        exists: a program that wants a file in an array had to run a script
+        that wrote one out, and the array it wrote was a C source file with a
+        hundred thousand tokens in it that every build had to lex. This
+        produces the same tokens without the file, and a compiler may
+        recognise the shape and skip the tokens entirely.
+
+        THE BYTES COME OUT AS A COMMA-SEPARATED LIST and nothing else, so the
+        braces are the program's: `= { #embed "x" }`. `prefix` and `suffix`
+        put tokens either side and are dropped when the resource is empty --
+        which is what makes `{ 0, #embed "x" }` and `{ #embed "x" prefix(0,) }`
+        different, and why both spellings exist.
+        """
+        name, angled, used = self._header_name(rest, 0, at)
+        if name is None:
+            expanded = self.expand(rest)
+            name, angled, used = self._header_name(expanded, 0, at)
+            rest = expanded
+        if not name:
+            self.sink.report(
+                error("E1114", '#embed needs "file" or <file>').at(at.span))
+            return []
+        params = self._embed_params(rest[used:], at)
+        if params is None:
+            return []
+        limit, prefix, suffix, if_empty = params
+        data = self._embed_read(name, angled, at)
+        if data is None:
+            return []
+        if limit is not None:
+            data = data[:limit]
+        if not data:
+            return list(if_empty)
+        out = list(prefix)
+        for i, byte in enumerate(data):
+            if i:
+                out.append(Token(Kind.PUNCT, ",", at.span, ws=False))
+            out.append(_number(byte, at.span))
+        out.extend(suffix)
+        return out
+
+    def _embed_read(self, name: str, angled: bool, at: Token) -> bytes | None:
+        path = self._find(name, angled, at)
+        if path is None:
+            self.sink.report(
+                error("E1146", f"cannot find embedded file {name!r}")
+                .at(at.span)
+                .help("`__has_embed` answers before the directive does"))
+            return None
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            self.sink.report(
+                error("E1147", f"cannot read {path}: {exc.strerror}")
+                .at(at.span))
+            return None
+
+    def _embed_params(self, toks: list[Token], at: Token):
+        """`limit(n) prefix(...) suffix(...) if_empty(...)`, in any order."""
+        limit: int | None = None
+        prefix: list[Token] = []
+        suffix: list[Token] = []
+        if_empty: list[Token] = []
+        i = 0
+        while i < len(toks):
+            t = toks[i]
+            if t.kind is not Kind.IDENT:
+                self.sink.report(
+                    error("E1145", f"expected an #embed parameter, found "
+                                   f"{t.text!r}").at(t.span))
+                return None
+            word = t.text
+            i += 1
+            # A VENDOR'S PARAMETER IS PREFIXED, exactly as an attribute is,
+            # and is ignored for the same reason: the prefix says it belongs
+            # to somebody else.
+            vendor = False
+            if i < len(toks) and toks[i].is_punct("::"):
+                vendor = True
+                i += 2
+            if i >= len(toks) or not toks[i].is_punct("("):
+                if vendor:
+                    continue
+                self.sink.report(
+                    error("E1145", f"#embed parameter {word!r} needs "
+                                   f"parentheses").at(t.span))
+                return None
+            depth, j = 0, i
+            while j < len(toks):
+                if toks[j].is_punct("("):
+                    depth += 1
+                elif toks[j].is_punct(")"):
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            if j >= len(toks):
+                self.sink.report(
+                    error("E1145", f"#embed parameter {word!r} is never "
+                                   f"closed").at(t.span))
+                return None
+            body = toks[i + 1:j]
+            i = j + 1
+            if vendor:
+                continue
+            if word == "limit":
+                value = evaluate_value(
+                    self._resolve_queries(
+                        self.expand(self._resolve_queries(body),
+                                    in_if=True)), self.sink)
+                if value is None:
+                    return None
+                limit = max(0, value)
+            elif word == "prefix":
+                prefix = body
+            elif word == "suffix":
+                suffix = body
+            elif word == "if_empty":
+                if_empty = body
+            else:
+                self.sink.report(
+                    error("E1145", f"unknown #embed parameter {word!r}")
+                    .at(t.span)
+                    .note("C23 has `limit`, `prefix`, `suffix` and "
+                          "`if_empty`; anything else is a vendor's and "
+                          "goes in its own namespace"))
+                return None
+        return limit, prefix, suffix, if_empty
+
+    def _has_embed(self, toks: list[Token], i: int,
+                   at: Token) -> tuple[int, int]:
+        """`__has_embed(header)` -- 0 missing, 1 found, 2 found and empty."""
+        if i < len(toks) and toks[i].is_punct("("):
+            depth, j = 0, i
+            while j < len(toks):
+                if toks[j].is_punct("("):
+                    depth += 1
+                elif toks[j].is_punct(")"):
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            inner = toks[i + 1:j]
+            after = min(j + 1, len(toks))
+            name, angled, used = self._header_name(inner, 0, at)
+            if name:
+                path = self._find(name, angled, at)
+                if path is None:
+                    return 0, after
+                try:
+                    return (2 if path.stat().st_size == 0 else 1), after
+                except OSError:
+                    return 0, after
+            return 0, after
+        self.sink.report(
+            error("E1144", "__has_embed needs a header name in parentheses")
+            .at(at.span))
+        return 0, len(toks)
+
     # ── #line and #pragma ───────────────────────────────────────────────────
     def _line(self, rest: list[Token], at: Token, source: SourceFile) -> None:
         rest = self.expand(rest)
@@ -729,6 +900,9 @@ class Preprocessor:
         work = list(reversed(tokens))
         while work:
             t = work.pop()
+            if t.kind is Kind.IDENT and t.text == "_Pragma" \
+                    and self._pragma_operator(t, work):
+                continue
             if t.kind is not Kind.IDENT or t.text in t.hide:
                 out.append(t)
                 continue
@@ -762,6 +936,58 @@ class Preprocessor:
             body = self._subst(macro, t, args, hide)
             work.extend(reversed(body))
         return out
+
+    def _pragma_operator(self, at: Token, work: list[Token]) -> bool:
+        """`_Pragma("...")` -- a `#pragma` written where a token goes.
+
+        HERE AND NOT IN `_lines`, because C says the operator is processed
+        after its arguments have been through macro replacement: a header
+        writes `_Pragma(STRINGIFY(x))`, and by the time the expander reaches
+        this the string is a string. It also has to be here for the plain
+        case, because `_Pragma` may appear in the middle of a line where a
+        directive cannot.
+
+        DESTRINGIZING IS TWO SUBSTITUTIONS, which is the whole of 6.10.9:
+        `\\"` becomes `"` and `\\\\` becomes `\\`, and nothing else in the
+        string means anything. The result is lexed as if it had been written
+        after a `#pragma`, so `_Pragma("once")` and `#pragma once` are the
+        same thing said twice.
+        """
+        if not work or not work[-1].is_punct("(") \
+                or len(work) < 2 or work[-2].kind is not Kind.STRING:
+            # NOT LEFT AS AN IDENTIFIER. `_Pragma` is an operator and the
+            # name is reserved, so a program cannot have meant anything else
+            # by it -- and "`_Pragma` is not declared" from the parser two
+            # phases later names neither the problem nor the fix.
+            self.sink.report(
+                error("E1148", "`_Pragma` takes a parenthesised string")
+                .at(at.span)
+                .help('`_Pragma("once")`, which is `#pragma once` written '
+                      'where a token goes'))
+            return True
+        saved = list(work)
+        work.pop()                                  # `(`
+        text = work.pop().text
+        if not work or not work[-1].is_punct(")"):
+            work[:] = saved
+            self.sink.report(
+                error("E1148", "`_Pragma` takes a parenthesised string")
+                .at(at.span))
+            return True
+        work.pop()                                  # `)`
+        body = text
+        for prefix in ("u8", "L", "u", "U"):
+            if body.startswith(prefix):
+                body = body[len(prefix):]
+                break
+        if body.startswith('"') and body.endswith('"') and len(body) >= 2:
+            body = body[1:-1]
+        body = body.replace('\\"', '"').replace("\\\\", "\\")
+        line = SourceFile(body + "\n", f"<_Pragma at {at.span.file.name}>")
+        toks = [x for x in lex(line, self.sink, trigraphs=self.trigraphs)
+                if x.kind is not Kind.EOF]
+        self._pragma(toks, at)
+        return True
 
     def _arguments(self, work: list[Token], macro: Macro,
                    at: Token) -> tuple[list[list[Token]] | None, Token]:

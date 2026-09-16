@@ -105,7 +105,10 @@ deliverable.
   `[[...]]` attributes wherever C allows one, with `nodiscard` and
   `deprecated` the two that warn; `nullptr` and `nullptr_t`; `typeof` and
   `typeof_unqual`; an `enum` with a fixed underlying type; a label before a
-  declaration; `unreachable()`; and `%b`, `%ls` and `%lc` in `printf`.
+  declaration; `unreachable()`; and `%b`, `%ls` and `%lc` in `printf`. In
+  the preprocessor, `#embed` -- with `limit`, `prefix`, `suffix`, `if_empty`
+  and `__has_embed` -- and `_Pragma`, processed after macro replacement so
+  that a header's `_Pragma(STRINGIFY(x))` works.
 
   Its flags are declared the way a backend's always were, on the frontend
   itself: `-I`/`--include-path`, `-D`/`--define`, `--trigraphs` and
