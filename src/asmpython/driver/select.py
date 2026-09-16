@@ -36,7 +36,13 @@ from ..backend.families import SelectionError
 class Choice:
     """The three components one build runs through."""
 
-    frontend: str
+    #: NONE MEANS "NOT DECIDED HERE". No registered frontend claims the
+    #: source's extension, which is not always a mistake -- `asmpython run
+    #: thing.ir` reads IR directly and never asks a frontend at all -- so the
+    #: answer is deferred to the pipeline, which already words the real
+    #: failure. Ambiguity is still refused here, because that one nothing
+    #: downstream can tell apart from absence.
+    frontend: str | None
     backend: str
     linker: str
 
@@ -68,21 +74,26 @@ def _one(candidates: list[str], *, what: str, spelling: str,
     return candidates[0]
 
 
-def choose_frontend(source: Path, named: str | None, registry) -> str:
+def choose_frontend(source: Path, named: str | None,
+                    registry) -> str | None:
+    """The frontend the source's extension names, or None for nobody's.
+
+    AMBIGUITY IS REFUSED AND ABSENCE IS NOT, which is the one asymmetry here
+    and it is deliberate. Two frontends claiming `.py` is a question only the
+    user can settle, and nothing downstream can tell it apart from having no
+    frontend at all -- the registry's own `for_path` answers None to both,
+    which is how two claimants came to read as none.
+
+    NOBODY CLAIMING THE EXTENSION IS NOT ALWAYS A MISTAKE. `asmpython run
+    thing.ir` reads IR directly, and the commands that do never reach a
+    frontend; the ones that do reach one already report the failure in their
+    own words. So this defers rather than guessing that it knows better.
+    """
     if named:
         return named
-    known = _claimants(source.suffix, registry, "extensions")
-    picked = _one(known, what="frontend", spelling=source.suffix,
-                  flag="-fr/--frontend")
-    if picked is None:
-        every = sorted(
-            ext for fe in registry.available().values()
-            for ext in fe.extensions)
-        raise SelectionError(
-            f"no frontend reads {source.suffix or 'a file with no extension'!r}"
-            f" (the registered ones read: {', '.join(every) or 'nothing'}); "
-            f"name one with -fr/--frontend")
-    return picked
+    return _one(_claimants(source.suffix, registry, "extensions"),
+                what="frontend", spelling=source.suffix,
+                flag="-fr/--frontend")
 
 
 def choose_linker(output: Path | None, named: str | None, registry,

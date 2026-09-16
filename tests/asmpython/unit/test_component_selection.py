@@ -36,13 +36,12 @@ class TestTheSourceChoosesTheFrontend:
     def test_a_named_frontend_overrules_the_spelling(self):
         assert choose_frontend(Path("t.py"), "apir", frontend_registry) == "apir"
 
-    def test_an_unreadable_extension_says_what_is_readable(self):
-        try:
-            choose_frontend(Path("t.zzz"), None, frontend_registry)
-        except SelectionError as exc:
-            assert ".py" in str(exc) and "-fr/--frontend" in str(exc)
-        else:
-            raise AssertionError("expected a refusal")
+    def test_an_unclaimed_extension_defers_rather_than_refusing(self):
+        # NOT A MISTAKE BY ITSELF. `asmpython run thing.ir` reads IR
+        # directly and never asks a frontend, and the commands that do ask
+        # already report the failure in their own words.
+        assert choose_frontend(Path("t.ir"), None, frontend_registry) is None
+        assert choose_frontend(Path("t.zzz"), None, frontend_registry) is None
 
 
 class TestTheOutputChoosesTheLinker:

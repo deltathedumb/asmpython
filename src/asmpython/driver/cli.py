@@ -43,33 +43,60 @@ def _sink(args) -> DiagnosticSink:
     )
 
 
-def _select(args) -> tuple[str, str | None]:
-    """The backend and target a `--backend`/`--bits`/`--target` triple names.
+def _select(args):
+    """Every component one build runs through, and its target.
 
-    RESOLVED IN ONE PLACE so the three cannot be read in different orders by
-    different commands. A contradiction between them is a usage error and
-    exits saying which two disagree, rather than one silently winning.
+    RESOLVED IN ONE PLACE so the pieces cannot be read in different orders by
+    different commands. A contradiction is a usage error and exits saying
+    which two disagree, rather than one silently winning.
+
+    THE SPELLING CHOOSES AND A FLAG OVERRULES -- see `driver/select.py` for
+    the rules and the table of what each output extension resolves to. This
+    used to default to `c` and `cc` outright, so `-o thing.wasm` built C and
+    `-o out.ll` linked an executable and named it `out.ll`.
+
+    THE FAMILY RESOLUTION STILL RUNS AFTERWARDS. `--bits` and `--target`
+    narrow WITHIN a backend -- `x86` plus 32 is `x86-32` -- which is a
+    different question from which backend, and asking it second means the
+    answer applies whether the backend was chosen or named.
     """
+    from .. import frontend as frontend_registry
+    from .. import link as link_registry
     from ..backend.families import (
         SelectionError, resolve_backend, resolve_target,
     )
-    name = getattr(args, "backend", "c")
+    from . import select as selector
+    backend_registry.load_builtin()
+    frontend_registry.load_builtin()
+    link_registry.load_builtin()
     bits = getattr(args, "bits", None)
     named = getattr(args, "target", None)
+    out = getattr(args, "output", None)
     try:
-        backend = resolve_backend(name, bits, None)
+        choice = selector.choose(
+            Path(args.source), Path(out) if out else None,
+            frontend=getattr(args, "frontend", None),
+            backend=getattr(args, "backend", None),
+            linker=getattr(args, "toolchain", None),
+            # `--emit-asm` IMPLIES `--emit`, the same way it does for `link`
+            # below: assembly is not something this driver's toolchains take.
+            emit=(getattr(args, "emit", False)
+                  or getattr(args, "emit_asm", False)),
+            frontends=frontend_registry, backends=backend_registry,
+            linkers=link_registry)
+        backend = resolve_backend(choice.backend, bits, None)
         target = resolve_target(backend, bits, named, target_registry)
     except SelectionError as exc:
         raise SystemExit(f"asmpython: {exc}") from None
-    return backend, target
+    return choice, backend, target
 
 
 def _options(args) -> Options:
-    backend, target_name = _select(args)
+    choice, backend, target_name = _select(args)
     return Options(
         source=Path(args.source),
         output=Path(args.output) if getattr(args, "output", None) else None,
-        frontend=getattr(args, "frontend", None),
+        frontend=choice.frontend,
         library=getattr(args, "library", False),
         backend=backend,
         backend_options=dict(getattr(args, "backend_options", None) or {}),
@@ -79,7 +106,7 @@ def _options(args) -> Options:
         # the user already has the file they wanted.
         link=not (getattr(args, "emit", False)
                   or getattr(args, "emit_asm", False)),
-        toolchain=getattr(args, "toolchain", "cc"),
+        toolchain=choice.linker,
         link_inputs=tuple(getattr(args, "link_input", None) or ()),
         workdir=Path(args.workdir) if getattr(args, "workdir", None) else None,
         keep_intermediates=getattr(args, "keep_intermediates", False),
@@ -776,9 +803,10 @@ def build_parser() -> argparse.ArgumentParser:
     source_args(b)
     pass_args(b)
     b.add_argument("-o", "--output")
-    b.add_argument("--backend", default="c",
+    b.add_argument("-bk", "--backend", default=None,
                    help="code generator, or a family: `x86` and `arm` pick "
-                        "their member from --bits")
+                        "their member from --bits. Chosen from the output's "
+                        "extension when not given")
     b.add_argument("--bits", type=int, choices=(32, 64), default=None,
                    help="word size to emit for. Selects within a backend "
                         "family, and is checked against --backend and "
@@ -791,9 +819,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="write the backend's assembly instead of its object "
                         "file, and stop. For reading what was generated; a "
                         "backend whose artifact is already readable refuses")
-    b.add_argument("--toolchain", default="cc",
+    b.add_argument("-ln", "--linker", "--toolchain", dest="toolchain",
+                   default=None,
                    help="how to turn artifacts into a program "
-                        "(see `asmpython toolchains`)")
+                        "(see `asmpython toolchains`). Chosen from the "
+                        "output's extension when not given")
     b.add_argument("--link-input", action="append", metavar="INPUT",
                    help="extra object, archive or -l name for the link step")
     b.add_argument("--workdir", help="where intermediates go (default .asmpython)")
