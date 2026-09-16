@@ -190,7 +190,7 @@ class Preprocessor:
             "__SIZEOF_POINTER__": "8",
             "__SIZEOF_FLOAT__": "4",
             "__SIZEOF_DOUBLE__": "8",
-            "__SIZEOF_LONG_DOUBLE__": "8",
+            "__SIZEOF_LONG_DOUBLE__": "16",
             "__SIZEOF_SIZE_T__": "8",
             "__SIZEOF_WCHAR_T__": "4",
             "__CHAR_UNSIGNED__ ": "",

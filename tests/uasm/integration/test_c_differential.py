@@ -1562,6 +1562,80 @@ PROGRAMS: dict[str, str] = {
         }
     """,
 
+    "long_double_is_eighty_bit": r"""
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <float.h>
+        #include <math.h>
+        /* THE WIDEST TYPE, WHICH IS SOFTWARE HERE and hardware on the
+           oracle -- so every line of this is a bit-for-bit comparison
+           against x87. The arithmetic, the constants, the conversions in
+           both directions, printing all 21 digits and reading them back. */
+        static long double pi = 3.14159265358979323846L;
+
+        int main(void) {
+            long double a = 3.0L, b = 7.0L, c;
+            long double big = LDBL_MAX, tiny = LDBL_TRUE_MIN;
+            char buf[64];
+            printf("%zu %zu %d %d %d\n", sizeof(long double),
+                   _Alignof(long double), LDBL_MANT_DIG, LDBL_DIG,
+                   LDBL_MAX_EXP);
+            printf("%.21Lg\n", pi);
+            printf("%.21Lg %.21Lg\n", a / b, a * b);
+            printf("%.21Lg %.21Lg\n", a + b, a - b);
+            printf("%.20Lf\n", 1.0L / 3.0L);
+            printf("%Le %LE\n", pi, pi);
+            printf("%La %La %La\n", 1.0L, pi, 0.5L);
+            /* THE ENDS OF THE RANGE IN HEX, not in decimal: the exact
+               decimal of the smallest subnormal is eleven thousand digits
+               of `5^16445`, which the reference interpreter would spend a
+               minute on. `%La` reads the bits and is the same check of the
+               value. */
+            printf("%La %La %La\n", big, LDBL_MIN, tiny);
+            printf("%d %d %d %d\n", a < b, a == a, a != b, b >= a);
+            printf("%.21Lg\n", (long double)(1.0 / 3.0));
+            printf("%d %ld %.17g\n", (int)pi, (long)(pi * 1000000.0L),
+                   (double)pi);
+            printf("%.21Lg\n", (long double)9007199254740993L);
+            c = 0.0L;
+            { int i; for (i = 0; i < 10; i++) c += 0.1L; }
+            printf("%d %.21Lg\n", c == 1.0L, c);
+            printf("%.21Lg\n", strtold("2.71828182845904523536", NULL));
+            snprintf(buf, sizeof buf, "%.21Lg", pi * pi);
+            printf("%s %d\n", buf, strtold(buf, NULL) == pi * pi);
+            printf("%.21Lg %.21Lg\n", sqrtl(2.0L), fabsl(-1.5L));
+            printf("%.21Lg %.21Lg\n", ldexpl(1.0L, 100), copysignl(2.0L, -1.0L));
+            printf("%d %d %d\n", isinf(big * big), isnan(0.0L / 0.0L),
+                   isfinite(pi));
+            printf("%La %La\n", big * 2.0L, tiny / 2.0L);
+            printf("%d %d\n", (int)signbit(-0.0L), (int)signbit(1.0L));
+            return 0;
+        }
+    """,
+
+    "long_double_complex": r"""
+        #include <stdio.h>
+        #include <math.h>
+        #include <complex.h>
+        /* A COMPLEX WHOSE ELEMENT HAS NO IR TYPE: both halves live in
+           memory and every operation on one is a call, which is the case
+           that proves the complex lowering is not written for doubles. */
+        int main(void) {
+            long double complex z = 3.0L + 4.0L*I, w = 1.0L - 2.0L*I;
+            printf("%zu %zu\n", sizeof z, _Alignof(long double complex));
+            printf("%.18Lg %.18Lg\n", creall(z), cimagl(z));
+            printf("%.18Lg %.18Lg\n", creall(z * w), cimagl(z * w));
+            printf("%.18Lg %.18Lg\n", creall(z / w), cimagl(z / w));
+            printf("%.18Lg %.18Lg\n", creall(z + w), cimagl(z - w));
+            printf("%.18Lg %.18Lg\n", creall(conjl(z)), cimagl(conjl(z)));
+            printf("%.18Lg\n", cabsl(z));
+            printf("%d %d\n", z == w, z == z);
+            { long double complex q = z; q *= w;
+              printf("%.18Lg %.18Lg\n", creall(q), cimagl(q)); }
+            return 0;
+        }
+    """,
+
     "sscanf_conversions": r"""
         #include <stdio.h>
         #include <string.h>

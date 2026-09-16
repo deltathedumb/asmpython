@@ -404,7 +404,12 @@ class Parser:
             self.sema.error(getattr(exc, "code", "E1010"), str(exc), t.span)
             return self.sema.poison(t.span)
         if isinstance(got, FloatConst):
-            ty = C.FLOAT if got.size == 4 else C.DOUBLE
+            ty = (C.FLOAT if got.size == 4
+                  else C.LDOUBLE if got.size == 16 else C.DOUBLE)
+            if ty is C.LDOUBLE and got.exact is not None and not got.imaginary:
+                # THE EXACT VALUE, which is a `Fraction` rather than a float:
+                # see `literals.FloatConst.exact` and `ldouble.py`.
+                return S.FloatLit(t.span, ty, False, got.exact)
             if got.imaginary:
                 # THE VALUE IS THE PAIR, which is what makes the rest of the
                 # compiler need no special case: a complex literal is a

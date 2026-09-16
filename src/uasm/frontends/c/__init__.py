@@ -16,7 +16,8 @@
     longjmp.py       `setjmp` and `longjmp`, without a machine frame
     builtins.py      which of them exist; `__has_builtin` reads this
     builtin_check.py their type rules, including the three taking a TYPE
-    support.py       the VLA arena, written in C and compiled by this frontend
+    ldouble.py       `long double` at compile time: exact, and encoded
+    support.py       the VLA arena, the command line, complex and long double
     include/         the standard headers, written in C
 
 WHAT IT ACCEPTS is C23, which is to say C: every version's syntax, every
@@ -30,9 +31,15 @@ different list, and it is in `include/README.md`: those are
 has, and a program that calls into one it has not got is refused by name at
 compile time rather than failing to link.
 
-  * `long double` IS `double`. The IR has `f32` and `f64` and nothing wider.
-    `__SIZEOF_LONG_DOUBLE__` says 8 and `<float.h>`'s `LDBL_*` macros have
-    `double`'s values, so a program that asks is told the truth.
+  * `long double` IS SOFTWARE. The format is x86-64's -- 80-bit extended,
+    sixteen bytes with ten in use, a 64-bit significand -- so `sizeof`,
+    `LDBL_*` and every printed digit agree with a hosted compiler. The
+    arithmetic is `support.py`'s `ldouble` unit rather than the machine's,
+    because the IR has `f32` and `f64` and a third width would have to be
+    implemented by every backend, including the ones whose machine has no
+    such thing. The `l` functions in `<math.h>` compute in double and are
+    accurate to about a double's precision; `sqrtl`, `fabsl`, `copysignl`,
+    `ldexpl` and the conversions are exact.
   * `_Imaginary` IS NOT THERE, which is conforming rather than missing:
     imaginary types are Annex G, supported only by an implementation that
     defines `__STDC_IEC_559_COMPLEX__`, and gcc has never had them either.

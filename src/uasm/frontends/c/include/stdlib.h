@@ -211,7 +211,12 @@ static double strtod(const char *__s, char **__end)
 static float strtof(const char *__s, char **__end)
 { return (float)__num_strtod(__s, __end); }
 static long double strtold(const char *__s, char **__end)
-{ return (long double)__num_strtod(__s, __end); }
+{
+    /* NOT `(long double)strtod(s)`, which would round the decimal to 53
+       bits and then widen the answer -- losing the eleven bits this type
+       exists for. `__num_strtold` keeps all 64. */
+    return __num_strtold(__s, __end);
+}
 static double atof(const char *__s) { return strtod(__s, NULL); }
 
 /* ── pseudo-random ────────────────────────────────────────────────────── */

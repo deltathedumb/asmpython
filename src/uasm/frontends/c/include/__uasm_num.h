@@ -168,31 +168,32 @@ static void __big_mul_pow5(__numbig *__b, int __k)
 }
 
 /* ── the one place a double is built ──────────────────────────────────── */
-/* THE VALUE IS `q * 2^e2`, with `q` carrying at most 54 significant bits and
-   `sticky` saying whether anything nonzero was dropped below them. That is
-   exactly the information rounding needs: the guard bit is `q`'s lowest, and
-   ties go to even by looking at the bit above it.
+/* THE VALUE IS `q * 2^e2` with `q` carrying the format's significand bits,
+   `guard` the next bit below them and `sticky` saying whether anything
+   nonzero was dropped below THAT. Those three are exactly what rounding
+   needs: nearest, ties to even, with the tie broken by `q`'s low bit.
 
    BUILT AS BITS RATHER THAN BY ARITHMETIC, because the subnormal range
    cannot be reached by halving: each halving of a subnormal loses its low
    bit, so a loop that scaled down would round twice and land next door. */
-static double __num_make(unsigned long long __q, int __e2, int __sticky,
-                         int __neg)
+static double __num_make(unsigned long long __q, int __guard, int __sticky,
+                         int __e2, int __neg)
 {
     union { double __d; unsigned long __u; } x;
     unsigned long long q = __q;
     unsigned long sign = __neg ? 0x8000000000000000UL : 0UL;
-    int e2 = __e2, guard, exp;
-    if (q == 0) { x.__u = sign; return x.__d; }
-    /* EXACTLY 54 BITS, so that bit 0 is the guard wherever the value came
-       from. A small exact integer arrives with fewer and nothing has been
-       dropped, so shifting it up is free. */
-    while (q < (1ULL << 53)) { q <<= 1; e2--; }
-    if (e2 >= -1075) {
-        guard = (int)(q & 1u);
-        q >>= 1;
-        e2++;
-        if (guard && (__sticky || (q & 1u))) {
+    int e2 = __e2, exp;
+    if (q == 0 && __guard == 0 && __sticky == 0) { x.__u = sign; return x.__d; }
+    /* EXACTLY 53 BITS, so that the guard is always in the same place
+       wherever the value came from. A small exact integer arrives with
+       fewer and nothing has been dropped, so shifting it up is free. */
+    while (q < (1ULL << 52)) {
+        q = (q << 1) | (unsigned long long)__guard;
+        __guard = 0;
+        e2--;
+    }
+    if (e2 >= -1074) {
+        if (__guard && (__sticky || (q & 1u))) {
             q++;
             if (q == (1ULL << 53)) { q >>= 1; e2++; }
         }
@@ -201,81 +202,155 @@ static double __num_make(unsigned long long __q, int __e2, int __sticky,
             x.__u = sign | 0x7FF0000000000000UL;
             return x.__d;
         }
+        if (exp <= 0) {
+            /* SUBNORMAL: the step is 2^-1074 whatever the value is, so the
+               rounding position is fixed and the shift is however far away
+               from it the significand sits. */
+            int k = 1 - exp;
+            if (k >= 64) { x.__u = sign; return x.__d; }
+            {
+                unsigned long long lost = k >= 1 ? (q & ((1ULL << k) - 1)) : 0;
+                unsigned long long m = q >> k;
+                int g = k >= 1 ? (int)((q >> (k - 1)) & 1u) : 0;
+                int st = __sticky || (k >= 2 && (lost & ((1ULL << (k - 1)) - 1)));
+                if (g && (st || (m & 1u))) m++;
+                x.__u = sign | (unsigned long)m;
+                return x.__d;
+            }
+        }
         x.__u = sign | ((unsigned long)exp << 52)
               | (unsigned long)(q & ((1ULL << 52) - 1));
         return x.__d;
     }
     {
-        /* SUBNORMAL: the step is 2^-1074 whatever the value is, so the
-           rounding position is fixed and the shift is however far away from
-           it `q` sits. */
+        /* FAR BELOW THE SUBNORMAL RANGE: everything is sticky and the
+           answer is a zero or the smallest step, decided the same way. */
         int k = -1074 - e2;
         unsigned long long m;
         if (k >= 64) { x.__u = sign; return x.__d; }
-        guard = k >= 1 ? (int)((q >> (k - 1)) & 1u) : 0;
-        if (k >= 2 && (q & ((1ULL << (k - 1)) - 1)) != 0) __sticky = 1;
-        m = k > 0 ? (q >> k) : q;
-        if (guard && (__sticky || (m & 1u))) m++;
-        x.__u = sign | (unsigned long)m;   /* 2^52 here IS the smallest normal */
+        m = q >> k;
+        if (((q >> (k - 1)) & 1u) && (__sticky || __guard || (m & 1u))) m++;
+        x.__u = sign | (unsigned long)m;
         return x.__d;
     }
 }
 
-/* The top 54 bits of a big integer, with everything below them collapsed
-   into one sticky bit -- which is all that a correctly rounded result needs
-   to know about them. */
-static unsigned long long __big_top54(const __numbig *__b, int *__e2,
-                                      int *__sticky)
+/* THE SAME THREE NUMBERS, WRITTEN AS AN 80-BIT EXTENDED VALUE. `q` carries
+   64 significand bits here rather than 53, which is the whole difference:
+   the format's layout is in `support.py`'s `ldouble` unit and repeated
+   here because this is the other place that has to write one. */
+static void __num_make_ld(unsigned long long __q, int __guard, int __sticky,
+                          int __e2, int __neg, void *__out)
+{
+    struct __num_ld { unsigned long __m; unsigned short __se; };
+    struct __num_ld *o = (struct __num_ld *)__out;
+    unsigned long long q = __q;
+    int e2 = __e2, exp;
+    if (q == 0 && __guard == 0 && __sticky == 0) {
+        o->__m = 0;
+        o->__se = (unsigned short)(__neg ? 0x8000 : 0);
+        return;
+    }
+    while (q < (1ULL << 63)) {
+        q = (q << 1) | (unsigned long long)__guard;
+        __guard = 0;
+        e2--;
+    }
+    /* THE EXPONENT OF THE SIGNIFICAND'S TOP BIT, biased. */
+    exp = e2 + 63 + 16383;
+    if (exp <= 0) {
+        int k = 1 - exp;
+        if (k >= 64) {
+            o->__m = 0;
+            o->__se = (unsigned short)(__neg ? 0x8000 : 0);
+            return;
+        }
+        {
+            unsigned long long lost = q & ((1ULL << k) - 1);
+            unsigned long long m = q >> k;
+            int g = (int)((q >> (k - 1)) & 1u);
+            int st = __sticky || __guard
+                   || (k >= 2 && (lost & ((1ULL << (k - 1)) - 1)));
+            if (g && (st || (m & 1u))) m++;
+            o->__m = (unsigned long)m;
+            o->__se = (unsigned short)((m >> 63) ? 1 : 0);
+            if (__neg) o->__se |= 0x8000;
+            return;
+        }
+    }
+    if (__guard && (__sticky || (q & 1u))) {
+        q++;
+        if (q == 0) { q = 1ULL << 63; exp++; }
+    }
+    if (exp >= 0x7fff) {
+        o->__m = 1UL << 63;
+        o->__se = (unsigned short)(0x7fff | (__neg ? 0x8000 : 0));
+        return;
+    }
+    o->__m = (unsigned long)q;
+    o->__se = (unsigned short)((exp & 0x7fff) | (__neg ? 0x8000 : 0));
+}
+
+/* The top `want` bits of a big integer, with the bit below them as the
+   guard and everything below THAT collapsed into one sticky bit -- which is
+   all a correctly rounded result needs to know about them. */
+static unsigned long long __big_top(const __numbig *__b, int __want,
+                                    int *__e2, int *__guard, int *__sticky)
 {
     unsigned long long q = 0;
     int bits = __big_bits(__b), drop, i;
     *__sticky = 0;
+    *__guard = 0;
     if (bits == 0) { *__e2 = 0; return 0; }
-    drop = bits - 54;
+    drop = bits - __want;
     if (drop < 0) drop = 0;
-    for (i = bits - 1; i >= drop; i--) q = (q << 1) | (unsigned long long)__big_bit(__b, i);
-    for (i = drop - 1; i >= 0; i--)
-        if (__big_bit(__b, i)) { *__sticky = 1; break; }
+    for (i = bits - 1; i >= drop; i--)
+        q = (q << 1) | (unsigned long long)__big_bit(__b, i);
+    if (drop > 0) {
+        *__guard = __big_bit(__b, drop - 1);
+        for (i = drop - 2; i >= 0; i--)
+            if (__big_bit(__b, i)) { *__sticky = 1; break; }
+    }
     *__e2 = drop;
     return q;
 }
 
-/* ── digits and an exponent, to the nearest double ────────────────────── */
-static double __num_decimal(const char *__dig, int __nd, long __e10, int __neg)
+/* ── digits and an exponent, to the nearest of either format ──────────── */
+/* THE SCALING IS THE SAME WORK FOR BOTH WIDTHS: the value is D * 10^e, and
+   what changes between a double and an 80-bit extended is only how many
+   bits of it are kept. So it is done once, here, and the two `__num_make`s
+   above turn the answer into their own format. */
+static int __num_scale(const char *__dig, int __nd, long __e10, int __want,
+                       unsigned long long *__q, int *__guard, int *__sticky,
+                       int *__e2)
 {
     __numbig a, m;
-    unsigned long long q;
-    int e2 = 0, sticky = 0, i;
+    int i;
     long top;
-    union { double __d; unsigned long __u; } x;
-    if (__nd <= 0) {
-        x.__u = __neg ? 0x8000000000000000UL : 0UL;
-        return x.__d;
-    }
+    *__q = 0;
+    *__guard = 0;
+    *__sticky = 0;
+    *__e2 = 0;
+    if (__nd <= 0) return 0;                    /* a zero */
     /* THE DECIMAL EXPONENT OF THE LEADING DIGIT decides overflow and
        underflow before any work is done -- and has to, because 10^5000 is
        not a number this bignum can hold and does not need to be. */
     top = (long)__nd - 1 + __e10;
-    if (top > 309) {
-        x.__u = (__neg ? 0x8000000000000000UL : 0UL) | 0x7FF0000000000000UL;
-        return x.__d;
-    }
-    if (top < -400) {
-        x.__u = __neg ? 0x8000000000000000UL : 0UL;
-        return x.__d;
-    }
+    if (top > 4933) return 1;                   /* an infinity */
+    if (top < -5000) return 0;
     __big_set(&a, 0u);
-    for (i = 0; i < __nd; i++) __big_muladd(&a, 10u, (unsigned int)(__dig[i] - '0'));
+    for (i = 0; i < __nd; i++)
+        __big_muladd(&a, 10u, (unsigned int)(__dig[i] - '0'));
     if (__e10 >= 0) {
         /* AN INTEGER, so the answer is its top bits and nothing is divided. */
         __big_mul_pow10(&a, (int)__e10);
-        q = __big_top54(&a, &e2, &sticky);
-        return __num_make(q, e2, sticky, __neg);
+        *__q = __big_top(&a, __want, __e2, __guard, __sticky);
+        return 2;
     }
     {
-        /* D / 5^k * 2^-k, and the quotient one bit at a time. 54 rounds of
-           compare-and-subtract is a whole long division for a double, which
-           is why this file needs no bignum divide. */
+        /* D / 5^k * 2^-k, and the quotient one bit at a time. `want` rounds
+           of compare-and-subtract is a whole significand, which is why this
+           file needs no bignum divide. */
         int k = (int)(-__e10), scale = (int)__e10, ba, bm, s;
         __big_set(&m, 1u);
         __big_mul_pow5(&m, k);
@@ -285,15 +360,58 @@ static double __num_decimal(const char *__dig, int __nd, long __e10, int __neg)
         if (s > 0) { __big_shl(&m, s); scale += s; }
         else if (s < 0) { __big_shl(&a, -s); scale += s; }
         if (__big_cmp(&a, &m) < 0) { __big_shl1(&a); scale -= 1; }
-        q = 0;
-        for (i = 0; i < 54; i++) {
-            q <<= 1;
-            if (__big_cmp(&a, &m) >= 0) { __big_sub(&a, &m); q |= 1u; }
+        for (i = 0; i < __want; i++) {
+            *__q <<= 1;
+            if (__big_cmp(&a, &m) >= 0) { __big_sub(&a, &m); *__q |= 1u; }
             __big_shl1(&a);
         }
-        sticky = a.__n != 0;
-        return __num_make(q, scale - 53, sticky, __neg);
+        /* THE GUARD BIT IS ONE MORE ROUND, and it is separate rather than
+           the bottom of the quotient: a `long double` wants 64 bits, and a
+           65-bit quotient does not fit in the word it is built in. */
+        *__guard = 0;
+        if (__big_cmp(&a, &m) >= 0) { __big_sub(&a, &m); *__guard = 1; }
+        *__sticky = a.__n != 0;
+        *__e2 = scale - __want + 1;
+        return 2;
     }
+}
+
+static double __num_decimal(const char *__dig, int __nd, long __e10, int __neg)
+{
+    unsigned long long q;
+    int guard, sticky, e2, what;
+    union { double __d; unsigned long __u; } x;
+    what = __num_scale(__dig, __nd, __e10, 53, &q, &guard, &sticky, &e2);
+    if (what == 0) {
+        x.__u = __neg ? 0x8000000000000000UL : 0UL;
+        return x.__d;
+    }
+    if (what == 1) {
+        x.__u = (__neg ? 0x8000000000000000UL : 0UL) | 0x7FF0000000000000UL;
+        return x.__d;
+    }
+    return __num_make(q, guard, sticky, e2, __neg);
+}
+
+static void __num_decimal_ld(const char *__dig, int __nd, long __e10,
+                             int __neg, void *__out)
+{
+    struct __num_ld2 { unsigned long __m; unsigned short __se; };
+    struct __num_ld2 *o = (struct __num_ld2 *)__out;
+    unsigned long long q;
+    int guard, sticky, e2, what;
+    what = __num_scale(__dig, __nd, __e10, 64, &q, &guard, &sticky, &e2);
+    if (what == 0) {
+        o->__m = 0;
+        o->__se = (unsigned short)(__neg ? 0x8000 : 0);
+        return;
+    }
+    if (what == 1) {
+        o->__m = 1UL << 63;
+        o->__se = (unsigned short)(0x7fff | (__neg ? 0x8000 : 0));
+        return;
+    }
+    __num_make_ld(q, guard, sticky, e2, __neg, __out);
 }
 
 /* ── the C grammar for a floating-point number ────────────────────────── */
@@ -322,9 +440,17 @@ static int __num_word(const char *__p, const char *__w)
 /* `strtod`, and `<stdlib.h>`'s is this one: the conversion belongs with the
    arithmetic above rather than being written twice, and `<stdio.h>`'s `%f`
    scanner calls it too so that the two cannot disagree about what a number
-   looks like. */
-static double __num_strtod(const char *__s, char **__end)
+   looks like.
+
+   ONE FUNCTION FOR BOTH WIDTHS. `strtold` has to keep 64 significand bits
+   where `strtod` keeps 53, and that is the ONLY difference -- the grammar,
+   the digit budget, the sticky digit and where the number ends are the same
+   questions. Splitting them would be two answers to each. When `__out` is
+   null the answer is the `double` this returns; when it is not, the answer
+   is the 80-bit value written through it and the return is unused. */
+static double __num_parse(const char *__s, char **__end, void *__out)
 {
+    struct __num_ld3 { unsigned long __m; unsigned short __se; };
     const char *p = __s;
     char dig[__NUM_DIGITS + 2];
     int nd = 0, neg = 0, any = 0, dropped = 0;
@@ -336,6 +462,12 @@ static double __num_strtod(const char *__s, char **__end)
         p += 3;
         if (__num_word(p, "inity")) p += 5;
         if (__end) *__end = (char *)p;
+        if (__out) {
+            ((struct __num_ld3 *)__out)->__m = 1UL << 63;
+            ((struct __num_ld3 *)__out)->__se =
+                (unsigned short)(0x7fff | (neg ? 0x8000 : 0));
+            return 0.0;
+        }
         x.__u = (neg ? 0x8000000000000000UL : 0UL) | 0x7FF0000000000000UL;
         return x.__d;
     }
@@ -350,6 +482,11 @@ static double __num_strtod(const char *__s, char **__end)
             if (*q == ')') p = q + 1;
         }
         if (__end) *__end = (char *)p;
+        if (__out) {
+            ((struct __num_ld3 *)__out)->__m = (1UL << 63) | (1UL << 62);
+            ((struct __num_ld3 *)__out)->__se = 0x7fff;
+            return 0.0;
+        }
         x.__u = (neg ? 0x8000000000000000UL : 0UL) | 0x7FF8000000000000UL;
         return x.__d;
     }
@@ -358,7 +495,7 @@ static double __num_strtod(const char *__s, char **__end)
            multiply or divide by, and the bits are read straight off. */
         __numbig a;
         unsigned long long q;
-        int e2 = 0, sticky = 0, v, frac = 0;
+        int e2 = 0, sticky = 0, guard = 0, v, frac = 0;
         long pexp = 0;
         __big_set(&a, 0u);
         p += 2;
@@ -390,8 +527,13 @@ static double __num_strtod(const char *__s, char **__end)
             }
         }
         if (__end) *__end = (char *)p;
-        q = __big_top54(&a, &e2, &sticky);
-        return __num_make(q, e2 + (int)(pexp - frac), sticky, neg);
+        q = __big_top(&a, __out ? 64 : 53, &e2, &guard, &sticky);
+        if (__out) {
+            __num_make_ld(q, guard, sticky, e2 + (int)(pexp - frac), neg,
+                          __out);
+            return 0.0;
+        }
+        return __num_make(q, guard, sticky, e2 + (int)(pexp - frac), neg);
     }
     while (*p == '0') { p++; any = 1; }
     while (*p >= '0' && *p <= '9') {
@@ -417,6 +559,10 @@ static double __num_strtod(const char *__s, char **__end)
     }
     if (!any) {
         if (__end) *__end = (char *)__s;
+        if (__out) {
+            ((struct __num_ld3 *)__out)->__m = 0;
+            ((struct __num_ld3 *)__out)->__se = 0;
+        }
         return 0.0;
     }
     if (*p == 'e' || *p == 'E') {
@@ -440,7 +586,21 @@ static double __num_strtod(const char *__s, char **__end)
        rounding boundary, so the only thing the rest of them can say is "and
        a bit more" -- which is one digit, and costs one place of exponent. */
     if (dropped && nd < __NUM_DIGITS + 1) { dig[nd++] = '1'; e10--; }
+    if (__out) {
+        __num_decimal_ld(dig, nd, e10, neg, __out);
+        return 0.0;
+    }
     return __num_decimal(dig, nd, e10, neg);
+}
+
+static double __num_strtod(const char *__s, char **__end)
+{ return __num_parse(__s, __end, 0); }
+
+static long double __num_strtold(const char *__s, char **__end)
+{
+    long double __v;
+    __num_parse(__s, __end, &__v);
+    return __v;
 }
 
 #endif
