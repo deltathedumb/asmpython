@@ -399,7 +399,15 @@ REPLACES: dict[str, tuple[str, ...]] = {
                     # which `test_the_allocator_asks_the_floor_and_nothing_
                     # else` is there to keep true -- and an unported C name
                     # called from here is neither.
-                    "apy_order_held", "apy_order_error_of"),
+                    "apy_order_held", "apy_order_error_of",
+                    # AND THE ORDERING'S THREE STEPS, split out of
+                    # `apy_binary_dunder_of` so the builtin a class extends
+                    # can be read BETWEEN the two written halves rather than
+                    # after both -- see `apy_order_lt_of`. Ported for the
+                    # same reason the two above were: `apy_order_lt_of` is
+                    # the subset's own and calls these, and an unported C
+                    # name called from here is not the floor.
+                    "apy_order_mirror_first_of", "apy_written_dunder_of"),
     "tasks.py": ("apy_str_like", "apy_meta_for", "apy_asyncio_gather",
                  "apy_task_done", "apy_task_cancelled",
                  "apy_task_cancel"),

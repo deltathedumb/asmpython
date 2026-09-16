@@ -7986,6 +7986,95 @@ PROGRAMS = {
         zs[0] += [9]
         print(zs)
     """,
+    "an_inherited_comparison_beats_a_mirror_the_class_wrote": """
+        # `OnlyGt([1]) < OnlyGt([1, 2])` ANSWERED `'GT'`. `type(a).__lt__` is
+        # the one `list` gives the subclass, and in CPython an INHERITED slot
+        # wins outright over a `__gt__` the class wrote -- the reflected
+        # method is never consulted, and the answer is True. All three
+        # arrangements tried the written direct dunder, then the written
+        # MIRROR, and only then read the builtin the class extends, so a
+        # class that mentioned `__gt__` once answered every ordering with it.
+        #
+        # THE BUILTIN BELONGS IN THE MIDDLE, which is the whole fix: written
+        # direct, then the builtin (the inherited direct), then written
+        # mirror. `apy_order_mirror_first_of` and `apy_written_dunder_of`
+        # exist to make that order expressible -- `apy_binary_dunder` runs
+        # both written halves back to back and there was nowhere to put the
+        # builtin between them.
+        #
+        # CPYTHON HAS ONE REORDERING RULE and it had to come with the fix: a
+        # right operand whose type is a PROPER SUBCLASS of the left's and
+        # which overrides the mirror goes first, so `[1] < OnlyGt([1, 2])` is
+        # still `'GT'`. Three cases that were already right depend on it.
+        #
+        # AND `sorted` HAD TO MOVE TOO. It compares with the very `<` the
+        # operator spells, through `apy_order_rich_of` rather than
+        # `apy_cmp` -- so before this, `sorted` over these ordered by the
+        # written `__gt__` while `a < b` on the same two ordered as lists.
+        class OnlyGt(list):
+            def __gt__(self, other):
+                return "GT"
+
+        class OnlyLt(list):
+            def __lt__(self, other):
+                return "LT"
+
+        class Both(list):
+            def __lt__(self, other):
+                return "B.LT"
+
+            def __gt__(self, other):
+                return "B.GT"
+
+        class Plain(list):
+            pass
+
+        class T(tuple):
+            def __gt__(self, other):
+                return "T.GT"
+
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except TypeError as e:
+                print(label, "TypeError:", e)
+
+        a1 = OnlyGt([1])
+        a2 = OnlyGt([1, 2])
+        # THE INHERITED `__lt__` ANSWERS and the written `__gt__` is not asked.
+        show("inherited lt", lambda: a1 < a2)
+        # THE WRITTEN ONE STILL ANSWERS ITS OWN OPERATOR.
+        show("written gt", lambda: a1 > a2)
+        # THE SUBCLASS GOES FIRST when it is one and overrides the mirror.
+        show("subclass first", lambda: [1] < a2)
+        # AND NOT WHEN IT OVERRIDES THE OTHER NAME.
+        show("no reorder", lambda: [1] > a2)
+        show("against a plain list", lambda: a1 < [1, 2])
+        show("against an int", lambda: 5 < a1)
+        # THE MIRROR SIDE OF THE SAME RULE.
+        b1 = OnlyLt([1])
+        b2 = OnlyLt([1, 2])
+        show("written lt", lambda: b1 < b2)
+        show("inherited gt", lambda: b1 > b2)
+        show("reflected lt", lambda: [1] > b2)
+        # A CLASS THAT WROTE BOTH is never read as its builtin.
+        show("both lt", lambda: Both([1]) < Both([1, 2]))
+        show("both gt", lambda: Both([1]) > Both([1, 2]))
+        # SIBLINGS ARE NOT SUBCLASSES OF EACH OTHER.
+        show("plain pair", lambda: Plain([1]) < Plain([1, 2]))
+        show("plain vs onlygt", lambda: Plain([1]) < a2)
+        show("onlygt vs plain", lambda: a1 < Plain([1, 2]))
+        # THE SAME RULE ON A TUPLE, because the held value is any builtin.
+        show("tuple lt", lambda: T((1,)) < T((2,)))
+        show("tuple gt", lambda: T((1,)) > T((2,)))
+        show("tuple eq", lambda: T((1,)) == T((1,)))
+        # AND THE CONSUMERS, which reach it through `apy_order_rich_of`.
+        xs = [OnlyGt([1, 2]), OnlyGt([1]), OnlyGt([1, 2, 3])]
+        print("sorted", [len(v) for v in sorted(xs)])
+        print("extremes", len(min(xs)), len(max(xs)))
+        ts = [T((2,)), T((1,))]
+        print("sorted tuples", [t[0] for t in sorted(ts)])
+    """,
     "fstrings": """
         n = 42
         s = 'ab'

@@ -3534,6 +3534,71 @@ static apy_value apy_binary_dunder(apy_value a, apy_value b,
                                 (apy_value)(uintptr_t)rname);
 }
 
+/* --- what a comparison asks, and in what order -------------------------- */
+/* `a OP b` tries THREE things: the dunder A WROTE, the builtin a extends --
+   which is its INHERITED dunder -- and the mirror B WROTE. The builtin sits
+   in the MIDDLE and not after both, because `type(a).__lt__` is the written
+   one or the inherited one, and in CPython an inherited slot wins OUTRIGHT
+   over a `__gt__` the other side wrote: `OnlyGt([1]) < OnlyGt([1, 2])` is
+   True because `list.__lt__` answers and the reflected `__gt__` is never
+   reached. `apy_binary_dunder` runs both written halves back to back, so the
+   two are split here and the call sites put the builtin between them.
+
+   THE ONE REORDERING RULE IS CPYTHON'S OWN. A right operand whose type is a
+   PROPER SUBCLASS of the left's and which overrides the mirror goes first --
+   `[1] < OnlyGt([1, 2])` asks `OnlyGt.__gt__` before `list.__lt__`, the
+   subclass being presumed to know more about the pair than its base does.
+   Its own direct dunder still follows, because the mirror may answer
+   NotImplemented. Answers 1 for that order and 0 for the ordinary one. */
+APY_API int64_t apy_order_mirror_first_of(apy_value a, apy_value b,
+                                          apy_value mirror) {
+    apy_value held;
+    if (O(b)->kind != APY_INST_K) return 0;
+    if (!apy_class_find(O(b)->v.o.cls, apy_name((const char *)mirror)))
+        return 0;
+    if (O(a)->kind == APY_INST_K)
+        return (O(a)->v.o.cls != O(b)->v.o.cls
+                && apy_type_is_sub(O(b)->v.o.cls, O(a)->v.o.cls)) ? 1 : 0;
+    /* A IS NOT AN INSTANCE, so "a proper subclass of type(a)" is asking
+       whether b extends the very builtin a is one of. */
+    held = O(b)->v.o.held;
+    return (held && O(held)->kind == O(a)->kind) ? 1 : 0;
+}
+/* THE NAME ITS CALLERS USE, kept as a delegate: the body is IR's now,
+   and the exported half above stands in when nothing is ported. */
+static int apy_order_mirror_first(apy_value a, apy_value b,
+                                  const char *mirror) {
+    return (int)apy_order_mirror_first_of(a, b, (apy_value)(uintptr_t)mirror);
+}
+
+/* ONE HALF OF `apy_binary_dunder`: the dunder THIS side wrote, and only that.
+   0 for a class that wrote none and 0 for `NotImplemented`, which means "ask
+   the other operand" rather than "the answer is NotImplemented" -- the same
+   reading `apy_binary_dunder` gives it. A caller checks the error flag, as
+   it does there. */
+APY_API apy_value apy_written_dunder_of(apy_value who, apy_value other,
+                                        apy_value name) {
+    apy_value r = apy_method1_of(who, name, other);
+    if (apy_error_occurred()) return r;
+    return (r && O(r)->kind != APY_NOTIMPL_K) ? r : 0;
+}
+/* THE NAME ITS CALLERS USE, kept as a delegate: the body is IR's now,
+   and the exported half above stands in when nothing is ported. */
+static apy_value apy_written_dunder(apy_value who, apy_value other,
+                                    const char *name) {
+    return apy_written_dunder_of(who, other, (apy_value)(uintptr_t)name);
+}
+
+/* The builtin an instance holds, WITHOUT asking what its class wrote. The
+   right operand of an inherited comparison is only an OPERAND: CPython's
+   `list.__lt__(a, b)` takes any list subclass for `b` and never consults its
+   methods. `apy_order_held` is the gated form, and it is the left side that
+   needs gating -- a class that wrote the direct dunder has already had its
+   say by the time the builtin is read. */
+static apy_value apy_held_value(apy_value v) {
+    return O(v)->kind == APY_INST_K ? O(v)->v.o.held : 0;
+}
+
 /* True when either operand is an instance, which is the guard every operator
    below uses before paying for a lookup. */
 APY_API int64_t apy_either_inst_of(apy_value a, apy_value b) {

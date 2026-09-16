@@ -6526,6 +6526,44 @@ _CMP_DUNDER = {
 }
 
 
+#: The three things a comparison between an instance and anything else may
+#: try, in the order `_order_plan` puts them.
+_DIRECT, _HELD, _MIRROR = "direct", "held", "mirror"
+
+
+def _order_plan(x, y, mirror):
+    """The order `x OP y` tries the written dunders and the builtin between.
+
+    THE BUILTIN SITS IN THE MIDDLE, and that is the whole of divergence #112.
+    `type(a).__lt__` is the one the class WROTE or -- for a class extending a
+    builtin that wrote none -- the one it INHERITED, and in CPython an
+    inherited slot wins OUTRIGHT over a `__gt__` the other side wrote:
+    `OnlyGt([1]) < OnlyGt([1, 2])` is True, because `list.__lt__` answers and
+    the reflected `__gt__` is never reached. Trying both written dunders
+    first and only then reading the builtin answered `'GT'` -- the class's
+    own method, for a comparison the class never claimed.
+
+    THE ONE REORDERING RULE IS CPYTHON'S OWN. A right operand whose type is a
+    PROPER SUBCLASS of the left's and which overrides the mirror goes first,
+    so `[1] < OnlyGt([1, 2])` asks `OnlyGt.__gt__` before `list.__lt__` --
+    the subclass is presumed to know more about the pair than its base does.
+    Its own direct dunder still follows, because the mirror may answer
+    NotImplemented. Without this the reorder above would have broken the
+    three cases that were already right.
+    """
+    if isinstance(y, Instance) and y.cls.find(mirror) is not None:
+        if isinstance(x, Instance):
+            proper = y.cls is not x.cls and y.cls.is_sub(x.cls)
+        else:
+            # X IS NOT AN INSTANCE, so "a proper subclass of type(x)" is
+            # asking whether y extends the very builtin x is one of.
+            kind = y.cls.builtin_kind()
+            proper = kind is not None and type(x) is kind
+        if proper:
+            return (_MIRROR, _DIRECT, _HELD)
+    return (_DIRECT, _HELD, _MIRROR)
+
+
 def _cmpop(name, op):
     def run(h, a):
         x = h._get(a[0], name)
@@ -6540,7 +6578,31 @@ def _cmpop(name, op):
         # such answer into True.
         if isinstance(x, Instance) or isinstance(y, Instance):
             direct, reflected = _CMP_DUNDER[name]
-            for who, other, which in ((x, y, direct), (y, x, reflected)):
+            for step in _order_plan(x, y, reflected):
+                if step is _HELD:
+                    # THE BUILTIN THE LEFT SIDE EXTENDS, which is its
+                    # INHERITED direct dunder -- `list.__lt__` for a class
+                    # extending list that wrote no `__lt__` of its own. The
+                    # right side is unwrapped too and WITHOUT ASKING what it
+                    # wrote, because it is only the operand here: CPython's
+                    # `list.__lt__(a, b)` takes any list subclass for `b` and
+                    # never consults its methods.
+                    bx = _as_builtin(x, (direct,))
+                    by = y.held if isinstance(y, Instance) \
+                        and y.held is not None else y
+                    if bx is x and by is y:
+                        continue
+                    try:
+                        return h._bool(op(bx, by))
+                    except _UserFailed:
+                        return 0
+                    except TypeError:
+                        # NOT ORDERABLE AS THE BUILTINS EITHER, which is not
+                        # the end: `list.__lt__` answering NotImplemented is
+                        # exactly when CPython goes on to the mirror.
+                        continue
+                who, other, which = ((x, y, direct) if step is _DIRECT
+                                     else (y, x, reflected))
                 if not isinstance(who, Instance) or who.cls.find(which) is None:
                     continue
                 try:
@@ -6549,10 +6611,11 @@ def _cmpop(name, op):
                     return 0
                 if got is not NotImplemented:
                     return h._value(got)
-            # AFTER the dunders and before the comparison: a class that wrote
-            # one has already answered, and one that did not compares as the
-            # builtin it extends. `Counter(a=1) == {'a': 1}` is True in
-            # CPython for exactly this reason.
+            # NOTHING ANSWERED, so the comparison below is the one that words
+            # the refusal. Both sides are read as the builtin they extend for
+            # the same reason the plan reads one: `Counter(a=1) == {'a': 1}`
+            # is True in CPython because a class that wrote no `__eq__`
+            # compares as the builtin.
             x = _as_builtin(x, (direct, reflected))
             y = _as_builtin(y, (direct, reflected))
         try:

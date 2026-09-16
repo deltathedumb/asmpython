@@ -254,6 +254,15 @@ static apy_value apy_unary_dunder(apy_value v, const char *name);
 static apy_value apy_method1(apy_value v, const char *name, apy_value arg);
 static apy_value apy_binary_dunder(apy_value a, apy_value b,
                                    const char *name, const char *rname);
+/* The two halves of the one above, plus the ungated read of what an instance
+   holds: a comparison asks the written direct dunder, then the builtin the
+   class extends, then the written mirror -- see `apy_order_mirror_first_of`
+   for why the middle one is in the middle. */
+static apy_value apy_written_dunder(apy_value who, apy_value other,
+                                    const char *name);
+static int apy_order_mirror_first(apy_value a, apy_value b,
+                                  const char *mirror);
+static apy_value apy_held_value(apy_value v);
 static int apy_either_inst(apy_value a, apy_value b);
 static apy_value apy_call_n(apy_value f, apy_value *argv, int64_t argc);
 static apy_value apy_invoke(apy_value f, apy_value *a, int64_t n);

@@ -75,8 +75,15 @@ _HELPERS_THE_HOST_OWNS_WHOLE = {
     # host words the refusal in `_cmpop` and `_make_order`, and reads the
     # builtin a class extends in `_held_binary`, so neither name is ever
     # reached from here.
+    #
+    # `apy_order_mirror_first_of` and `apy_written_dunder_of` are the two the
+    # ordering's THREE STEPS needed -- which side goes first, and one written
+    # dunder without the other. `_cmpop`'s `_order_plan` is the same decision
+    # in Python and `who._send` is the same call, so the host asks neither.
     "apy_order_error_of",
     "apy_order_held",
+    "apy_order_mirror_first_of",
+    "apy_written_dunder_of",
     "apy_order_of",
     "apy_order_rich_of",
     "apy_repr_entered",

@@ -1580,27 +1580,63 @@ static apy_value apy_held_for(apy_value v, const char *name,
    THE MIRRORED OPERATOR IS THE REFLECTED NAME, as in `apy_cmp`: `a < b` falls
    back to `b.__gt__(a)`, because what b is asked is the comparison from its
    side. */
-APY_API int64_t apy_order_rich_of(apy_value a, apy_value b) {
-    int c = apy_order(a, b);
-    apy_value r;
-    if (c != 2 || !apy_either_inst(a, b)) return c;
-    r = apy_binary_dunder(a, b, "__lt__", "__gt__");
-    if (!r) {
-        apy_value ha, hb;
+static int apy_order_rich(apy_value a, apy_value b);
+
+/* IS `a < b`? 1 for yes, 0 for no, -1 for NEITHER SIDE ANSWERED -- which is
+   distinct from "no", and the caller turns it into the refusal.
+
+   THE SAME THREE STEPS `apy_cmp` TAKES, and in the same order, because
+   `sorted` compares with the very `<` the operator spells and the two must
+   not disagree: the dunder a wrote, the builtin a extends, the mirror b
+   wrote. See `apy_order_mirror_first_of` for why the builtin is in the
+   middle and when the mirror goes first. Before this split, `sorted` over a
+   class extending list that wrote only `__gt__` ordered by that method
+   while `a < b` on the same two objects ordered as lists. */
+static int apy_order_lt(apy_value a, apy_value b) {
+    static const int PLAIN[3] = { 0, 1, 2 };
+    static const int SUBCLASS_FIRST[3] = { 2, 0, 1 };
+    const int *plan = apy_order_mirror_first(a, b, "__gt__")
+        ? SUBCLASS_FIRST : PLAIN;
+    int k;
+    for (k = 0; k < 3; k++) {
+        apy_value r;
+        if (plan[k] == 1) {
+            /* THE BUILTIN THE LEFT SIDE EXTENDS, gated on the DIRECT name
+               alone -- which is why `apy_order_held` is asked with `__lt__`
+               twice. The right side is not gated: it is only an operand. */
+            apy_value ha = apy_held_for(a, "__lt__", "__lt__");
+            apy_value hb = apy_held_value(b);
+            int c2;
+            if (!ha && !hb) continue;
+            c2 = apy_order_rich(ha ? ha : a, hb ? hb : b);
+            if (c2 == APY_UNORD) return 0;
+            /* NOT ORDERABLE AS THE BUILTINS EITHER, which is when CPython
+               goes on to the mirror rather than giving up. */
+            if (c2 == 2) continue;
+            return c2 < 0 ? 1 : 0;
+        }
+        r = plan[k] == 0 ? apy_written_dunder(a, b, "__lt__")
+                         : apy_written_dunder(b, a, "__gt__");
         /* A FAILURE IS NOT A MISSING DUNDER. A `__lt__` that raised has
-           already reported; reading the builtin underneath would run a
-           second comparison over the first one's error. */
-        if (apy_error_occurred()) return 2;
-        ha = apy_held_for(a, "__lt__", "__gt__");
-        hb = apy_held_for(b, "__lt__", "__gt__");
-        if (ha || hb)
-            return apy_order_rich_of(ha ? ha : a, hb ? hb : b);
-        return 2;
+           already reported; going on would run a second comparison over the
+           first one's error. */
+        if (apy_error_occurred()) return -1;
+        if (r) return apy_truth(r) ? 1 : 0;
     }
-    if (apy_truth(r)) return -1;
-    r = apy_binary_dunder(b, a, "__lt__", "__gt__");
-    if (!r) return 2;
-    return apy_truth(r) ? 1 : 0;
+    return -1;
+}
+
+APY_API int64_t apy_order_rich_of(apy_value a, apy_value b) {
+    int c = apy_order(a, b), lt, gt;
+    if (c != 2 || !apy_either_inst(a, b)) return c;
+    lt = apy_order_lt(a, b);
+    if (lt < 0) return 2;
+    if (lt) return -1;
+    /* NOT LESS SAYS NOTHING ABOUT EQUAL VERSUS GREATER, so the other
+       direction is asked the same way rather than assumed. */
+    gt = apy_order_lt(b, a);
+    if (gt < 0) return 2;
+    return gt ? 1 : 0;
 }
 /* THE NAME ITS CALLERS USE, kept as a delegate: the body is IR's now,
    and the exported half above stands in when nothing is ported. */
@@ -1745,29 +1781,56 @@ static apy_value apy_cmp(const char *op, apy_value a, apy_value b, int lt, int e
             int i;
             for (i = 0; REFLECT[i][0]; i++)
                 if (strcmp(REFLECT[i][0], op) == 0) {
-                    apy_value r = apy_binary_dunder(a, b, REFLECT[i][1],
-                                                    REFLECT[i][2]);
-                    apy_value ha, hb;
-                    if (r || apy_error_occurred()) return r;
-                    /* AND THEN THE BUILTIN IT EXTENDS -- see
-                       `apy_order_held`. `Sub((1,)) < Sub((2,))` on a class
-                       extending tuple was a TypeError about two objects
-                       whose contents order perfectly well.
+                    const char *direct = REFLECT[i][1];
+                    const char *mirror = REFLECT[i][2];
+                    /* THE THREE STEPS, IN THE ORDER THIS PAIR TAKES THEM:
+                       0 the dunder a wrote, 1 the builtin a extends, 2 the
+                       mirror b wrote. `apy_order_mirror_first` says which of
+                       the two orders applies and why. */
+                    static const int PLAIN[3] = { 0, 1, 2 };
+                    static const int SUBCLASS_FIRST[3] = { 2, 0, 1 };
+                    const int *plan = apy_order_mirror_first(a, b, mirror)
+                        ? SUBCLASS_FIRST : PLAIN;
+                    int k;
+                    for (k = 0; k < 3; k++) {
+                        apy_value r;
+                        if (plan[k] == 1) {
+                            /* THE BUILTIN IT EXTENDS -- see `apy_order_held`.
+                               `Sub((1,)) < Sub((2,))` on a class extending
+                               tuple was a TypeError about two objects whose
+                               contents order perfectly well.
 
-                       THE ANSWER IS TAKEN AND THE MESSAGE IS NOT. Unwrapping
-                       is how the comparison is MADE; it is not what the
-                       program compared, so a pair that still refuses is
-                       reported as the ORIGINAL two -- `5 < P(1, 1)` on a
-                       namedtuple said `'int' and 'tuple'`, naming something
-                       the program never wrote. */
-                    ha = apy_held_for(a, REFLECT[i][1], REFLECT[i][2]);
-                    hb = apy_held_for(b, REFLECT[i][1], REFLECT[i][2]);
-                    if (ha || hb) {
-                        int c2 = apy_order(ha ? ha : a, hb ? hb : b);
-                        if (c2 == APY_UNORD) return apy_from_bool(0);
-                        if (c2 != 2)
+                               THE LEFT SIDE IS GATED ON THE DIRECT NAME ALONE,
+                               which is why `apy_order_held` is asked with it
+                               twice: a class that wrote the MIRROR has not had
+                               its say about this comparison yet, and reading
+                               the builtin is exactly what CPython does before
+                               reaching that mirror. The right side is not
+                               gated at all -- it is only an operand here.
+
+                               THE ANSWER IS TAKEN AND THE MESSAGE IS NOT.
+                               Unwrapping is how the comparison is MADE; it is
+                               not what the program compared, so a pair that
+                               still refuses is reported as the ORIGINAL two --
+                               `5 < P(1, 1)` on a namedtuple said `'int' and
+                               'tuple'`, naming something the program never
+                               wrote. */
+                            apy_value ha = apy_held_for(a, direct, direct);
+                            apy_value hb = apy_held_value(b);
+                            int c2;
+                            if (!ha && !hb) continue;
+                            c2 = apy_order(ha ? ha : a, hb ? hb : b);
+                            if (c2 == APY_UNORD) return apy_from_bool(0);
+                            /* NOT ORDERABLE AS THE BUILTINS EITHER, which is
+                               not the end: that is precisely when CPython
+                               goes on to the mirror. */
+                            if (c2 == 2) continue;
                             return apy_from_bool(c2 < 0 ? lt
                                                  : (c2 == 0 ? eq : gt));
+                        }
+                        r = plan[k] == 0 ? apy_written_dunder(a, b, direct)
+                                         : apy_written_dunder(b, a, mirror);
+                        if (r || apy_error_occurred()) return r;
                     }
                     break;
                 }

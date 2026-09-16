@@ -953,6 +953,145 @@ def apy_order_error_of(greater: i64, a: ptr, b: ptr) -> ptr:
     return ptr(0)
 
 
+def apy_order_mirror_first_of(a: ptr, b: ptr, mirror: ptr) -> i64:
+    """Does the RIGHT operand go first? 1 for yes, 0 for the ordinary order.
+
+    CPYTHON'S ONE REORDERING RULE: a right operand whose type is a PROPER
+    SUBCLASS of the left's and which overrides the mirror is asked before the
+    left's own dunder, the subclass being presumed to know more about the pair
+    than its base does. `[1] < OnlyGt([1, 2])` asks `OnlyGt.__gt__` before
+    `list.__lt__`.
+
+    WHEN THE LEFT IS NOT AN INSTANCE, "a proper subclass of type(a)" is asking
+    whether b extends the very builtin a is one of -- which is exactly the
+    case above, and the one the reordering exists for.
+    """
+    if i64(load(i32, offset(b, 0))) != apy_inst_kind():
+        return 0
+    bcls: ptr = ptr(load(u64, offset(b, apy_o_cls_offset())))
+    if not apy_class_find_of(bcls, apy_name_of(mirror)):
+        return 0
+    if i64(load(i32, offset(a, 0))) == apy_inst_kind():
+        acls: ptr = ptr(load(u64, offset(a, apy_o_cls_offset())))
+        if acls == bcls:
+            return 0
+        return apy_type_is_sub_of(bcls, acls)
+    held: ptr = ptr(load(u64, offset(b, apy_o_held_offset())))
+    if not held:
+        return 0
+    if i64(load(i32, offset(held, 0))) == i64(load(i32, offset(a, 0))):
+        return 1
+    return 0
+
+
+def apy_written_dunder_of(who: ptr, other: ptr, name: ptr) -> ptr:
+    """ONE HALF OF `apy_binary_dunder_of`: the dunder THIS side wrote.
+
+    0 for a class that wrote none and 0 for `NotImplemented`, which means
+    "ask the other operand" rather than "the answer is NotImplemented" -- the
+    same reading the paired form gives it. Split out so the builtin a class
+    extends can be read BETWEEN the two halves rather than after both; see
+    `apy_order_lt_of`.
+    """
+    r: ptr = apy_method1_of(who, name, other)
+    if apy_error_occurred():
+        return r
+    if r:
+        if i64(load(i32, offset(r, 0))) != apy_notimpl_kind():
+            return r
+    return ptr(0)
+
+
+def apy_order_lt_held_of(a: ptr, b: ptr) -> i64:
+    """`a < b` AS THE BUILTINS THE TWO EXTEND: 1, 0, or -1 for "not that
+    either", which sends the caller on to the mirror.
+
+    THE LEFT SIDE IS GATED ON THE DIRECT NAME ALONE, which is why
+    `apy_order_held` is asked with `__lt__` twice: a class that wrote the
+    MIRROR has not had its say about this comparison yet, and reading the
+    builtin is exactly what CPython does before reaching that mirror. THE
+    RIGHT SIDE IS NOT GATED AT ALL -- it is only an operand here, and
+    CPython's `list.__lt__(a, b)` takes any list subclass for `b` without
+    consulting its methods.
+    """
+    ha: ptr = apy_order_held(a, rodata(b"__lt__\0"), rodata(b"__lt__\0"))
+    hb: ptr = ptr(0)
+    if i64(load(i32, offset(b, 0))) == apy_inst_kind():
+        hb = ptr(load(u64, offset(b, apy_o_held_offset())))
+    if not ha:
+        if not hb:
+            return -1
+    left: ptr = a
+    if ha:
+        left = ha
+    right: ptr = b
+    if hb:
+        right = hb
+    c2: i64 = apy_order_rich_of(left, right)
+    if c2 == apy_unord():
+        return 0
+    if c2 == 2:
+        return -1
+    if c2 < 0:
+        return 1
+    return 0
+
+
+def apy_order_lt_of(a: ptr, b: ptr) -> i64:
+    """Is `a < b`? 1 for yes, 0 for no, -1 for NEITHER SIDE ANSWERED -- which
+    is distinct from "no", and the caller turns it into the refusal.
+
+    THREE STEPS, AND THE BUILTIN IS THE MIDDLE ONE: the dunder a wrote, the
+    builtin a extends, the mirror b wrote. `type(a).__lt__` is the written one
+    or -- for a class extending a builtin that wrote none -- the INHERITED
+    one, and in CPython an inherited slot wins OUTRIGHT over a `__gt__` the
+    other side wrote. Asking both written dunders first and only then reading
+    the builtin made `sorted` over a class extending list that wrote only
+    `__gt__` order by that method, while `a < b` on the same two objects
+    ordered as lists.
+
+    THE C SAYS THIS TWICE, in `apy_cmp` and in its own `apy_order_lt`, and all
+    three have to agree: `sorted` compares with the very `<` the operator
+    spells. See `apy_order_mirror_first_of` for when the mirror goes first.
+    """
+    if apy_order_mirror_first_of(a, b, rodata(b"__gt__\0")):
+        first: ptr = apy_written_dunder_of(b, a, rodata(b"__gt__\0"))
+        if apy_error_occurred():
+            return -1
+        if first:
+            if apy_truth(first):
+                return 1
+            return 0
+        second: ptr = apy_written_dunder_of(a, b, rodata(b"__lt__\0"))
+        if apy_error_occurred():
+            return -1
+        if second:
+            if apy_truth(second):
+                return 1
+            return 0
+        return apy_order_lt_held_of(a, b)
+    direct: ptr = apy_written_dunder_of(a, b, rodata(b"__lt__\0"))
+    # A FAILURE IS NOT A MISSING DUNDER: a `__lt__` that raised has already
+    # reported, and going on would run a second comparison over its error.
+    if apy_error_occurred():
+        return -1
+    if direct:
+        if apy_truth(direct):
+            return 1
+        return 0
+    held: i64 = apy_order_lt_held_of(a, b)
+    if held >= 0:
+        return held
+    mirror: ptr = apy_written_dunder_of(b, a, rodata(b"__gt__\0"))
+    if apy_error_occurred():
+        return -1
+    if mirror:
+        if apy_truth(mirror):
+            return 1
+        return 0
+    return -1
+
+
 def apy_order_rich_of(a: ptr, b: ptr) -> i64:
     """`apy_order_of` with the program\'s own `__lt__` behind it.
 
@@ -971,36 +1110,17 @@ def apy_order_rich_of(a: ptr, b: ptr) -> i64:
         return c
     if not apy_either_inst_of(a, b):
         return c
-    r: ptr = apy_binary_dunder_of(a, b, rodata(b"__lt__\0"),
-                                 rodata(b"__gt__\0"))
-    if not r:
-        # A FAILURE IS NOT A MISSING DUNDER: a `__lt__` that raised has
-        # already reported, and reading the builtin underneath would run a
-        # second comparison over the first one's error.
-        if apy_error_occurred():
-            return 2
-        # AND THEN THE BUILTIN THE CLASS EXTENDS -- see `apy_order_held`.
-        ha: ptr = apy_order_held(a, rodata(b"__lt__\0"),
-                                 rodata(b"__gt__\0"))
-        hb: ptr = apy_order_held(b, rodata(b"__lt__\0"),
-                                 rodata(b"__gt__\0"))
-        if not ha:
-            if not hb:
-                return 2
-        left: ptr = a
-        if ha:
-            left = ha
-        right: ptr = b
-        if hb:
-            right = hb
-        return apy_order_rich_of(left, right)
-    if apy_truth(r):
-        return -1
-    r2: ptr = apy_binary_dunder_of(b, a, rodata(b"__lt__\0"),
-                                  rodata(b"__gt__\0"))
-    if not r2:
+    lt: i64 = apy_order_lt_of(a, b)
+    if lt < 0:
         return 2
-    if apy_truth(r2):
+    if lt:
+        return -1
+    # NOT LESS SAYS NOTHING ABOUT EQUAL VERSUS GREATER, so the other
+    # direction is asked the same way rather than assumed.
+    gt: i64 = apy_order_lt_of(b, a)
+    if gt < 0:
+        return 2
+    if gt:
         return 1
     return 0
 
