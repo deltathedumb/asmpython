@@ -114,7 +114,62 @@ class Lowerer:
         self._emit_entry()
         if self.needs_vla:
             self._splice_support()
+        self._prune()
         return self.module
+
+    def _prune(self) -> None:
+        """Drop what nothing reaches.
+
+        THE STANDARD LIBRARY IS A HEADER, so `#include <stdio.h>` brings in
+        `printf` AND `fprintf` AND `snprintf` AND the whole formatter, as
+        `static` definitions in this one translation unit. Every one of them
+        would reach the backend and be emitted: the C backend writes a
+        function per IR function, and a program that prints one line would
+        carry a `qsort` it never calls.
+
+        A linker drops those, and this frontend produces a module rather than
+        an object file, so nothing downstream would. Reachability from the
+        exported functions is exactly the question a linker asks, and the
+        answer here costs one walk of the instruction stream.
+
+        ONLY INTERNAL ONES GO. Anything with external linkage is part of the
+        artifact's interface whether or not this unit calls it, and an
+        external DECLARATION is kept only while something still calls it --
+        which is what stops `extern` lines for functions the pruning just
+        removed the calls to.
+        """
+        by_name = {f.name: f for f in self.module.functions}
+        roots = [f for f in self.module.functions
+                 if f.linkage is not IRLinkage.INTERNAL and not f.external]
+        seen: set[str] = set()
+        globals_used: set[str] = set()
+        stack = [f.name for f in roots]
+        while stack:
+            name = stack.pop()
+            if name in seen:
+                continue
+            seen.add(name)
+            fn = by_name.get(name)
+            if fn is None:
+                continue
+            for _, ins in fn.instructions():
+                if ins.op in (Op.CALL, Op.FUNC_ADDR) and ins.sym:
+                    if ins.sym not in seen:
+                        stack.append(ins.sym)
+                elif ins.op is Op.GLOBAL_ADDR and ins.sym:
+                    globals_used.add(ins.sym)
+        self.module.functions = [
+            f for f in self.module.functions
+            if f.name in seen or (f.linkage is not IRLinkage.INTERNAL
+                                  and not f.external)]
+        # A global an initialiser points AT is used even when no instruction
+        # names it: `static char *p = msg;` becomes a store in `__c_init`,
+        # which does name it -- but a string only ever reached through
+        # another global's bytes would not be there. Nothing produces that
+        # today; the assertion is the comment.
+        self.module.globals = [
+            g for g in self.module.globals
+            if g.name in globals_used or g.linkage is IRLinkage.EXPORT]
 
     def anon_literals(self):
         return list(self.parser.anon)

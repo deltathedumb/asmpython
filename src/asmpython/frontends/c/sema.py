@@ -373,6 +373,9 @@ class Sema:
         self._mark_addressed(operand)
         return S.Unary(span, C.pointer_to(operand.type), False, "&", operand)
 
+    def mark_addressed(self, e: S.Expr) -> None:
+        self._mark_addressed(e)
+
     def _mark_addressed(self, e: S.Expr) -> None:
         """Remember that a local is addressed, so lowering gives it a slot."""
         while True:

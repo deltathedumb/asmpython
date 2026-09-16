@@ -109,6 +109,20 @@ class Options:
     #: Declaration files naming shared libraries the program may `import`.
     #: See `frontends/python/nativelib.py`.
     native_libraries: tuple[Path, ...] = ()
+    #: `-I`: where `#include <...>` looks, before the bundled headers. A C
+    #: notion, kept separate from `import_paths` because the two search
+    #: different things in different orders and one flag doing both would
+    #: put a Python package directory on a C header path.
+    include_paths: tuple[Path, ...] = ()
+    #: `-D NAME[=VALUE]`, as the C preprocessor sees them. A name with no
+    #: value is defined as `1`, which is what every C compiler does.
+    defines: tuple[tuple[str, str], ...] = ()
+    #: Whether `??=` is a `#`. C23 deleted trigraphs and gcc needs a flag for
+    #: them; so does this.
+    trigraphs: bool = False
+    #: Search the frontend's own `<stdio.h>` and the rest. Off for a project
+    #: that supplies a whole library of its own on an `-I` path.
+    bundled_headers: bool = True
 
     @property
     def effective_passes(self) -> tuple[str, ...]:
@@ -255,6 +269,17 @@ def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
             sink.report(error("E9109", f"--native-library: {exc}"))
             return Result()
     py_nativelib.use(declared, _target_os(opts, selected))
+
+    # WHERE `#include` LOOKS, published the same way and for the same reason
+    # as the Python frontend's import paths: a frontend is handed a source and
+    # a sink, so what the driver knows and it needs arrives through a module
+    # global, republished every compilation.
+    from ..frontends import c as c_frontend
+    c_frontend.use(include_paths=opts.include_paths,
+                   quote_paths=opts.import_paths,
+                   defines=dict(opts.defines),
+                   bundled=opts.bundled_headers,
+                   trigraphs=opts.trigraphs)
 
     fe = (frontend_registry.get(opts.frontend) if opts.frontend
           else frontend_registry.for_path(opts.source))

@@ -101,7 +101,26 @@ def _options(args) -> Options:
         host_python=getattr(args, "host_python", None),
         native_libraries=tuple(Path(p) for p in
                                (getattr(args, "native_library", None) or ())),
+        include_paths=tuple(Path(p) for p in
+                            (getattr(args, "include_path", None) or ())),
+        defines=_defines(getattr(args, "define", None) or ()),
+        trigraphs=getattr(args, "trigraphs", False),
+        bundled_headers=getattr(args, "bundled_headers", True),
     )
+
+
+def _defines(items) -> tuple[tuple[str, str], ...]:
+    """`-D NAME=VALUE` and `-D NAME`, the latter defined as `1`.
+
+    Split on the FIRST `=` only, because a macro body may contain one:
+    `-D MAX(a,b)=((a)>(b)?(a):(b))` is a definition every build system
+    writes, and splitting on all of them loses most of it.
+    """
+    out = []
+    for item in items:
+        name, sep, value = item.partition("=")
+        out.append((name, value if sep else "1"))
+    return tuple(out)
 
 
 def cmd_build(args) -> int:
@@ -734,6 +753,22 @@ def build_parser() -> argparse.ArgumentParser:
         # discovered: a foreign symbol's argument kinds cannot be read out of
         # the library, and guessing them is how a native call corrupts a
         # stack. See frontends/python/nativelib.py.
+        # THE C FRONTEND'S OWN FLAGS, spelled as every C compiler spells
+        # them. On the shared parser rather than a C-specific one because
+        # `--frontend` is chosen on the same command line and an option that
+        # only exists once a frontend has been named is one nobody can
+        # discover from `--help`.
+        p.add_argument("-I", "--include-path", action="append", metavar="DIR",
+                       help="where #include <...> looks, before the bundled "
+                            "headers (C)")
+        p.add_argument("-D", "--define", action="append", metavar="NAME[=VAL]",
+                       help="define a preprocessor macro; no value means 1 (C)")
+        p.add_argument("--trigraphs", action="store_true",
+                       help="translate ??= and the rest; C23 deleted them (C)")
+        p.add_argument("--no-bundled-headers", dest="bundled_headers",
+                       action="store_false",
+                       help="do not search the frontend's own standard "
+                            "headers (C)")
         p.add_argument("--native-library", action="append", metavar="FILE",
                        help="JSON declaring shared libraries this program may "
                             "import, and the signatures it calls in them")

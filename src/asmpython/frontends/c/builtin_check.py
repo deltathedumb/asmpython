@@ -67,6 +67,27 @@ _SIGNATURES: dict[str, tuple[tuple, CType]] = {
 }
 
 
+def _need_address(p, e: S.Expr, name: str) -> bool:
+    """A `va_list` argument is written through, so it needs a location.
+
+    NOTHING IN THE SOURCE TAKES ITS ADDRESS. `va_arg(ap, int)` advances `ap`,
+    and the only `&` involved is the one this builtin does on the programmer's
+    behalf -- so without this the parser sees a `va_list` that is never
+    addressed, lowering keeps it in a register, and the advance has nowhere to
+    be stored. The symptom was the frontend refusing its own `<stdarg.h>`.
+    """
+    inner = e
+    while isinstance(inner, (S.Conv, S.Cast)):
+        inner = inner.operand
+    if not inner.lvalue:
+        p.sema.error("E1299", f"{name} needs a va_list it can modify",
+                     inner.span,
+                     note="it advances the list, so it must be an object")
+        return False
+    p.sema._mark_addressed(inner)
+    return True
+
+
 def parse_type_builtin(p, name: str, span: Span) -> S.Expr:
     """`__builtin_va_arg`, `__builtin_offsetof`, `__builtin_types_compatible_p`."""
     p.expect("(", f"{name} needs parentheses")
@@ -79,6 +100,8 @@ def parse_type_builtin(p, name: str, span: Span) -> S.Expr:
             p.sema.error("E1290",
                          f"__builtin_va_arg needs a va_list, not "
                          f"{C.spell(ap.type)}", span)
+            return p.sema.poison(span)
+        if not _need_address(p, ap, "__builtin_va_arg"):
             return p.sema.poison(span)
         if ty.is_array or ty.is_function or not ty.complete:
             p.sema.error("E1291",
@@ -163,6 +186,8 @@ def check_builtin(p, name: str, args: list[S.Expr], span: Span) -> S.Expr:
         # address is a property of the frame, not of `last`.
         if not 1 <= len(args) <= 2:
             return _arity(p, name, "1 or 2", args, span)
+        if not _need_address(p, args[0], name):
+            return p.sema.poison(span)
         return S.BuiltinCall(span, C.VOID, False, name, args[:1], [])
     if name == "__builtin_expect":
         if len(args) != 2:
@@ -181,6 +206,8 @@ def check_builtin(p, name: str, args: list[S.Expr], span: Span) -> S.Expr:
     want, result = sig
     if len(args) != len(want):
         return _arity(p, name, str(len(want)), args, span)
+    if name == "__builtin_va_copy" and not _need_address(p, args[0], name):
+        return p.sema.poison(span)
     checked: list[S.Expr] = []
     for i, (arg, target) in enumerate(zip(args, want)):
         if target is None:
