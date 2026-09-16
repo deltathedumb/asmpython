@@ -13,6 +13,81 @@ typedef unsigned char char8_t;
 typedef unsigned short char16_t;
 typedef unsigned int char32_t;
 
+/* ── UTF-8 code units, which C23 added ────────────────────────────────── */
+/* THE ENCODING HERE IS ALREADY UTF-8, so these two are a buffer and a state
+   rather than a conversion: `mbrtoc8` hands back one byte per call and keeps
+   the rest, and `c8rtomb` collects bytes until the sequence is complete. The
+   `(size_t)-3` return is the whole reason they are stateful -- it means "a
+   code unit came out and nothing went in", which is how a function that
+   answers one byte at a time reports the second one.
+
+   A ZERO BYTE MEANS "ABSENT" in the packed state, which is safe because no
+   byte of a multi-byte UTF-8 sequence is zero: a lead byte is 0xC0..0xF7 and
+   a continuation byte is 0x80..0xBF. That is what lets `c8rtomb` work out
+   how many it has collected without a second counter. */
+static size_t mbrtoc8(char8_t *__c, const char *__s, size_t __n,
+                      mbstate_t *__st)
+{
+    static mbstate_t __own;
+    char __buf[8];
+    wchar_t __w = 0;
+    size_t __r, __k, __i;
+    if (__st == NULL) __st = &__own;
+    if (__st->__count > 0) {
+        if (__c) *__c = (char8_t)(__st->__value & 0xFFu);
+        __st->__value >>= 8;
+        __st->__count--;
+        return (size_t)-3;
+    }
+    __r = mbrtowc(&__w, __s, __n, __st);
+    if (__r == (size_t)-1 || __r == (size_t)-2) return __r;
+    __k = wcrtomb(__buf, __w, __st);
+    if (__k == (size_t)-1) return (size_t)-1;
+    if (__c) *__c = (char8_t)(unsigned char)__buf[0];
+    __st->__value = 0;
+    for (__i = __k; __i > 1; __i--)
+        __st->__value = (__st->__value << 8)
+                      | (unsigned int)(unsigned char)__buf[__i - 1];
+    __st->__count = (int)__k - 1;
+    return __r;
+}
+
+static size_t c8rtomb(char *__s, char8_t __c, mbstate_t *__st)
+{
+    static mbstate_t __own;
+    unsigned int __need, __have = 0, __lead;
+    size_t __i;
+    if (__st == NULL) __st = &__own;
+    if (__s == NULL) { __st->__count = 0; __st->__value = 0; return 1; }
+    while (__have < 4 && ((__st->__value >> (__have * 8)) & 0xFFu) != 0)
+        __have++;
+    if (__have == 0) {
+        if (__c < 0x80) { __s[0] = (char)__c; return 1; }
+        if ((__c & 0xE0u) == 0xC0u) __need = 2;
+        else if ((__c & 0xF0u) == 0xE0u) __need = 3;
+        else if ((__c & 0xF8u) == 0xF0u) __need = 4;
+        else return (size_t)-1;
+        __st->__value = __c;
+        __st->__count = (int)__need;
+        return 0;
+    }
+    if ((__c & 0xC0u) != 0x80u) {
+        __st->__count = 0; __st->__value = 0;
+        return (size_t)-1;
+    }
+    __st->__value |= ((unsigned int)__c) << (__have * 8);
+    __have++;
+    __lead = __st->__value & 0xFFu;
+    __need = (__lead & 0xE0u) == 0xC0u ? 2u
+           : (__lead & 0xF0u) == 0xE0u ? 3u : 4u;
+    if (__have < __need) return 0;
+    for (__i = 0; __i < __need; __i++)
+        __s[__i] = (char)((__st->__value >> (__i * 8)) & 0xFFu);
+    __st->__count = 0;
+    __st->__value = 0;
+    return (size_t)__need;
+}
+
 static size_t mbrtoc32(char32_t *__c, const char *__s, size_t __n,
                        mbstate_t *__st)
 { wchar_t w = 0; size_t r = mbrtowc(&w, __s, __n, __st);

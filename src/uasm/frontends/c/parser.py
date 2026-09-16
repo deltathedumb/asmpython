@@ -635,7 +635,7 @@ class Parser:
         """What a declaration's specifiers said."""
 
         __slots__ = ("type", "storage", "inline", "noreturn", "align",
-                     "attrs", "constexpr",
+                     "attrs", "constexpr", "infer",
                      "span", "thread_local", "explicit")
 
         def __init__(self) -> None:
@@ -645,6 +645,7 @@ class Parser:
             self.noreturn = False
             self.attrs: set[str] = set()
             self.constexpr = False
+            self.infer = False
             self.align: int | None = None
             self.thread_local = False
             self.span: Span | None = None
@@ -827,11 +828,16 @@ class Parser:
             if made is not None:
                 self.sema.error("E1216", "two type specifiers", start)
             made = basic
+        # C23's `auto`: WITH NO TYPE SPECIFIER IT IS NOT A STORAGE CLASS,
+        # it is a request to take the type from the initialiser. `auto int x`
+        # is still the old keyword, which has meant nothing since C89 gave
+        # every block-scope object automatic storage by default -- so the
+        # test is that no specifier named a type, which is what `made is
+        # None` says here and nowhere later.
+        spec.infer = (spec.storage is Storage.AUTO and not spec.explicit
+                      and made is None and not complex_)
         if made is None:
-            if spec.explicit or spec.storage is not None or quals:
-                made = C.INT
-            else:
-                made = C.INT
+            made = C.INT
         if complex_:
             # `_Complex` ALONE IS `_Complex double`. C's grammar lists the
             # three spellings with a real floating type in them, so a bare
@@ -2112,6 +2118,9 @@ class Parser:
     def _declare(self, name: str, ty: CType, spec: Spec, span: Span) -> S.Decl:
         file_scope = self.sema.scope.is_file
         storage = spec.storage
+        pre: S.Expr | None = None
+        if spec.infer:
+            ty, pre = self._infer(name, ty, spec, span)
         if storage is Storage.TYPEDEF:
             return self._typedef(name, ty, span)
         if ty.is_function:
@@ -2157,7 +2166,7 @@ class Parser:
             self.sema.error("E1276", f"{name!r} is defined twice", span,
                             also=(sym.span, "the first definition")
                             if sym.span else None)
-        if self.eat("="):
+        if pre is not None or self.eat("="):
             if storage is Storage.EXTERN and not file_scope:
                 self.sema.error("E1269",
                                 f"{name!r} is declared `extern` and "
@@ -2167,7 +2176,8 @@ class Parser:
                 self.sema.error("E1270",
                                 f"cannot initialise the incomplete type "
                                 f"{C.spell(sym.type)}", span)
-            init = self.initializer(sym.type, span)
+            init = (self._init_from(sym.type, pre, span) if pre is not None
+                    else self.initializer(sym.type, span))
             if sym.type.is_array and sym.type.count is None:
                 elem = max(1, sym.type.of.size)
                 sym.type = C.array_of(sym.type.of,
@@ -2214,6 +2224,60 @@ class Parser:
             # lowering asks about the storage itself.
             self.function.locals.append(sym)
         return decl
+
+    def _infer(self, name: str, ty: CType, spec: Spec,
+               span: Span) -> tuple[CType, "S.Expr | None"]:
+        """C23's `auto x = e;` -- the type is `e`'s, and `e` is parsed here.
+
+        IT HAS TO BE PARSED BEFORE THE OBJECT EXISTS, which is why this is
+        not in `initializer`: the declaration has no type until the
+        initialiser has one, and a name cannot be declared without a type.
+        The expression comes back so that the ordinary path can use it.
+
+        THE TYPE IS AFTER DECAY AND LVALUE CONVERSION: `auto p = "hi";` is a
+        `char *` and not a `char[3]`, `auto q = a;` for an array is a pointer
+        to its first element, and `auto x = c;` for a `const int c` is a
+        plain `int` -- reading an object gives a value, and a value has no
+        qualifiers.
+        """
+        if ty is not spec.type:
+            # `auto *p = ...` -- C23 allows one plain identifier and nothing
+            # built on it, because there is no type yet for a `*` to be
+            # applied to.
+            self.sema.error(
+                "E1286", f"`auto` infers the type of {name!r} and cannot be "
+                         f"combined with a declarator", span,
+                help="write the type out, or drop the `*` and let the "
+                     "initialiser supply it")
+            return C.INT, None
+        if not self.at("="):
+            self.sema.error(
+                "E1287", f"`auto` needs an initialiser to take {name!r}'s "
+                         f"type from", span)
+            return C.INT, None
+        self.next()
+        e = self.assignment()
+        got = C.decay(self.sema.lvalue_conversion(e).type).unqualified()
+        if got.is_void or not got.complete:
+            self.sema.error(
+                "E1288", f"`auto` cannot take {name!r}'s type from "
+                         f"{C.spell(got)}", e.span)
+            return C.INT, e
+        # THE QUALIFIERS ARE THE DECLARATION'S, not the initialiser's:
+        # `const auto x = f();` is a `const` object of `f`'s return type.
+        return got.qualified(spec.type.qual) if spec.type.qual else got, e
+
+    def _init_from(self, ty: CType, e: S.Expr, span: Span) -> S.Init:
+        """An `S.Init` for an initialiser that is already parsed."""
+        out = S.Init(span)
+        got = self.sema.assignable(ty, e, "initialisation", e.span)
+        if got is not None:
+            out.entries.append(S.InitEntry(0, ty, got))
+        try:
+            out.size = ty.size
+        except C.IncompleteType:
+            out.size = 0
+        return out
 
     def _check_constexpr(self, sym: Symbol, init: S.Init, span: Span) -> None:
         """`constexpr int n = 7;` -- and then `n` IS 7 wherever a constant is.

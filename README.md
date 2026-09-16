@@ -307,8 +307,8 @@ C23's own: `_BitInt(N)` up to `BITINT_MAXWIDTH`, which is 64 — what C23
 requires and no more — and which is *not* promoted, so `a + b` on two
 `_BitInt(4)`s wraps at four bits; `constexpr` objects whose name is a
 constant expression; `[[...]]` attributes everywhere C allows them;
-`nullptr`, `typeof`, an `enum` with a fixed underlying type, and a label
-before a declaration. In the preprocessor: `#embed` with all four of its
+`nullptr`, `typeof`, `auto` that takes the initialiser's type, an `enum`
+with a fixed underlying type, and a label before a declaration. In the preprocessor: `#embed` with all four of its
 parameters and `__has_embed`, `#elifdef`, `__VA_OPT__` and `_Pragma`.
 
 The preprocessor is Prosser's algorithm, which is to say it agrees with the

@@ -105,7 +105,9 @@ deliverable.
   `[[...]]` attributes wherever C allows one, with `nodiscard` and
   `deprecated` the two that warn; `nullptr` and `nullptr_t`; `typeof` and
   `typeof_unqual`; an `enum` with a fixed underlying type; a label before a
-  declaration; `unreachable()`; and `%b`, `%ls` and `%lc` in `printf`. In
+  declaration; `auto` with no type specifier, which takes the
+  initialiser's type rather than being a storage class; `unreachable()`;
+  and `%b`, `%ls` and `%lc` in `printf`. In
   the preprocessor, `#embed` -- with `limit`, `prefix`, `suffix`, `if_empty`
   and `__has_embed` -- and `_Pragma`, processed after macro replacement so
   that a header's `_Pragma(STRINGIFY(x))` works.

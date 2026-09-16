@@ -448,6 +448,28 @@ class TestTheDivergences:
         codes = [d.code for d in sink.diagnostics]
         assert codes.count("W1218") == 1, codes
 
+    def test_auto_without_a_type_is_not_a_storage_class(self, tmp_path):
+        """The four ways C23's `auto` is refused, all of which compiled
+        before as `int`: a declarator built on it, no initialiser, a `void`
+        initialiser, and an array. The WORKING cases are compared against a
+        real compiler in the differential suite -- `auto` inference is one
+        of the few C23 features gcc 13 has."""
+        for source, code in (
+                ("int main(void){ auto *p = (int *)0; return 0; }", "E1286"),
+                ("int main(void){ auto a[2] = {1, 2}; return 0; }", "E1286"),
+                ("int main(void){ auto x; return 0; }", "E1287"),
+                ("void f(void);\nint main(void){ auto x = f(); return 0; }",
+                 "E1288")):
+            _, sink = compile_c(source)
+            assert sink.failed, source
+            assert code in [d.code for d in sink.diagnostics], source
+
+        # AND `auto int x` IS STILL THE OLD KEYWORD, which has meant nothing
+        # since C89 gave every block-scope object automatic storage anyway.
+        module, sink = compile_c("int main(void){ auto int x = 1; return x - 1; }")
+        assert module is not None, [d.message for d in sink.diagnostics]
+        assert not sink.failed, [d.message for d in sink.diagnostics]
+
     def test_embed_is_the_file_s_bytes(self, tmp_path):
         """`#embed` IS A DIRECTIVE AND NOT A FUNCTION, which is why it needs
         a file on disk to test: the bytes are read at translation time and

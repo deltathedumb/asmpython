@@ -1697,6 +1697,50 @@ PROGRAMS: dict[str, str] = {
         }
     """,
 
+    "auto_takes_the_initialisers_type": r"""
+        /* C23's `auto`: with no type specifier it is not a storage
+           class any more, it is a request to take the type from
+           the initialiser -- AFTER decay and lvalue conversion, so
+           `auto p = "hi"` is a `char *` and `auto y = c` for a
+           `const int c` is a plain `int`. It was silently `int`
+           before, which compiled `auto d = 3.5;` into a 4-byte
+           object holding 3. */
+        #include <stdio.h>
+
+        struct pair { int a, b; };
+        auto global = 5;
+
+        static struct pair make(void) { struct pair p = { 3, 4 }; return p; }
+
+        int main(void) {
+            auto x = 3;
+            auto d = 3.5;
+            auto f = 1.5f;
+            auto p = "hi";
+            auto ll = 1LL;
+            auto u = 1u;
+            auto ch = 'q';
+            int a[3] = { 7, 8, 9 };
+            auto q = a;
+            const int c = 1;
+            auto y = c;
+            struct pair s = { 1, 2 };
+            auto t = s;
+            auto made = make();
+            const auto k = 9;
+            int *ok = &x;
+
+            y = 2;                  /* the inferred type drops the `const` */
+            printf("%zu %zu %zu %zu %zu %zu\n", sizeof x, sizeof d, sizeof f,
+                   sizeof p, sizeof ll, sizeof u);
+            printf("%zu %zu %zu %zu %zu\n", sizeof q, sizeof y, sizeof t, sizeof k,
+                   sizeof ch);
+            printf("%c %d %d %d %d %d\n", p[0], q[2], y, t.a + t.b, global, k);
+            printf("%d %d %d\n", made.a, made.b, *ok);
+            return 0;
+        }
+    """,
+
     "wide_strings_and_the_bit_utilities": r"""
         /* `<wchar.h>`'s non-multibyte half, `wcsftime`,
            `timespec_getres` and every operation `<stdbit.h>` has
@@ -3350,6 +3394,66 @@ NO_ORACLE: dict[str, tuple[str, str]] = {
         return 0;
     }
     """, '64 1 32 64\n1 1 2 4 8 8\n1 2 4 8\n16 8\n-192 16 16 1\n-192 192\n9223372036854775807 18446744073709551615\n255 9 -4294967296\n-4096\n4095\n15\n15\n-3192\n-4096\n4095\n0\n8\n-1 0\n-1\n-212 12 -212 12\n2 4 1 8\n0 1 0\n3808 8\n1 1 43 7\n1 1 3\n1000 1024000\n-428 -5\n71 3\n-200.0 -100 1 0 -200.0\n3 -3\n-16 7 4000\nfour thousand\n4000 -4000 4\n-5 9\n'),
+
+    "utf_8_code_units": (r"""
+    #include <stdio.h>
+    #include <uchar.h>
+    #include <string.h>
+
+    int main(void) {
+        mbstate_t st;
+        char8_t c8;
+        char buf[8];
+        size_t r;
+        int i;
+
+        memset(&st, 0, sizeof st);
+        r = mbrtoc8(&c8, "a", 1, &st);
+        printf("%zu %d %d\n", r, (int)c8, mbsinit(&st) != 0);
+
+        /* A THREE-BYTE CHARACTER COMES OUT ONE CODE UNIT AT A TIME, and the two
+           after the first consume nothing -- which is what `(size_t)-3` says. */
+        memset(&st, 0, sizeof st);
+        r = mbrtoc8(&c8, "\xE2\x82\xAC", 4, &st);
+        printf("%zu %d %d\n", r, (int)c8, mbsinit(&st) != 0);
+        for (i = 0; i < 2; i++) {
+            r = mbrtoc8(&c8, 0, 0, &st);
+            printf("%d %d\n", r == (size_t)-3, (int)c8);
+        }
+        printf("%d\n", mbsinit(&st) != 0);
+
+        memset(&st, 0, sizeof st);
+        memset(buf, 0, sizeof buf);
+        printf("%zu %zu %zu %s\n", c8rtomb(buf, (char8_t)0xE2, &st),
+               c8rtomb(buf, (char8_t)0x82, &st),
+               c8rtomb(buf, (char8_t)0xAC, &st), buf);
+
+        memset(&st, 0, sizeof st);
+        printf("%zu %d\n", c8rtomb(buf, (char8_t)0x41, &st), buf[0]);
+
+        /* A `u8` string IS an array of `char8_t` in C23. */
+        {
+            const char8_t *u = u8"caf\xC3\xA9";
+            printf("%d %d %zu\n", (int)u[0], (int)u[3], sizeof(char8_t));
+        }
+        /* char16_t across the surrogate pair, which is the one piece of real
+           work in this header. */
+        {
+            char16_t c16 = 0;
+            memset(&st, 0, sizeof st);
+            r = mbrtoc16(&c16, "\xF0\x9F\x92\xA9", 4, &st);   /* U+1F4A9 */
+            printf("%zu %d\n", r, (int)c16);
+            r = mbrtoc16(&c16, 0, 0, &st);
+            printf("%d %d\n", r == (size_t)-3, (int)c16);
+            memset(&st, 0, sizeof st);
+            memset(buf, 0, sizeof buf);
+            printf("%zu %zu %d %d\n", c16rtomb(buf, 0xD83D, &st),
+                   c16rtomb(buf, 0xDCA9, &st), (unsigned char)buf[0],
+                   (unsigned char)buf[3]);
+        }
+        return 0;
+    }
+    """, '1 97 1\n3 226 0\n1 130\n1 172\n1\n0 0 3 €\n1 65\n99 195 1\n4 55357\n1 56489\n0 4 240 169\n'),
 
     "wide_characters_are_utf_8": (r"""
     #include <stdio.h>

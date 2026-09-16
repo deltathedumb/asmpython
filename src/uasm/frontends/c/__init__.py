@@ -81,9 +81,12 @@ which is the whole of what the specifier buys, since `const int n = 7;` has
 always produced the same code and never been one; `[[...]]` attributes
 everywhere C allows them, with `nodiscard` and `deprecated` the two that
 warn and `attributes.py` saying why the rest do not; `nullptr` and
-`nullptr_t`; `typeof` and `typeof_unqual`; an `enum` with a fixed underlying
-type; a label before a declaration and at the end of a block; `u8` character
-constants, binary literals and digit separators; and `unreachable()`.
+`nullptr_t`; `auto` with no type specifier, which takes the initialiser's
+type after decay and lvalue conversion rather than being a storage class;
+`typeof` and `typeof_unqual`; an `enum` with a fixed underlying type; a label
+before a declaration and at the end of a block; `u8` character constants and
+strings, binary literals and digit separators; `unreachable()`; and
+`mbrtoc8`/`c8rtomb` for the code units `char8_t` holds.
 
 IN THE PREPROCESSOR: `#embed`, with `limit`, `prefix`, `suffix` and
 `if_empty` and with `__has_embed` to ask first -- a file's bytes as integer
