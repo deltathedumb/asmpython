@@ -558,76 +558,67 @@ def composite(a: CType, b: CType) -> CType:
 def layout(tag: Tag) -> None:
     """Assign every member an offset, and the tag a size and an alignment.
 
-    THE SYSTEM V RULES, which are also Windows' rules for everything except
-    bit-fields, and are what every C programmer's mental model of a struct
-    already is: each member is placed at the next offset with its own
-    alignment, and the whole is rounded up to the largest member's alignment
-    so that an ARRAY of the struct keeps every element aligned.
+    A BIT CURSOR OVER THE WHOLE STRUCT, not a byte cursor with a bit-field
+    special case beside it. That is the System V rule, and the difference is
+    visible in three lines of C:
 
-    BIT-FIELDS PACK INTO A STORAGE UNIT of their declared type, and a field
-    that would straddle the end of one starts a new one. A zero-width field
-    ends the current unit and names nothing. This is the ABI's rule and not
-    the standard's -- the standard says almost nothing -- so it is written out
-    here beside the one that is.
+        struct { char c; unsigned a : 12; char d; };
+
+    The bit-field does not start a new byte: it begins at bit 8, inside the
+    four-byte storage unit that already holds `c`, and `d` goes at byte 3.
+    The whole struct is FOUR bytes. A layout that rounds up to the field's
+    type before placing it makes the same struct twelve, and every offset in
+    it disagrees with the platform -- which is not a performance question but
+    a wrong answer, because a struct's layout is an ABI.
+
+    A bit-field is placed at the cursor when it fits inside the storage unit
+    of its declared type that the cursor is currently in, and at the start of
+    the next one when it does not. A zero-width field names nothing and moves
+    the cursor to the next unit boundary, which is the only thing it is for.
     """
-    offset = 0              # bytes, for a struct
+    bit = 0                 # the cursor, in bits from the start
     align = 1
-    bit_cursor = 0          # bits used in the unit starting at `unit_offset`
-    unit_offset = 0
-    unit_size = 0
     union = tag.kind is K.UNION
-    size = 0
+    union_bits = 0
 
     for m in tag.members:
         if m.type.is_array and m.type.count is None and not m.type.is_vla:
             # A FLEXIBLE ARRAY MEMBER occupies no space and must be last; the
-            # caller checks the ordering and reports, because it has the span.
-            m.offset = offset if not union else 0
+            # parser checks the ordering, because it has the span.
+            m.offset = bit // 8
             m.bits = None
             tag.flexible = True
             continue
         malign = m.type.align
         if m.bits is not None:
-            width = m.bits
-            storage = m.type.size * 8
-            if width == 0:
-                # `int : 0;` ends the current unit. It has no name and takes
-                # no space, but it does move the next field to a boundary.
-                bit_cursor = 0
-                unit_size = 0
+            unit_bits = m.type.size * 8
+            if m.bits == 0:
+                bit = _round_up(bit, unit_bits)
                 align = max(align, malign)
                 continue
             if union:
                 m.offset, m.bit_offset = 0, 0
-                size = max(size, (width + 7) // 8)
+                union_bits = max(union_bits, m.type.size * 8)
                 align = max(align, malign)
                 continue
-            if unit_size and bit_cursor + width <= unit_size * 8 and \
-                    m.type.size * 8 == unit_size * 8:
-                m.offset, m.bit_offset = unit_offset, bit_cursor
-                bit_cursor += width
-            else:
-                unit_offset = _round_up(offset, malign)
-                unit_size = m.type.size
-                m.offset, m.bit_offset = unit_offset, 0
-                bit_cursor = width
-                offset = unit_offset + unit_size
+            place = bit
+            if (place % unit_bits) + m.bits > unit_bits:
+                place = _round_up(place, unit_bits)
+            m.offset = (place // unit_bits) * m.type.size
+            m.bit_offset = place % unit_bits
+            bit = place + m.bits
             align = max(align, malign)
             continue
-        # An ordinary member ends any bit-field unit in progress.
-        bit_cursor = 0
-        unit_size = 0
         if union:
             m.offset = 0
-            size = max(size, m.type.size)
+            union_bits = max(union_bits, m.type.size * 8)
         else:
-            offset = _round_up(offset, malign)
-            m.offset = offset
-            offset += m.type.size
+            bit = _round_up(bit, malign * 8)
+            m.offset = bit // 8
+            bit += m.type.size * 8
         align = max(align, malign)
 
-    if not union:
-        size = offset
+    size = ((union_bits if union else bit) + 7) // 8
     tag.align = align
     tag.size = _round_up(size, align)
     # A STRUCT IS NEVER ZERO BYTES. `struct empty {};` is a C23 feature and a

@@ -381,6 +381,13 @@ class Parser:
             self.sema.error("E1205", "expected an expression, found end of file",
                             t.span)
             return self.sema.poison(t.span)
+        if t.kind is Kind.OTHER:
+            # Phase 3 kept it without complaint -- see `lexer.tokens`. It is
+            # reported HERE, where it has survived every conditional and every
+            # macro and is really part of the program.
+            self.sema.error("E1001", f"stray {t.text!r} in program", t.span)
+            self.next()
+            return self.sema.poison(t.span)
         self.sema.error("E1205", f"expected an expression, found {t.text!r}",
                         t.span)
         self.next()
@@ -802,7 +809,11 @@ class Parser:
                     self._attributes()
                 if name is None and bits is None:
                     self.sema.error("E1221", "expected a member name", span)
-                elif tag.flexible:
+                elif _ends_with_flexible(tag):
+                    # ASKED OF THE MEMBER LIST, not of `tag.flexible`: that
+                    # flag is set by `layout`, which has not run yet -- so the
+                    # check never fired and a struct with a member after its
+                    # flexible array compiled without a word.
                     self.sema.error(
                         "E1222",
                         "a flexible array member must be the last member",
@@ -1096,6 +1107,9 @@ class Parser:
                 if spec.storage not in (None, Storage.REGISTER):
                     self.sema.error("E1240",
                                     "a parameter cannot have a storage class",
+                                    span)
+                if name and self.sema.scope.names.get(name) is not None:
+                    self.sema.error("E1276", f"{name!r} is declared twice",
                                     span)
                 params.append(C.Param(name, ty, span))
                 if name:
@@ -1715,6 +1729,13 @@ class Parser:
             storage, linkage = Storage.AUTO, Linkage.NONE
         sym = self._merge(name, ty, storage, linkage, span)
         decl = S.Decl(span, name, sym.type, sym)
+        if self.at("=") and sym.defined:
+            # TWO DEFINITIONS, not two declarations. `int x; int x;` at file
+            # scope is a pair of tentative definitions and is fine; `int x =
+            # 1; int x = 2;` is the program saying two different things.
+            self.sema.error("E1276", f"{name!r} is defined twice", span,
+                            also=(sym.span, "the first definition")
+                            if sym.span else None)
         if self.eat("="):
             if storage is Storage.EXTERN and not file_scope:
                 self.sema.error("E1269",
@@ -1755,7 +1776,13 @@ class Parser:
                                 note="its size is not known here")
         if spec.align is not None:
             sym.align = spec.align
-        if not sym.is_global and self.function is not None:
+        if self.function is not None and sym not in self.function.locals:
+            # A BLOCK-SCOPE `static` IS STILL DECLARED IN THIS FUNCTION, and
+            # it was left off this list because it has static storage -- so
+            # nothing ever created the global it lives in, and every use was
+            # a `global_addr` of a symbol the module did not contain. The
+            # list means "declared here", not "has automatic storage";
+            # lowering asks about the storage itself.
             self.function.locals.append(sym)
         return decl
 
@@ -1825,9 +1852,20 @@ class Parser:
                 existing.linkage = linkage
             return existing
         sym = Symbol(name, ty, storage, linkage, span=span)
-        sym.ir_name = (name if linkage is Linkage.EXTERNAL
-                       else self.sema.unique(name if scope.is_file
-                                             else f"{_owner(self)}.{name}"))
+        # A NAME WITH INTERNAL LINKAGE IS NOT THE PLATFORM'S. `static int
+        # printf(const char *, ...)` -- which is exactly what this frontend's
+        # own `<stdio.h>` declares -- must not become a symbol called `printf`
+        # in the IR: the C backend emits a self-contained file that includes
+        # the real `<stdio.h>`, and two `printf`s with different signatures is
+        # a compile error in generated code the user never wrote. `static`
+        # means "this name is this unit's", and the prefix says so. A
+        # block-scope `static` carries its function's name too, because two
+        # functions may each have a `static int count;` and the IR has one
+        # flat namespace of globals.
+        sym.ir_name = (
+            name if linkage is Linkage.EXTERNAL
+            else self.sema.unique(f"c.{name}" if scope.is_file
+                                  else f"c.{_owner(self)}.{name}"))
         if linkage is Linkage.EXTERNAL:
             self.sema.taken.add(name)
         scope.declare(sym)
@@ -1961,6 +1999,11 @@ class Parser:
                         "E1282",
                         f"parameter {p.name!r} has the incomplete type "
                         f"{C.spell(p.type)}", p.span or span)
+                if self.sema.scope.names.get(p.name) is not None:
+                    self.sema.error("E1276",
+                                    f"{p.name!r} is declared twice",
+                                    p.span or span)
+                    continue
                 psym = Symbol(p.name, p.type, Storage.PARAM, span=p.span)
                 self.sema.scope.declare(psym)
                 fn.params.append(psym)
@@ -1986,6 +2029,13 @@ def _owner(p: Parser) -> str:
 def _prefix_info(prefix: str):
     from .literals import PREFIXES
     return PREFIXES[prefix]
+
+
+def _ends_with_flexible(tag: C.Tag) -> bool:
+    if not tag.members:
+        return False
+    last = tag.members[-1].type
+    return last.is_array and last.count is None and not last.is_vla
 
 
 def _element(ty: CType, index: int):

@@ -27,7 +27,7 @@ name starts rather than at some offset into a string the user has never seen.
 """
 from __future__ import annotations
 
-from ...diagnostics import DiagnosticSink, SourceFile, Span, error, warning
+from ...diagnostics import DiagnosticSink, SourceFile, Span, error
 from .tokens import DIGRAPHS, Kind, PUNCTUATORS, Token, eof_token
 
 #: Phase 1's trigraphs. OFF BY DEFAULT, and that is not laziness: C23 deleted
@@ -144,12 +144,14 @@ class Lexer:
             start = self.pos
             tok = self._one()
             if tok is None:
-                # A character that begins no token at all. Reported once and
-                # kept as OTHER: deleting it would silently change `a $ b` into
-                # `a b`, and the parser's own error is the better one to show.
-                self.sink.report(
-                    error("E1001", f"stray {self.text[start]!r} in program")
-                    .at(self.span(start, start + 1)))
+                # A character that begins no other token IS a preprocessing
+                # token -- 6.4p1's last alternative, "each non-white-space
+                # character that cannot be one of the above". So phase 3
+                # accepts it and says nothing, and the PARSER reports it if it
+                # ever reaches phase 7. That is not pedantry: `#if 0` around a
+                # block of another language's source is ordinary, and a lexer
+                # that complains about a `@` inside one complains about text
+                # the program deleted.
                 self.pos = start + 1
                 tok = Token(Kind.OTHER, self.text[start],
                             self.span(start, start + 1))

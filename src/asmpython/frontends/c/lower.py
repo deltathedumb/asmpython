@@ -101,9 +101,8 @@ class Lowerer:
         for (prefix, data), name in self.parser.strings.items():
             self._add_global(Global(name, len(data), data, readonly=True,
                                     align=_prefix_align(prefix)))
-        for node in self.unit.decls:
-            if isinstance(node, S.Decl) and node.sym is not None:
-                self._file_decl(node)
+        for sym in self.parser.sema.file_scope.names.values():
+            self._file_object(sym)
         for node in self.anon_literals():
             self._compound_global(node)
         for node in self.unit.decls:
@@ -181,20 +180,32 @@ class Lowerer:
         self.globals.add(g.name)
         self.module.globals.append(g)
 
-    def _file_decl(self, node: S.Decl) -> None:
-        sym = node.sym
-        if sym.storage is Storage.TYPEDEF or sym.type.is_function:
+    def _file_object(self, sym: Symbol) -> None:
+        """Emit the storage for one file-scope object, if this unit owns it.
+
+        ONE PASS OVER THE SYMBOLS, not over the declarations. A file-scope
+        object may be declared more than once --
+
+            extern int shared;
+            int shared = 5;
+
+        -- and walking the declarations emits the FIRST one, which has no
+        initialiser, and then finds the name already taken and drops the
+        second. `shared` came out zero. The symbol carries the composite type
+        and the initialiser from whichever declaration supplied them, so it
+        is the thing to ask.
+        """
+        if sym.storage in (Storage.TYPEDEF, Storage.ENUM_CONST):
             return
-        if not sym.is_global:
+        if sym.type.is_function:
             return
-        if sym.linkage is Linkage.EXTERNAL and not sym.defined and \
-                not _is_tentative(sym):
-            return                  # declared elsewhere; nothing to emit
+        if sym.storage is Storage.EXTERN and not sym.defined:
+            return                  # declared here, defined elsewhere
         try:
             size = sym.type.size
         except C.IncompleteType:
             return
-        data = self._static_bytes(sym, node.init, size)
+        data = self._static_bytes(sym, sym.init, size)
         linkage = (IRLinkage.EXPORT if sym.linkage is Linkage.EXTERNAL
                    else IRLinkage.INTERNAL)
         self._add_global(Global(sym.ir_name or sym.name, max(1, size), data,
@@ -371,6 +382,12 @@ class Lowerer:
         self.b = None
 
     def _allocate_local(self, sym: Symbol) -> None:
+        if sym.storage is Storage.EXTERN:
+            # `extern int x;` inside a function names a global defined
+            # elsewhere. Emitting one here would define it twice.
+            sym.in_register = False
+            sym.slot = None
+            return
         if sym.is_global:
             # A block-scope `static`: an ordinary global with a private name.
             size = sym.type.size
@@ -862,7 +879,12 @@ class Lowerer:
             case S.Call():
                 return self._call(e)
             case S.CompoundLiteral():
-                return self._compound_literal(e)
+                # AN LVALUE LIKE ANY OTHER. `(int){5}` has type `int` and a
+                # location; `_compound_literal` yields the location, so a
+                # scalar one still has to be read through. Returning the
+                # address made `return (int){5}` return a pointer, and the
+                # verifier caught it -- which is what it is for.
+                return self._load_lvalue(e)
             case S.VaArg():
                 return self._va_arg(e)
             case S.BuiltinCall():
@@ -1456,6 +1478,135 @@ class Lowerer:
             zero = value if value is not None else self.b.const(ty, 0)
             self.b.store(ty, zero, self._offset(addr, offset))
 
+    def _byte_loop(self, count: int, body) -> int:
+        """`for (i = 0; i < count; i++) body(i)`, as blocks. Returns `i`.
+
+        The shape every one of the memory builtins needs, written once: a
+        mutable cursor, a head that tests it, a body the caller fills, and a
+        latch. Four of them written out separately is four places for the
+        cursor to be incremented on the wrong side of the test.
+        """
+        cursor = self.b.reg(IR.I64)
+        self.b.copy(cursor, self.b.const(IR.I64, 0))
+        head = self.b.new_block("loop")
+        inner = self.b.new_block("loopbody")
+        after = self.b.new_block("loopend")
+        self.b.jump(head)
+        self._open(head)
+        test = self.b.cmp(Op.LT, IR.I64, cursor, count)
+        self.b.branch(test, inner, after)
+        self._open(inner)
+        body(cursor, after)
+        if self.b.current.terminator is None:
+            self.b.copy(cursor, self.b.add(IR.I64, cursor,
+                                           self.b.const(IR.I64, 1)))
+            self.b.jump(head)
+        self._open(after)
+        return cursor
+
+    def _mem_inline(self, name: str, args: list[int]) -> int:
+        """`memcpy` and friends with no library behind them.
+
+        A BUILTIN MUST NOT NEED A LIBRARY. `__builtin_memcmp(a, b, n)` appears
+        in programs that never include `<string.h>` -- gcc emits a call and
+        lets the link fail -- and every one of these is a loop over memory,
+        which is what the IR expresses directly. So when nothing in the module
+        defines the function, the loop is emitted here instead of a call to
+        something that is not there.
+        """
+        b = self.b
+        if name == "strlen":
+            base = args[0]
+            n = b.reg(IR.I64)
+            b.copy(n, b.const(IR.I64, 0))
+            head = b.new_block("slen")
+            body = b.new_block("slenbody")
+            after = b.new_block("slenend")
+            b.jump(head)
+            self._open(head)
+            byte = b.load(IR.U8, b.offset(base, n))
+            more = b.cmp(Op.NE, IR.U8, byte, b.const(IR.U8, 0))
+            b.branch(more, body, after)
+            self._open(body)
+            b.copy(n, b.add(IR.I64, n, b.const(IR.I64, 1)))
+            b.jump(head)
+            self._open(after)
+            return n
+        count = self._ir_convert(args[-1], self.fn.register_type(args[-1]),
+                                 IR.I64)
+        if name == "memset":
+            value = self._ir_convert(args[1], self.fn.register_type(args[1]),
+                                     IR.U8)
+            self._byte_loop(count, lambda i, _end:
+                            b.store(IR.U8, value, b.offset(args[0], i)))
+            return args[0]
+        if name == "memcmp":
+            result = b.reg(IR.I32)
+            b.copy(result, b.const(IR.I32, 0))
+
+            def compare(i, end):
+                x = b.load(IR.U8, b.offset(args[0], i))
+                y = b.load(IR.U8, b.offset(args[1], i))
+                same = b.cmp(Op.EQ, IR.U8, x, y)
+                differs = b.new_block("cmpdiff")
+                nxt = b.new_block("cmpnext")
+                b.branch(same, nxt, differs)
+                self._open(differs)
+                below = b.cmp(Op.LT, IR.U8, x, y)
+                b.copy(result, self._select(below, b.const(IR.I32, -1),
+                                            b.const(IR.I32, 1), IR.I32))
+                b.jump(end)
+                self._open(nxt)
+
+            self._byte_loop(count, compare)
+            return result
+        if name == "memmove":
+            # BACKWARDS WHEN THE DESTINATION IS ABOVE THE SOURCE. This is the
+            # whole difference from `memcpy`, and getting it wrong is
+            # invisible until two objects overlap.
+            dst_i = self._bitcast(args[0], IR.U64)
+            src_i = self._bitcast(args[1], IR.U64)
+            above = b.cmp(Op.GT, IR.U64, dst_i, src_i)
+            back = b.new_block("mmback")
+            fwd = b.new_block("mmfwd")
+            done = b.new_block("mmend")
+            b.branch(above, back, fwd)
+            self._open(back)
+            self._byte_loop(count, lambda i, _e: b.store(
+                IR.U8,
+                b.load(IR.U8, b.offset(args[1], b.sub(
+                    IR.I64, b.sub(IR.I64, count, i),
+                    b.const(IR.I64, 1)))),
+                b.offset(args[0], b.sub(IR.I64, b.sub(IR.I64, count, i),
+                                        b.const(IR.I64, 1)))))
+            b.jump(done)
+            self._open(fwd)
+            self._byte_loop(count, lambda i, _e: b.store(
+                IR.U8, b.load(IR.U8, b.offset(args[1], i)),
+                b.offset(args[0], i)))
+            b.jump(done)
+            self._open(done)
+            return args[0]
+        self._byte_loop(count, lambda i, _e: b.store(
+            IR.U8, b.load(IR.U8, b.offset(args[1], i)), b.offset(args[0], i)))
+        return args[0]
+
+    def _select(self, cond: int, a: int, c: int, ty: IR.Type) -> int:
+        """`cond ? a : c` without a call. Two blocks and a shared register."""
+        out = self.b.reg(ty)
+        yes = self.b.new_block("sel")
+        no = self.b.new_block("selelse")
+        after = self.b.new_block("selend")
+        self.b.branch(cond, yes, no)
+        self._open(yes)
+        self.b.copy(out, a)
+        self.b.jump(after)
+        self._open(no)
+        self.b.copy(out, c)
+        self.b.jump(after)
+        self._open(after)
+        return out
+
     def _copy_loop(self, dst: int, src: int, size: int) -> None:
         cursor = self.b.reg(IR.I64)
         self.b.copy(cursor, self.b.const(IR.I64, 0))
@@ -1595,12 +1746,6 @@ def _unconvert(e: S.Expr) -> S.Expr:
     while isinstance(e, (S.Conv, S.Cast)):
         e = e.operand
     return e
-
-
-def _is_tentative(sym: Symbol) -> bool:
-    """A file-scope declaration with no initialiser and no `extern`: C defines
-    the object at the end of the unit if nothing else does."""
-    return sym.storage is Storage.STATIC and not sym.type.is_function
 
 
 def _prefix_align(prefix: str) -> int:

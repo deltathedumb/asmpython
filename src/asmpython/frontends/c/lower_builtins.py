@@ -272,8 +272,16 @@ def _mem(L, name: str, e: S.BuiltinCall) -> int:
     from .fold import fold
     b = L.b
     args = [L._value(a) for a in e.args]
+    plain = name[len("__builtin_"):]
+    defined = L.module.function(plain)
+    if defined is None or defined.external:
+        # NOTHING DEFINES IT, so it is emitted inline rather than called.
+        # See `Lowerer._mem_inline`.
+        got = L._mem_inline(plain, args)
+        if plain == "strlen":
+            return L._ir_convert(got, IR.I64, IR.U64)
+        return got
     if name == "__builtin_strlen":
-        L._ensure_extern("strlen", IR.U64, [IR.PTR])
         return b.call(IR.U64, "strlen", args)
     size = fold(e.args[2]) if len(e.args) > 2 else None
     if isinstance(size, int) and size <= 128:
@@ -285,7 +293,5 @@ def _mem(L, name: str, e: S.BuiltinCall) -> int:
             if value == 0:
                 L._zero(args[0], size)
                 return args[0]
-    plain = name[len("__builtin_"):]
     ret = IR.I32 if plain == "memcmp" else IR.PTR
-    L._ensure_extern(plain, ret, [L.fn.register_type(a) for a in args])
     return b.call(ret, plain, args)

@@ -17,6 +17,54 @@ deliverable.
 
 ### Added
 
+- **A C frontend** (`src/asmpython/frontends/c/`) — `asmpython build prog.c`
+  compiles C. Not a subset: the preprocessor is Prosser's algorithm with hide
+  sets and passes the standard's own EXAMPLE 3, 4 and 5 from 6.10.3.5
+  byte-for-byte; the grammar is all of C23, declarators built as composed
+  closures so `int (*a[3])(void)` spirals for free; the type system has
+  bit-fields laid out on a bit cursor (System V's rule, which is why
+  `struct { char c; unsigned a : 12; char d; }` is four bytes and not twelve),
+  flexible array members, anonymous members, VLAs, `_Generic`, designated
+  initialisers, compound literals, `__VA_OPT__`, K&R definitions and statement
+  expressions.
+
+  `--frontend c` HAS BEEN A SCAFFOLD SINCE THE OLD TREE --
+  `_frontends/scaffolds.py` registered it so the flag would fail loudly rather
+  than silently, and the entry below still says "does not compile C/C++ source
+  (`--frontend c` is still a scaffold)". It is not one now.
+
+  THE IR HAS NO AGGREGATES, NO VARARGS AND NO DYNAMIC `alloca`, and C has all
+  three, so each gets a convention that is written down rather than left in
+  the code: a struct is always an address; passing one by value is passing a
+  pointer to a fresh copy and returning one is a hidden first parameter;
+  varargs are one extra trailing pointer to a block of 8-byte slots, eight
+  because the default argument promotions leave exactly four shapes; and a VLA
+  comes from an arena whose three functions are WRITTEN IN C and compiled by
+  this frontend into the same module.
+
+  **The standard library is compiled from C too**, over `plat_write`,
+  `plat_exit` and `plat_heap` and nothing else — so a C program built here
+  runs on every backend AND in the IR interpreter, with no second runtime for
+  a backend to implement. Nineteen headers including a complete `printf`
+  whose floating-point conversion is EXACT (a base-10^9 bignum: every finite
+  double is a terminating decimal, so `printf("%f", 1e300)` has a right answer
+  with 301 digits in it) and rounds ties to even, and a `<math.h>` written
+  over `+ - * /` because there is no libm below it.
+
+  Twenty programs are compiled three ways — the host's `cc`, this frontend's
+  IR in the reference interpreter, and this frontend's IR through the C
+  backend and then `cc` — and all three must agree on output and exit status.
+  Struct layout is compared against the host compiler's `sizeof` and
+  `_Alignof` for twelve declarations, because a struct's layout is an ABI and
+  a frontend can be self-consistently wrong about one.
+
+  FOUR KNOWN DIVERGENCES, and they are the whole list: `long double` is
+  `double` (the IR has no type wider than f64, and `<float.h>` says so rather
+  than pretending); `_Complex` is refused with a diagnostic; `setjmp`/`longjmp`
+  are refused, because a non-local jump needs a frame the IR deliberately
+  cannot name; and `main`'s parameters are 0 and a null `argv`, because
+  nothing in the platform floor can ask the host for a command line.
+
 - **A from-scratch retargetable compiler** (`src/asmpython/`) — a
   language-independent IR with four registries (frontends, backends, targets,
   toolchains) whose built-ins register through exactly the same call a third
