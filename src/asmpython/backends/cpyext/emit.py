@@ -165,6 +165,9 @@ def _classify(fn: Function) -> tuple[str, list[int]] | None:
 
 class CPyExtBackend(Backend):
     name = "cpyext"
+    #: C source too -- the extension module it becomes is the
+    #: `cpyext` TOOLCHAIN's artifact, not this one's.
+    artifacts = (".c",)
     description = ("a real CPython extension module: .so on Linux, .pyd on "
                    "Windows, loadable with an ordinary `import`")
     #: Emits C -- the object runtime, the module's own functions (both via

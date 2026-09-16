@@ -30,6 +30,7 @@ from pathlib import Path
 
 from ..diagnostics import DiagnosticSink, SourceFile
 from ..ir import Module
+from ..options import Option
 
 
 class Frontend(abc.ABC):
@@ -38,6 +39,15 @@ class Frontend(abc.ABC):
     name: str = ""
     extensions: tuple[str, ...] = ()
     description: str = ""
+
+    #: OPTIONS THIS FRONTEND TAKES from the command line, declared the way a
+    #: backend has always declared its own. The flags a frontend needs used
+    #: to sit on the DRIVER's parser -- `--import-path`, `--host-python`,
+    #: `--no-site-packages` are the Python frontend's and nobody else's -- so
+    #: the driver carried them as though they were facts about compiling in
+    #: general, and a second frontend would have inherited flags that mean
+    #: nothing to it.
+    options: tuple[Option, ...] = ()
 
     @abc.abstractmethod
     def compile(self, source: SourceFile, sink: DiagnosticSink) -> Module | None:
