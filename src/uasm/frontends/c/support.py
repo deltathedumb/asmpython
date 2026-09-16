@@ -904,10 +904,50 @@ unsigned long __c_ldtou(const void *__ap)
 }
 """
 
+TLS_SOURCE = r"""
+/* uasm C frontend: `_Thread_local` storage. See support.py.
+
+   ONE COPY PER THREAD, MADE ON FIRST USE. The key is created before `main`
+   runs -- by the unit's initialiser, where the program is still one thread
+   -- so there is no race to make one and this only has to answer "has this
+   thread got a copy yet".
+
+   THE TEMPLATE IS THE OBJECT ITSELF as lowering emitted it: a
+   `_Thread_local int x = 5;` is a global holding 5, and every thread's copy
+   starts as a copy of it. That is what C says a thread-local object's
+   initial value is, and it costs nothing to have.
+
+   NOTHING IS EVER FREED, because the destructor a key can carry runs in the
+   HOST's thread cleanup and would have to call back into the program.
+   `plat_heap`'s memory is not returned anyway -- its contract says so. */
+extern void *plat_heap(long);
+extern long host_tss_get(long);
+extern long host_tss_set(long, void *);
+
+void *__c_tls_get(void *keyp, long size, void *template_)
+{
+    long key = *(long *)keyp;
+    char *p;
+    long i;
+    /* NO KEY MEANS NO THREADS: the host refused to make one, so there is
+       one copy and it is the template. A program that never starts a thread
+       cannot tell the difference. */
+    if (key <= 0) return template_;
+    p = (char *)host_tss_get(key);
+    if (p == 0) {
+        p = (char *)plat_heap(size);
+        if (p == 0) return template_;
+        for (i = 0; i < size; i++) p[i] = ((char *)template_)[i];
+        host_tss_set(key, p);
+    }
+    return (void *)p;
+}
+"""
+
 #: The units, by the name `lower.py` asks for. See the module docstring for
 #: why they are separate rather than one file with everything in it.
 UNITS = {"vla": SOURCE, "args": ARGS_SOURCE, "complex": COMPLEX_SOURCE,
-         "ldouble": LDOUBLE_SOURCE}
+         "ldouble": LDOUBLE_SOURCE, "tls": TLS_SOURCE}
 
 
 @lru_cache(maxsize=None)

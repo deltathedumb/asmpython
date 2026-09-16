@@ -311,12 +311,16 @@ one external name is an error naming both files. It is a flag rather than
 several positional sources because the driver hands each frontend one source,
 and that is what names the output and roots the search path.
 
-All thirty-one headers C23 requires are there. One of them refuses with a
-reason rather than being absent — `<threads.h>`, explaining what the IR
-cannot express and what to write instead — because a missing file is a
-mystery and a refusal is an answer.
-`<stdatomic.h>` is supported and `<threads.h>` is not, which is not a
-contradiction: with one thread every operation is already atomic.
+All thirty-one headers C23 requires are there, and all thirty-one work.
+`<threads.h>` is a host-service group: threads are a capability of the
+target, like a filesystem or a clock, so a backend declares whether its
+target has them and a program that starts one is refused by name where it
+does not. `_Thread_local` is compiled onto the same group — one copy per
+thread, not one for the program.
+`<stdatomic.h>` is the one to read carefully now that there can be two
+threads: its operations are ordinary loads and stores with the right names,
+which was right for one thread and is not a promise this library can keep
+for two.
 
 Three paths are compared for every test program — the host's `cc`, the
 reference interpreter, and the C backend's output compiled by `cc` — and all

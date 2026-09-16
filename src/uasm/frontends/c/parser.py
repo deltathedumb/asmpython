@@ -1813,6 +1813,18 @@ class Parser:
         else:
             storage, linkage = Storage.AUTO, Linkage.NONE
         sym = self._merge(name, ty, storage, linkage, span)
+        if spec.thread_local:
+            # ONE COPY PER THREAD, which is a property of the OBJECT rather
+            # than of this declaration: a second declaration without the
+            # keyword refers to the same thread-local object.
+            if storage is Storage.AUTO:
+                self.sema.error(
+                    "E1278",
+                    f"{name!r} is `_Thread_local` and has automatic storage",
+                    span,
+                    note="a local already has one copy per thread",
+                    help="add `static`, or move it to file scope")
+            sym.thread_local = True
         decl = S.Decl(span, name, sym.type, sym)
         if self.at("=") and sym.defined:
             # TWO DEFINITIONS, not two declarations. `int x; int x;` at file

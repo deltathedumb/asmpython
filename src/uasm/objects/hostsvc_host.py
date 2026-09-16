@@ -18,6 +18,7 @@
 # CPython as an address. The comment there explains why at length.
 
 import os
+import threading
 import time as _time
 
 
@@ -30,7 +31,8 @@ NOT_MINE = object()
 #: Unicode table wired to these names rather than a second copy of it here.
 #: `net` used to be excluded too, on the grounds that it was "not written yet
 #: on any backend" -- it is now written on both this one and the C one.
-GROUPS = frozenset({"file", "time", "random", "env", "net", "proc"})
+GROUPS = frozenset({"file", "time", "random", "env", "net", "proc",
+                    "thread"})
 
 #: `objects/hostsvc.py`'s error table, which is NOT errno -- see there for why.
 _ERR, _ENOENT, _EACCES, _EEXIST = -1, -2, -3, -4
@@ -54,6 +56,12 @@ def _err(exc: OSError) -> int:
     those numbers differ between platforms.
     """
     return _ERRNO.get(exc.errno, _ERR)
+
+
+def _store_word(interp, addr: int, value: int) -> None:
+    """One 64-bit word, little-endian, where a caller asked for it."""
+    interp.mem.buf[addr:addr + 8] = int(value).to_bytes(8, "little",
+                                                        signed=value < 0)
 
 
 def _bytes(interp, addr: int, n: int) -> bytes:
@@ -527,6 +535,300 @@ def _host_net_port(interp, a):
         return _sock_error(exc)
 
 
+
+# ── threads ─────────────────────────────────────────────────────────────────
+#
+# PYTHON THREADS, RUNNING THE SAME INTERPRETER. That works because of one
+# change in `ir/interpreter.py`: the stack pointer is per thread, so a
+# frame belongs to the thread that made it and returning from a call gives
+# back only that thread's. Everything else in a `Memory` is shared, which is
+# what threads sharing an address space means.
+#
+# THE GIL DOES NOT MAKE THIS POINTLESS. What a program is testing here is
+# that its own locking is right -- that two threads incrementing a counter
+# through a mutex agree on the total -- and interleaving at the Python
+# bytecode level is more than enough to break a program that got it wrong.
+# It is not a performance story and never could be.
+#
+# A HANDLE IS AN INDEX INTO A TABLE, as everywhere else on this side: the
+# contract says a handle is opaque and belongs to whoever answered it, and
+# a Python object has no address a program may hold.
+
+_THREAD_STACK_BYTES = 1 << 18
+
+
+class _ThreadExit(BaseException):
+    """`thrd_exit`, which leaves the thread rather than returning."""
+
+    def __init__(self, code: int) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class _Cond:
+    """A condition variable over a mutex the CALLER holds.
+
+    NOT `threading.Condition`, which owns its lock: C's `cnd_wait` is handed
+    the mutex at the wait, and the same condition variable may be used with
+    different ones over its life. So this is the queue-of-semaphores version
+    -- which is what a condition variable is underneath anyway.
+    """
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._waiters: list = []
+
+    def wait(self, lock, timeout: float | None) -> int:
+        sem = threading.Semaphore(0)
+        with self._guard:
+            self._waiters.append(sem)
+        lock.release()
+        try:
+            got = sem.acquire(timeout=timeout) if timeout is not None \
+                else sem.acquire()
+        finally:
+            lock.acquire()
+        if not got:
+            with self._guard:
+                if sem in self._waiters:
+                    self._waiters.remove(sem)
+            return 1                      # timed out, which is not an error
+        return 0
+
+    def signal(self) -> None:
+        with self._guard:
+            if self._waiters:
+                self._waiters.pop(0).release()
+
+    def broadcast(self) -> None:
+        with self._guard:
+            for sem in self._waiters:
+                sem.release()
+            self._waiters.clear()
+
+
+def _threads(interp) -> dict:
+    got = getattr(interp, "_hostsvc_threads", None)
+    if got is None:
+        got = {"next": 1, "objects": {}, "lock": threading.Lock()}
+        interp._hostsvc_threads = got
+    return got
+
+
+def _keep(interp, obj) -> int:
+    table = _threads(interp)
+    with table["lock"]:
+        handle = table["next"]
+        table["next"] += 1
+        table["objects"][handle] = obj
+        return handle
+
+
+def _held(interp, handle: int):
+    return _threads(interp)["objects"].get(int(handle))
+
+
+def _host_thread_start(interp, a):
+    from ..ir.interpreter import _FUNC_TAG
+    fnptr, arg = int(a[0]), int(a[1])
+    if not fnptr & _FUNC_TAG:
+        return _EINVAL
+    try:
+        fn = interp.module.functions[fnptr & ~_FUNC_TAG]
+    except IndexError:
+        return _EINVAL
+    slot = {"result": 0, "error": None}
+
+    def body():
+        # THE STACK FIRST, before any IR runs: see `Memory.enter_thread`.
+        interp.mem.enter_thread()
+        try:
+            got = interp._call(fn, [arg])
+            slot["result"] = int(got) if got is not None else 0
+        except _ThreadExit as exit_:
+            slot["result"] = exit_.code
+        except BaseException as exc:      # noqa: BLE001 - reported at join
+            slot["error"] = exc
+        finally:
+            try:
+                _run_destructors(interp)
+            except BaseException:         # noqa: BLE001 - a dying thread
+                pass
+
+    thread = threading.Thread(target=body, daemon=True)
+    slot["thread"] = thread
+    handle = _keep(interp, slot)
+    thread.start()
+    return handle
+
+
+def _host_thread_join(interp, a):
+    slot = _held(interp, int(a[0]))
+    if slot is None or "thread" not in slot:
+        return _EINVAL
+    slot["thread"].join()
+    if slot["error"] is not None:
+        # A TRAP IN A THREAD IS THE PROGRAM'S TRAP, raised in whoever joins:
+        # losing it would turn a crash into a wrong answer.
+        raise slot["error"]
+    if int(a[1]):
+        _store_word(interp, int(a[1]), slot["result"])
+    return 0
+
+
+def _host_thread_detach(interp, a):
+    slot = _held(interp, int(a[0]))
+    if slot is None or "thread" not in slot:
+        return _EINVAL
+    return 0                              # nothing to give back; it is daemon
+
+
+def _host_thread_self(interp, a):
+    return threading.get_ident()
+
+
+def _host_thread_yield(interp, a):
+    _time.sleep(0)
+    return 0
+
+
+def _host_thread_exit(interp, a):
+    raise _ThreadExit(int(a[0]))
+
+
+def _host_mutex_new(interp, a):
+    return _keep(interp, threading.RLock() if int(a[0]) == 1
+                 else threading.Lock())
+
+
+def _host_mutex_lock(interp, a):
+    lock = _held(interp, int(a[0]))
+    if lock is None:
+        return _EINVAL
+    lock.acquire()
+    return 0
+
+
+def _host_mutex_trylock(interp, a):
+    lock = _held(interp, int(a[0]))
+    if lock is None:
+        return _EINVAL
+    return 0 if lock.acquire(blocking=False) else 1
+
+
+def _host_mutex_timedlock(interp, a):
+    lock = _held(interp, int(a[0]))
+    if lock is None:
+        return _EINVAL
+    nanos = int(a[1])
+    if nanos < 0:
+        lock.acquire()
+        return 0
+    return 0 if lock.acquire(timeout=nanos / 1e9) else 1
+
+
+def _host_mutex_unlock(interp, a):
+    lock = _held(interp, int(a[0]))
+    if lock is None:
+        return _EINVAL
+    try:
+        lock.release()
+    except RuntimeError:
+        return _ERR                       # not held by this thread
+    return 0
+
+
+def _host_mutex_free(interp, a):
+    _threads(interp)["objects"].pop(int(a[0]), None)
+    return 0
+
+
+def _host_cond_new(interp, a):
+    return _keep(interp, _Cond())
+
+
+def _host_cond_wait(interp, a):
+    cond = _held(interp, int(a[0]))
+    lock = _held(interp, int(a[1]))
+    if not isinstance(cond, _Cond) or lock is None:
+        return _EINVAL
+    nanos = int(a[2])
+    return cond.wait(lock, None if nanos < 0 else nanos / 1e9)
+
+
+def _host_cond_signal(interp, a):
+    cond = _held(interp, int(a[0]))
+    if not isinstance(cond, _Cond):
+        return _EINVAL
+    cond.signal()
+    return 0
+
+
+def _host_cond_broadcast(interp, a):
+    cond = _held(interp, int(a[0]))
+    if not isinstance(cond, _Cond):
+        return _EINVAL
+    cond.broadcast()
+    return 0
+
+
+def _host_cond_free(interp, a):
+    _threads(interp)["objects"].pop(int(a[0]), None)
+    return 0
+
+
+class _Key:
+    """One `tss_t`: a pointer per thread, and a destructor for the ones that
+    are still set when a thread ends."""
+
+    def __init__(self, dtor: int) -> None:
+        self.local = threading.local()
+        self.dtor = dtor
+
+
+def _host_tss_new(interp, a):
+    return _keep(interp, _Key(int(a[0])))
+
+
+def _host_tss_get(interp, a):
+    key = _held(interp, int(a[0]))
+    if not isinstance(key, _Key):
+        return 0
+    return getattr(key.local, "value", 0)
+
+
+def _host_tss_set(interp, a):
+    key = _held(interp, int(a[0]))
+    if not isinstance(key, _Key):
+        return _EINVAL
+    key.local.value = int(a[1])
+    return 0
+
+
+def _host_tss_free(interp, a):
+    _threads(interp)["objects"].pop(int(a[0]), None)
+    return 0
+
+
+def _run_destructors(interp) -> None:
+    """What pthreads does when a thread ends: call each key's destructor on
+    whatever that thread left in it."""
+    from ..ir.interpreter import _FUNC_TAG
+    table = _threads(interp)
+    for obj in list(table["objects"].values()):
+        if not isinstance(obj, _Key) or not obj.dtor:
+            continue
+        value = getattr(obj.local, "value", 0)
+        if not value:
+            continue
+        obj.local.value = 0
+        try:
+            fn = interp.module.functions[obj.dtor & ~_FUNC_TAG]
+        except IndexError:
+            continue
+        interp._call(fn, [value])
+
+
 _TABLE = {
     "host_file_open": _host_file_open,
     "host_file_read": _host_file_read,
@@ -554,4 +856,25 @@ _TABLE = {
     "host_net_port": _host_net_port,
     "host_net_ready": _host_net_ready,
     "host_proc_run": _host_proc_run,
+    "host_thread_start": _host_thread_start,
+    "host_thread_join": _host_thread_join,
+    "host_thread_detach": _host_thread_detach,
+    "host_thread_self": _host_thread_self,
+    "host_thread_yield": _host_thread_yield,
+    "host_thread_exit": _host_thread_exit,
+    "host_mutex_new": _host_mutex_new,
+    "host_mutex_lock": _host_mutex_lock,
+    "host_mutex_trylock": _host_mutex_trylock,
+    "host_mutex_timedlock": _host_mutex_timedlock,
+    "host_mutex_unlock": _host_mutex_unlock,
+    "host_mutex_free": _host_mutex_free,
+    "host_cond_new": _host_cond_new,
+    "host_cond_wait": _host_cond_wait,
+    "host_cond_signal": _host_cond_signal,
+    "host_cond_broadcast": _host_cond_broadcast,
+    "host_cond_free": _host_cond_free,
+    "host_tss_new": _host_tss_new,
+    "host_tss_get": _host_tss_get,
+    "host_tss_set": _host_tss_set,
+    "host_tss_free": _host_tss_free,
 }

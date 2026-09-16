@@ -68,7 +68,11 @@ def _host_run(source: str, tmp_path: Path) -> tuple[int, str]:
     exe = tmp_path / "host.exe"
     src.write_text(HOST_PRELUDE + source, encoding="utf-8")
     built = subprocess.run(
-        [HAS_CC, "-std=c11", "-w", "-o", str(exe), str(src), "-lm"],
+        # `-lpthread` FOR THE SAME REASON THE LINKER PASSES IT: the thread
+        # functions were in libpthread before glibc 2.34 and the flag is an
+        # empty stub since. The oracle has to be built the way we build.
+        [HAS_CC, "-std=c11", "-w", "-o", str(exe), str(src), "-lm",
+         "-lpthread"],
         capture_output=True, text=True)
     assert built.returncode == 0, f"the host compiler refused it:\n{built.stderr}"
     ran = subprocess.run([str(exe)], capture_output=True, text=True)
@@ -1632,6 +1636,161 @@ PROGRAMS: dict[str, str] = {
             printf("%d %d\n", z == w, z == z);
             { long double complex q = z; q *= w;
               printf("%.18Lg %.18Lg\n", creall(q), cimagl(q)); }
+            return 0;
+        }
+    """,
+
+    "threads_and_a_mutex": r"""
+        #include <stdio.h>
+        #include <threads.h>
+        /* FOUR THREADS AND ONE COUNTER. The answer is deterministic
+           BECAUSE of the mutex, which is what makes this comparable at all:
+           a threaded program whose output depends on the scheduling could
+           not be checked against anything. */
+        static mtx_t lock;
+        static int counter;
+
+        static int worker(void *arg) {
+            int n = *(int *)arg, i;
+            for (i = 0; i < 500; i++) {
+                mtx_lock(&lock);
+                counter += 1;
+                mtx_unlock(&lock);
+            }
+            return n * 10;
+        }
+
+        int main(void) {
+            thrd_t t[4];
+            int id[4], res, i, ok = 1;
+            if (mtx_init(&lock, mtx_plain) != thrd_success) return 1;
+            for (i = 0; i < 4; i++) {
+                id[i] = i + 1;
+                if (thrd_create(&t[i], worker, &id[i]) != thrd_success) return 1;
+            }
+            for (i = 0; i < 4; i++) {
+                thrd_join(t[i], &res);
+                if (res != (i + 1) * 10) ok = 0;
+            }
+            printf("counter %d results %d\n", counter, ok);
+            printf("equal %d\n", thrd_equal(thrd_current(), thrd_current()));
+            mtx_destroy(&lock);
+            return 0;
+        }
+    """,
+
+    "a_condition_variable": r"""
+        #include <stdio.h>
+        #include <threads.h>
+        /* ONE PRODUCER, ONE CONSUMER, AND THE WAIT THAT MAKES IT WORK. The
+           total is fixed; the interleaving is not, which is the point. */
+        static mtx_t m;
+        static cnd_t ready;
+        static int queue[64], head, tail, done;
+
+        static int producer(void *arg) {
+            int n = *(int *)arg, i;
+            for (i = 0; i < n; i++) {
+                mtx_lock(&m);
+                queue[tail++] = i * i;
+                cnd_signal(&ready);
+                mtx_unlock(&m);
+                thrd_yield();
+            }
+            mtx_lock(&m);
+            done = 1;
+            cnd_broadcast(&ready);
+            mtx_unlock(&m);
+            return n;
+        }
+
+        static int consumer(void *arg) {
+            int total = 0;
+            (void)arg;
+            for (;;) {
+                mtx_lock(&m);
+                while (head == tail && !done) cnd_wait(&ready, &m);
+                if (head == tail && done) { mtx_unlock(&m); break; }
+                total += queue[head++];
+                mtx_unlock(&m);
+            }
+            return total;
+        }
+
+        static once_flag once = ONCE_FLAG_INIT;
+        static int once_count;
+        static void initialise(void) { once_count++; }
+
+        int main(void) {
+            thrd_t p, c;
+            int n = 8, made = 0, got = 0, i;
+            mtx_init(&m, mtx_plain);
+            cnd_init(&ready);
+            thrd_create(&c, consumer, NULL);
+            thrd_create(&p, producer, &n);
+            thrd_join(p, &made);
+            thrd_join(c, &got);
+            printf("produced %d consumed %d\n", made, got);
+            for (i = 0; i < 5; i++) call_once(&once, initialise);
+            printf("once %d\n", once_count);
+            {
+                struct timespec t = { 0, 1000000 };
+                printf("sleep %d\n", thrd_sleep(&t, NULL));
+            }
+            mtx_destroy(&m);
+            cnd_destroy(&ready);
+            return 0;
+        }
+    """,
+
+    "thread_local_storage": r"""
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <threads.h>
+        /* BOTH KINDS: the `_Thread_local` keyword, which lowering turns
+           into a lookup, and `tss_t`, which a program manages itself --
+           including the destructor the host runs when a thread ends. */
+        static _Thread_local int mine = 100;
+        static tss_t key;
+        static mtx_t lock;
+        static int total, freed;
+
+        static void dtor(void *p) {
+            mtx_lock(&lock);
+            freed += *(int *)p;
+            mtx_unlock(&lock);
+            free(p);
+        }
+
+        static int worker(void *arg) {
+            int n = *(int *)arg, i;
+            int *owned = malloc(sizeof(int));
+            *owned = n;
+            tss_set(key, owned);
+            for (i = 0; i < 3; i++) mine += n;
+            mtx_lock(&lock);
+            total += mine;
+            mtx_unlock(&lock);
+            return mine + *(int *)tss_get(key);
+        }
+
+        int main(void) {
+            thrd_t t[3];
+            int id[3], got, i;
+            mtx_init(&lock, mtx_plain);
+            if (tss_create(&key, dtor) != thrd_success) return 1;
+            printf("main sees %d\n", mine);
+            for (i = 0; i < 3; i++) {
+                id[i] = i + 1;
+                thrd_create(&t[i], worker, &id[i]);
+            }
+            for (i = 0; i < 3; i++) {
+                thrd_join(t[i], &got);
+                printf("thread %d ended with %d\n", i, got);
+            }
+            printf("total %d freed %d main still %d\n", total, freed, mine);
+            tss_delete(key);
+            mtx_destroy(&lock);
             return 0;
         }
     """,

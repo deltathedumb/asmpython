@@ -285,6 +285,14 @@ GROUPS: dict[str, dict[str, tuple[tuple[str, ...], str]]] = {
         "host_cond_signal":   (("i64",), "i64"),
         "host_cond_broadcast": (("i64",), "i64"),
         "host_cond_free":     (("i64",), "i64"),
+        # PER-THREAD STORAGE, which is four operations and not a storage
+        # class: a key, a pointer per thread under it, and a destructor the
+        # host runs when a thread ends. `_Thread_local` is compiled onto
+        # these too -- see the C frontend's `lower._tls_slot`.
+        "host_tss_new":       (("ptr",), "i64"),
+        "host_tss_get":       (("i64",), "ptr"),
+        "host_tss_set":       (("i64", "ptr"), "i64"),
+        "host_tss_free":      (("i64",), "i64"),
     },
     # ── another program ─────────────────────────────────────────────────
     #
@@ -1150,6 +1158,327 @@ static int apy_proc_argv(@PTR@ packed, int64_t n, int64_t count,
 }
 """
 
+
+C_SOURCE["thread"] = r"""/* --- host services: thread ---------------------------------------------- */
+
+/* NO HEADER, for the reason every other group here gives: `<pthread.h>`
+   declares a great deal besides the dozen calls wanted, and every name it
+   declares is one a `ctypes` program may declare for itself -- two
+   prototypes for one symbol do not compile.
+
+   THE OPAQUE TYPES ARE BYTE ARRAYS OF THE RIGHT SIZE, allocated with
+   `malloc` and never inspected. `pthread_mutex_t` is 40 bytes on x86-64
+   Linux and 64 on some other platforms; a `pthread_cond_t` is 48. Asking
+   for 128 costs nothing measurable and cannot be too small on any platform
+   this targets -- and a handle a caller may only hand back is exactly the
+   kind of thing this file's header says should be opaque.
+
+   THE THREAD FUNCTION'S SIGNATURE IS THE CONTRACT'S, not pthreads': it
+   takes a `ptr` and answers an `i64`. `pthread_create` wants `void *(*)(void
+   *)`, so the start routine below is a trampoline that calls the real one
+   and keeps its answer for `join`. */
+#ifdef _WIN32
+/* WINDOWS IS NOT IMPLEMENTED HERE, and says so rather than pretending: the
+   Win32 thread API needs `CRITICAL_SECTION` and `CONDITION_VARIABLE`, which
+   are STRUCTS whose layout a wrong prototype gets silently wrong -- the
+   hazard this file's `file` group warns about at length, and the reason its
+   `proc` group stops where it does. `thrd_create` answers `thrd_error`
+   there, which is an answer C defines and a program can act on. */
+@STATIC@int64_t host_thread_start(@PTR@ fn, @PTR@ arg)
+{ (void)fn; (void)arg; return -1; }
+@STATIC@int64_t host_thread_join(int64_t h, @PTR@ out)
+{ (void)h; (void)out; return -1; }
+@STATIC@int64_t host_thread_detach(int64_t h) { (void)h; return -1; }
+@STATIC@int64_t host_thread_self(void) { return 0; }
+@STATIC@int64_t host_thread_yield(void) { return 0; }
+@STATIC@int64_t host_thread_exit(int64_t code) { (void)code; return -1; }
+@STATIC@int64_t host_mutex_new(int64_t kind) { (void)kind; return -1; }
+@STATIC@int64_t host_mutex_lock(int64_t m) { (void)m; return -1; }
+@STATIC@int64_t host_mutex_trylock(int64_t m) { (void)m; return -1; }
+@STATIC@int64_t host_mutex_timedlock(int64_t m, int64_t ns)
+{ (void)m; (void)ns; return -1; }
+@STATIC@int64_t host_mutex_unlock(int64_t m) { (void)m; return -1; }
+@STATIC@int64_t host_mutex_free(int64_t m) { (void)m; return -1; }
+@STATIC@int64_t host_cond_new(void) { return -1; }
+@STATIC@int64_t host_cond_wait(int64_t c, int64_t m, int64_t ns)
+{ (void)c; (void)m; (void)ns; return -1; }
+@STATIC@int64_t host_cond_signal(int64_t c) { (void)c; return -1; }
+@STATIC@int64_t host_cond_broadcast(int64_t c) { (void)c; return -1; }
+@STATIC@int64_t host_cond_free(int64_t c) { (void)c; return -1; }
+@STATIC@int64_t host_tss_new(@PTR@ dtor) { (void)dtor; return -1; }
+@STATIC@@PTR@ host_tss_get(int64_t k) { (void)k; return 0; }
+@STATIC@int64_t host_tss_set(int64_t k, @PTR@ v) { (void)k; (void)v; return -1; }
+@STATIC@int64_t host_tss_free(int64_t k) { (void)k; return -1; }
+#else
+typedef unsigned long apy_thread_t;
+int pthread_create(apy_thread_t *, const void *, void *(*)(void *), void *);
+int pthread_join(apy_thread_t, void **);
+int pthread_detach(apy_thread_t);
+apy_thread_t pthread_self(void);
+int sched_yield(void);
+void pthread_exit(void *);
+int pthread_mutex_init(void *, const void *);
+int pthread_mutex_lock(void *);
+int pthread_mutex_trylock(void *);
+int pthread_mutex_unlock(void *);
+int pthread_mutex_destroy(void *);
+int pthread_mutexattr_init(void *);
+int pthread_mutexattr_settype(void *, int);
+int pthread_cond_init(void *, const void *);
+int pthread_cond_wait(void *, void *);
+int pthread_cond_timedwait(void *, void *, const void *);
+int pthread_cond_signal(void *);
+int pthread_cond_broadcast(void *);
+int pthread_cond_destroy(void *);
+int pthread_key_create(unsigned int *, void (*)(void *));
+int pthread_key_delete(unsigned int);
+void *pthread_getspecific(unsigned int);
+int pthread_setspecific(unsigned int, const void *);
+/* `clock_gettime` IS NOT DECLARED HERE, and it is the one exception to this
+   file's rule. Every consumer of this C already includes `<time.h>` -- the
+   `time` group's `time()` and `CLOCKS_PER_SEC` need it -- so the name and
+   its `struct timespec` are already in scope, and declaring them again is
+   the conflicting-prototype error the rule exists to avoid, from the other
+   side. The struct is also one this file must not guess at: it is two words
+   on every platform this targets and is exactly the kind of layout the
+   `file` group's comment says not to write from memory. */
+
+/* ROOM FOR THE LARGEST OF THESE OBJECTS ON ANY PLATFORM THIS TARGETS. See
+   the comment above: the size is deliberately generous and the contents are
+   never read here. */
+#define APY_THREAD_OBJ 128
+#define APY_MUTEX_RECURSIVE 1
+
+/* THE TRAMPOLINE AND WHAT IT CARRIES. A thread's answer is an `int64_t` and
+   `pthread_join` hands back a `void *`, which is the same width on every
+   platform with threads -- but going through one loses the sign, so the
+   answer is kept in the block instead and the pointer is only a token. */
+struct apy_thread_slot {
+    apy_thread_t id;
+    int64_t (*fn)(void *);
+    void *arg;
+    int64_t result;
+    int done;
+};
+
+static void *apy_thread_run(void *p)
+{
+    struct apy_thread_slot *s = (struct apy_thread_slot *)p;
+    s->result = s->fn(s->arg);
+    s->done = 1;
+    return p;
+}
+
+@STATIC@int64_t host_thread_start(@PTR@ fn, @PTR@ arg)
+{
+    struct apy_thread_slot *s;
+    if (fn == 0) return -9;
+    s = (struct apy_thread_slot *)malloc(sizeof *s);
+    if (!s) return -1;
+    s->fn = (int64_t (*)(void *))fn;
+    s->arg = (void *)arg;
+    s->result = 0;
+    s->done = 0;
+    if (pthread_create(&s->id, 0, apy_thread_run, s) != 0) {
+        free(s);
+        return -1;
+    }
+    /* THE HANDLE IS THE BLOCK, not the `pthread_t`: the answer has to live
+       somewhere until somebody joins, and the block is where it is. */
+    return (int64_t)(intptr_t)s;
+}
+
+@STATIC@int64_t host_thread_join(int64_t h, @PTR@ out)
+{
+    struct apy_thread_slot *s = (struct apy_thread_slot *)(intptr_t)h;
+    void *ignored;
+    if (!s) return -9;
+    if (pthread_join(s->id, &ignored) != 0) return -1;
+    if (out) *(int64_t *)out = s->result;
+    free(s);
+    return 0;
+}
+
+@STATIC@int64_t host_thread_detach(int64_t h)
+{
+    struct apy_thread_slot *s = (struct apy_thread_slot *)(intptr_t)h;
+    if (!s) return -9;
+    if (pthread_detach(s->id) != 0) return -1;
+    /* THE BLOCK LEAKS, ON PURPOSE. Nothing will join, so nothing can know
+       when the thread is finished with it; one block per detached thread is
+       the price of not freeing memory another thread is still running in. */
+    return 0;
+}
+
+@STATIC@int64_t host_thread_self(void)
+{
+    /* NOT THE BLOCK -- a thread does not know its own -- but a number that
+       is this thread's and nobody else's, which is all `thrd_current` is
+       for: comparing. */
+    return (int64_t)pthread_self();
+}
+
+@STATIC@int64_t host_thread_yield(void) { return (int64_t)sched_yield(); }
+
+@STATIC@int64_t host_thread_exit(int64_t code)
+{
+    pthread_exit((void *)(intptr_t)code);
+    return 0;
+}
+
+@STATIC@int64_t host_mutex_new(int64_t kind)
+{
+    void *m = malloc(APY_THREAD_OBJ);
+    char attr[APY_THREAD_OBJ];
+    if (!m) return -1;
+    if (kind == APY_MUTEX_RECURSIVE) {
+        pthread_mutexattr_init(attr);
+        /* PTHREAD_MUTEX_RECURSIVE is 1 on Linux and 2 on macOS, and there
+           is no portable name without the header. The common case is the
+           plain mutex; a recursive one falls back to plain where the number
+           is wrong, which C's `mtx_recursive` does not promise to detect. */
+        pthread_mutexattr_settype(attr, 1);
+        if (pthread_mutex_init(m, attr) != 0) { free(m); return -1; }
+        return (int64_t)(intptr_t)m;
+    }
+    if (pthread_mutex_init(m, 0) != 0) { free(m); return -1; }
+    return (int64_t)(intptr_t)m;
+}
+
+@STATIC@int64_t host_mutex_lock(int64_t h)
+{
+    if (!h) return -9;
+    return pthread_mutex_lock((void *)(intptr_t)h) == 0 ? 0 : -1;
+}
+
+@STATIC@int64_t host_mutex_trylock(int64_t h)
+{
+    if (!h) return -9;
+    /* ONE FOR "SOMEBODY ELSE HAS IT", which is not an error: every error in
+       this table is negative, so the two are distinguishable. */
+    return pthread_mutex_trylock((void *)(intptr_t)h) == 0 ? 0 : 1;
+}
+
+@STATIC@int64_t host_mutex_timedlock(int64_t h, int64_t nanos)
+{
+    /* SPINNING WITH A YIELD, because `pthread_mutex_timedlock` takes a
+       `struct timespec` at an ABSOLUTE time -- a struct this file would
+       have to declare and a clock it would have to read. The wait is
+       correct and is not efficient; a program that waits on a mutex for
+       long enough to notice wants a condition variable. */
+    int64_t waited = 0;
+    if (!h) return -9;
+    for (;;) {
+        if (pthread_mutex_trylock((void *)(intptr_t)h) == 0) return 0;
+        if (nanos >= 0 && waited >= nanos) return 1;
+        sched_yield();
+        waited += 1000;
+    }
+}
+
+@STATIC@int64_t host_mutex_unlock(int64_t h)
+{
+    if (!h) return -9;
+    return pthread_mutex_unlock((void *)(intptr_t)h) == 0 ? 0 : -1;
+}
+
+@STATIC@int64_t host_mutex_free(int64_t h)
+{
+    if (!h) return -9;
+    pthread_mutex_destroy((void *)(intptr_t)h);
+    free((void *)(intptr_t)h);
+    return 0;
+}
+
+@STATIC@int64_t host_cond_new(void)
+{
+    void *c = malloc(APY_THREAD_OBJ);
+    if (!c) return -1;
+    if (pthread_cond_init(c, 0) != 0) { free(c); return -1; }
+    return (int64_t)(intptr_t)c;
+}
+
+@STATIC@int64_t host_cond_wait(int64_t c, int64_t m, int64_t nanos)
+{
+    if (!c || !m) return -9;
+    if (nanos < 0)
+        return pthread_cond_wait((void *)(intptr_t)c,
+                                 (void *)(intptr_t)m) == 0 ? 0 : -1;
+    {
+        /* THE TIMED FORM NEEDS AN ABSOLUTE DEADLINE, which is `<time.h>`'s
+           own `struct timespec` -- see the note beside the prototypes above
+           for why this one type is not written out. CLOCK_REALTIME is 0. */
+        struct timespec until;
+        clock_gettime(0, &until);
+        until.tv_sec += (long)(nanos / 1000000000);
+        until.tv_nsec += (long)(nanos % 1000000000);
+        if (until.tv_nsec >= 1000000000) {
+            until.tv_nsec -= 1000000000;
+            until.tv_sec += 1;
+        }
+        {
+            int r = pthread_cond_timedwait((void *)(intptr_t)c,
+                                           (void *)(intptr_t)m, &until);
+            if (r == 0) return 0;
+            /* ETIMEDOUT is 110 on Linux and 60 on macOS; anything that is
+               not success and not an argument error is a timeout here, and
+               the caller's own deadline tells it which. */
+            return 1;
+        }
+    }
+}
+
+@STATIC@int64_t host_cond_signal(int64_t c)
+{
+    if (!c) return -9;
+    return pthread_cond_signal((void *)(intptr_t)c) == 0 ? 0 : -1;
+}
+
+@STATIC@int64_t host_cond_broadcast(int64_t c)
+{
+    if (!c) return -9;
+    return pthread_cond_broadcast((void *)(intptr_t)c) == 0 ? 0 : -1;
+}
+
+@STATIC@int64_t host_cond_free(int64_t c)
+{
+    if (!c) return -9;
+    pthread_cond_destroy((void *)(intptr_t)c);
+    free((void *)(intptr_t)c);
+    return 0;
+}
+
+/* A KEY IS A `pthread_key_t`, WHICH IS AN UNSIGNED INT, and the handle is
+   that number plus one: zero is a perfectly good key and this table's
+   handles are negative only for errors, so the offset keeps a valid key
+   from looking like "nothing". */
+@STATIC@int64_t host_tss_new(@PTR@ dtor)
+{
+    unsigned int key = 0;
+    if (pthread_key_create(&key, (void (*)(void *))dtor) != 0) return -1;
+    return (int64_t)key + 1;
+}
+
+@STATIC@@PTR@ host_tss_get(int64_t key)
+{
+    if (key <= 0) return 0;
+    return (@PTR@)pthread_getspecific((unsigned int)(key - 1));
+}
+
+@STATIC@int64_t host_tss_set(int64_t key, @PTR@ value)
+{
+    if (key <= 0) return -9;
+    return pthread_setspecific((unsigned int)(key - 1),
+                               (const void *)value) == 0 ? 0 : -1;
+}
+
+@STATIC@int64_t host_tss_free(int64_t key)
+{
+    if (key <= 0) return -9;
+    return pthread_key_delete((unsigned int)(key - 1)) == 0 ? 0 : -1;
+}
+#endif
+"""
 
 C_SOURCE["dynlib"] = r"""/* --- host services: dynlib ---------------------------------------------- */
 

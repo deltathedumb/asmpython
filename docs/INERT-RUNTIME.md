@@ -698,7 +698,8 @@ floor and nothing else -- and "nothing else" has to be written down or it is
 not a claim. So `hostsvc.py` is one table of operations with fixed signatures,
 the floor is its mandatory `core` group, and everything a real program needs
 beyond the floor is an OPTIONAL group a backend declares: a filesystem, a
-clock, entropy, an environment, a network, a character database.
+clock, entropy, an environment, a network, another program, a dynamic
+library, a character database, threads.
 
 **What forced it was `pathlib`.** That module reaches `_open`, `_read` and
 `GetFileAttributesA` through `ctypes`, which `frontends/python/cffi.py`

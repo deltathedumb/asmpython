@@ -57,10 +57,16 @@ K&R definitions, statement expressions, `__attribute__` where it is advisory,
 and GNU's `__typeof__`/`__restrict` spellings because real headers use them
 -- is implemented.
 
-ALL THIRTY-ONE HEADERS C23 REQUIRES are in `include/`. One of them refuses
-with a reason rather than being absent -- `<threads.h>` -- because a missing
-file is a mystery and a refusal is an answer. `<stdatomic.h>` is supported and `<threads.h>` is not, which is not a
-contradiction: with one thread every operation is already atomic.
+ALL THIRTY-ONE HEADERS C23 REQUIRES are in `include/`, and all thirty-one
+work. `<threads.h>` is `objects/hostsvc.py`'s `thread` group: threads are a
+capability of the TARGET, so a backend that has them gets `thrd_create`, a
+mutex, a condition variable and `tss_t`, one that has not got them refuses
+the program by name, and `thrd_create` may still answer `thrd_error` --
+which C allows and a portable program checks. `_Thread_local` is compiled
+onto the same keys. `<stdatomic.h>` IS THE ONE TO READ CAREFULLY now that
+there can be two threads: its operations are ordinary loads and stores with
+the right names, which was right for one thread and is not a promise this
+library can keep for two.
 
 SEVERAL TRANSLATION UNITS IN ONE BUILD. `uasm build main.c --c:unit parse.c
 --c:unit emit.c` compiles each file on its own and joins the modules, which is

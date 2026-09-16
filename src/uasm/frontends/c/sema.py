@@ -79,6 +79,9 @@ class Symbol:
     #: True if the symbol was declared `inline` without `extern`, so an
     #: unused definition need not be emitted.
     inline: bool = False
+    #: `_Thread_local`: one copy per thread rather than one for the program.
+    #: Lowering turns every use into a lookup -- see `lower._tls_address`.
+    thread_local: bool = False
     #: True while the symbol is a function parameter of a VLA type, whose
     #: size must be evaluated on entry.
     vla_bound: Any = None

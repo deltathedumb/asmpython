@@ -108,7 +108,14 @@ class CcToolchain(Toolchain):
         object_format = (target_registry.host().object_format
                          if request.target.is_source
                          else request.target.object_format)
-        system_libs = ["-lm", "-ldl"] if object_format == "elf" else []
+        # `-lpthread` FOR THE SAME REASON AS THE OTHER TWO: the thread
+        # functions moved into libc in glibc 2.34 and were libpthread before
+        # that, so the flag is needed on an older system and is a harmless
+        # empty stub on a newer one. The alternative is a program that
+        # compiles and fails to link with `undefined reference to
+        # pthread_create`, which names neither the group nor the fix.
+        system_libs = (["-lm", "-ldl", "-lpthread"]
+                       if object_format == "elf" else [])
         argv = [cc, *inputs, "-o", str(output), *request.extra_inputs,
                 *system_libs]
         run(request, argv, what="linking")

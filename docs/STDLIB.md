@@ -78,11 +78,16 @@ again:
   the group along the way (`host_net_port`, `host_net_ready`), because a
   contract that cannot report which ephemeral port it got, or whether a
   descriptor would block, cannot be used by the modules it exists for.
-* `threading` still cannot have a second thread -- that part of the claim
-  stands -- but most of the module is not the scheduler. Its locks,
-  semaphores, events, conditions, barriers and thread-local storage are
-  state machines that answer exactly what CPython answers on one thread,
-  and only `Thread` itself diverges.
+* `threading` still cannot have a second thread here, but the reason has
+  moved: there IS a group now. `thread` was added to `hostsvc.py` for the
+  C frontend's `<threads.h>`, the C backend answers it over pthreads and
+  the reference interpreter over Python threads -- so the floor is not
+  what stops this module any more. The object runtime's reference counts
+  are: they are ordinary loads and stores, and two threads sharing a
+  Python object would corrupt them. Everything in the module that is NOT
+  the scheduler -- locks, semaphores, events, conditions, barriers,
+  thread-local storage -- is a state machine that answers exactly what
+  CPython answers on one thread, and only `Thread` itself diverges.
 
 * `subprocess` is the one the claim was actually about: creating a
   process is the largest single addition to the floor of anything here,

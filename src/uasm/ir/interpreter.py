@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import math
 import struct
+import threading
 from dataclasses import dataclass, field
 
 from . import types as T
@@ -117,24 +118,83 @@ class Memory:
 
     def __init__(self, size: int = 1 << 22) -> None:
         self.buf = bytearray(size)
-        self.brk = 8            # never hand out 0
+        #: THE STACK POINTER IS PER THREAD, and that is the whole of what a
+        #: thread needs from this class. Frames are handed back by resetting
+        #: `brk` when a call returns, so two threads sharing one would give
+        #: each other's frames away -- which is not a slow leak but an
+        #: immediate, silent overwrite. `enter_thread` gives a new thread a
+        #: region of its own; everything else here is shared, which is what
+        #: threads sharing an address space means.
+        self._local = threading.local()
+        self._local.brk = 8     # never hand out 0
+        #: THE FIRST THREAD'S STACK POINTER, kept beside the thread-local
+        #: one because `heap` has to know where the bottom-up allocator has
+        #: reached and it may be called from any thread.
+        self._main = threading.get_ident()
+        self._main_brk = 8
         self.heap_top = len(self.buf)
+        #: The heap and the stack regions grow towards each other from the
+        #: same end, so handing one out is not two threads' business at once.
+        self._lock = threading.Lock()
+
+    @property
+    def brk(self) -> int:
+        return getattr(self._local, "brk", self._main_brk)
+
+    @brk.setter
+    def brk(self, value: int) -> None:
+        self._local.brk = value
+        if threading.get_ident() == self._main:
+            self._main_brk = value
+
+    @property
+    def _limit(self) -> int:
+        """How far this thread's stack may grow.
+
+        THE MAIN THREAD'S LIMIT IS THE HEAP, which is the arrangement this
+        class is built around: the two grow towards each other and meeting
+        is what "out of memory" means. A thread other than the first has a
+        REGION, taken from the heap once, and its limit is the end of that
+        -- so one thread's frames cannot walk into another's.
+        """
+        got = getattr(self._local, "limit", 0)
+        return got or self.heap_top
 
     def alloc(self, nbytes: int, align: int = 8) -> int:
         addr = (self.brk + align - 1) & ~(align - 1)
         end = addr + max(1, nbytes)
-        if end >= self.heap_top:
+        if end >= self._limit:
             raise Trap(f"out of memory: {nbytes} bytes at {addr:#x}")
         self.brk = end
         return addr
 
     def heap(self, nbytes: int, align: int = 16) -> int:
         """`plat_heap`. Outlives every frame; see the class docstring."""
-        addr = (self.heap_top - max(1, nbytes)) & ~(align - 1)
-        if addr <= self.brk:
-            raise Trap(f"out of memory: {nbytes} bytes from the heap")
-        self.heap_top = addr
-        return addr
+        with self._lock:
+            addr = (self.heap_top - max(1, nbytes)) & ~(align - 1)
+            # AGAINST THE FIRST THREAD'S STACK POINTER, not the calling
+            # thread's: another thread's stack is a region that came out of
+            # this same heap and is already below `heap_top`.
+            if addr <= self._main_brk:
+                raise Trap(f"out of memory: {nbytes} bytes from the heap")
+            self.heap_top = addr
+            return addr
+
+    #: How much stack a thread other than the first one gets. Its frames
+    #: come out of the same space `plat_heap` uses and are never given back,
+    #: which is what a thread that may still be running requires.
+    THREAD_STACK = 1 << 18
+
+    def enter_thread(self) -> None:
+        """Give the calling thread a stack region of its own.
+
+        THE FIRST THING A NEW THREAD DOES, before it runs any IR: until this
+        has run, `brk` answers the main thread's and a frame would be
+        allocated on top of somebody else's.
+        """
+        base = self.heap(self.THREAD_STACK)
+        self._local.brk = base
+        self._local.limit = base + self.THREAD_STACK
 
     def _check(self, addr: int, n: int) -> None:
         if addr <= 0 or addr + n > len(self.buf):

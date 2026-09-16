@@ -102,6 +102,10 @@ class Lowerer:
         self.needs_args = False
         self.needs_complex = False
         self.needs_ldouble = False
+        self.needs_tls = False
+        #: `_Thread_local` objects: (the template's name, its size). Their
+        #: keys are made by `_emit_init`.
+        self.thread_locals: list[tuple[str, int]] = []
         #: Complex temporaries, by position in the expression being lowered.
         #: See `_cx_temp` for why they are pooled and where they live.
         self._cx_pool: list[dict[int, int]] = []
@@ -129,7 +133,7 @@ class Lowerer:
         self._emit_init()
         self._emit_entry()
         if (self.needs_vla or self.needs_args or self.needs_complex
-                or self.needs_ldouble):
+                or self.needs_ldouble or self.needs_tls):
             self._splice_support()
         self._prune()
         return self.module
@@ -177,11 +181,20 @@ class Lowerer:
         data = self._static_bytes(sym, sym.init, size)
         linkage = (IRLinkage.EXPORT if sym.linkage is Linkage.EXTERNAL
                    else IRLinkage.INTERNAL)
-        self._add_global(Global(sym.ir_name or sym.name, max(1, size), data,
+        name = sym.ir_name or sym.name
+        self._add_global(Global(name, max(1, size), data,
                                 readonly=self._readonly(sym, mark),
                                 linkage=linkage,
                                 align=sym.align or sym.type.align,
                                 span=sym.span or self.unit.span))
+        if sym.thread_local:
+            # THE OBJECT ABOVE BECOMES THE TEMPLATE: what a thread's own
+            # copy starts as. Beside it goes a key, made once before `main`
+            # runs -- which is where the race a key would otherwise have is
+            # avoided, because the program is one thread there.
+            self._add_global(Global(name + ".key", 8, None, linkage=linkage,
+                                    span=sym.span or self.unit.span))
+            self.thread_locals.append((name, max(1, size)))
 
     def _compound_global(self, node: S.CompoundLiteral) -> None:
         size = node.type.size
@@ -486,7 +499,7 @@ class Lowerer:
         alternative (working out afterwards which units produced one and
         editing the entry block) does not come close to.
         """
-        if not self.init_stores and not self.inits:
+        if not self.init_stores and not self.inits and not self.thread_locals:
             return
         fn = Function(self._init_name, IR.VOID, span=self.unit.span,
                       linkage=(IRLinkage.EXPORT if self.inits
@@ -496,6 +509,13 @@ class Lowerer:
         fn.blocks.append(Block("entry"))
         self.b = Builder(fn)
         self.sret = None
+        # THE KEYS FIRST, and before `main`: a key made here is made by one
+        # thread, which is what makes `__c_tls_get` need no lock.
+        for name, _size in self.thread_locals:
+            self._ensure_extern("host_tss_new", IR.I64, [IR.PTR])
+            key = self.b.call(IR.I64, "host_tss_new",
+                              [self.b.const(IR.PTR, 0)])
+            self.b.store(IR.I64, key, self._global_addr(name + ".key"))
         for owner, offset, ty, value in self.init_stores:
             base = self._global_addr(owner)
             addr = self._offset(base, offset)
@@ -518,7 +538,7 @@ class Lowerer:
             # IN A MULTI-UNIT BUILD THIS IS THE ORDINARY CASE -- only one
             # unit has `main` -- and the frontend says so once, after the
             # merge, if no unit had one at all.
-            if self.init_stores and not self.inits:
+            if (self.init_stores or self.thread_locals) and not self.inits:
                 self.sink.report(
                     warning("W1500",
                             "this unit has static initialisers that need "
@@ -541,7 +561,8 @@ class Lowerer:
         # happens before `main` runs; unit order is the one a reader can
         # predict.
         for name in (self.inits or
-                     ((self._init_name,) if self.init_stores else ())):
+                     ((self._init_name,)
+                      if (self.init_stores or self.thread_locals) else ())):
             self.b.call(IR.VOID, name, [])
         args = self._main_args(user)
         got = self.b.call(user.ret, USER_MAIN, args)
@@ -994,6 +1015,8 @@ class Lowerer:
                                             sym=sym.ir_name or sym.name))
                     return d
                 if sym.is_global:
+                    if sym.thread_local:
+                        return self._tls_address(sym)
                     return self._global_addr(sym.ir_name or sym.name)
                 if sym.type.is_vla:
                     return self.b.load(IR.PTR, sym.slot)
@@ -1028,6 +1051,29 @@ class Lowerer:
             case S.StmtExpr():
                 return self._stmt_expr(e)
         raise Unsupported(f"address of {type(e).__name__}")
+
+    def _tls_address(self, sym: Symbol) -> int:
+        """Where THIS thread's copy of a `_Thread_local` object lives.
+
+        A LOOKUP AND NOT AN ADDRESS, which is the whole difference from
+        every other global: the answer depends on which thread is asking.
+        `__c_tls_get` reads the key, asks the host service for this thread's
+        pointer, and makes one from the template the first time -- so the
+        first use in a thread is an allocation and every later one is a
+        load.
+
+        WHAT IT COSTS is `objects/hostsvc.py`'s `thread` group: a program
+        with a `_Thread_local` object is refused on a backend whose target
+        has no threads, by name. That is the honest reading of what the
+        program asked for.
+        """
+        self.needs_tls = True
+        name = sym.ir_name or sym.name
+        self._ensure_extern("__c_tls_get", IR.PTR, [IR.PTR, IR.I64, IR.PTR])
+        return self.b.call(IR.PTR, "__c_tls_get",
+                           [self._global_addr(name + ".key"),
+                            self.b.const(IR.I64, max(1, sym.type.size)),
+                            self._global_addr(name)])
 
     def _global_addr(self, name: str) -> int:
         d = self.b.reg(IR.PTR)
@@ -2231,7 +2277,8 @@ class Lowerer:
         units = ((("vla",) if self.needs_vla else ())
                  + (("args",) if self.needs_args else ())
                  + (("complex",) if self.needs_complex else ())
-                 + (("ldouble",) if self.needs_ldouble else ()))
+                 + (("ldouble",) if self.needs_ldouble else ())
+                 + (("tls",) if self.needs_tls else ()))
         functions, globals_ = compile_support(self.sink, units)
         for fn in functions:
             existing = self.module.function(fn.name)

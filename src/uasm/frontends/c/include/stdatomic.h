@@ -1,15 +1,31 @@
-/* <stdatomic.h> -- one thread, so every operation already is atomic.
+/* <stdatomic.h> -- ordinary operations with the right names.
 
-   This is not a pretence. `<threads.h>` refuses because the platform floor
-   cannot create a thread, so there is exactly one; on one thread a plain load
-   is indivisible with respect to every other operation in the program, which
-   is the whole of what `atomic_load` promises. The memory orders are accepted
-   and ignored for the same reason: there is no second observer for them to
-   order anything against.
+   THREADS HAVE ARRIVED, and this file said what to do when they did: "IF
+   THREADS EVER ARRIVE, this file becomes wrong and has to be rewritten
+   against whatever the IR grows to express them." The IR has not grown
+   anything -- there is no atomic exchange, no fence, and adding one would
+   mean implementing it in every backend -- so what is here is what was here,
+   and the honest thing is to say exactly what it is.
 
-   IF THREADS EVER ARRIVE, this file becomes wrong and has to be rewritten
-   against whatever the IR grows to express them. Said here so that the day it
-   matters, the reason it was ever right is on the page. */
+   WHAT IS TRUE. On one thread a plain load is indivisible with respect to
+   every other operation in the program, which is the whole of what
+   `atomic_load` promises, and the memory orders have no second observer to
+   order anything against. A program that uses `_Atomic` to say what it means
+   -- and runs one thread -- gets exactly the right answers.
+
+   WHAT IS NOT. With two threads these are a data race like any other:
+   `atomic_fetch_add` is a load, an add and a store, and two threads running
+   it lose counts. `<threads.h>`'s mutex is the thing to use, and it is a
+   real one -- `objects/hostsvc.py`'s `thread` group, pthreads underneath.
+
+   WHY NOT A LOCK IN HERE, which would make these correct. Because it would
+   make `<stdatomic.h>` need the `thread` group: a program that uses an
+   `_Atomic` counter without ever starting a thread would stop compiling for
+   a target that has no threads, and that program is the common one. The
+   other half is that a lock could only fix the FUNCTIONS -- C says an
+   assignment to an atomic object is an atomic store too, and that is the
+   compiler's business rather than this header's. Half an implementation that
+   looks like a whole one is the worse trade. */
 #ifndef _UASM_STDATOMIC_H
 #define _UASM_STDATOMIC_H
 

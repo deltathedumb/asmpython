@@ -271,7 +271,7 @@ C23_HEADERS = [
 
 #: The three that cannot exist here, and the diagnostic each one gives. A
 #: refusal with a reason is a feature; a missing file is a mystery.
-REFUSING = {"threads.h"}
+REFUSING: set[str] = set()
 
 
 class TestItAlwaysTerminates:
@@ -298,6 +298,9 @@ class TestItAlwaysTerminates:
 class TestTheStandardHeaders:
     @harness.cases("name", C23_HEADERS)
     def test_each_one_is_there_and_stands_alone(self, name):
+        """ALL THIRTY-ONE COMPILE NOW. `REFUSING` is empty and is kept
+        because the shape of the answer -- a header that is present and
+        explains itself -- is what this suite is checking for."""
         module, sink = compile_c(f"#include <{name}>\nint main(void){{return 0;}}")
         codes_ = [d.code for d in sink.diagnostics]
         if name in REFUSING:
@@ -365,6 +368,30 @@ class TestTheFourDivergences:
         _, sink = compile_c("_Imaginary double z;")
         assert [d.code for d in sink.diagnostics] == ["E1214"]
         assert "Annex G" in sink.diagnostics[0].notes[0]
+
+    def test_threads_are_a_capability_of_the_target(self):
+        """`<threads.h>` is `objects/hostsvc.py`'s `thread` group, so a
+        program that starts one names it and a program that does not is
+        untouched."""
+        module, sink = compile_c(
+            "#include <threads.h>\n"
+            "static int go(void *p){ (void)p; return 1; }\n"
+            "int main(void){ thrd_t t; thrd_create(&t, go, 0);\n"
+            "                return thrd_join(t, 0); }")
+        assert not sink.failed, [d.message for d in sink.diagnostics]
+        assert "host_thread_start" in {f.name for f in module.functions}
+
+    def test_thread_local_is_one_copy_per_thread(self):
+        """Not `static` with a different spelling: every use is a lookup,
+        and the key is made before `main` runs."""
+        module, sink = compile_c(
+            "_Thread_local int mine = 7;\n"
+            "int get(void){ return mine; }\n"
+            "int main(void){ return get(); }")
+        assert not sink.failed, [d.message for d in sink.diagnostics]
+        names = {f.name for f in module.functions}
+        assert "__c_tls_get" in names and "host_tss_new" in names
+        assert [g for g in module.globals if g.name.endswith("mine.key")]
 
     def test_setjmp_compiles_into_the_function_that_calls_it(self):
         """There is no `setjmp` function to call: `longjmp.py` turns the

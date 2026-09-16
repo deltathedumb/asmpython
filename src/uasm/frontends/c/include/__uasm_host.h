@@ -82,6 +82,32 @@ extern long host_env_get(const void *__name, long __n, void *__out, long __cap);
 extern long host_arg_count(void);
 extern long host_arg_get(long __i, void *__out, long __cap);
 
+/* ── the `thread` group ───────────────────────────────────────────────── */
+/* A HANDLE IS OPAQUE and belongs to whoever answered it. The start routine
+   takes a `void *` and answers a machine word, which is `thrd_start_t` with
+   C's `int` widened -- the contract deals in words. */
+extern long host_thread_start(long (*__fn)(void *), void *__arg);
+extern long host_thread_join(long __handle, void *__result);
+extern long host_thread_detach(long __handle);
+extern long host_thread_self(void);
+extern long host_thread_yield(void);
+extern long host_thread_exit(long __code);
+extern long host_mutex_new(long __kind);
+extern long host_mutex_lock(long __m);
+extern long host_mutex_trylock(long __m);
+extern long host_mutex_timedlock(long __m, long __nanos);
+extern long host_mutex_unlock(long __m);
+extern long host_mutex_free(long __m);
+extern long host_cond_new(void);
+extern long host_cond_wait(long __c, long __m, long __nanos);
+extern long host_cond_signal(long __c);
+extern long host_cond_broadcast(long __c);
+extern long host_cond_free(long __c);
+extern long host_tss_new(void (*__dtor)(void *));
+extern void *host_tss_get(long __key);
+extern long host_tss_set(long __key, void *__value);
+extern long host_tss_free(long __key);
+
 /* ── the `proc` group ─────────────────────────────────────────────────── */
 extern long host_proc_run(const void *__argv, long __count, long __n,
                           void *__out, long __out_cap,

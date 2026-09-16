@@ -22,7 +22,8 @@ else. A program that only computes and prints therefore runs on **every**
 backend and in the IR interpreter, with no second runtime to implement.
 
 The second is `objects/hostsvc.py`'s optional groups — a filesystem, a clock,
-entropy, an environment, another program — which a backend **declares**. A
+entropy, an environment, another program, threads — which a backend
+**declares**. A
 program that calls into a group its target has not got is refused at compile
 time, by name:
 
@@ -34,6 +35,7 @@ time, by name:
 | `fopen`, `fclose`, `fseek`, `remove`, `tmpfile` | `file` | opening a file |
 | `fgetc`, `fgets`, `fread`, `scanf` on any stream | `file` | reading anything |
 | `time`, `clock`, `timespec_get` | `time` | asking what time it is |
+| `<threads.h>`, `_Thread_local` | `thread` | starting one, or one copy per thread |
 | `getenv` | `env` | asking about the environment |
 | `main(argc, argv)` | `env` | declaring parameters |
 | `system` | `proc` | running another program |

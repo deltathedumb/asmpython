@@ -2,10 +2,15 @@
 
 WHAT THIS IS AND IS NOT. `docs/STDLIB.md` puts `threading` in the tier
 that "NEEDS THE FLOOR TO GROW", and for the SCHEDULER that is still
-exactly right: a second thread of execution is a platform function this
-runtime does not have and cannot fake -- `objects/hostsvc.py` has no
-group for it, and inventing one that ran a target on the calling thread
-while claiming otherwise would be worse than not having the module.
+exactly right HERE -- though the reason has changed. There IS a group
+now: `objects/hostsvc.py`'s `thread`, which the C frontend's
+`<threads.h>` is written on and which the C backend and the reference
+interpreter both provide. What stops this module from using it is one
+step further in: the object runtime's reference counts are ordinary
+loads and stores, so two threads sharing a Python object would corrupt
+them. Wiring `Thread` to the group without making those atomic would
+produce a program that ran and was wrong, which is worse than a module
+that says what it cannot do.
 
 BUT MOST OF `threading` IS NOT THE SCHEDULER. `Lock`, `RLock`,
 `Semaphore`, `BoundedSemaphore`, `Event`, `Condition`, `Barrier` and
