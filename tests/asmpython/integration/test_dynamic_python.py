@@ -8862,6 +8862,198 @@ PROGRAMS = {
         show("kwonly named", lambda: needskw(1, k=2))
         show("kwrest fits", lambda: kwrest(1, x=1))
     """,
+    "a_keyword_refusal_gathers_every_name_and_says_the_qualname": """
+        # THREE REFUSALS STOPPED AT THE FIRST NAME THEY MET and none of them
+        # said which function they were about.
+        #
+        # POSITIONAL-ONLY NAMES ARE GATHERED. `pos(a=1, b=2, c=3)` against
+        # `def pos(a, b, /, c)` is `got some positional-only arguments passed
+        # as keyword arguments: 'a, b'` -- every offender in ONE refusal, in
+        # DECLARATION order. Returning at the first match named one of them,
+        # and named whichever the CALL happened to put first, so
+        # `pos(b=2, a=1, c=3)` said 'b'. The scan also runs BEFORE any other
+        # keyword complaint -- `pos(a=1, zz=2, c=3)` names `a` and never
+        # mentions `zz` -- and is skipped where a `**kw` exists for the names
+        # to land in.
+        #
+        # MISSING PARAMETERS ARE GATHERED TOO, and the holes need not be
+        # adjacent: `f(b=2)` against `def f(a, b, c)` is missing `'a' and
+        # 'c'`. Reporting the first meant a caller who forgot two learned
+        # about one, fixed it, and came straight back. A keyword-only hole is
+        # a SEPARATE message, said only when no positional one is
+        # outstanding.
+        #
+        # AND ALL OF THEM NAME THE FUNCTION BY ITS QUALNAME -- `K.m()`,
+        # `K.__init__()`, `outer.<locals>.inner()` -- which is what CPython
+        # prints and what the arity messages already said.
+        # CALLED THROUGH A VALUE, not written out. The frontend refuses
+        # some of these spellings at COMPILE time with wording of its own --
+        # see the static-checker divergence -- and what is measured here is
+        # the RUN-TIME binder, which is what a call through a value reaches.
+        def show(label, fn, args, kw):
+            try:
+                print(label, repr(fn(*args, **kw)))
+            except TypeError as e:
+                print(label, "TypeError:", e)
+
+        def pos(a, b, /, c):
+            return (a, b, c)
+
+        def poskw(a, b, /, **kw):
+            return (a, b, kw)
+
+        def three(a, b, c):
+            return (a, b, c)
+
+        def four(a, b, c, d):
+            return (a, b, c, d)
+
+        def mixed(a, b=1, *, k, j):
+            return (a, b, k, j)
+
+        def outer():
+            def inner(a, b, /, c):
+                return (a, b, c)
+            return inner
+
+        class K:
+            def __init__(self, a, /, b=0):
+                self.a = a
+
+            def m(self, a, b, /, c):
+                return (a, b, c)
+
+        class Q:
+            def m(self, a):
+                return a
+
+        # EVERY POSITIONAL-ONLY NAME, IN DECLARATION ORDER.
+        show("both by name", pos, [], {"a": 1, "b": 2, "c": 3})
+        show("both, call order reversed", pos, [], {"b": 2, "a": 1, "c": 3})
+        show("only one by name", pos, [1, 2], {"a": 9, "c": 3})
+        # AND BEFORE ANY OTHER KEYWORD COMPLAINT.
+        show("alongside an unknown name", pos, [], {"a": 1, "zz": 2, "c": 3})
+        # UNLESS THERE IS A `**kw` FOR THEM TO LAND IN.
+        show("kwrest takes them", poskw, [], {"a": 1, "b": 2})
+        show("kwrest keeps its own", poskw, [1, 2], {"a": 1})
+        # EVERY HOLE AT ONCE, ADJACENT OR NOT.
+        show("holes at the ends", three, [], {"b": 2})
+        show("three holes", four, [], {"b": 2})
+        show("no argument at all", three, [], {})
+        # A KEYWORD-ONLY HOLE IS ITS OWN MESSAGE, AND WAITS ITS TURN.
+        show("positional first", mixed, [], {"k": 1})
+        show("then the keyword-only", mixed, [1], {})
+        show("a default is not a hole", mixed, [1], {"k": 1, "j": 2})
+        # AND THE QUALNAME NAMES THE FUNCTION.
+        show("method", K(1).m, [], {"a": 1, "b": 2, "c": 3})
+        show("init", K, [], {"a": 1})
+        show("nested", outer(), [], {"a": 1, "b": 2, "c": 3})
+        show("unknown name, nested", outer(), [], {"zz": 1})
+        show("unknown name, method", Q().m, [], {"zz": 1})
+        show("by name and position both", Q().m, [1], {"a": 2})
+    """,
+    "a_default_belongs_to_its_own_parameter": """
+        # `def mixed(a, b=1, *, k, j)` called `mixed(1, k=1, j=2)` refused,
+        # with `missing 1 required positional argument: 'b'`, for a call
+        # CPython answers.
+        #
+        # THE DEFAULTS WERE INDEXED AS IF EVERY ONE BELONGED TO A TRAILING
+        # PARAMETER. That is false the moment a keyword-only parameter
+        # WITHOUT a default follows a positional one WITH: `b`'s default sits
+        # at index 0 of a one-element list, and the arithmetic looked for it
+        # two places before the start.
+        #
+        # THE LAYOUT IS TWO RUNS. The positional defaults first, covering the
+        # LAST that many POSITIONAL parameters; then the keyword-only ones,
+        # covering the last that many of the keyword-only tail. `nkwdefault`
+        # is recorded on the function for exactly this, and says where the
+        # first run ends.
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except TypeError as e:
+                print(label, "TypeError:", e)
+
+        def a1(a, b=1, *, k):
+            return (a, b, k)
+
+        def a2(a, b=1, *, k=5):
+            return (a, b, k)
+
+        def a3(a=0, b=1, *, k, j=7):
+            return (a, b, k, j)
+
+        def a4(a, *, k, j=7):
+            return (a, k, j)
+
+        def a5(a, b=1, c=2, *rest, k, j=7, **kw):
+            return (a, b, c, rest, k, j, kw)
+
+        def a6(a, /, b=1, *, k=2):
+            return (a, b, k)
+
+        def a7(*, k=1, j=2):
+            return (k, j)
+
+        # A POSITIONAL DEFAULT BEHIND A REQUIRED KEYWORD-ONLY PARAMETER.
+        show("one default, one required", lambda: a1(1, k=9))
+        show("both positions written", lambda: a1(1, 2, k=9))
+        show("and the keyword-only missing", lambda: a1(1))
+        # BOTH RUNS AT ONCE.
+        show("both defaulted", lambda: a2(1))
+        show("both written", lambda: a2(1, 2, k=9))
+        show("two positional, two keyword-only", lambda: a3(k=9))
+        show("all four written", lambda: a3(1, 2, k=9, j=8))
+        show("keyword-only still required", lambda: a3())
+        # NO POSITIONAL DEFAULT AT ALL.
+        show("keyword-only pair", lambda: a4(1, k=9))
+        show("keyword-only pair written", lambda: a4(1, k=9, j=8))
+        # WITH `*rest` AND `**kw` AROUND THEM.
+        show("rest and kw empty", lambda: a5(1, k=9))
+        show("rest and kw filled", lambda: a5(1, 2, 3, 4, 5, k=9, j=8, z=0))
+        # AND WITH A `/` IN FRONT.
+        show("positional-only lead", lambda: a6(1))
+        show("its default named", lambda: a6(1, b=2))
+        # KEYWORD-ONLY ONLY.
+        show("all defaulted", lambda: a7())
+        show("one of two named", lambda: a7(j=9))
+        # AND ALL OF IT THROUGH A BOUND METHOD, which is where the two halves
+        # came apart: the C copies a function's whole shape when it binds a
+        # receiver, while the interpreter copied it field by field and left
+        # three out -- where the keyword-only defaults begin, whether calling
+        # it builds a coroutine, and the attributes set on the function
+        # itself. The first of those is this rule, and a class whose
+        # `__init__` takes a keyword-only default is the commonest shape
+        # there is: `ContextVar(name, *, default=...)` built by name refused
+        # every construction that left the default alone.
+        import inspect
+
+        class Var:
+            def __init__(self, name, *, default=None):
+                self.name = name
+                self.default = default
+
+            def m(self, a, b=1, *, k=2):
+                return (a, b, k)
+
+            async def am(self):
+                return 1
+
+            m.tag = "kept"
+
+        show("built with the default", lambda: Var("x").name)
+        show("the default itself", lambda: Var("x").default)
+        show("built with it named", lambda: Var("y", default=5).default)
+        show("bound method defaults", lambda: Var("z").m(1))
+        show("bound method written", lambda: Var("z").m(1, 2, k=3))
+        # AND THE OTHER TWO THINGS A BIND MUST CARRY.
+        show("an attribute set on the method",
+             lambda: Var("z").m.tag)
+        show("a coroutine function stays one",
+             lambda: inspect.iscoroutinefunction(Var("z").am))
+        show("and unbound too",
+             lambda: inspect.iscoroutinefunction(Var.am))
+    """,
     "fstrings": """
         n = 42
         s = 'ab'

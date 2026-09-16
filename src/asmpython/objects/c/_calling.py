@@ -1837,6 +1837,45 @@ static apy_value apy_invoke(apy_value f, apy_value *a, int64_t n) {
     }
 }
 
+/* THE DEFAULT THE `def` EVALUATED FOR DECLARED PARAMETER `idx`, or 0 where
+   it has none.
+
+   NOT SIMPLY THE TRAILING ONES. `defaults` holds the POSITIONAL defaults
+   first and the KEYWORD-ONLY defaults after them, and a keyword-only
+   parameter WITHOUT a default may follow a positional one WITH: `def f(a,
+   b=1, *, k)` records one default, for `b`, while `k` has none. Indexing
+   from the end of the whole declaration looked for `b`'s default two places
+   before the start of the array, found nothing, and reported `b` as a hole
+   -- so `f(1, k=2)` refused a call CPython answers.
+
+   `nkwdefault` is on the function object for exactly this: it says where the
+   first run ends and the second begins. */
+static apy_value apy_fn_default(apy_value f, int64_t idx) {
+    int64_t declared = O(f)->v.fn.arity - (O(f)->v.fn.vararg ? 1 : 0)
+                                        - (O(f)->v.fn.kwarg ? 1 : 0);
+    int64_t bypos = declared - O(f)->v.fn.kwonly;
+    int64_t nkw = O(f)->v.fn.nkwdefault;
+    int64_t npos = O(f)->v.fn.ndefaults - nkw;
+    int64_t d;
+    if (!O(f)->v.fn.defaults) return 0;
+    if (npos < 0) npos = 0;
+    if (nkw < 0) nkw = 0;
+    if (idx < 0) return 0;
+    if (idx < bypos) {
+        /* The positional defaults cover the LAST `npos` positional
+           parameters, and sit at the FRONT of the array. */
+        d = idx - (bypos - npos);
+        if (d < 0 || d >= npos) return 0;
+        return O(f)->v.fn.defaults[d];
+    }
+    /* And the keyword-only defaults cover the last `nkw` of the keyword-only
+       tail, sitting behind the positional ones. */
+    if (idx < declared - nkw || idx >= declared) return 0;
+    d = npos + (idx - (declared - nkw));
+    if (d < 0 || d >= O(f)->v.fn.ndefaults) return 0;
+    return O(f)->v.fn.defaults[d];
+}
+
 static apy_value apy_arity_error(apy_value f, int64_t got) {
     char buf[192];
     /* POSITIONS, not declared slots. A keyword-only parameter is declared and
@@ -1907,14 +1946,14 @@ static apy_value apy_arity_error(apy_value f, int64_t got) {
    overrun: a signature wide enough to fill this is one no message was going
    to rescue anyway. */
 static void apy_name_list(char *out, size_t cap, apy_value *names,
-                          int64_t from, int64_t to) {
-    int64_t i, n = to - from;
+                          int64_t n) {
+    int64_t i;
     size_t at = 0;
     out[0] = 0;
-    for (i = from; i < to; i++) {
+    for (i = 0; i < n; i++) {
         const char *nm = (names && names[i]) ? APY_CSTR(names[i]) : "?";
         const char *sep = "";
-        if (i > from) sep = (i == to - 1) ? (n > 2 ? ", and " : " and ") : ", ";
+        if (i) sep = (i == n - 1) ? (n > 2 ? ", and " : " and ") : ", ";
         if (at + strlen(sep) + strlen(nm) + 3 >= cap) break;
         at += (size_t)snprintf(out + at, cap - at, "%s'%s'", sep, nm);
     }
@@ -1985,7 +2024,8 @@ static apy_value apy_fn_arity_error(apy_value f, int64_t given, int64_t kwo) {
        The names still wanted start where the arguments ran out -- and that
        index already skips a receiver, which is why `given` counts it. */
     if (given < least && O(f)->v.fn.pnames) {
-        apy_name_list(names, sizeof names, O(f)->v.fn.pnames, given, least);
+        apy_name_list(names, sizeof names, O(f)->v.fn.pnames + given,
+                      least - given);
         snprintf(buf, sizeof buf,
                  "%s() missing %lld required positional argument%s: %s", who,
                  (long long)(least - given), least - given == 1 ? "" : "s",
@@ -2000,7 +2040,8 @@ static apy_value apy_fn_arity_error(apy_value f, int64_t given, int64_t kwo) {
     if (O(f)->v.fn.kwonly && O(f)->v.fn.pnames) {
         int64_t end = declared - O(f)->v.fn.nkwdefault;
         if (end > bypos) {
-            apy_name_list(names, sizeof names, O(f)->v.fn.pnames, bypos, end);
+            apy_name_list(names, sizeof names, O(f)->v.fn.pnames + bypos,
+                          end - bypos);
             snprintf(buf, sizeof buf,
                      "%s() missing %lld required keyword-only argument%s: %s",
                      who, (long long)(end - bypos),
@@ -2809,10 +2850,10 @@ static apy_value apy_call_nk(apy_value f, apy_value *argv, int64_t argc,
         /* A missing trailing argument comes from the default the `def`
            evaluated, which lives in the function object -- see the comment on
            `fn` in `struct apy_obj`. */
-        while (n < declared && O(f)->v.fn.defaults) {
-            int64_t d = n - (declared - O(f)->v.fn.ndefaults);
-            if (d < 0 || d >= O(f)->v.fn.ndefaults) break;
-            slots[n++] = O(f)->v.fn.defaults[d];
+        while (n < declared) {
+            apy_value dv = apy_fn_default(f, n);
+            if (!dv) break;
+            slots[n++] = dv;
         }
         if (O(f)->v.fn.vararg) {
             apy_value rest = apy_tuple_new(argc - take + 1);
@@ -2949,6 +2990,7 @@ APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
     char filled[17];
     int64_t skip = 0, declared, want, bypos, i, k, kwn;
     int64_t kwonly_given = 0;
+    const char *who;
     apy_value target = apy_call_target(f, &skip);
 
     if (!target)
@@ -3079,6 +3121,48 @@ APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
     for (i = 0; i < want; i++) filled[i] = 0;
     for (i = 0; i < argc && i < bypos; i++) { slots[i] = raw[i]; filled[i] = 1; }
     if (O(target)->v.fn.kwarg) rest = apy_dict_new(kwn + 1);
+    /* NAMED BY ITS QUALNAME in every refusal below -- `K.m()`,
+       `outer.<locals>.inner()` -- which is what CPython prints and what the
+       arity messages already say. */
+    who = APY_CSTR(O(target)->v.fn.qualname ? O(target)->v.fn.qualname
+                                            : O(target)->v.fn.name);
+
+    /* POSITIONAL-ONLY NAMES PASSED BY KEYWORD ARE GATHERED, all of them at
+       once: CPython lists every offender in ONE refusal (`'a, b'`) and says
+       it BEFORE any other keyword complaint -- `pos(a=1, zz=2)` names `a`
+       and never mentions `zz`. Scanned in DECLARATION order, which is the
+       order CPython prints and not the order the call wrote; refusing at the
+       first match named one of them, and named whichever the CALL happened
+       to put first.
+
+       SKIPPED WHEN THERE IS A `**kw`. The name is not refused then, it lands
+       in the collection: `def f(a, /, **kw)` called `f(1, a=2)` binds
+       `kw = {'a': 2}`. */
+    if (!O(target)->v.fn.kwarg && O(target)->v.fn.posonly
+            && O(target)->v.fn.pnames && kwn) {
+        char list[192];
+        size_t at = 0;
+        list[0] = 0;
+        for (i = skip; i < O(target)->v.fn.posonly; i++) {
+            apy_value pn = O(target)->v.fn.pnames[i];
+            if (!pn) continue;
+            for (k = 0; k < kwn; k++) {
+                const char *nm = APY_CSTR(O(kwd)->v.d.keys[k]);
+                if (strcmp(nm, APY_CSTR(pn)) != 0) continue;
+                if (at + strlen(nm) + 3 < sizeof list)
+                    at += (size_t)snprintf(list + at, sizeof list - at,
+                                           "%s%s", at ? ", " : "", nm);
+                break;
+            }
+        }
+        if (at) {
+            char b[256];
+            snprintf(b, sizeof b, "%s() got some positional-only arguments "
+                                  "passed as keyword arguments: '%s'",
+                     who, list);
+            return apy_fail("TypeError", b);
+        }
+    }
 
     for (k = 0; k < kwn; k++) {
         apy_value nm = O(kwd)->v.d.keys[k], val = O(kwd)->v.d.vals[k];
@@ -3112,7 +3196,7 @@ APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
         if (at >= 0) {
             char b[160];
             snprintf(b, sizeof b, "%s() got multiple values for argument '%s'",
-                     APY_CSTR(O(target)->v.fn.name), APY_CSTR(nm));
+                     who, APY_CSTR(nm));
             return apy_fail("TypeError", b);
         }
         /* Not a declared parameter. `**kw` collects it; without one it is the
@@ -3120,43 +3204,57 @@ APY_API apy_value apy_call_kw(apy_value f, apy_value buf, int64_t argc,
         if (rest) { apy_dict_set(rest, nm, val); continue; }
         {
             char b[192];
-            /* NAMED SPECIFICALLY when the parameter exists but is
-               positional-only. "unexpected keyword" would send the reader
-               looking for a typo in a name that is right there in the
-               signature; the mistake is the spelling of the CALL, not of the
-               name. */
-            if (posonly_hit)
-                snprintf(b, sizeof b,
-                         "%s() got some positional-only arguments passed as "
-                         "keyword arguments: '%s'",
-                         APY_CSTR(O(target)->v.fn.name), APY_CSTR(nm));
-            else
-                snprintf(b, sizeof b,
-                         "%s() got an unexpected keyword argument '%s'",
-                         APY_CSTR(O(target)->v.fn.name), APY_CSTR(nm));
+            /* THE POSITIONAL-ONLY CASE NEVER REACHES HERE. The gather above
+               owns it, and owns every name at once; by this point the only
+               keyword still unplaced is one the signature does not declare
+               at all. */
+            snprintf(b, sizeof b,
+                     "%s() got an unexpected keyword argument '%s'",
+                     who, APY_CSTR(nm));
             return apy_fail("TypeError", b);
         }
     }
 
-    for (i = 0; i < want; i++) {
-        int64_t d;
-        if (filled[i]) continue;
-        d = (i + skip) - (declared - O(target)->v.fn.ndefaults);
-        if (d < 0 || d >= O(target)->v.fn.ndefaults) {
-            char b[160];
-            apy_value q = O(target)->v.fn.qualname;
-            const char *pn = (O(target)->v.fn.pnames
-                              && O(target)->v.fn.pnames[i + skip])
-                ? APY_CSTR(O(target)->v.fn.pnames[i + skip]) : "?";
-            /* PAST `bypos` IS KEYWORD-ONLY, and CPython says so: no position
-               could have filled the slot, so calling it positional sends the
-               reader to the wrong half of the signature. */
-            snprintf(b, sizeof b, "%s() missing 1 required %s argument: '%s'",
-                     APY_CSTR(q ? q : O(target)->v.fn.name),
-                     i >= bypos ? "keyword-only" : "positional", pn);
+    /* EVERY HOLE AT ONCE, and the two kinds of hole kept apart. CPython
+       names all the parameters a call left unfilled in one refusal -- `'a'
+       and 'c'`, and the holes need not be adjacent -- where refusing at the
+       first meant a caller who forgot two learned about one, fixed it, and
+       came straight back. Keyword-only holes are a SEPARATE message, said
+       only when no positional one is outstanding: no position could have
+       filled one, so counting it among the positional arguments sends the
+       reader to the wrong half of the signature.
+
+       GATHERED BEFORE ANY DEFAULT IS WRITTEN, because the fill is what hides
+       them: a hole a default covers stops being one. */
+    {
+        apy_value miss[18], kwmiss[18];
+        int64_t nmiss = 0, nkwmiss = 0;
+        for (i = 0; i < want; i++) {
+            apy_value pn;
+            if (filled[i]) continue;
+            if (apy_fn_default(target, i + skip)) continue;
+            pn = O(target)->v.fn.pnames ? O(target)->v.fn.pnames[i + skip] : 0;
+            if (i >= bypos) {
+                if (nkwmiss < 18) kwmiss[nkwmiss++] = pn;
+            } else {
+                if (nmiss < 18) miss[nmiss++] = pn;
+            }
+        }
+        if (nmiss || nkwmiss) {
+            char b[256], list[192];
+            const char *kind = nmiss ? "positional" : "keyword-only";
+            int64_t n = nmiss ? nmiss : nkwmiss;
+            apy_name_list(list, sizeof list, nmiss ? miss : kwmiss, n);
+            snprintf(b, sizeof b, "%s() missing %lld required %s argument%s: %s",
+                     who, (long long)n, kind, n == 1 ? "" : "s", list);
             return apy_fail("TypeError", b);
         }
-        slots[i] = O(target)->v.fn.defaults[d];
+    }
+    for (i = 0; i < want; i++) {
+        apy_value dv;
+        if (filled[i]) continue;
+        dv = apy_fn_default(target, i + skip);
+        if (dv) slots[i] = dv;
     }
     if (argc > bypos) {
         if (O(target)->v.fn.vararg) {

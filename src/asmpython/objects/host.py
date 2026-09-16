@@ -1770,10 +1770,10 @@ class ObjectHost:
         # evaluated -- one object, shared across calls, which is what
         # `aliasing/default-argument-is-shared` measures.
         while len(slots) < declared:
-            d = len(slots) - (declared - len(f.defaults))
-            if d < 0 or d >= len(f.defaults):
+            d = _fn_default(f, len(slots))
+            if d is _NO_DEFAULT:
                 break
-            slots.append(f.defaults[d])
+            slots.append(d)
         if f.vararg:
             slots.append(tuple(args[take:]))
         # `**kw` is the LAST parameter and is bound even when empty: `def
@@ -7534,6 +7534,11 @@ class Func:
         self.is_type = False
         #: WHETHER the last declared parameter is `**kw`.
         self.kwarg = False
+        #: How many of the TRAILING DEFAULTS are the keyword-only
+        #: parameters'. Not derivable from `kwonly`: one of those may be
+        #: REQUIRED, and `def f(a, b=1, *args, c)` has one keyword-only
+        #: parameter and one default that is not its.
+        self.nkwdefault = 0
         #: How many TRAILING declared parameters are keyword-only. A position
         #: cannot reach one, so positional filling stops short of them.
         self.kwonly = 0
@@ -7599,12 +7604,26 @@ class Func:
         out.vararg = self.vararg
         out.kwarg = self.kwarg
         out.kwonly = self.kwonly
+        # WHERE THE POSITIONAL DEFAULTS END AND THE KEYWORD-ONLY ONES BEGIN.
+        # Carried like every other shape of the signature: the C copies the
+        # whole struct when it binds, so leaving this one out was the two
+        # halves disagreeing about `def __init__(self, name, *, default=x)`
+        # -- reachable the moment a bound method is what a call enters, which
+        # is every method call there is.
+        out.nkwdefault = self.nkwdefault
         out.posonly = self.posonly
         out.pnames = self.pnames
         out.doc = self.doc
         out.annotate = self.annotate
         out.qualname = self.qualname
         out.builtin = self.builtin
+        # WHETHER CALLING IT BUILDS A COROUTINE, and the attributes set on
+        # the function itself. SHARED like the cells and the defaults, not
+        # copied: `C.m.tag = 1` is readable through `C().m` because they are
+        # one dict, and writing through the bound one is meant to be seen by
+        # the other.
+        out.coro = self.coro
+        out.dict = self.dict
         out.bound = receiver
         return out
 
@@ -7858,11 +7877,54 @@ def _meth_kind(v) -> str:
     return _METH_KIND.get(type(v), type(v).__name__)
 
 
-def _name_list(names, start: int, stop: int) -> str:
+#: WHAT `_fn_default` ANSWERS FOR A PARAMETER WITH NO DEFAULT. A distinct
+#: object and not `None`, because `None` is the commonest default there is.
+_NO_DEFAULT = object()
+
+
+def _fn_default(f, idx: int):
+    """The default the `def` evaluated for declared parameter `idx`, or
+    `_NO_DEFAULT` where it has none.
+
+    NOT SIMPLY THE TRAILING ONES. `defaults` holds the POSITIONAL defaults
+    first and the KEYWORD-ONLY defaults after them, and a keyword-only
+    parameter WITHOUT a default may follow a positional one WITH: `def f(a,
+    b=1, *, k)` records one default, for `b`, while `k` has none. Indexing
+    from the end of the whole declaration looked for `b`'s default two places
+    before the start of the list, found nothing, and reported `b` as a hole
+    -- so `f(1, k=2)` refused a call CPython answers.
+
+    `nkwdefault` is on the function object for exactly this: it says where
+    the first run ends and the second begins.
+    """
+    declared = f.arity - (1 if f.vararg else 0) - (1 if f.kwarg else 0)
+    bypos = declared - f.kwonly
+    nkw = max(0, f.nkwdefault)
+    npos = max(0, len(f.defaults) - nkw)
+    if idx < 0:
+        return _NO_DEFAULT
+    if idx < bypos:
+        # The positional defaults cover the LAST `npos` positional
+        # parameters, and sit at the FRONT of the list.
+        d = idx - (bypos - npos)
+        return f.defaults[d] if 0 <= d < npos else _NO_DEFAULT
+    # And the keyword-only defaults cover the last `nkw` of the keyword-only
+    # tail, sitting behind the positional ones.
+    if idx < declared - nkw or idx >= declared:
+        return _NO_DEFAULT
+    d = npos + (idx - (declared - nkw))
+    return f.defaults[d] if 0 <= d < len(f.defaults) else _NO_DEFAULT
+
+
+def _name_list(names) -> str:
     """CPython's list of parameter names: `'a'`, `'a' and 'b'`, then
     `'a', 'b', and 'c'`. The Oxford comma appears only from three on, which
-    is why the separator cannot be chosen from the position alone."""
-    got = [f"'{names[i] or '?'}'" for i in range(start, stop)]
+    is why the separator cannot be chosen from the position alone.
+
+    TAKES THE NAMES AND NOT A RANGE OF THEM, because the holes a keyword call
+    leaves need not be adjacent: `f(b=2)` against `def f(a, b, c)` is missing
+    `'a' and 'c'`."""
+    got = [f"'{n or '?'}'" for n in names]
     if len(got) < 3:
         return " and ".join(got)
     return ", ".join(got[:-1]) + ", and " + got[-1]
@@ -7899,7 +7961,7 @@ def _fn_arity_failure(h, f, given: int, kwo: int) -> None:
     # ONLY A POSITIONAL PARAMETER'S DEFAULT widens the low end. The
     # keyword-only defaults sit past `bypos`, and counting those said
     # `takes from 0 to 1 positional arguments` for `def f(a, *, k=0)`.
-    ndef = max(0, len(f.defaults) - (getattr(f, "nkwdefault", 0) or 0))
+    ndef = max(0, len(f.defaults) - f.nkwdefault)
     least = max(0, bypos - ndef)
 
     if given > bypos and not f.vararg:
@@ -7930,20 +7992,20 @@ def _fn_arity_failure(h, f, given: int, kwo: int) -> None:
         h._fail("TypeError",
                 f"{who}() missing {n} required positional "
                 f"argument{'' if n == 1 else 's'}: "
-                f"{_name_list(f.pnames, given, least)}")
+                f"{_name_list(f.pnames[given:least])}")
         return
     # A REQUIRED KEYWORD-ONLY PARAMETER IS MISSED BY NAME and never by count:
     # no position could have reached it, so a message about how many
     # positional arguments the function takes sends the reader to the wrong
     # half of the signature. They are the parameters past `bypos` that the
     # trailing keyword defaults do not cover.
-    end = declared - (getattr(f, "nkwdefault", 0) or 0)
+    end = declared - f.nkwdefault
     if f.kwonly and f.pnames and bypos < end <= len(f.pnames):
         n = end - bypos
         h._fail("TypeError",
                 f"{who}() missing {n} required keyword-only "
                 f"argument{'' if n == 1 else 's'}: "
-                f"{_name_list(f.pnames, bypos, end)}")
+                f"{_name_list(f.pnames[bypos:end])}")
         return
     # NOTHING THE FAMILY ABOVE COVERS -- a function whose parameter names the
     # frontend never recorded, or a count wrong in some way the signature does
@@ -10243,6 +10305,27 @@ def _call_kwargs(h, f, args, kwargs):
     # is the layout `_invoke(bound=True)` reads.
     extra = args[bypos:]
     rest = {} if target.kwarg else None
+    # NAMED BY ITS QUALNAME in every refusal below -- `K.m()`,
+    # `outer.<locals>.inner()` -- which is what CPython prints and what the
+    # arity messages already say.
+    who = target.qualname or target.name
+    # POSITIONAL-ONLY NAMES PASSED BY KEYWORD ARE GATHERED, all of them at
+    # once: CPython lists every offender in ONE refusal (`'a, b'`) and says
+    # it BEFORE any other keyword complaint -- `pos(a=1, zz=2)` names `a` and
+    # never mentions `zz`. Scanned in DECLARATION order, which is the order
+    # CPython prints and not the order the call wrote; refusing at the first
+    # match named one of them, and named whichever the CALL put first.
+    #
+    # SKIPPED WHEN THERE IS A `**kw`. The name is not refused then, it lands
+    # in the collection: `def f(a, /, **kw)` called `f(1, a=2)` binds
+    # `kw = {'a': 2}`.
+    if rest is None and target.posonly and kwargs:
+        hit = [n for n in target.pnames[skip:target.posonly]
+               if n and n in kwargs]
+        if hit:
+            return h._fail("TypeError",
+                           f"{who}() got some positional-only arguments "
+                           f"passed as keyword arguments: '{', '.join(hit)}'")
     # COUNTED FOR THE REFUSAL AND NOTHING ELSE. A surplus positional
     # alongside these is worded by CPython as `3 positional arguments (and 1
     # keyword-only argument)`, and this loop is the only place that can tell
@@ -10271,18 +10354,17 @@ def _call_kwargs(h, f, args, kwargs):
         # keyword-only one, which no position could have filled.
         if at < 0:
             if rest is None:
-                if posonly_hit:
-                    return h._fail(
-                        "TypeError",
-                        f"{target.name}() got some positional-only arguments "
-                        f"passed as keyword arguments: '{name}'")
+                # THE POSITIONAL-ONLY CASE NEVER REACHES HERE. The gather
+                # above owns it, and owns every name at once; by this point
+                # the only keyword still unplaced is one the signature does
+                # not declare at all.
                 return h._fail("TypeError",
-                               f"{target.name}() got an unexpected keyword "
+                               f"{who}() got an unexpected keyword "
                                f"argument '{name}'")
             rest[name] = value
             continue
         if 0 <= at < len(slots) and slots[at] is not _MISSING:
-            return h._fail("TypeError", f"{target.name}() got multiple values "
+            return h._fail("TypeError", f"{who}() got multiple values "
                                         f"for argument '{name}'")
         while len(slots) <= at:
             slots.append(_MISSING)
@@ -10297,20 +10379,35 @@ def _call_kwargs(h, f, args, kwargs):
     if extra and not target.vararg:
         _fn_arity_failure(h, target, skip + len(args), kwonly_given)
         return 0
+    # EVERY HOLE AT ONCE, and the two kinds of hole kept apart. CPython names
+    # all the parameters a call left unfilled in one refusal -- `'a' and
+    # 'c'`, and the holes need not be adjacent -- where refusing at the first
+    # meant a caller who forgot two learned about one, fixed it, and came
+    # straight back. Keyword-only holes are a SEPARATE message, said only
+    # when no positional one is outstanding: no position could have filled
+    # one, so counting it among the positional arguments sends the reader to
+    # the wrong half of the signature.
+    #
+    # GATHERED BEFORE ANY DEFAULT IS WRITTEN, because the fill is what hides
+    # them: a hole a default covers stops being one.
+    miss, kwmiss = [], []
     for i, value in enumerate(slots):
         if value is not _MISSING:
             continue
-        d = (i + skip) - (declared - len(target.defaults))
-        if d < 0 or d >= len(target.defaults):
-            pname = target.pnames[i + skip] or "?"
-            # PAST `bypos` IS KEYWORD-ONLY, and CPython says so: no position
-            # could have filled the slot, so calling it positional sends the
-            # reader to the wrong half of the signature.
-            which = "keyword-only" if i >= bypos else "positional"
-            who = target.qualname or target.name
-            return h._fail("TypeError", f"{who}() missing 1 required "
-                                        f"{which} argument: '{pname}'")
-        slots[i] = target.defaults[d]
+        if _fn_default(target, i + skip) is not _NO_DEFAULT:
+            continue
+        (kwmiss if i >= bypos else miss).append(target.pnames[i + skip])
+    if miss or kwmiss:
+        names = miss or kwmiss
+        kind = "positional" if miss else "keyword-only"
+        return h._fail("TypeError",
+                       f"{who}() missing {len(names)} required {kind} "
+                       f"argument{'' if len(names) == 1 else 's'}: "
+                       f"{_name_list(names)}")
+    for i, value in enumerate(slots):
+        if value is not _MISSING:
+            continue
+        slots[i] = _fn_default(target, i + skip)
     try:
         return h._value(h._invoke(f, slots + extra, kwrest=rest, bound=True))
     except _UserFailed:
