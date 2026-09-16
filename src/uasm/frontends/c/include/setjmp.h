@@ -45,6 +45,18 @@ typedef long jmp_buf[1];
 extern int __c_setjmp(void *__env);
 extern _Noreturn void __c_longjmp(void *__env, int __val);
 
+/* AND `longjmp` IS ALSO A FUNCTION, because C says a program may write
+   `(longjmp)(env, 1)` or take its address when the header declares it --
+   7.1.4p1, the rule that makes every library macro parenthesisable. The
+   rewriting works on calls to `__c_longjmp` in the IR, so a wrapper that
+   makes one is unwound exactly as a direct call would be. `setjmp` cannot
+   have the same treatment and the note above says why: it is a branch
+   inside its caller, so there is no function for it to be. */
+static _Noreturn void longjmp(long *__env, int __val)
+{
+    __c_longjmp(__env, __val);
+}
+
 #define setjmp(env) __c_setjmp(env)
 #define longjmp(env, val) __c_longjmp((env), (val))
 

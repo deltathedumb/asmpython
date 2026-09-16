@@ -295,6 +295,111 @@ class TestItAlwaysTerminates:
         assert module is not None or sink.failed
 
 
+#: Every function C23 requires a header to declare, by header. The list
+#: is the standard's synopsis for each one, with the conditional
+#: families left out: `<fenv.h>`'s Annex F pragmas, the `_s` functions
+#: of Annex K, and the `*_SNAN` and IEC 60559 additions this
+#: implementation does not claim -- `<float.h>` says why.
+C23_LIBRARY: dict[str, str] = {
+    "complex.h": """
+        cacos cacosh casin casinh catan catanh ccos ccosh csin csinh ctan
+        ctanh cexp clog cabs cpow csqrt carg cimag conj cproj creal cacosf
+        cacoshf casinf casinhf catanf catanhf ccosf ccoshf csinf csinhf ctanf
+        ctanhf cexpf clogf cabsf cpowf csqrtf cargf cimagf conjf cprojf crealf
+        cacosl cacoshl casinl casinhl catanl catanhl ccosl ccoshl csinl csinhl
+        ctanl ctanhl cexpl clogl cabsl cpowl csqrtl cargl cimagl conjl cprojl
+        creall
+    """,
+    "ctype.h": """
+        isalnum isalpha isblank iscntrl isdigit isgraph islower isprint
+        ispunct isspace isupper isxdigit tolower toupper
+    """,
+    "fenv.h": """
+        feclearexcept fegetexceptflag feraiseexcept fesetexceptflag
+        fetestexcept fegetround fesetround fegetenv feholdexcept fesetenv
+        feupdateenv
+    """,
+    "inttypes.h": """
+        imaxabs imaxdiv strtoimax strtoumax wcstoimax wcstoumax
+    """,
+    "locale.h": """
+        setlocale localeconv
+    """,
+    "math.h": """
+        acos asin atan atan2 cos sin tan acosh asinh atanh cosh sinh tanh exp
+        exp2 expm1 frexp ilogb ldexp log log10 log1p log2 logb modf scalbn
+        scalbln cbrt fabs hypot pow sqrt erf erfc lgamma tgamma ceil floor
+        nearbyint rint lrint llrint round lround llround trunc fmod remainder
+        remquo copysign nan nextafter nexttoward fdim fmax fmin fma acosf
+        asinf atanf atan2f cosf sinf tanf acoshf asinhf atanhf coshf sinhf
+        tanhf expf exp2f expm1f frexpf ilogbf ldexpf logf log10f log1pf log2f
+        logbf modff scalbnf scalblnf cbrtf fabsf hypotf powf sqrtf erff erfcf
+        lgammaf tgammaf ceilf floorf nearbyintf rintf lrintf llrintf roundf
+        lroundf llroundf truncf fmodf remainderf remquof copysignf nanf
+        nextafterf nexttowardf fdimf fmaxf fminf fmaf acosl asinl atanl atan2l
+        cosl sinl tanl acoshl asinhl atanhl coshl sinhl tanhl expl exp2l
+        expm1l frexpl ilogbl ldexpl logl log10l log1pl log2l logbl modfl
+        scalbnl scalblnl cbrtl fabsl hypotl powl sqrtl erfl erfcl lgammal
+        tgammal ceill floorl nearbyintl rintl lrintl llrintl roundl lroundl
+        llroundl truncl fmodl remainderl remquol copysignl nanl nextafterl
+        nexttowardl fdiml fmaxl fminl fmal
+    """,
+    "setjmp.h": """
+        longjmp
+    """,
+    "signal.h": """
+        signal raise
+    """,
+    "stdio.h": """
+        remove rename tmpfile tmpnam fclose fflush fopen freopen setbuf
+        setvbuf fprintf fscanf printf scanf snprintf sprintf sscanf vfprintf
+        vfscanf vprintf vscanf vsnprintf vsprintf vsscanf fgetc fgets fputc
+        fputs getc getchar puts putc putchar ungetc fread fwrite fgetpos fseek
+        fsetpos ftell rewind clearerr feof ferror perror
+    """,
+    "stdlib.h": """
+        atof atoi atol atoll strtod strtof strtold strtol strtoll strtoul
+        strtoull strfromd strfromf strfroml rand srand aligned_alloc calloc
+        free malloc realloc free_sized free_aligned_sized abort atexit
+        at_quick_exit exit _Exit getenv quick_exit system bsearch qsort abs
+        labs llabs div ldiv lldiv mblen mbtowc wctomb mbstowcs wcstombs
+        memalignment
+    """,
+    "string.h": """
+        memcpy memmove strcpy strncpy strdup strndup strcat strncat memcmp
+        strcmp strcoll strncmp strxfrm memchr strchr strcspn strpbrk strrchr
+        strspn strstr strtok memset memset_explicit strerror strlen memccpy
+    """,
+    "threads.h": """
+        call_once cnd_broadcast cnd_destroy cnd_init cnd_signal cnd_timedwait
+        cnd_wait mtx_destroy mtx_init mtx_lock mtx_timedlock mtx_trylock
+        mtx_unlock thrd_create thrd_current thrd_detach thrd_equal thrd_exit
+        thrd_join thrd_sleep thrd_yield tss_create tss_delete tss_get tss_set
+    """,
+    "time.h": """
+        clock difftime mktime time timespec_get timespec_getres asctime ctime
+        gmtime localtime strftime
+    """,
+    "uchar.h": """
+        mbrtoc8 c8rtomb mbrtoc16 c16rtomb mbrtoc32 c32rtomb
+    """,
+    "wchar.h": """
+        fwprintf fwscanf swprintf swscanf vfwprintf vfwscanf vswprintf
+        vswscanf vwprintf vwscanf wprintf wscanf fgetwc fgetws fputwc fputws
+        fwide getwc getwchar putwc putwchar ungetwc wcstod wcstof wcstold
+        wcstol wcstoll wcstoul wcstoull wcscpy wcsncpy wmemcpy wmemmove wcscat
+        wcsncat wcscmp wcscoll wcsncmp wcsxfrm wmemcmp wcschr wcscspn wcspbrk
+        wcsrchr wcsspn wcsstr wcstok wmemchr wcslen wmemset wcsftime btowc
+        wctob mbsinit mbrlen mbrtowc wcrtomb mbsrtowcs wcsrtombs
+    """,
+    "wctype.h": """
+        iswalnum iswalpha iswblank iswcntrl iswdigit iswgraph iswlower
+        iswprint iswpunct iswspace iswupper iswxdigit iswctype wctype towlower
+        towupper towctrans wctrans
+    """,
+}
+
+
 class TestTheStandardHeaders:
     @harness.cases("name", C23_HEADERS)
     def test_each_one_is_there_and_stands_alone(self, name):
@@ -309,6 +414,30 @@ class TestTheStandardHeaders:
             return
         assert module is not None, codes_
         assert not sink.failed, codes_
+
+    def test_every_function_c23_requires_is_declared(self, tmp_path):
+        """THE NAMES, ALL FOUR HUNDRED AND FIFTY, asked for by taking each
+        one's ADDRESS -- which a macro cannot answer and a missing
+        declaration cannot either. That is the difference between this and
+        the differential programs: those check what a handful of them DO,
+        and a library is not conforming because its `printf` is right.
+
+        ONE TRANSLATION UNIT AND NOT FOUR HUNDRED AND FIFTY, because the
+        suite is run on every change and each compile is a preprocessor, a
+        parser and a lowering over the whole of `<math.h>`.
+        """
+        body = []
+        for header in sorted(C23_LIBRARY):
+            body.append(f"#include <{header}>")
+        body.append("void *__names[] = {")
+        for _, names in sorted(C23_LIBRARY.items()):
+            for name in names.split():
+                body.append(f"    (void *)&{name},")
+        body.append("};")
+        body.append("int main(void){ return __names[0] != 0 ? 0 : 1; }")
+        module, sink = compile_c("\n".join(body) + "\n")
+        assert module is not None, [d.message for d in sink.diagnostics][:6]
+        assert not sink.failed, [d.message for d in sink.diagnostics][:6]
 
     def test_all_of_them_at_once(self):
         """Including every header a program could include, together. A macro

@@ -90,4 +90,16 @@ static intmax_t strtoimax(const char *__s, char **__e, int __b)
 static uintmax_t strtoumax(const char *__s, char **__e, int __b)
 { return (uintmax_t)strtoul(__s, __e, __b); }
 
+
+/* THE TWO WIDE ONES, which C keeps here rather than in `<wchar.h>` because
+   `intmax_t` is this header's business. `<wchar.h>`'s `wcstoll` does the
+   work; these are the widths named again. */
+#include <wchar.h>
+
+static intmax_t wcstoimax(const wchar_t *__s, wchar_t **__e, int __b)
+{ return (intmax_t)wcstoll(__s, __e, __b); }
+
+static uintmax_t wcstoumax(const wchar_t *__s, wchar_t **__e, int __b)
+{ return (uintmax_t)wcstoull(__s, __e, __b); }
+
 #endif

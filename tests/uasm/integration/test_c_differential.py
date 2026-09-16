@@ -1697,6 +1697,68 @@ PROGRAMS: dict[str, str] = {
         }
     """,
 
+    "classification_by_name": r"""
+        /* The four `<wctype.h>` functions that take a property at
+           RUN time rather than naming one at compile time, the two
+           `<inttypes.h>` wide converters, and `(longjmp)(...)` --
+           the parenthesised spelling C guarantees for every library
+           macro, which needs there to be a function behind it. */
+        #include <stdio.h>
+        #include <wchar.h>
+        #include <wctype.h>
+        #include <ctype.h>
+        #include <inttypes.h>
+        #include <setjmp.h>
+
+        static jmp_buf jb;
+
+        int main(void) {
+            static const char *const props[] = {
+                "alnum", "alpha", "blank", "cntrl", "digit", "graph", "lower",
+                "print", "punct", "space", "upper", "xdigit", "nope", 0
+            };
+            const wchar_t probe[] = { L'a', L'Z', L'7', L' ', L'.', 1, 0 };
+            int i, j;
+
+            for (i = 0; props[i]; i++) {
+                wctype_t t = wctype(props[i]);
+                printf("%s:%d", props[i], t != 0);
+                /* NOT `iswctype(c, 0)`: C says the descriptor must be one `wctype`
+                   answered for a name it knows, and glibc's is a pointer it
+                   dereferences. What an unknown NAME answers is the test here. */
+                if (t) for (j = 0; probe[j]; j++)
+                    printf("%d", !!iswctype(probe[j], t));
+                printf(" ");
+            }
+            printf("\n");
+            printf("%d %d %d %d\n", (int)towctrans(L'a', wctrans("toupper")),
+                   (int)towctrans(L'A', wctrans("tolower")),
+                   (int)towctrans(L'a', wctrans("nope")), (int)wctrans("nope"));
+            printf("%d %d %d %d %d %d\n", !!iswalpha(L'a'), !!iswdigit(L'5'),
+                   !!iswspace(L'\t'), !!iswpunct(L'!'), !!iswxdigit(L'f'),
+                   !!iswcntrl(1));
+            printf("%d %d\n", (int)towlower(L'Q'), (int)towupper(L'q'));
+            printf("%jd %ju\n", (intmax_t)wcstoimax(L"-42abc", NULL, 10),
+                   (uintmax_t)wcstoumax(L"0xff", NULL, 0));
+            printf("%jd %ju %jd\n", imaxabs((intmax_t)-5),
+                   (uintmax_t)strtoumax("7", NULL, 10), strtoimax("-7", NULL, 10));
+            {
+                imaxdiv_t d = imaxdiv((intmax_t)17, (intmax_t)5);
+                printf("%jd %jd\n", d.quot, d.rem);
+            }
+            /* `(longjmp)(...)` -- the parenthesised spelling C guarantees, and the
+               address of one, which needs it to be a function and not only a macro. */
+            if (setjmp(jb) == 0) {
+                void (*p)(jmp_buf, int) = longjmp;
+                printf("%d\n", p != 0);
+                (longjmp)(jb, 3);
+            } else {
+                printf("came back\n");
+            }
+            return 0;
+        }
+    """,
+
     "wide_formatting_and_scanning": r"""
         /* `swprintf`, `swscanf` and the narrow scanner's `%ls`,
            `%lc` and `%l[`, which C gives the same meaning in both
