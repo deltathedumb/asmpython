@@ -9317,6 +9317,72 @@ PROGRAMS = {
         fs = [abs, log, send]
         print([f(1) for f in fs])
     """,
+    "driving_an_iterator_by_hand_answers_values_not_handles": """
+        # `it.__next__()` ANSWERED A NUMBER. `iter([1, 2, 3]).__next__()` gave
+        # `4294967317` where CPython gives `1` -- the interpreter's internal
+        # HANDLE for the value, handed back without being unwrapped. A silent
+        # wrong answer, and one only the interpreter gave, so the three
+        # arrangements disagreed with each other.
+        #
+        # EVERY CURSOR KIND AND A GENERATOR ALIKE: a list iterator, a
+        # `reversed`, a str, a dict, `map`, `filter`, `enumerate`, `zip`.
+        #
+        # AND `it.__iter__() is it` WAS FALSE, where CPython says True -- the
+        # same missing unwrap, because an int is not the cursor.
+        #
+        # ONLY THE DUNDER REACHED AS AN ATTRIBUTE was wrong. `next(it)` and a
+        # `for` loop never come this way, which is why it lasted; a program
+        # sees it the moment it drives an iterator by hand, which is exactly
+        # what a wrapper class with its own `__iter__`/`__next__` does.
+        def show(label, f):
+            try:
+                print(label, f())
+            except Exception as e:
+                print(label, e.__class__.__name__ + ":", e)
+
+        def g():
+            yield 7
+            yield 8
+
+        it = iter([1, 2, 3])
+        show("first", lambda: it.__next__())
+        show("second", lambda: it.__next__())
+        show("generator", lambda: g().__next__())
+        show("map", lambda: map(lambda x: x * 2, [5]).__next__())
+        show("filter", lambda: filter(None, [6]).__next__())
+        show("enumerate", lambda: enumerate(["a"]).__next__())
+        show("zip", lambda: zip([1], [2]).__next__())
+        show("reversed", lambda: reversed([1, 2]).__next__())
+        show("str", lambda: iter("ab").__next__())
+        show("dict", lambda: iter({5: 6}).__next__())
+        show("range", lambda: range(3).__iter__().__next__())
+        # AN ITERATOR IS ITS OWN `__iter__`.
+        show("cursor is its own", lambda: (lambda i: i.__iter__() is i)(
+            iter([1])))
+        show("generator is its own", lambda: (lambda i: i.__iter__() is i)(g()))
+        # AND A CONTAINER'S `__iter__` ANSWERS A CURSOR, not a number.
+        show("list", lambda: list([1, 2].__iter__()))
+        show("tuple", lambda: list((1, 2).__iter__()))
+        show("bytes", lambda: list(b"ab".__iter__()))
+        show("range walked", lambda: list(range(3).__iter__()))
+        show("set", lambda: sorted({1, 2}.__iter__()))
+        # THE WHOLE PROTOCOL DRIVEN BY HAND, which is the shape that made this
+        # matter: a wrapper that forwards to the cursor it holds.
+        class Twice:
+            def __init__(self, src):
+                self.it = src.__iter__()
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return self.it.__next__() * 2
+
+        print("wrapped", [x for x in Twice([1, 2, 3])])
+        print("wrapped listed", list(Twice([4, 5])))
+        # AND `send` STILL CARRIES ITS OWN VALUE THROUGH.
+        show("send", lambda: (lambda i: (i.__next__(), i.send(None)))(g()))
+    """,
     "fstrings": """
         n = 42
         s = 'ab'

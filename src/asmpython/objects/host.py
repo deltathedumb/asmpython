@@ -8397,10 +8397,22 @@ def _kind_attr(h, obj, want: str):
         return made(want, _no_pickle)
     if want == "__len__" and walks:
         return made("__len__", lambda: len(obj))
+    # THROUGH `_unwrap`, like `__getattribute__` above and for the same
+    # reason: an `_apy_*` entry point answers a HANDLE, and handing that back
+    # as the value made `it.__next__()` answer `4294967317` where CPython
+    # answers `1` -- a silent wrong answer, and one only the interpreter gave,
+    # so the three arrangements disagreed with each other. It also made
+    # `it.__iter__() is it` False, because an int is not the cursor.
+    #
+    # ONLY THE DUNDER REACHED AS AN ATTRIBUTE was wrong; `next(it)` and a
+    # `for` loop never come this way, which is why it lasted. A program sees
+    # it the moment it drives an iterator by hand.
     if want == "__iter__" and (walks or isinstance(obj, (Gen, Iterator))):
-        return made("__iter__", lambda: _apy_iter(h, [h._new(obj)]))
+        return made("__iter__",
+                    lambda: _unwrap(h, _apy_iter(h, [h._new(obj)])))
     if want == "__next__" and isinstance(obj, (Gen, Iterator)):
-        return made("__next__", lambda: _apy_next(h, [h._new(obj), 0, 0]))
+        return made("__next__",
+                    lambda: _unwrap(h, _apy_next(h, [h._new(obj), 0, 0])))
     if want == "__contains__" and walks:
         return made("__contains__", lambda x: x in obj)
     if want == "__getitem__" and (seq or text or dict_):
@@ -8583,7 +8595,11 @@ def _kind_attr(h, obj, want: str):
         if want == "__len__":
             return made("__len__", lambda: len(obj))
         if want == "__iter__":
-            return made("__iter__", lambda: _apy_iter(h, [h._new(obj)]))
+            # THROUGH `_unwrap` -- see the `__iter__` branch above: an
+            # `_apy_*` entry point answers a HANDLE, and handing that back
+            # made `range(3).__iter__()` an int rather than a cursor.
+            return made("__iter__",
+                        lambda: _unwrap(h, _apy_iter(h, [h._new(obj)])))
         if want == "__contains__":
             return made("__contains__", lambda x: x in obj)
         if want == "__getitem__":
