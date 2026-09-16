@@ -8270,6 +8270,25 @@ def _cell_bytes(v) -> int:
     return _CELL_BYTES
 
 
+def _cursor_left(it) -> int:
+    """How many steps a cursor has left, for `__length_hint__`.
+
+    AN ESTIMATE AND NOT A PROMISE, which is what the hint is for: the source
+    may grow or shrink under the walk, and CPython's own answer goes stale
+    the same way. What it must never be is negative -- `operator.length_hint`
+    raises ValueError on one.
+
+    A REVERSED CURSOR COUNTS DOWN from where `reversed` started it, and -1 is
+    its exhaustion, so what it has left is the position plus one.
+    """
+    if it.mode == Iterator.REV:
+        return max(0, it.i + 1)
+    if not isinstance(it.src, (list, tuple, str, bytes, bytearray, dict, set,
+                               frozenset, range)):
+        return 0
+    return max(0, len(it.src) - it.i)
+
+
 def _unwrap(h, got):
     """A handle an `_apy_*` entry point answered, as a value -- or the
     failure it left pending, re-raised so the caller sees it."""
@@ -8413,6 +8432,14 @@ def _kind_attr(h, obj, want: str):
     if want == "__next__" and isinstance(obj, (Gen, Iterator)):
         return made("__next__",
                     lambda: _unwrap(h, _apy_next(h, [h._new(obj), 0, 0])))
+    # ONLY THE CURSORS THAT WALK A SIZED SOURCE have a length hint, which is
+    # CPython's line: a list, tuple, str, bytes, range, dict, set or reversed
+    # iterator carries one, and `map`, `filter`, `enumerate`, `zip` and a
+    # `callable_iterator` do not. Those are the LAZY modes, and what they
+    # have left is not a question their source can answer.
+    if want == "__length_hint__" and isinstance(obj, Iterator) \
+            and obj.mode in (Iterator.PLAIN, Iterator.REV):
+        return made("__length_hint__", lambda: _cursor_left(obj))
     if want == "__contains__" and walks:
         return made("__contains__", lambda x: x in obj)
     if want == "__getitem__" and (seq or text or dict_):

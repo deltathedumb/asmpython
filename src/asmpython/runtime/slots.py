@@ -1196,6 +1196,18 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
     if apy_name_is(want, rodata(b"__next__\0")):
         if is_gen or is_iter:
             return apy_kind_method_of(obj, 1, rodata(b"__next__\0"), bind)
+    # ONLY THE CURSORS THAT WALK A SIZED SOURCE have a length hint, which is
+    # CPython's line: a list, tuple, str, bytes, range, dict, set or reversed
+    # iterator carries one, and `map`, `filter`, `enumerate`, `zip` and a
+    # `callable_iterator` do not. Those are the LAZY modes, and what they
+    # have left is not a question their source can answer. The plain mode is
+    # zero, which is why it is compared against and not named.
+    if apy_name_is(want, rodata(b"__length_hint__\0")):
+        if is_iter:
+            mode: i64 = i64(load(i32, offset(obj, apy_it_mode_offset())))
+            if mode == 0 or mode == apy_it_rev():
+                return apy_kind_method_of(
+                    obj, 1, rodata(b"__length_hint__\0"), bind)
     if apy_name_is(want, rodata(b"__contains__\0")) and walks:
         return apy_kind_method_of(obj, 2, rodata(b"__contains__\0"), bind)
     if apy_name_is(want, rodata(b"__getitem__\0")):

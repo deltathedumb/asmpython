@@ -9383,6 +9383,63 @@ PROGRAMS = {
         # AND `send` STILL CARRIES ITS OWN VALUE THROUGH.
         show("send", lambda: (lambda i: (i.__next__(), i.send(None)))(g()))
     """,
+    "a_cursor_over_a_sized_source_says_what_it_has_left": """
+        # `__length_hint__` WAS MISSING FROM EVERY CURSOR. A list iterator, a
+        # `reversed`, a str, a tuple, a dict, a set and a range iterator all
+        # carry one in CPython and answered AttributeError here.
+        #
+        # ONLY THE CURSORS THAT WALK A SIZED SOURCE HAVE ONE, which is
+        # CPython's line and not an approximation of it: `map`, `filter`,
+        # `enumerate`, `zip` and a `callable_iterator` have NO length hint,
+        # because those are the lazy modes and what they have left is not a
+        # question their source can answer.
+        #
+        # AN ESTIMATE AND NOT A PROMISE. The source may grow or shrink under
+        # the walk and CPython's answer goes stale the same way; what it must
+        # never be is negative, which `operator.length_hint` raises on.
+        #
+        # A REVERSED CURSOR COUNTS DOWN from where `reversed` started it, so
+        # what it has left is its position plus one.
+        def show(label, f):
+            try:
+                print(label, f())
+            except Exception as e:
+                print(label, e.__class__.__name__ + ":", e)
+
+        it = iter([1, 2, 3])
+        show("fresh", lambda: it.__length_hint__())
+        show("after one", lambda: (next(it), it.__length_hint__())[1])
+        show("after two", lambda: (next(it), it.__length_hint__())[1])
+        show("exhausted", lambda: (next(it), it.__length_hint__())[1])
+        show("past the end", lambda: it.__length_hint__())
+        show("reversed", lambda: reversed([1, 2, 3]).__length_hint__())
+        show("reversed stepped",
+             lambda: (lambda r: (next(r), r.__length_hint__())[1])(
+                 reversed([1, 2, 3])))
+        show("tuple", lambda: iter((1, 2)).__length_hint__())
+        show("str", lambda: iter("abc").__length_hint__())
+        show("bytes", lambda: iter(b"abcd").__length_hint__())
+        show("dict", lambda: iter({1: 2, 3: 4}).__length_hint__())
+        show("set", lambda: iter({1}).__length_hint__())
+        show("range", lambda: iter(range(5)).__length_hint__())
+        show("empty", lambda: iter([]).__length_hint__())
+        # AND THE LAZY MODES HAVE NONE.
+        show("map", lambda: hasattr(map(str, [1]), "__length_hint__"))
+        show("filter", lambda: hasattr(filter(None, [1]), "__length_hint__"))
+        show("enumerate", lambda: hasattr(enumerate([1]), "__length_hint__"))
+        show("zip", lambda: hasattr(zip([1], [2]), "__length_hint__"))
+        show("callable", lambda: hasattr(iter(lambda: 0, 1),
+                                         "__length_hint__"))
+        show("generator", lambda: hasattr((x for x in [1]),
+                                          "__length_hint__"))
+        # A SOURCE THAT SHRANK UNDER THE WALK never answers a negative.
+        xs = [1, 2, 3, 4]
+        walk = iter(xs)
+        next(walk)
+        next(walk)
+        del xs[1:]
+        show("source shrank", lambda: walk.__length_hint__())
+    """,
     "fstrings": """
         n = 42
         s = 'ab'

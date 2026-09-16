@@ -439,6 +439,26 @@ APY_API apy_value apy_kind_method_opt(apy_value obj, int64_t arity,
 }
 /* THE NAME ITS CALLERS USE, kept as a delegate: the body is IR's now,
    and the exported half above stands in when nothing is ported. */
+/* HOW MANY STEPS A CURSOR HAS LEFT, for `__length_hint__`.
+
+   AN ESTIMATE AND NOT A PROMISE, which is what the hint is for: the source
+   may grow or shrink under the walk, and CPython's own answer goes stale the
+   same way. What it must never be is NEGATIVE -- `operator.length_hint`
+   raises ValueError on one.
+
+   A REVERSED CURSOR COUNTS DOWN from where `reversed` started it, and -1 is
+   its exhaustion, so what it has left is the position plus one. */
+static int64_t apy_cursor_left(apy_value it) {
+    int64_t at = O(it)->v.it.i, n;
+    if (O(it)->v.it.mode == APY_IT_REV) return at < 0 ? 0 : at + 1;
+    n = apy_raw_len(O(it)->v.it.src);
+    /* A SOURCE WITH NO LENGTH answers nothing rather than failing: the walk
+       through `__getitem__` is the shape that has none, and a hint is
+       allowed to say it does not know. */
+    if (apy_error_occurred()) { apy_error_clear(); return 0; }
+    return at >= n ? 0 : n - at;
+}
+
 static apy_value apy_kind_method(apy_value obj, int64_t arity,
                                  const char *name, int bind) {
     return apy_kind_method_of(obj, arity,
@@ -896,6 +916,15 @@ APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
     }
     if (strcmp(want, "__len__") == 0 && walks)
         return apy_kind_method(obj, 1, "__len__", bind);
+    /* ONLY THE CURSORS THAT WALK A SIZED SOURCE have a length hint, which is
+       CPython's line: a list, tuple, str, bytes, range, dict, set or
+       reversed iterator carries one, and `map`, `filter`, `enumerate`, `zip`
+       and a `callable_iterator` do not. Those are the LAZY modes, and what
+       they have left is not a question their source can answer. */
+    if (strcmp(want, "__length_hint__") == 0 && k == APY_ITER_K
+            && (O(obj)->v.it.mode == APY_IT_PLAIN
+                || O(obj)->v.it.mode == APY_IT_REV))
+        return apy_kind_method(obj, 1, "__length_hint__", bind);
     if (strcmp(want, "__iter__") == 0
             && (walks || k == APY_GEN_K || k == APY_ITER_K))
         return apy_kind_method(obj, 1, "__iter__", bind);
@@ -1626,6 +1655,8 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
         if (strcmp(w, "__len__") == 0) return apy_len(a[0]);
         if (strcmp(w, "__iter__") == 0) return apy_iter(a[0]);
         if (strcmp(w, "__next__") == 0) return apy_next(a[0], 0, 0);
+        if (strcmp(w, "__length_hint__") == 0)
+            return apy_from_int(apy_cursor_left(a[0]));
         if (strcmp(w, "keys") == 0)
             return apy_dict_parts(a[0], APY_PART_KEYS);
         if (strcmp(w, "values") == 0)
