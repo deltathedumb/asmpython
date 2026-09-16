@@ -21,7 +21,7 @@ from asmpython import frontend as frontend_registry
 from asmpython import link as link_registry
 from asmpython.backend.families import SelectionError
 from asmpython.driver.select import (
-    choose_backend, choose_frontend, choose_linker,
+    choose, choose_backend, choose_frontend, choose_linker,
 )
 
 backend_registry.load_builtin()
@@ -129,3 +129,65 @@ class TestTheDeclarationsNameRealBackends:
                  for name, tc in link_registry.available().items()
                  if [b for b in tc.backends if b not in known]}
         assert wrong == {}, f"linkers naming unregistered backends: {wrong}"
+
+
+#: WHAT EACH SPELLING RESOLVES TO, end to end. The table is the contract: a
+#: reader should be able to answer "what does `-o thing.jar` build?" without
+#: reading the algorithm, and a change that moves any row is a change to what
+#: the command means.
+#:
+#: ONLY THE FIRST AND LAST ROWS MATCH the driver's old hardcoded `c` and `cc`.
+#: Every other one was previously a build of C that the user had to correct by
+#: naming a backend.
+RESOLVES = [
+    ("thing",      "python", "c",      "cc"),
+    ("thing.wasm", "python", "wasm",   "none"),
+    ("thing.so",   "python", "cpyext", "cpyext"),
+    ("thing.jar",  "python", "jvm",    "jar"),
+    ("thing.pyc",  "python", "pybc",   "pyc"),
+    ("thing.ll",   "python", "llvm",   "none"),
+    (None,         "python", "c",      "cc"),
+]
+
+
+@harness.cases(
+    "output,frontend,backend,linker",
+    [harness.param(*row, id=str(row[0])) for row in RESOLVES])
+def test_each_output_spelling_resolves(output, frontend, backend, linker):
+    got = choose(Path("t.py"),
+                 Path(output) if output is not None else None,
+                 frontend=None, backend=None, linker=None, emit=False,
+                 frontends=frontend_registry, backends=backend_registry,
+                 linkers=link_registry)
+    assert (got.frontend, got.backend, got.linker) == (
+        frontend, backend, linker)
+
+
+class TestTheWholeSpellingResolves:
+    def test_emit_truncates_the_pipeline_it_does_not_change_it(self):
+        # `--emit -o thing.so` wants the artifact of the pipeline that MAKES
+        # a `.so`, so the spelling still picks `cpyext` and only the LINKING
+        # is dropped. Choosing the linker after `emit` threw the spelling
+        # away and refused a request that is perfectly clear -- `.so` is
+        # claimed by the cpyext toolchain and by no backend at all.
+        got = choose(Path("t.py"), Path("thing.so"), frontend=None,
+                     backend=None, linker=None, emit=True,
+                     frontends=frontend_registry, backends=backend_registry,
+                     linkers=link_registry)
+        assert (got.backend, got.linker) == ("cpyext", "none")
+
+    def test_a_named_linker_survives_emit(self):
+        got = choose(Path("t.py"), Path("thing.so"), frontend=None,
+                     backend=None, linker="cpyext", emit=True,
+                     frontends=frontend_registry, backends=backend_registry,
+                     linkers=link_registry)
+        assert got.linker == "cpyext"
+
+    def test_an_artifact_spelling_is_not_linked_into_a_program(self):
+        # THE CASE THAT USED TO BE WRONG. With the toolchain fixed at `cc`,
+        # `-o out.ll` linked an executable and named it `out.ll`.
+        got = choose(Path("t.py"), Path("out.ll"), frontend=None,
+                     backend=None, linker=None, emit=False,
+                     frontends=frontend_registry, backends=backend_registry,
+                     linkers=link_registry)
+        assert (got.backend, got.linker) == ("llvm", "none")

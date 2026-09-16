@@ -137,3 +137,48 @@ def choose_backend(output: Path | None, named: str | None, linker: str,
         f"the {linker} linker takes input from any backend and "
         f"{'the output names none' if output is None else repr(output.suffix)}"
         f" does not say which; pick one with -bk/--backend")
+
+
+def choose(source: Path, output: Path | None, *, frontend: str | None,
+           backend: str | None, linker: str | None, emit: bool,
+           frontends, backends, linkers) -> Choice:
+    """The three components one build runs through.
+
+    WHAT `-o` MEANS DECIDES WHETHER THERE IS A LINKER AT ALL, and the four
+    cases are worth spelling out because they are the whole policy:
+
+      * `--emit` says not to link, so there is nothing to choose;
+      * an output a LINKER claims is a program -- `.so`, `.jar`, `.pyc`;
+      * an output a BACKEND claims is an artifact the user asked for by
+        name, and asking a linker to turn `out.c` into a program named
+        `out.c` is not what was meant;
+      * anything else -- `-o thing`, or no `-o` at all -- is a program, and
+        the native toolchain is what makes one.
+
+    THE THIRD CASE IS THE ONE THAT USED TO BE WRONG. With the toolchain
+    fixed at `cc`, `-o out.c` linked an executable and called it `out.c`.
+    """
+    fe = choose_frontend(source, frontend, frontends)
+    # THE SPELLING NAMES THE PIPELINE EVEN WHEN NOTHING WILL BE LINKED, which
+    # is why this is asked before `emit` is looked at. `--emit -o thing.so`
+    # wants the artifact of the pipeline that MAKES a `.so`, and forcing the
+    # linker to `none` first threw that away: `.so` is claimed by the cpyext
+    # TOOLCHAIN and by no backend, so the backend question then had nothing
+    # to go on and refused a request that is perfectly clear.
+    names = choose_linker(
+        output, linker, linkers,
+        # An artifact the backend itself writes needs no linker; a program
+        # does. `cc` is named here rather than derived because "the one that
+        # makes a native executable" is a fact about this driver's host and
+        # not something a registry can be asked.
+        fallback=("none" if (output is not None
+                             and _claimants(output.suffix, backends,
+                                            "artifacts"))
+                  else "cc"))
+    return Choice(
+        frontend=fe,
+        backend=choose_backend(output, backend, names, backends, linkers),
+        # `--emit` TRUNCATES THE PIPELINE, it does not choose a different
+        # one. An explicitly named linker still wins, because a user who
+        # types both has said which they meant.
+        linker=(linker or "none") if emit else names)
