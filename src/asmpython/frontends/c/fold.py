@@ -93,6 +93,11 @@ def fold(e: S.Expr) -> Const:
             sym = e.sym
             if sym is not None and sym.storage.name == "ENUM_CONST":
                 return sym.value
+            if sym is not None and sym.type.is_function:
+                # A FUNCTION DESIGNATOR IS AN ADDRESS CONSTANT once it has
+                # decayed, which is what makes `static Entry t[] = {{ add }}`
+                # a static initialiser rather than something needing code.
+                return Address(sym.ir_name or sym.name, function=True)
             return None
         case S.MemberAccess():
             base = fold(e.base) if e.arrow else _address_of_fold(e.base)

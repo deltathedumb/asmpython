@@ -487,13 +487,18 @@ class Parser:
             ty = self.type_name()
             self.expect(":")
             got = self.assignment()
+            # QUALIFIERS COUNT. `int` and `const int` are not compatible
+            # types -- 6.2.7 requires identical qualifiers -- so listing both
+            # is legal, and a control expression of type `int` matches only
+            # the first. Comparing unqualified types made the pair a
+            # duplicate and refused a program gcc accepts.
             for earlier in seen:
-                if C.compatible(earlier.unqualified(), ty.unqualified()):
+                if C.compatible(earlier, ty):
                     self.sema.error(
                         "E1210",
                         f"_Generic lists {C.spell(ty)} more than once", got.span)
             seen.append(ty)
-            if C.compatible(control.type.unqualified(), ty.unqualified()):
+            if C.compatible(control.type.unqualified(), ty):
                 chosen = got
         self.expect(")")
         picked = chosen if chosen is not None else default
@@ -819,7 +824,7 @@ class Parser:
                         "a flexible array member must be the last member",
                         span)
                 else:
-                    self._check_member(tag, name, ty, span, bits)
+                    self._check_member(tag, name, ty, span, bits, spec.align)
                 if not self.eat(","):
                     break
             self.expect(";", "a member declaration ends with `;`")
@@ -843,7 +848,8 @@ class Parser:
         return got
 
     def _check_member(self, tag: C.Tag, name: str | None, ty: CType,
-                      span: Span, bits: int | None) -> None:
+                      span: Span, bits: int | None,
+                      align: int | None = None) -> None:
         if name is not None and any(m.name == name for m in tag.members):
             self.sema.error("E1226", f"duplicate member {name!r}", span)
             return
@@ -867,7 +873,8 @@ class Parser:
                             note="a struct cannot contain itself; use a "
                                  "pointer")
             return
-        tag.members.append(C.Member(name, ty, bits=bits, span=span))
+        tag.members.append(C.Member(name, ty, bits=bits, span=span,
+                                    align=align))
 
     def enum_specifier(self) -> CType:
         kw = self.next()
@@ -1063,7 +1070,10 @@ class Parser:
                     self.sema.error("E1239",
                                     "a function cannot return an array",
                                     self.tok.span)
-                return C.function(inner, None if kr else tuple(params), variadic)
+                return C.function(inner, None if kr else tuple(params),
+                                  variadic,
+                                  tuple(p.name for p in params if p.name)
+                                  if kr else ())
             return build_function
         return lambda base: base
 
@@ -1960,6 +1970,8 @@ class Parser:
         params = list(ty.params or ())
         kr: dict[str, CType] = {}
         if ty.params is None or self._kr_declarations_ahead():
+            if ty.params is None:
+                params = [C.Param(n, C.INT, span) for n in ty.kr_names]
             # K&R: `int f(a, b) int a; char *b; { ... }`. Accepted because it
             # is still C, and because a program that uses it has no other way
             # to be compiled; the resulting prototype is built from the

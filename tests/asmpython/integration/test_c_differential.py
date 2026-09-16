@@ -741,6 +741,267 @@ PROGRAMS: dict[str, str] = {
           tentative = 3; private_ = 4;
           printf("%d %d %d %d %d\n", a, b, shared, tentative, private_); return 0; }
     """,
+
+    # ── the third: the shapes that found the last six bugs ───────────────
+    "restrict_and_deep_pointers": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <limits.h>
+
+        static void copyn(int *restrict d, const int *restrict s, int n){ for(int i=0;i<n;i++) d[i]=s[i]; }
+        int main(void){ int a[4]={1,2,3,4}, b[4]; copyn(b,a,4);
+          int x = 5; int *p = &x; int **q = &p; int ***r = &q;
+          ***r = 9; printf("%d %d %d\n", b[3], x, **q); return 0; }
+    """,
+    "wide_strings": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <limits.h>
+
+        int main(void){ wchar_t w[] = L"abc"; unsigned short u[] = u"hi"; unsigned int U[] = U"xy";
+          printf("%d %d %d %d\n", (int)w[0], (int)sizeof w, (int)u[1], (int)sizeof U);
+          const char *j = "ab" "cd" "ef";
+          printf("%s %d\n", j, (int)sizeof("ab" "cd")); return 0; }
+    """,
+    "alignas": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <limits.h>
+
+        struct S { _Alignas(16) char c; int i; };
+        int main(void){ _Alignas(32) static int v = 3;
+          printf("%d %d %d\n", (int)_Alignof(struct S), (int)sizeof(struct S), v);
+          printf("%d\n", (int)((unsigned long)&v % 32) == 0); return 0; }
+    """,
+    "struct_with_string": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <limits.h>
+
+        struct Rec { char name[8]; int age; };
+        static struct Rec people[2] = { { "ann", 30 }, { .name = "bob", .age = 40 } };
+        int main(void){ for (int i = 0; i < 2; i++) printf("%s %d ", people[i].name, people[i].age);
+          printf("\n%d %d\n", (int)sizeof people, people[0].name[3]); return 0; }
+    """,
+    "division_corners": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <limits.h>
+
+        int main(void){ int a = INT_MIN, b = -1;
+          printf("%d %d\n", a / 2, a % 3);
+          printf("%d %d %d\n", 7/2, -7/2, 7/-2);
+          printf("%d %d %d\n", 7%2, -7%2, 7%-2);
+          unsigned u = 4294967295u; printf("%u %u\n", u/3, u%3);
+          long l = -9223372036854775807L - 1; printf("%ld\n", l / 2);
+          (void)b; return 0; }
+    """,
+    "float_conversions": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <limits.h>
+
+        int main(void){ double d = 4294967296.5; float f = 1e20f;
+          printf("%u %ld\n", (unsigned)1234.9, (long)d);
+          printf("%d %d\n", (int)-0.9, (int)0.9);
+          printf("%.1f %.1f\n", (double)(unsigned)4000000000u, (double)-1);
+          printf("%d\n", (int)(f > 1e19f));
+          unsigned char c = (unsigned char)200.7; printf("%d\n", c); return 0; }
+    """,
+    "big_switch": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <limits.h>
+
+        static int classify(int n){ switch(n){
+          case 0: return 100; case 1: return 101; case 2: return 102; case 3: return 103;
+          case 4: return 104; case 5: return 105; case 10: return 110; case 20: return 120;
+          case 100: return 200; case -1: return 999; default: return -7; } }
+        int main(void){ int ks[] = {0,3,5,10,20,100,-1,7};
+          for (unsigned i=0;i<sizeof ks/sizeof ks[0];i++) printf("%d ", classify(ks[i]));
+          printf("\n"); return 0; }
+    """,
+    "kr_definition": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <limits.h>
+
+        static int oldstyle(a, b) int a; char *b; { return a + (int)strlen(b); }
+        static int noproto();
+        static int noproto(void){ return 42; }
+        int main(void){ printf("%d %d\n", oldstyle(5, "abc"), noproto()); return 0; }
+    """,
+    "void_and_exit_paths": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <limits.h>
+
+        static void nothing(void){ return; }
+        static int deep(int n){ if (n == 0) return 0; return 1 + deep(n - 1); }
+        int main(void){ nothing(); printf("%d\n", deep(100));
+          for (int i = 0; i < 3; i++) { if (i == 1) continue; printf("%d", i); }
+          printf("\n"); return 0; }
+    """,
+    "bit_manipulation": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <limits.h>
+
+        static unsigned rotl(unsigned v, int n){ return (v << n) | (v >> (32 - n)); }
+        static int parity(unsigned v){ int p = 0; while (v) { p ^= v & 1u; v >>= 1; } return p; }
+        int main(void){ unsigned x = 0x12345678u;
+          printf("%x %x %d\n", rotl(x, 8), x ^ (x >> 16), parity(x));
+          unsigned long long m = 0; for (int i = 0; i < 64; i += 8) m |= 1ULL << i;
+          printf("%llx\n", m);
+          printf("%d %d\n", __builtin_popcountll(m), (int)(m >> 56)); return 0; }
+    """,
+    "const_pointer_chain": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <limits.h>
+
+        static const char *const names[] = { "a", "bb", "ccc" };
+        static int total(const char *const *p, int n){ int t = 0; for (int i=0;i<n;i++) t += (int)strlen(p[i]); return t; }
+        int main(void){ printf("%d %s\n", total(names, 3), names[2]); return 0; }
+    """,
+    "self_referential": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <limits.h>
+
+        typedef struct Node Node;
+        struct Node { int v; Node *next; };
+        typedef struct { int (*op)(int, int); const char *name; } Entry;
+        static int add(int a, int b){ return a + b; }
+        static int mul(int a, int b){ return a * b; }
+        static Entry table[] = { { add, "add" }, { mul, "mul" } };
+        int main(void){ Node a = {1, 0}, b = {2, &a};
+          printf("%d %d\n", b.v, b.next->v);
+          for (int i = 0; i < 2; i++) printf("%s=%d ", table[i].name, table[i].op(3, 4));
+          printf("\n"); return 0; }
+    """,
+    "sizeof_vla": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <limits.h>
+
+        static int probe(int n){ int a[n][3]; return (int)sizeof a + (int)sizeof a[0]; }
+        int main(void){ printf("%d %d\n", probe(2), probe(5));
+          int n = 4; printf("%d\n", (int)sizeof(char[n][n])); return 0; }
+    """,
+    "generic_qualified": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <limits.h>
+
+        #define kind(x) _Generic((x), int: 1, const int: 2, int *: 3, char *: 4, default: 0)
+        int main(void){ const int c = 1; int i = 2; int *p = &i;
+          printf("%d %d %d %d\n", kind(i), kind(c), kind(p), kind("s")); return 0; }
+    """,
+    "labels_and_blocks": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <limits.h>
+
+        int main(void){ int i = 0;
+          { int i = 5; { int i = 9; printf("%d ", i); } printf("%d ", i); }
+          printf("%d\n", i);
+          switch (2) { case 1: { int x = 1; printf("%d", x); } break;
+                       case 2: { int x = 2; printf("%d", x); } break; }
+          printf("\n");
+          goto end;
+          printf("unreachable");
+          end: ;
+          return 0; }
+    """,
+    "preprocessor_in_anger": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <limits.h>
+
+        #define STR(x) #x
+        #define XSTR(x) STR(x)
+        #define CONCAT(a,b) a##b
+        #define MAX(a,b) ((a) > (b) ? (a) : (b))
+        #define LOG(fmt, ...) printf("[log] " fmt, ##__VA_ARGS__)
+        #define VERSION 3
+        int CONCAT(my, var) = 7;
+        int main(void){ printf("%s %s %d\n", STR(VERSION), XSTR(VERSION), myvar);
+          printf("%d %d\n", MAX(3, 5), MAX(-1, -2));
+          LOG("plain\n");
+          LOG("%d and %s\n", 42, "text");
+          return 0; }
+    """,
+    "unsigned_char_math": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <limits.h>
+
+        int main(void){ unsigned char a = 200, b = 100;
+          printf("%d %d %d\n", a + b, (unsigned char)(a + b), a * 2);
+          signed char s = -128; printf("%d %d\n", -s, (signed char)-s);
+          char buf[4] = {(char)0x80, (char)0xFF, 0x7F, 0};
+          for (int i = 0; i < 3; i++) printf("%d %u ", buf[i], (unsigned char)buf[i]);
+          printf("\n"); return 0; }
+    """,
+    "array_of_struct_init": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <limits.h>
+
+        struct P { int x, y; const char *n; };
+        static struct P a[] = { {1,2,"one"}, {3,4,"two"}, {5,6,"three"} };
+        static int counts[3][3] = { {1}, {0,2}, {0,0,3} };
+        int main(void){ printf("%d ", (int)(sizeof a / sizeof a[0]));
+          for (unsigned i = 0; i < sizeof a / sizeof a[0]; i++) printf("%s:%d ", a[i].n, a[i].x*a[i].y);
+          printf("\n");
+          for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) printf("%d", counts[i][j]);
+          printf("\n"); return 0; }
+    """,
+    "long_expression": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <limits.h>
+
+        int main(void){ int t = 1+2+3+4+5+6+7+8+9+10+11+12+13+14+15+16+17+18+19+20
+          +21+22+23+24+25+26+27+28+29+30+31+32+33+34+35+36+37+38+39+40;
+          double d = 1.0*2.0*3.0/4.0+5.0-6.0*7.0/8.0+9.0-10.0;
+          printf("%d %.4f\n", t, d);
+          int a=1,b=2,c=3; printf("%d\n", a<b ? b<c ? 1 : 2 : c<a ? 3 : 4); return 0; }
+    """,
+    "memcmp_structs": r"""
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        #include <limits.h>
+
+        struct K { int a; int b; };
+        int main(void){ struct K x = {1,2}, y = {1,2}, z = {1,3};
+          printf("%d %d\n", memcmp(&x,&y,sizeof x) == 0, memcmp(&x,&z,sizeof x) == 0);
+          char big[200], other[200];
+          memset(big, 'q', sizeof big); memcpy(other, big, sizeof big);
+          printf("%d %d\n", memcmp(big, other, sizeof big), big[199]);
+          other[150] = 'z'; printf("%d\n", memcmp(big, other, sizeof big) < 0); return 0; }
+    """,
 }
 
 

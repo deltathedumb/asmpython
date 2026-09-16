@@ -115,6 +115,10 @@ class Member:
     bits: int | None = None
     bit_offset: int = 0
     span: Any = None
+    #: `_Alignas` on the member, when it asked for more than the type's own.
+    #: A member's alignment is what places it AND what the whole struct
+    #: inherits, so an over-aligned member makes the struct over-aligned.
+    align: int | None = None
     #: For an anonymous member, the path to reach a named member inside it is
     #: rebuilt on demand rather than flattened here -- see `find_member`.
 
@@ -181,6 +185,12 @@ class CType:
     ret: CType | None = None
     params: tuple[Param, ...] | None = None
     variadic: bool = False
+    #: The parameter NAMES of an unprototyped definition -- `int f(a, b)`.
+    #: `params is None` is what says "no prototype", so the names need
+    #: somewhere else to live until the declarations that follow give them
+    #: types. Without this they were dropped between the declarator and the
+    #: body, and `f(5, "x")` was told the function takes none.
+    kr_names: tuple[str, ...] = ()
     #: STRUCT, UNION, ENUM.
     tag: Tag | None = None
     #: A typedef's name, kept for diagnostics only: a message reading
@@ -367,8 +377,9 @@ def pointer_to(target: CType, quals=frozenset()) -> CType:
 
 
 def function(ret: CType, params: tuple[Param, ...] | None,
-             variadic: bool = False) -> CType:
-    return CType(K.FUNCTION, ret=ret, params=params, variadic=variadic)
+             variadic: bool = False, kr_names: tuple[str, ...] = ()) -> CType:
+    return CType(K.FUNCTION, ret=ret, params=params, variadic=variadic,
+                 kr_names=kr_names)
 
 
 def record(tag: Tag) -> CType:
@@ -589,7 +600,7 @@ def layout(tag: Tag) -> None:
             m.bits = None
             tag.flexible = True
             continue
-        malign = m.type.align
+        malign = max(m.align or 0, m.type.align)
         if m.bits is not None:
             unit_bits = m.type.size * 8
             if m.bits == 0:
