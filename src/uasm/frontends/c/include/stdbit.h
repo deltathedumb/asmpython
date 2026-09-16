@@ -2,9 +2,21 @@
 
    Every one of these is one instruction on every machine and a loop in C, so
    they are `__builtin_*` here for the same reason they are there: see
-   `builtins.py`. The `_uc`/`_us`/`_ui`/`_ul`/`_ull` families differ only in
-   the width they count within, which is what makes the generic macro at the
-   bottom a `_Generic` over the argument. */
+   `builtins.py`.
+
+   FIVE WIDTHS AND FOURTEEN OPERATIONS IS SEVENTY FUNCTIONS, which is a
+   hand-written list with seventy chances to count within the wrong width --
+   and counting within the wrong width is exactly the bug that would be
+   invisible, because `stdc_leading_zeros_uc(1)` answering 31 instead of 7 is
+   a plausible-looking number. So one macro writes the whole family for a
+   width, and the width appears once in each expansion.
+
+   THE COUNTING IS DONE IN 64 BITS AND CORRECTED, which is what makes the
+   macro possible: `__builtin_clzll` of a zero-extended value counts the
+   64-bit leading zeros, and the ones above the type's own width are the
+   difference between 64 and W. `ctzll` needs no correction -- a zero bit
+   below the value is a zero bit in either width -- except for the value 0,
+   which every operation here has a named answer for. */
 #ifndef _UASM_STDBIT_H
 #define _UASM_STDBIT_H
 
@@ -14,67 +26,78 @@
 #define __STDC_ENDIAN_NATIVE__ __STDC_ENDIAN_LITTLE__
 
 #include <stdint.h>
+#include <stdbool.h>
 
-static unsigned int stdc_leading_zeros_ui(unsigned int __v)
-{ return __v ? (unsigned)__builtin_clz(__v) : 32u; }
-static unsigned int stdc_leading_zeros_ull(unsigned long long __v)
-{ return __v ? (unsigned)__builtin_clzll(__v) : 64u; }
-static unsigned int stdc_leading_zeros_uc(unsigned char __v)
-{ return __v ? (unsigned)__builtin_clz((unsigned)__v) - 24u : 8u; }
-static unsigned int stdc_leading_zeros_us(unsigned short __v)
-{ return __v ? (unsigned)__builtin_clz((unsigned)__v) - 16u : 16u; }
-static unsigned int stdc_leading_zeros_ul(unsigned long __v)
-{ return stdc_leading_zeros_ull((unsigned long long)__v); }
+/* THE POSITION IS ONE-BASED AND 0 MEANS "THERE IS NONE", which is C23's
+   convention for the `first_*` four and the one thing about this header that
+   a reader will not guess: `stdc_first_leading_one_uc(0x80)` is 1, and
+   `stdc_first_leading_one_uc(0)` is 0 rather than 9. */
+#define __STDBIT(SUF, T, W)                                                   \
+    static unsigned int stdc_leading_zeros_##SUF(T __v)                       \
+    { return __v ? (unsigned int)__builtin_clzll((unsigned long long)__v)     \
+                   - (64u - (W)) : (unsigned int)(W); }                       \
+    static unsigned int stdc_leading_ones_##SUF(T __v)                        \
+    { return stdc_leading_zeros_##SUF((T)~__v); }                             \
+    static unsigned int stdc_trailing_zeros_##SUF(T __v)                      \
+    { return __v ? (unsigned int)__builtin_ctzll((unsigned long long)__v)     \
+                 : (unsigned int)(W); }                                       \
+    static unsigned int stdc_trailing_ones_##SUF(T __v)                       \
+    { return stdc_trailing_zeros_##SUF((T)~__v); }                            \
+    static unsigned int stdc_count_ones_##SUF(T __v)                          \
+    { return (unsigned int)__builtin_popcountll((unsigned long long)__v); }   \
+    static unsigned int stdc_count_zeros_##SUF(T __v)                         \
+    { return (unsigned int)(W) - stdc_count_ones_##SUF(__v); }                \
+    static unsigned int stdc_first_leading_zero_##SUF(T __v)                  \
+    { unsigned int __n = stdc_leading_ones_##SUF(__v);                        \
+      return __n == (unsigned int)(W) ? 0u : __n + 1u; }                      \
+    static unsigned int stdc_first_leading_one_##SUF(T __v)                   \
+    { unsigned int __n = stdc_leading_zeros_##SUF(__v);                       \
+      return __n == (unsigned int)(W) ? 0u : __n + 1u; }                      \
+    static unsigned int stdc_first_trailing_zero_##SUF(T __v)                 \
+    { unsigned int __n = stdc_trailing_ones_##SUF(__v);                       \
+      return __n == (unsigned int)(W) ? 0u : __n + 1u; }                      \
+    static unsigned int stdc_first_trailing_one_##SUF(T __v)                  \
+    { unsigned int __n = stdc_trailing_zeros_##SUF(__v);                      \
+      return __n == (unsigned int)(W) ? 0u : __n + 1u; }                      \
+    static bool stdc_has_single_bit_##SUF(T __v)                              \
+    { return __v != 0 && (T)(__v & (T)(__v - 1)) == 0; }                      \
+    static unsigned int stdc_bit_width_##SUF(T __v)                           \
+    { return (unsigned int)(W) - stdc_leading_zeros_##SUF(__v); }             \
+    static T stdc_bit_floor_##SUF(T __v)                                      \
+    { return __v ? (T)((T)1 << (stdc_bit_width_##SUF(__v) - 1u)) : (T)0; }    \
+    static T stdc_bit_ceil_##SUF(T __v)                                       \
+    { return __v <= (T)1 ? (T)1                                               \
+                         : (T)((T)1 << stdc_bit_width_##SUF((T)(__v - 1))); }
 
-static unsigned int stdc_trailing_zeros_ui(unsigned int __v)
-{ return __v ? (unsigned)__builtin_ctz(__v) : 32u; }
-static unsigned int stdc_trailing_zeros_ull(unsigned long long __v)
-{ return __v ? (unsigned)__builtin_ctzll(__v) : 64u; }
-static unsigned int stdc_trailing_zeros_uc(unsigned char __v)
-{ return __v ? (unsigned)__builtin_ctz((unsigned)__v) : 8u; }
-static unsigned int stdc_trailing_zeros_us(unsigned short __v)
-{ return __v ? (unsigned)__builtin_ctz((unsigned)__v) : 16u; }
-static unsigned int stdc_trailing_zeros_ul(unsigned long __v)
-{ return stdc_trailing_zeros_ull((unsigned long long)__v); }
+__STDBIT(uc, unsigned char, 8)
+__STDBIT(us, unsigned short, 16)
+__STDBIT(ui, unsigned int, 32)
+__STDBIT(ul, unsigned long, 64)
+__STDBIT(ull, unsigned long long, 64)
 
-static unsigned int stdc_count_ones_ui(unsigned int __v)
-{ return (unsigned)__builtin_popcount(__v); }
-static unsigned int stdc_count_ones_ull(unsigned long long __v)
-{ return (unsigned)__builtin_popcountll(__v); }
-static unsigned int stdc_count_ones_uc(unsigned char __v)
-{ return (unsigned)__builtin_popcount((unsigned)__v); }
-static unsigned int stdc_count_ones_us(unsigned short __v)
-{ return (unsigned)__builtin_popcount((unsigned)__v); }
-static unsigned int stdc_count_ones_ul(unsigned long __v)
-{ return stdc_count_ones_ull((unsigned long long)__v); }
+/* THE GENERIC MACRO PICKS BY THE TYPE and there are five of them, so the
+   `_Generic` is written once too. `default` is the `ull` one, which is what
+   an argument of any other unsigned type widens to. */
+#define __STDBIT_G(NAME, v) _Generic((v), \
+    unsigned char: NAME##_uc, \
+    unsigned short: NAME##_us, \
+    unsigned int: NAME##_ui, \
+    unsigned long: NAME##_ul, \
+    default: NAME##_ull)(v)
 
-static unsigned int stdc_bit_width_ui(unsigned int __v)
-{ return 32u - stdc_leading_zeros_ui(__v); }
-static unsigned int stdc_bit_width_ull(unsigned long long __v)
-{ return 64u - stdc_leading_zeros_ull(__v); }
-static unsigned long long stdc_bit_floor_ull(unsigned long long __v)
-{ return __v ? 1ULL << (stdc_bit_width_ull(__v) - 1u) : 0ULL; }
-static unsigned long long stdc_bit_ceil_ull(unsigned long long __v)
-{ return __v <= 1ULL ? 1ULL : 1ULL << stdc_bit_width_ull(__v - 1ULL); }
-static _Bool stdc_has_single_bit_ull(unsigned long long __v)
-{ return __v != 0ULL && (__v & (__v - 1ULL)) == 0ULL; }
-
-#define stdc_leading_zeros(v) _Generic((v), \
-    unsigned char: stdc_leading_zeros_uc, unsigned short: stdc_leading_zeros_us, \
-    unsigned int: stdc_leading_zeros_ui, unsigned long: stdc_leading_zeros_ul, \
-    default: stdc_leading_zeros_ull)(v)
-#define stdc_trailing_zeros(v) _Generic((v), \
-    unsigned char: stdc_trailing_zeros_uc, unsigned short: stdc_trailing_zeros_us, \
-    unsigned int: stdc_trailing_zeros_ui, unsigned long: stdc_trailing_zeros_ul, \
-    default: stdc_trailing_zeros_ull)(v)
-#define stdc_count_ones(v) _Generic((v), \
-    unsigned char: stdc_count_ones_uc, unsigned short: stdc_count_ones_us, \
-    unsigned int: stdc_count_ones_ui, unsigned long: stdc_count_ones_ul, \
-    default: stdc_count_ones_ull)(v)
-#define stdc_bit_width(v) _Generic((v), \
-    unsigned int: stdc_bit_width_ui, default: stdc_bit_width_ull)(v)
-#define stdc_bit_floor(v) stdc_bit_floor_ull(v)
-#define stdc_bit_ceil(v) stdc_bit_ceil_ull(v)
-#define stdc_has_single_bit(v) stdc_has_single_bit_ull(v)
+#define stdc_leading_zeros(v)       __STDBIT_G(stdc_leading_zeros, v)
+#define stdc_leading_ones(v)        __STDBIT_G(stdc_leading_ones, v)
+#define stdc_trailing_zeros(v)      __STDBIT_G(stdc_trailing_zeros, v)
+#define stdc_trailing_ones(v)       __STDBIT_G(stdc_trailing_ones, v)
+#define stdc_first_leading_zero(v)  __STDBIT_G(stdc_first_leading_zero, v)
+#define stdc_first_leading_one(v)   __STDBIT_G(stdc_first_leading_one, v)
+#define stdc_first_trailing_zero(v) __STDBIT_G(stdc_first_trailing_zero, v)
+#define stdc_first_trailing_one(v)  __STDBIT_G(stdc_first_trailing_one, v)
+#define stdc_count_zeros(v)         __STDBIT_G(stdc_count_zeros, v)
+#define stdc_count_ones(v)          __STDBIT_G(stdc_count_ones, v)
+#define stdc_has_single_bit(v)      __STDBIT_G(stdc_has_single_bit, v)
+#define stdc_bit_width(v)           __STDBIT_G(stdc_bit_width, v)
+#define stdc_bit_floor(v)           __STDBIT_G(stdc_bit_floor, v)
+#define stdc_bit_ceil(v)            __STDBIT_G(stdc_bit_ceil, v)
 
 #endif

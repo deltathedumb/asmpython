@@ -68,6 +68,20 @@ static int timespec_get(struct timespec *__ts, int __base)
     return __base;
 }
 
+/* ONE NANOSECOND, because that is the unit `host_time_unix` answers in and
+   there is nothing below it to ask. C23 added this so a program can tell a
+   clock that ticks in whole seconds from one that does not; answering the
+   unit rather than a measured granularity is the honest reading -- the host
+   service's contract is nanoseconds and what the machine under it rounds to
+   is not something this side can see. */
+static int timespec_getres(struct timespec *__ts, int __base)
+{
+    if (__ts == NULL || __base != TIME_UTC) return 0;
+    __ts->tv_sec = 0;
+    __ts->tv_nsec = 1;
+    return __base;
+}
+
 static double difftime(time_t __a, time_t __b) { return (double)(__a - __b); }
 
 /* ── the civil calendar ───────────────────────────────────────────────── */

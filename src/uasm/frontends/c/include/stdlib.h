@@ -17,7 +17,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <__uasm_alloc.h>
-#include <wchar.h>
+#include <__uasm_wide.h>
 #include <errno.h>
 #include <__uasm_num.h>
 #include <__uasm_base.h>

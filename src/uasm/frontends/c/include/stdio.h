@@ -36,6 +36,7 @@
 #include <string.h>
 #include <__uasm_num.h>
 #include <__uasm_base.h>
+#include <__uasm_wide.h>
 #include <__uasm_host.h>
 
 #define EOF (-1)
@@ -794,15 +795,58 @@ static int __vformat(__sink *__s, const char *__fmt, va_list __ap)
             else if (conv != 'u') base = 16;
             if (conv == 'X') base_digits = "0123456789ABCDEF";
         } else if (conv == 'c') {
-            body[len++] = (char)va_arg(__ap, int);
+            if (lmod >= 1) {
+                /* `%lc` IS A `wint_t` AND THE OUTPUT IS BYTES: the stream is
+                   a byte stream, so a wide character is written in the
+                   multibyte encoding -- UTF-8 here. */
+                mbstate_t __ws;
+                __ws.__count = 0;
+                __ws.__value = 0;
+                len = (int)wcrtomb(body, (wchar_t)va_arg(__ap, wint_t), &__ws);
+            } else {
+                body[len++] = (char)va_arg(__ap, int);
+            }
             __emit_padded(__s, body, len, prefix, 0, flags & ~__F_ZERO, width, 0);
             continue;
         } else if (conv == 's') {
+            if (lmod >= 1) {
+                /* `%ls` IS A `wchar_t *`, converted a character at a time,
+                   and `prec` counts BYTES -- so a character that would not
+                   fit whole is not written at all, which is what C says and
+                   the one part of this that is not obvious. */
+                const wchar_t *wstr = va_arg(__ap, const wchar_t *);
+                mbstate_t __ws;
+                char __one[8];
+                int __k;
+                __ws.__count = 0;
+                __ws.__value = 0;
+                if (wstr == 0) {
+                    const char *nil = "(null)";
+                    while (nil[len] && (prec < 0 || len < prec))
+                    { body[len] = nil[len]; len++; }
+                } else {
+                    while (*wstr) {
+                        __k = (int)wcrtomb(__one, *wstr, &__ws);
+                        if (__k <= 0) break;
+                        if (prec >= 0 && len + __k > prec) break;
+                        if (len + __k > (int)sizeof body) break;
+                        for (int __j = 0; __j < __k; __j++)
+                            body[len + __j] = __one[__j];
+                        len += __k;
+                        wstr++;
+                    }
+                }
+                __emit_padded(__s, body, len, prefix, 0, flags & ~__F_ZERO,
+                              width, 0);
+                continue;
+            }
+            {
             const char *str = va_arg(__ap, const char *);
             if (str == 0) str = "(null)";
             while (str[len] && (prec < 0 || len < prec)) { body[len] = str[len]; len++; }
             __emit_padded(__s, body, len, prefix, 0, flags & ~__F_ZERO, width, 0);
             continue;
+            }
         } else if (conv == 'p') {
             void *ptr = va_arg(__ap, void *);
             uv = (unsigned long)ptr;

@@ -105,6 +105,21 @@ thread for exactly this reason. `thrd_create` can still FAIL -- on Windows,
 and on any target without the group -- which C allows and a portable program
 checks.
 
+`_BitInt(N)` works, for N up to `BITINT_MAXWIDTH`, which is **64** — what
+C23 requires and no more. It is not promoted, which is the point of it:
+`a + b` on two `_BitInt(4)`s is four-bit arithmetic that wraps at four bits,
+and the type lives in the smallest standard container that holds it with
+`lower._aligned_slot`'s neighbour, `lower._narrow_bitint`, putting the spare
+bits back after every operation. A wider one is refused by name: it would be
+software arithmetic over several registers, which is the `long double` story
+again for a type whose whole appeal is being a machine integer with a
+narrower range.
+
+The wide functions are the non-stream half of `<wchar.h>` plus `wcsftime`:
+there is no `fwprintf` and no `fgetwc`, for the same two reasons as ever —
+one needs a wide formatter and the other needs input. `%ls` and `%lc` in the
+narrow `printf` are there, and convert through the same UTF-8 encoder.
+
 `<stdatomic.h>` is the one to read carefully now that there can be two
 threads: its operations are ordinary loads and stores with the right names,
 which was right for one thread and is not a promise this library can keep
@@ -114,16 +129,23 @@ All thirty-one headers C23 requires are here, and a test includes every one
 of them alone and then all of them together -- a macro one defines can break
 the next, and one translation unit is the only place that shows.
 
-## The three implementation headers
+## The implementation headers
 
 `__uasm_base.h` is the platform floor and `__uasm_host.h` the optional
 groups; both are there so that several headers can name the same externs.
-The other two exist to break a circle rather than to share anything:
+`__uasm_num.h` is decimal text to binary floating point, which `<stdlib.h>`
+and `<stdio.h>` both need.
+
+The other three exist to break a circle rather than to share anything.
 `<string.h>` needs the allocator for `strdup`, the allocator needs `memcpy`
 and `memset`, and `<stdlib.h>` — where the allocator lives as far as a
-program is concerned — already includes `<string.h>`. So `__uasm_mem.h` has
-the three that move bytes and `__uasm_alloc.h` has the arena, and a program
-that includes `<string.h>` or `<stdlib.h>` sees exactly what C says it
+program is concerned — already includes `<string.h>`: so `__uasm_mem.h` has
+the three that move bytes and `__uasm_alloc.h` has the arena. `<stdlib.h>`
+has `mbtowc` and the other four, which are the same UTF-8 encoder and
+decoder `<wchar.h>`'s restartable ones are, and `<wchar.h>` needs `strtol`
+for `wcstol`: so `__uasm_wide.h` has `mbrtowc`, `wcrtomb` and `mbstate_t`,
+and `<stdio.h>` takes it too, for `%ls`. A program that includes
+`<string.h>`, `<stdlib.h>` or `<wchar.h>` sees exactly what C says it
 should.
 
 `<stdlib.h>` includes `<stdio.h>`, which is more than C asks for and is what

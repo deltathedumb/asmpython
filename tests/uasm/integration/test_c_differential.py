@@ -1697,6 +1697,94 @@ PROGRAMS: dict[str, str] = {
         }
     """,
 
+    "wide_strings_and_the_bit_utilities": r"""
+        /* `<wchar.h>`'s non-multibyte half, `wcsftime`,
+           `timespec_getres` and every operation `<stdbit.h>` has
+           at every width. The numeral parsers are the interesting
+           ones: a wide numeral is the narrow one in a wider
+           element, so they copy the prefix and hand it to
+           `<stdlib.h>`'s -- and the end pointer has to map back. */
+        #include <stdio.h>
+        #include <wchar.h>
+        #include <string.h>
+        #include <time.h>
+        #include <stdbit.h>
+
+        int main(void) {
+            wchar_t buf[64], *save, *end;
+            size_t n;
+
+            wcscpy(buf, L"abc");
+            wcsncat(buf, L"defgh", 3);
+            printf("%ls %zu\n", buf, wcslen(buf));
+
+            printf("%zu %zu\n", wcsspn(L"aabbcz", L"ab"), wcscspn(L"aabbcz", L"cz"));
+            printf("%ls\n", wcspbrk(L"hello world", L"ow"));
+            printf("%d %d\n", wcscoll(L"a", L"b") < 0, (int)wcsxfrm(buf, L"xyz", 64));
+            printf("%ls\n", buf);
+
+            wcscpy(buf, L"one,two,,three");
+            for (wchar_t *t = wcstok(buf, L",", &save); t; t = wcstok(NULL, L",", &save))
+                printf("[%ls]", t);
+            printf("\n");
+
+            printf("%.6f %.6f %.6Lf\n", wcstod(L"  3.25xyz", &end),
+                   (double)wcstof(L"1.5", NULL), wcstold(L"2.75", NULL));
+            printf("%ls\n", end);
+            printf("%ld %lld %lu %llu\n", wcstol(L"-42abc", &end, 10),
+                   wcstoll(L"0x1f", NULL, 16), wcstoul(L"7", NULL, 0),
+                   wcstoull(L"18446744073709551615", NULL, 10));
+            printf("%ls\n", end);
+
+            {
+                struct tm t;
+                memset(&t, 0, sizeof t);
+                t.tm_year = 124; t.tm_mon = 2; t.tm_mday = 15; t.tm_hour = 9;
+                t.tm_min = 5; t.tm_sec = 3; t.tm_wday = 5;
+                n = wcsftime(buf, 64, L"%Y-%m-%d %H:%M:%S", &t);
+                printf("%zu %ls\n", n, buf);
+            }
+            {
+                /* THE RESOLUTION ITSELF IS THE IMPLEMENTATION'S and is not something
+                   two of them can be asked to agree on -- and glibc's leaves the
+                   object alone here, which says how little of it is comparable.
+                   That it answers, and refuses a base it does not know, is. */
+                struct timespec ts;
+                printf("%d %d\n", timespec_getres(&ts, TIME_UTC) == TIME_UTC,
+                       timespec_getres(&ts, 987) == 0);
+            }
+            printf("[%ls] [%10ls] [%-10ls] [%.3ls] [%lc]\n", L"abcdef", L"xy",
+                   L"xy", L"abcdef", (wint_t)L'Z');
+
+            /* <stdbit.h>, every operation at every width. */
+            printf("%u %u %u %u %u\n", stdc_leading_zeros_uc(1),
+                   stdc_leading_zeros_us(1), stdc_leading_zeros_ui(1),
+                   stdc_leading_zeros_ul(1), stdc_leading_zeros_ull(1));
+            printf("%u %u %u %u\n", stdc_leading_ones_uc(0xF0),
+                   stdc_trailing_zeros_us(8), stdc_trailing_ones_uc(0x0F),
+                   stdc_count_zeros_ui(0xF));
+            printf("%u %u %u %u\n", stdc_first_leading_zero_uc(0xF0),
+                   stdc_first_leading_one_uc(0x10), stdc_first_trailing_zero_uc(0x0F),
+                   stdc_first_trailing_one_uc(0x10));
+            printf("%u %u %u %u\n", stdc_first_leading_one_uc(0),
+                   stdc_first_leading_zero_uc(0xFF), stdc_first_trailing_one_uc(0),
+                   stdc_first_trailing_zero_uc(0xFF));
+            printf("%u %u %u\n", stdc_count_ones_ull(0xFFFFFFFFFFFFFFFFull),
+                   stdc_bit_width_uc(9), stdc_bit_width_ull(0));
+            printf("%u %u %d %d\n", (unsigned)stdc_bit_floor_uc(9),
+                   (unsigned)stdc_bit_ceil_uc(9), (int)stdc_has_single_bit_uc(8),
+                   (int)stdc_has_single_bit_uc(9));
+            printf("%llu %llu\n", (unsigned long long)stdc_bit_floor_ull(0xFFull),
+                   (unsigned long long)stdc_bit_ceil_ull(0xFFull));
+            printf("%u %u %u %u\n", stdc_leading_zeros((unsigned char)1),
+                   stdc_bit_width(9u), stdc_count_ones(255u),
+                   (unsigned)stdc_bit_ceil((unsigned short)9));
+            printf("%d %d %d\n", __STDC_ENDIAN_NATIVE__ == __STDC_ENDIAN_LITTLE__,
+                   __STDC_ENDIAN_LITTLE__, __STDC_ENDIAN_BIG__);
+            return 0;
+        }
+    """,
+
     "the_names_c23_added_to_the_library": r"""
         /* `strdup`, `memccpy`, `strcoll`, `strxfrm`,
            `aligned_alloc`, `strfrom*` and `quick_exit`. The host
@@ -3262,6 +3350,46 @@ NO_ORACLE: dict[str, tuple[str, str]] = {
         return 0;
     }
     """, '64 1 32 64\n1 1 2 4 8 8\n1 2 4 8\n16 8\n-192 16 16 1\n-192 192\n9223372036854775807 18446744073709551615\n255 9 -4294967296\n-4096\n4095\n15\n15\n-3192\n-4096\n4095\n0\n8\n-1 0\n-1\n-212 12 -212 12\n2 4 1 8\n0 1 0\n3808 8\n1 1 43 7\n1 1 3\n1000 1024000\n-428 -5\n71 3\n-200.0 -100 1 0 -200.0\n3 -3\n-16 7 4000\nfour thousand\n4000 -4000 4\n-5 9\n'),
+
+    "wide_characters_are_utf_8": (r"""
+    #include <stdio.h>
+    #include <wchar.h>
+    #include <string.h>
+
+    int main(void) {
+        wchar_t buf[64];
+        char narrow[64];
+        const char *src;
+        const wchar_t *wsrc;
+        mbstate_t st;
+        size_t n;
+
+        printf("%d %d %d %d\n", (int)btowc('a'), (int)btowc(200) == (int)WEOF,
+               wctob(L'z'), wctob(0x20AC) == EOF);
+
+        memset(&st, 0, sizeof st);
+        printf("%zu %zu\n", mbrlen("\xE2\x82\xAC", 4, &st), mbrlen("a", 1, NULL));
+
+        memset(&st, 0, sizeof st);
+        src = "a\xC3\xA9z";
+        n = mbsrtowcs(buf, &src, 64, &st);
+        printf("%zu %ld %ld %ld %d\n", n, (long)buf[0], (long)buf[1], (long)buf[2],
+               src == NULL);
+        printf("%zu\n", mbsrtowcs(NULL, &(const char *){"a\xC3\xA9z"}, 0, NULL));
+
+        memset(&st, 0, sizeof st);
+        wsrc = buf;
+        n = wcsrtombs(narrow, &wsrc, 64, &st);
+        printf("%zu %s %d\n", n, narrow, wsrc == NULL);
+        printf("%d %d %d\n", (unsigned char)narrow[0], (unsigned char)narrow[1],
+               (unsigned char)narrow[2]);
+
+        printf("[%ls]\n", L"café");
+        printf("[%.3ls] [%.4ls]\n", L"caféx", L"caféx");
+        printf("[%lc]\n", (wint_t)0x20AC);
+        return 0;
+    }
+    """, '97 1 122 1\n3 1\n3 97 233 122 1\n3\n4 aéz 1\n97 195 169\n[café]\n[caf] [caf]\n[€]\n'),
 
     "the_c23_names_glibc_has_not_got": (r"""
     #include <stdio.h>
