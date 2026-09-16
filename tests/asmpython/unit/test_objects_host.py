@@ -60,6 +60,11 @@ _HELPERS_THE_HOST_OWNS_WHOLE = {
     "apy_is_classlike",
     "apy_index_arg_of",
     "apy_is_descriptor_of",
+    # The rule `__iter__`'s ANSWER has to satisfy, factored out so `str.join`
+    # can ask it and word the refusal its own way. The host asks the same
+    # question through `_is_iterator`, in Python, so this name is never
+    # reached from here.
+    "apy_is_iterator_of",
     "apy_is_seq_of",
     "apy_is_set_of",
     "apy_is_special_form",
