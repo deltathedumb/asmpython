@@ -1244,22 +1244,26 @@ class DynamicLowering:
         and `apy_func_is_type` is what registers it. Doing it lazily made
         `type(1) is int` depend on which side was evaluated first.
 
-        Only the names the module actually mentions -- a program that never
-        writes `int` needs no thunk for it, and `type(1)` still answers a type
-        object with the right name and repr.
+        EVERY KIND, AND NOT ONLY THE NAMES THE MODULE MENTIONS. This used to
+        register the thunk for `_BUILTIN_TYPE_VALUES & mentioned`, on the
+        reasoning that a program which never writes `int` needs no thunk for
+        it and `type(1)` still answers a type object with the right name and
+        repr. The name and the repr were right; the METHODS went with the
+        thunk, so
+
+            L = type([1])
+            hasattr(L, "append")        # False, against CPython's True
+
+        and adding one unused line that merely NAMES the type -- `_x = list`
+        -- made it True. An unrelated statement elsewhere in the module
+        changing what an unrelated expression answers is not a trade-off, and
+        what a program will ask `type()` about is not knowable from the names
+        it writes.
         """
         entry = self.infos.get(ENTRY_NAME)
         if entry is None:
             return
-        # Every function's body, not only the module's: `int` named inside a
-        # `def` registers the same canonical thunk, and a `def` is lifted out
-        # of the entry's own AST.
-        mentioned = set()
-        for info in self.infos.values():
-            for node in ast.walk(info.node):
-                if isinstance(node, ast.Name):
-                    mentioned.add(node.id)
-        for key in sorted(_BUILTIN_TYPE_VALUES & mentioned):
+        for key in sorted(_BUILTIN_TYPE_VALUES):
             self._dyn_builtin_value(key)
 
     def _dyn_builtin_value(self, name: str) -> int:

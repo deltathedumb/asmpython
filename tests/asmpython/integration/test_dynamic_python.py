@@ -9440,6 +9440,71 @@ PROGRAMS = {
         del xs[1:]
         show("source shrank", lambda: walk.__length_hint__())
     """,
+    "a_type_object_has_its_methods_without_being_named": """
+        # `type(x)` ANSWERED A TYPE OBJECT WITH NO METHODS unless the program
+        # happened to MENTION that type's name somewhere:
+        #
+        #     L = type([1])
+        #     hasattr(L, "append")      # False, against CPython's True
+        #
+        #     _x = list                 # one unused line, anywhere
+        #     L = type([1])
+        #     hasattr(L, "append")      # True
+        #
+        # Action at a distance: an unrelated statement elsewhere in the module
+        # decided what an unrelated expression answered. The canonical thunk
+        # -- which is what carries a builtin type's methods -- was registered
+        # only for the type names appearing as an `ast.Name` in the source, on
+        # the reasoning that a program which never writes `int` needs no thunk
+        # for it. The name and the repr survived that; the METHODS did not,
+        # and what a program will ask `type()` about is not knowable from the
+        # names it writes.
+        #
+        # NOT ONE BUILTIN TYPE IS NAMED BELOW, which is the whole point of the
+        # test: every type here is reached through `type(...)` alone. Writing
+        # `list` once anywhere would register the thunk and prove nothing.
+        def show(label, f):
+            try:
+                print(label, f())
+            except Exception as e:
+                print(label, e.__class__.__name__ + ":", e)
+
+        L = type([1])
+        S = type("a")
+        D = type({1: 2})
+        T = type((1,))
+        I = type(1)
+        F = type(1.5)
+        B = type(b"a")
+        E = type({1})
+
+        show("list name", lambda: L.__name__)
+        show("list append", lambda: hasattr(L, "append"))
+        show("list len", lambda: hasattr(L, "__len__"))
+        show("list unbound len", lambda: L.__len__([1, 2, 3]))
+        show("str upper", lambda: S.upper("ab"))
+        show("str unbound len", lambda: S.__len__("abc"))
+        show("str join", lambda: S.join("-", ["a", "b"]))
+        show("dict keys", lambda: sorted(D.keys({1: 2, 3: 4})))
+        show("dict len", lambda: D.__len__({1: 2}))
+        show("int bit_length", lambda: I.bit_length(5))
+        show("float is_integer", lambda: F.is_integer(2.0))
+        show("set union sorted", lambda: sorted(E.union({1}, {2})))
+        # REACHED THROUGH `getattr` for the three whose WRITTEN spelling is a
+        # separate fault: `T.count(...)` on a runtime type object lands on the
+        # compile-time name dispatch and refuses, where `getattr` takes the
+        # value path and answers. Filed on its own; what this program is
+        # about is whether the methods are THERE.
+        show("tuple count", lambda: getattr(T, "count")((1, 1, 2), 1))
+        show("list count", lambda: getattr(L, "count")([1, 2, 1], 1))
+        show("bytes hex", lambda: getattr(B, "hex")(b"ab"))
+        # AND EACH IS THE SAME OBJECT the name would have given.
+        show("interned", lambda: type([1]) is L)
+        show("still named", lambda: [L.__name__, S.__name__, D.__name__])
+        # `dir` OVER ONE LISTS WHAT IT REALLY HAS.
+        show("list dir has append", lambda: "append" in dir(L))
+        show("str dir has upper", lambda: "upper" in dir(S))
+    """,
     "fstrings": """
         n = 42
         s = 'ab'
