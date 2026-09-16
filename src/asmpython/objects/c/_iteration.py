@@ -90,11 +90,7 @@ APY_API apy_value apy_getiter(apy_value v) {
         if (hook) {
             apy_value got = apy_call_n(apy_bind(hook, v), NULL, 0);
             if (!got) return 0;
-            if (O(got)->kind == APY_GEN_K || O(got)->kind == APY_ITER_K)
-                return got;
-            if (O(got)->kind == APY_INST_K
-                && apy_class_find(O(got)->v.o.cls, apy_name("__next__")))
-                return got;
+            if (apy_is_iterator(got)) return got;
             return apy_fail2("TypeError",
                              "iter() returned non-iterator of type '%s'%s",
                              apy_kind_name(got), "");
@@ -110,11 +106,7 @@ APY_API apy_value apy_getiter(apy_value v) {
                broken class into a working one that iterated something else
                entirely -- CPython refuses, and naming the type is what tells
                the author which method to fix. */
-            if (O(got)->kind == APY_GEN_K || O(got)->kind == APY_ITER_K)
-                return got;
-            if (O(got)->kind == APY_INST_K
-                && apy_class_find(O(got)->v.o.cls, apy_name("__next__")))
-                return got;
+            if (apy_is_iterator(got)) return got;
             return apy_fail2("TypeError",
                              "iter() returned non-iterator of type '%s'%s",
                              apy_kind_name(got), "");

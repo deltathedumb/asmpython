@@ -12090,8 +12090,13 @@ def _is_iterator(got) -> bool:
     -- see the call site for why clearing the funnel's error instead would
     swallow more than CPython does.
     """
-    return (isinstance(got, (Gen, Iterator, list, tuple, set, frozenset,
-                             dict))
+    # A GENERATOR, A CURSOR, OR A CLASS WITH `__next__`, AND NOTHING ELSE.
+    # A list is not an iterator and neither is a dict, a set or a tuple --
+    # `iter()` makes one FROM each of them, which is a different thing, and
+    # this used to accept all four. A class whose `__iter__` answered a list
+    # then iterated it happily where CPython refuses, so a broken class
+    # silently worked and the author was never told which method to fix.
+    return (isinstance(got, (Gen, Iterator))
             or (isinstance(got, Instance)
                 and got.cls.find("__next__") is not None))
 
@@ -13569,6 +13574,12 @@ def _apy_iterable(h, a):
             got = h._invoke(hook, [v])
             if h.err is not None:
                 return 0
+            # THE SAME RULE A CLASS'S OWN `__iter__` ANSWERS UNDER: a
+            # metaclass writing one is still writing `__iter__`.
+            if not _is_iterator(got):
+                return h._fail("TypeError",
+                               f"iter() returned non-iterator of type "
+                               f"'{h.kind_name(got)}'")
             return h._new(got)
     if not isinstance(v, Instance):
         return a[0]
@@ -14997,14 +15008,31 @@ def _apy_iter(h, a):
             got = h._invoke(hook, [v])
             if h.err is not None:
                 return 0
+            # THE SAME RULE A CLASS'S OWN `__iter__` ANSWERS UNDER: a
+            # metaclass writing one is still writing `__iter__`.
+            if not _is_iterator(got):
+                return h._fail("TypeError",
+                               f"iter() returned non-iterator of type "
+                               f"'{h.kind_name(got)}'")
             return _apy_iter(h, [h._new(got)])
     if isinstance(v, Instance):
         # `iter(obj)` answers what `__iter__` did, UNCHANGED, so that
         # `iter(it) is it` holds for a class that returns self.
+        #
+        # UNCHANGED BUT NOT UNCHECKED: what `__iter__` answers has to BE an
+        # iterator -- see `_is_iterator`, which is the rule and which the
+        # eager funnel applies too. Handing a list straight back meant
+        # `next(iter(obj))` then reported `'list' object is not an iterator`,
+        # which is what `next` says about something that never was one rather
+        # than what `iter` says about what `__iter__` gave it.
         got = v._send("__iter__")
         if h.err is not None:
             return 0
         if got is not NotImplemented:
+            if not _is_iterator(got):
+                return h._fail("TypeError",
+                               f"iter() returned non-iterator of type "
+                               f"'{h.kind_name(got)}'")
             return h._value(got)
         # A CLASS EXTENDING A BUILTIN IS ITERABLE BECAUSE THE BUILTIN IS.
         # `for k in d` over a `class D(dict)` walks its keys, and without this

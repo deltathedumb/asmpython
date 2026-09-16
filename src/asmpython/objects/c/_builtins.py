@@ -782,6 +782,12 @@ APY_API apy_value apy_iter(apy_value v) {
         if (hook) {
             apy_value got = apy_call_n(apy_bind(hook, v), NULL, 0);
             if (!got) return 0;
+            /* THE SAME RULE A CLASS'S OWN `__iter__` ANSWERS UNDER: a
+               metaclass writing one is still writing `__iter__`. */
+            if (!apy_is_iterator(got))
+                return apy_fail2("TypeError",
+                                 "iter() returned non-iterator of type '%s'%s",
+                                 apy_kind_name(got), "");
             return got;
         }
     }
@@ -793,9 +799,22 @@ APY_API apy_value apy_iter(apy_value v) {
     if (O(v)->kind == APY_INST_K) {
         /* `iter(obj)` answers what `__iter__` did, unchanged, so that
            `iter(it) is it` holds for a class that returns self -- the identity
-           `for v in it` on a half-consumed iterator relies on. */
+           `for v in it` on a half-consumed iterator relies on.
+
+           UNCHANGED BUT NOT UNCHECKED: what `__iter__` answers has to BE an
+           iterator, which is `apy_is_iterator_of`'s rule and the same one
+           `apy_getiter` and `apy_iterable` apply. Handing a list straight
+           back meant `next(iter(obj))` then reported `'list' object is not
+           an iterator` -- what `next` says about something that never was
+           one, rather than what `iter` says about what `__iter__` gave it. */
         apy_value got = apy_unary_dunder(v, "__iter__");
-        if (got) return got;
+        if (got) {
+            if (!apy_is_iterator(got))
+                return apy_fail2("TypeError",
+                                 "iter() returned non-iterator of type '%s'%s",
+                                 apy_kind_name(got), "");
+            return got;
+        }
         if (apy_error_occurred()) return 0;
         /* A CLASS EXTENDING A BUILTIN IS ITERABLE BECAUSE THE BUILTIN IS.
            `for k in d` over a `class D(dict)` walks its keys; the miss above
@@ -848,8 +867,14 @@ APY_API apy_value apy_iter(apy_value v) {
    this funnel gets the iterator AND drains it, so a cleared flag would also
    swallow a TypeError from a user's `__next__`. */
 APY_API int64_t apy_is_iterator_of(apy_value it) {
+    /* A GENERATOR, A CURSOR, OR A CLASS WITH `__next__`, AND NOTHING ELSE.
+       A list is not an iterator and neither is a dict, a set or a tuple --
+       `iter()` makes one FROM each of them, which is a different thing, and
+       this funnel used to accept all four. A class whose `__iter__` answered
+       a list then iterated it happily where CPython refuses, so a broken
+       class silently worked and the author was never told which method to
+       fix. */
     return O(it)->kind == APY_GEN_K || O(it)->kind == APY_ITER_K
-        || apy_is_seq(it) || apy_is_set(it) || O(it)->kind == APY_DICT_K
         || (O(it)->kind == APY_INST_K
             && apy_class_find(O(it)->v.o.cls, apy_name("__next__")) != 0);
 }
@@ -878,6 +903,12 @@ APY_API apy_value apy_iterable(apy_value v) {
         if (hook) {
             apy_value got = apy_call_n(apy_bind(hook, v), NULL, 0);
             if (!got) return 0;
+            /* THE SAME RULE A CLASS'S OWN `__iter__` ANSWERS UNDER: a
+               metaclass writing one is still writing `__iter__`. */
+            if (!apy_is_iterator(got))
+                return apy_fail2("TypeError",
+                                 "iter() returned non-iterator of type '%s'%s",
+                                 apy_kind_name(got), "");
             return apy_iterable(got);
         }
     }

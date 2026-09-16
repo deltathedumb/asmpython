@@ -473,6 +473,29 @@ def apy_has_next_method(v: ptr) -> i64:
     return 0
 
 
+def apy_is_iterator_of(it: ptr) -> i64:
+    """Is this an ITERATOR -- the rule `__iter__`'s ANSWER has to satisfy.
+
+    A GENERATOR, A CURSOR, OR A CLASS WITH `__next__`, AND NOTHING ELSE. A
+    list is not an iterator and neither is a dict, a set or a tuple --
+    `iter()` makes one FROM each of them, which is a different thing, and
+    every funnel here used to accept all four. A class whose `__iter__`
+    answered a list then iterated it happily where CPython refuses, so a
+    broken class silently worked and the author was never told which method
+    to fix.
+
+    ONE FUNCTION so `apy_getiter`, `apy_iter` and `str.join` cannot drift
+    about it; the C says the same in `apy_is_iterator_of` and the host in
+    `_is_iterator`.
+    """
+    k: i64 = i64(load(i32, offset(it, 0)))
+    if k == apy_gen_kind():
+        return 1
+    if k == apy_iter_kind():
+        return 1
+    return apy_has_next_method(it)
+
+
 def apy_iterable(v: ptr) -> ptr:
     """`v` as something with elements that can be READ MORE THAN ONCE.
 
@@ -507,6 +530,14 @@ def apy_iterable(v: ptr) -> ptr:
                 got: ptr = apy_call(apy_bind_of(hook, v), ptr(0), 0)
                 if not got:
                     return ptr(0)
+                # THE SAME RULE A CLASS'S OWN `__iter__` ANSWERS UNDER: a
+                # metaclass writing one is still writing `__iter__`.
+                if not apy_is_iterator_of(got):
+                    return apy_raise_fmt(
+                        rodata(b"TypeError\0"),
+                        rodata(b"iter() returned non-iterator of "
+                               b"type '%s'%s\0"),
+                        apy_kind_name_of(got), rodata(b"\0"))
                 return apy_iterable(got)
     if k != apy_inst_kind():
         return v
@@ -530,16 +561,11 @@ def apy_iterable(v: ptr) -> ptr:
                 rodata(b"'%s' object is not iterable%s\0"),
                 apy_kind_name_of(v), rodata(b"\0"))
         return apy_walk_getitem(v)
-    ik: i64 = i64(load(i32, offset(it, 0)))
-    if ik != apy_gen_kind() and ik != apy_iter_kind():
-        if not apy_is_seq_of(it) and not apy_is_set_of(it):
-            if ik != apy_dict_kind():
-                if not apy_has_next_method(it):
-                    return apy_raise_fmt(
-                        rodata(b"TypeError\0"),
-                        rodata(b"iter() returned non-iterator of "
-                               b"type '%s'%s\0"),
-                        apy_kind_name_of(it), rodata(b"\0"))
+    if not apy_is_iterator_of(it):
+        return apy_raise_fmt(
+            rodata(b"TypeError\0"),
+            rodata(b"iter() returned non-iterator of type '%s'%s\0"),
+            apy_kind_name_of(it), rodata(b"\0"))
     if not apy_has_next_method(it):
         return apy_iterable(it)
     return apy_walk_next(it)
@@ -583,12 +609,32 @@ def apy_iter(v: ptr) -> ptr:
             hook: ptr = apy_class_find_of(
                 meta, apy_name_of(rodata(b"__iter__\0")))
             if hook:
-                return apy_call(apy_bind_of(hook, v), ptr(0), 0)
+                # THE SAME RULE A CLASS'S OWN `__iter__` ANSWERS UNDER: a
+                # metaclass writing one is still writing `__iter__`.
+                spun: ptr = apy_call(apy_bind_of(hook, v), ptr(0), 0)
+                if not spun:
+                    return ptr(0)
+                if not apy_is_iterator_of(spun):
+                    return apy_raise_fmt(
+                        rodata(b"TypeError\0"),
+                        rodata(b"iter() returned non-iterator of "
+                               b"type '%s'%s\0"),
+                        apy_kind_name_of(spun), rodata(b"\0"))
+                return spun
     if k == apy_gen_kind():
         return v
     if k == apy_inst_kind():
         got: ptr = apy_unary_dunder_of(v, rodata(b"__iter__\0"))
         if got:
+            # UNCHANGED BUT NOT UNCHECKED. Handing a list straight back meant
+            # `next(iter(obj))` then reported `'list' object is not an
+            # iterator` -- what `next` says about something that never was
+            # one, rather than what `iter` says about what `__iter__` gave it.
+            if not apy_is_iterator_of(got):
+                return apy_raise_fmt(
+                    rodata(b"TypeError\0"),
+                    rodata(b"iter() returned non-iterator of type '%s'%s\0"),
+                    apy_kind_name_of(got), rodata(b"\0"))
             return got
         if apy_error_occurred():
             return ptr(0)

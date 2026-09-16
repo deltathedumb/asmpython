@@ -376,7 +376,14 @@ REPLACES: dict[str, tuple[str, ...]] = {
     # static in the C.
     # THE CURSOR AND THE STRING COMPARE, two more statics the rest of the
     # runtime could not name.
-    "cursor.py": ("apy_str_cmp_of", "apy_cursor_of"),
+    "cursor.py": ("apy_str_cmp_of", "apy_cursor_of",
+                  # THE RULE `__iter__`'S ANSWER HAS TO SATISFY, which three
+                  # funnels here ask and which used to be written out at
+                  # each. Ported rather than called in the C for the reason
+                  # the ordering's helpers were: the ported runtime reaches
+                  # for the floor and its own, and an unported C name called
+                  # from here is neither.
+                  "apy_is_iterator_of"),
     "mathints.py": ("apy_math_gcd", "apy_math_factorial", "apy_view_items",
                     "apy_math_lcm",
                     # `comb` AND `perm` came with the big-integer fix to

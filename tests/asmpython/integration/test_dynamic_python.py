@@ -8373,6 +8373,119 @@ PROGRAMS = {
         show("int", lambda: ",".join(5))
         show("ints inside", lambda: ",".join([1, 2]))
     """,
+    "what_iter_answers_must_be_an_iterator": """
+        # `__iter__` MUST RETURN AN ITERATOR -- an object with `__next__`. A
+        # list is not one, and neither is a dict, a set or a tuple: `iter()`
+        # makes one FROM each of them, which is a different thing. Every
+        # funnel here accepted all four, so `[x for x in GivesList()]`
+        # answered `[1, 2]` where CPython refuses -- a broken class silently
+        # working, and the author never told which method to fix.
+        #
+        # AND THE LAZY PATH REFUSED IT IN THE WRONG WORDS. `iter(obj)` handed
+        # back whatever `__iter__` gave, so the complaint came later from
+        # `next`: `'list' object is not an iterator`, which is what `next`
+        # says about something that never was one rather than what `iter`
+        # says about what `__iter__` gave it.
+        #
+        # ONE PREDICATE PER ARRANGEMENT now, which is what lets `iter`, the
+        # eager funnel and `str.join` agree: `apy_is_iterator_of` in the C
+        # and in the ported subset, `_is_iterator` in the host.
+        class GivesList:
+            def __iter__(self):
+                return [1, 2]
+
+        class GivesDict:
+            def __iter__(self):
+                return {"k": 1}
+
+        class GivesSet:
+            def __iter__(self):
+                return {"a"}
+
+        class GivesTuple:
+            def __iter__(self):
+                return (1, 2)
+
+        class GivesStr:
+            def __iter__(self):
+                return "ab"
+
+        class BadMeta(type):
+            def __iter__(cls):
+                return [1, 2]
+
+        class BadMembers(metaclass=BadMeta):
+            pass
+
+        class SelfIter:
+            def __init__(self):
+                self.n = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.n = self.n + 1
+                if self.n > 2:
+                    raise StopIteration
+                return self.n
+
+        class GenIter:
+            def __iter__(self):
+                yield "g1"
+                yield "g2"
+
+        class WrapsIter:
+            def __iter__(self):
+                return iter([1, 2, 3])
+
+        class GetItem:
+            def __getitem__(self, i):
+                if i < 2:
+                    return i * 10
+                raise IndexError
+
+        class Meta(type):
+            def __iter__(cls):
+                return iter(["m"])
+
+        class Members(metaclass=Meta):
+            pass
+
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except TypeError as e:
+                print(label, "TypeError:", e)
+
+        # REFUSED, and by `iter`'s words rather than `next`'s -- on the eager
+        # path, the lazy one and `join` alike.
+        for name, k in (("list", GivesList), ("dict", GivesDict),
+                        ("set", GivesSet), ("tuple", GivesTuple),
+                        ("str", GivesStr)):
+            show("for " + name, lambda k=k: [x for x in k()])
+            show("list " + name, lambda k=k: list(k()))
+            show("iter " + name, lambda k=k: next(iter(k())))
+            show("join " + name, lambda k=k: ",".join(k()))
+        show("metaclass gives list", lambda: list(BadMembers))
+        # AND EVERY REAL WAY OF BEING ITERABLE STILL IS.
+        show("self-iter", lambda: [x for x in SelfIter()])
+        show("iter is self", lambda: (lambda o: iter(o) is o)(SelfIter()))
+        show("generator method", lambda: list(GenIter()))
+        show("wraps a cursor", lambda: list(WrapsIter()))
+        show("getitem walk", lambda: list(GetItem()))
+        show("metaclass", lambda: list(Members))
+        show("builtins", lambda: (list([1, 2]), list((3,)), list({"k": 1})))
+        show("str and range", lambda: (list("ab"), list(range(3))))
+        show("cursors", lambda: (list(map(str, [1])), list(zip([1], [2]))))
+        show("iter builtins", lambda: (next(iter([7])), next(iter({"z": 1})),
+                                       next(iter("q"))))
+        show("half consumed",
+             lambda: (lambda i: (next(i), list(i)))(iter([1, 2, 3])))
+        show("unpack", lambda: (lambda a, b: (a, b))(*SelfIter()))
+        show("sum", lambda: sum(SelfIter()))
+        show("not iterable at all", lambda: list(object()))
+    """,
     "fstrings": """
         n = 42
         s = 'ab'
