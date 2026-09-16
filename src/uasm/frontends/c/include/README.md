@@ -72,8 +72,13 @@ lists. `fmal` is the one that is not fused, and says so where it is written.
 `l` function, which is what makes the paragraph above visible to a program
 that only ever writes `sqrt`.
 
-The multibyte encoding is UTF-8, always: `mbrtowc` decodes it, `MB_CUR_MAX`
-is 4, and `mbstowcs` of two UTF-8 bytes is one wide character. C leaves the
+The execution character set is UTF-8, and so is the multibyte encoding:
+`"caf\u00e9"` and a literal `café` in the source are the same six bytes,
+`'é'` is the multi-character constant those two bytes make, `mbrtowc`
+decodes it, `MB_CUR_MAX` is 4, and `mbstowcs` of two UTF-8 bytes is one wide
+character. `"\xe9"` is still the ONE byte it was written as: a hex escape is
+a byte and a character is a character, which is the distinction C draws and
+the only one that is not visible in the values afterwards. C leaves the
 execution character set to the implementation and this one chose the
 source's; glibc's `"C"` locale chose one byte per character and answers −1
 for the same input, which is a different choice rather than a better one.

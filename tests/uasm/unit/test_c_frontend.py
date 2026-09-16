@@ -615,6 +615,32 @@ class TestTheDivergences:
         assert not sink.failed, [d.message for d in sink.diagnostics]
         assert not any(f.name.endswith("vla_alloc") for f in module.functions)
 
+    def test_a_hex_escape_is_a_byte_and_a_character_is_a_character(self):
+        """The one distinction `encode` cannot make for itself, because by
+        the time both are numbers they look identical: `"\\xe9"` is the one
+        byte it was written as and `"\\u00e9"` is the two UTF-8 spells that
+        character with. `decode_escapes` records which is which."""
+        from uasm.frontends.c.literals import decode_escapes, encode
+        flags: list[bool] = []
+        values = decode_escapes("\\xe9", max_value=0xFF, literal=flags)
+        assert values == [0xE9] and flags == [True]
+        assert encode(values, "", flags) == b"\xe9"
+
+        flags = []
+        values = decode_escapes("\\u00e9", max_value=0xFF, literal=flags)
+        assert values == [0xE9] and flags == [False]
+        assert encode(values, "", flags) == b"\xc3\xa9"
+
+        # AND A UCN IS NOT CHECKED AGAINST THE ELEMENT'S WIDTH, because it
+        # names a character rather than a value the element has to hold:
+        # `"\\u0100"` in a narrow string is a perfectly good two-byte one.
+        flags = []
+        assert decode_escapes("\\u0100", max_value=0xFF, literal=flags) == [0x100]
+        # A surrogate is not a character, and C says so.
+        from uasm.frontends.c.literals import LiteralError
+        with harness.raises(LiteralError, match="not a character"):
+            decode_escapes("\\ud800", max_value=0x10FFFF)
+
     def test_the_multibyte_encoding_is_utf_8(self):
         """C leaves the execution character set to the implementation, and
         this one chose the source's. glibc's `"C"` locale chose one byte per

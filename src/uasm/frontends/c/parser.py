@@ -427,15 +427,19 @@ class Parser:
         parts = []
         while self.tok.kind is Kind.STRING:
             parts.append(self.next().text)
+        literal: list[bool] = []
         try:
-            prefix, values = join_strings(parts)
+            prefix, values = join_strings(parts, literal)
         except LiteralError as exc:
             self.sema.error("E1010", str(exc), span)
             return self.sema.poison(span)
         width, _, _ = _prefix_info(prefix)
         elem = {"": C.CHAR, "u8": C.UCHAR, "L": C.WCHAR_T,
                 "u": C.CHAR16_T, "U": C.CHAR32_T}[prefix]
-        data = encode(values, prefix) + b"\x00" * width
+        # `literal` SAYS WHICH VALUES WERE WRITTEN AS BYTES, which is the one
+        # thing `encode` cannot work out: `"\xe9"` is one byte and `"\u00e9"`
+        # is the two UTF-8 spells that character with.
+        data = encode(values, prefix, literal) + b"\x00" * width
         count = len(data) // width
         node = S.StringLit(span, C.array_of(elem, count), True, prefix, data)
         key = (prefix, data)

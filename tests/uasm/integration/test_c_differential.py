@@ -1697,6 +1697,132 @@ PROGRAMS: dict[str, str] = {
         }
     """,
 
+    "the_execution_character_set_is_utf_8": r"""
+        /* WHAT A LITERAL'S BYTES ARE, which is the execution
+           character set and here is UTF-8. The distinction that
+           matters is between a CHARACTER and a BYTE: `"\\u00e9"`
+           and a literal `\u00e9` are the two bytes UTF-8 spells
+           that character with, and `"\\xe9"` is the one byte it was
+           written as -- and by the time both are numbers they look
+           the same, which is why `decode_escapes` has to say. A
+           narrow character constant is its BYTES for the same
+           reason, so `'\u00e9'` is a multi-character constant. */
+        #include <stdio.h>
+        #include <string.h>
+        int main(void){
+          const char *ucn = "café";
+          const char *raw = "caf\xc3\xa9";
+          const char *esc = "caf\xe9";
+          const char *big = "Ā\U0001F4A9";
+          printf("%zu %zu %zu %zu\n", strlen(ucn), strlen(raw), strlen(esc), strlen(big));
+          printf("%d %d %d %d\n", (unsigned char)ucn[3], (unsigned char)ucn[4],
+                 (unsigned char)raw[3], (unsigned char)esc[3]);
+          printf("%d %d %d %d %d %d\n", (unsigned char)big[0], (unsigned char)big[1],
+                 (unsigned char)big[2], (unsigned char)big[3], (unsigned char)big[4],
+                 (unsigned char)big[5]);
+          printf("%d %d %d\n", (int)'é', (int)'\xe9', (int)'ab');
+          printf("%d %d %zu\n", (int)L'é', (int)u'Ā', sizeof(U"\U0001F4A9"));
+          printf("%zu %d %d\n", sizeof(u8"é"), (unsigned char)u8"é"[0],
+                 (unsigned char)u8"é"[1]);
+          printf("%zu %d\n", sizeof(u"\U0001F4A9"), (int)u"\U0001F4A9"[0]);
+          return 0; }
+    """,
+
+    "the_corners_of_the_object_model": r"""
+        /* Odd struct sizes through a by-value call and back, a
+           `long double` inside one, bit-fields at the edges of
+           their widths, the implementation-defined integer
+           conversions, designated initialisers that override,
+           `volatile`, and a universal character name in an
+           IDENTIFIER. Every one is something an ABI decides and
+           a frontend can be self-consistently wrong about. */
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdarg.h>
+
+        /* Universal character names, in an identifier and in a literal. */
+        static int café = 7;
+
+        struct odd { char a; short b; char c; };
+        struct big { char a[13]; };
+        struct mixed { long double ld; char c; };
+        struct bits { signed a : 5; unsigned b : 7; int : 0; unsigned c : 20; };
+
+        static struct odd by_value(struct odd v) { v.a++; return v; }
+        static struct big big_value(struct big v) { v.a[12]++; return v; }
+        static struct mixed mixed_value(struct mixed v) { v.ld += 1.0L; return v; }
+
+        static int sum(int n, ...) {
+            va_list ap;
+            int i, t = 0;
+            va_start(ap, n);
+            for (i = 0; i < n; i++) t += va_arg(ap, int);
+            va_end(ap);
+            return t;
+        }
+
+        int main(void) {
+            volatile int v = 0;
+            int reads = 0;
+
+            printf("%d %s %s\n", café, "café", u8"café");
+
+            /* A volatile object is read every time it is written in the source. */
+            v = 1; v = v + 1; v = v + 1;
+            reads = v;
+            printf("%d %d\n", reads, (int)sizeof(volatile int));
+
+            printf("%zu %zu %zu %zu\n", sizeof(struct odd), sizeof(struct big),
+                   sizeof(struct mixed), sizeof(struct bits));
+            printf("%zu %zu %zu %zu\n", _Alignof(struct odd), _Alignof(struct big),
+                   _Alignof(struct mixed), _Alignof(struct bits));
+            {
+                struct odd o = { 1, 2, 3 };
+                struct odd r = by_value(o);
+                struct big b;
+                struct big rb;
+                struct mixed m = { 1.5L, 'x' };
+                struct mixed rm;
+                memset(&b, 0, sizeof b);
+                b.a[12] = 5;
+                rb = big_value(b);
+                rm = mixed_value(m);
+                printf("%d %d %d %d\n", o.a, r.a, r.b, r.c);
+                printf("%d %d\n", b.a[12], rb.a[12]);
+                printf("%.1Lf %.1Lf %c\n", m.ld, rm.ld, rm.c);
+            }
+            {
+                struct bits t = { -16, 100, 999999 };
+                printf("%d %u %u\n", t.a, t.b, t.c);
+                t.a = 15; t.b = 127; t.c = 1048575;
+                printf("%d %u %u\n", t.a, t.b, t.c);
+                t.a++; t.b++; t.c++;
+                printf("%d %u %u\n", t.a, t.b, t.c);
+            }
+            /* Implementation-defined signed conversions, which C says are the
+               two's-complement ones here. */
+            {
+                int big = 300;
+                signed char sc = (signed char)big;
+                short sh = (short)70000;
+                unsigned u = (unsigned)-1;
+                long l = (long)(unsigned)-1;
+                printf("%d %d %u %ld\n", sc, sh, u, l);
+                printf("%d %d %d\n", -7 / 2, -7 % 2, 7 / -2);
+                printf("%d %d\n", -1 >> 1, (int)((unsigned)-1 >> 1));
+            }
+            /* Designated initialisers that overlap and override. */
+            {
+                int a[5] = { [0] = 1, [2] = 3, [1] = 2, [2] = 30 };
+                struct odd o = { .c = 9, .a = 1, .c = 8 };
+                printf("%d %d %d %d %d %d %d\n", a[0], a[1], a[2], a[3], a[4],
+                       o.a, o.c);
+            }
+            printf("%d %d\n", sum(3, 1, 2, 3), sum(0));
+            return 0;
+        }
+    """,
+
     "auto_takes_the_initialisers_type": r"""
         /* C23's `auto`: with no type specifier it is not a storage
            class any more, it is a request to take the type from

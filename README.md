@@ -291,12 +291,13 @@ the whole list, rather than the beginning of one:
   * `localtime` **is** `gmtime`. The host services can say what time it is
     and cannot say what the local offset from UTC is, so the calendar is UTC
     and `tm_isdst` is 0 — not unknown, not in effect.
-  * The multibyte encoding **is UTF-8, always**. C leaves the execution
-    character set to the implementation and this one chose the source's:
-    `mbrtowc` decodes UTF-8, `MB_CUR_MAX` is 4, and two bytes of UTF-8 are
-    one wide character. glibc's `"C"` locale says one byte is one character
-    and answers −1 for the same input, so this is a choice rather than a
-    mistake — and `<locale.h>` has one locale to choose it in.
+  * The execution character set **is UTF-8, always**, and so is the
+    multibyte encoding. C leaves both to the implementation and this one
+    chose the source's: `"caf\u00e9"` is six bytes, `mbrtowc` decodes UTF-8,
+    `MB_CUR_MAX` is 4, and two bytes of UTF-8 are one wide character.
+    glibc's `"C"` locale says one byte is one character and answers −1 for
+    the same input, so this is a choice rather than a mistake — and
+    `<locale.h>` has one locale to choose it in.
 
 Everything else is implemented — VLAs, flexible array members, bit-fields,
 anonymous members, `_Generic`, designated initialisers, compound literals

@@ -56,12 +56,13 @@ compile time rather than failing to link.
   * `localtime` IS `gmtime`. The host services can say what time it is and
     cannot say what the local offset from UTC is, so the calendar is UTC and
     `tm_isdst` is 0 -- not unknown, not in effect.
-  * THE MULTIBYTE ENCODING IS UTF-8, ALWAYS. C leaves the execution
-    character set to the implementation and this one chose the source's, so
-    `mbrtowc` decodes UTF-8, `MB_CUR_MAX` is 4 and two bytes of UTF-8 are
-    one wide character. glibc's `"C"` locale calls each byte a character and
-    answers -1 for the same input; `<locale.h>` here has one locale, so
-    there is nowhere to put the other answer even if it were wanted.
+  * THE EXECUTION CHARACTER SET IS UTF-8, ALWAYS, and so is the multibyte
+    encoding. C leaves both to the implementation and this one chose the
+    source's: `"caf\u00e9"` is six bytes, `'é'` is the multi-character
+    constant its two make, `mbrtowc` decodes UTF-8 and `MB_CUR_MAX` is 4.
+    glibc's `"C"` locale calls each byte a character and answers -1 for the
+    same input; `<locale.h>` here has one locale, so there is nowhere to put
+    the other answer even if it were wanted.
 
 Everything else -- VLAs, flexible array members, bit-fields, anonymous
 members, `_Generic`, designated initialisers, compound literals (including at

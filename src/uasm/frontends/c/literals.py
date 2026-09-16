@@ -41,20 +41,32 @@ class LiteralError(ValueError):
 
 
 # ── escape sequences ────────────────────────────────────────────────────────
-def decode_escapes(body: str, *, max_value: int) -> list[int]:
+def decode_escapes(body: str, *, max_value: int,
+                   literal: list[bool] | None = None) -> list[int]:
     """The character values of `body`, escapes resolved.
 
     `max_value` is the widest value one element may hold, which is what makes
     `'\\x1ff'` an error in a narrow char constant and not in a `U'...'` one.
-    Values are CODE POINTS here; turning them into bytes is `encode` below,
-    because the two answers differ for every encoding except the narrow one.
+    IT APPLIES TO `\\x` AND OCTAL AND TO NOTHING ELSE, because those two are
+    the only escapes C defines as a VALUE the element has to hold: a `\\u`
+    names a character, and `"\\u0100"` in a narrow string is a perfectly good
+    two-byte one.
+
+    Values are CODE POINTS here; turning them into bytes is `encode` below.
+    `literal`, when given, receives one flag per value, True for the ones that
+    came from a `\\x` or octal escape -- which is the one distinction `encode`
+    cannot make afterwards and has to have: `"\\xe9"` is ONE byte and `"\\u00e9"`
+    is the two that UTF-8 spells that character with, and by the time the
+    values are numbers they look the same.
     """
     out: list[int] = []
+    flags = literal if literal is not None else []
     i, n = 0, len(body)
     while i < n:
         ch = body[i]
         if ch != "\\":
             out.append(ord(ch))
+            flags.append(False)
             i += 1
             continue
         i += 1
@@ -63,7 +75,9 @@ def decode_escapes(body: str, *, max_value: int) -> list[int]:
         e = body[i]
         if e in _SIMPLE_ESCAPES and e not in "01234567":
             out.append(_SIMPLE_ESCAPES[e])
+            flags.append(True)
             i += 1
+            _fits(out[-1], max_value, i)
         elif e in "01234567":
             # AT MOST THREE OCTAL DIGITS, and the limit is why `'\\0777'` is two
             # characters rather than one out-of-range one. A greedy scan reads
@@ -73,6 +87,8 @@ def decode_escapes(body: str, *, max_value: int) -> list[int]:
                 digits += body[i]
                 i += 1
             out.append(int(digits, 8))
+            flags.append(True)
+            _fits(out[-1], max_value, i)
         elif e == "x":
             i += 1
             start = i
@@ -85,6 +101,8 @@ def decode_escapes(body: str, *, max_value: int) -> list[int]:
             if i == start:
                 raise LiteralError("\\x needs at least one hex digit", start)
             out.append(int(body[start:i], 16))
+            flags.append(True)
+            _fits(out[-1], max_value, i)
         elif e in "uU":
             want = 4 if e == "u" else 8
             i += 1
@@ -92,15 +110,27 @@ def decode_escapes(body: str, *, max_value: int) -> list[int]:
             if len(digits) != want or any(c not in _HEX for c in digits):
                 raise LiteralError(
                     f"\\{e} needs exactly {want} hex digits", i)
-            out.append(int(digits, 16))
+            value = int(digits, 16)
+            # A UCN NAMES A CHARACTER, so what it has to fit in is Unicode
+            # and not the element: `encode` spells it in the execution
+            # encoding, which for a narrow string is UTF-8 and may be four
+            # bytes. A surrogate is not a character and C says so.
+            if value > 0x10FFFF or 0xD800 <= value <= 0xDFFF:
+                raise LiteralError(
+                    f"\\{e}{digits} is not a character", i)
+            out.append(value)
+            flags.append(False)
             i += want
         else:
             raise LiteralError(f"unknown escape sequence \\{e}", i - 1)
-        if out[-1] > max_value:
-            raise LiteralError(
-                f"escape sequence value {out[-1]:#x} does not fit in "
-                f"{max_value.bit_length()} bits", i)
     return out
+
+
+def _fits(value: int, max_value: int, at: int) -> None:
+    if value > max_value:
+        raise LiteralError(
+            f"escape sequence value {value:#x} does not fit in "
+            f"{max_value.bit_length()} bits", at)
 
 
 # ── character constants ─────────────────────────────────────────────────────
@@ -140,9 +170,31 @@ def decode_char(text: str) -> CharConst:
     prefix, body = split_prefix(text, "'")
     width, signed, _ = PREFIXES[prefix]
     bits = width * 8
-    values = decode_escapes(body, max_value=(1 << bits) - 1 if prefix else 0xFF)
+    literal: list[bool] = []
+    values = decode_escapes(body, max_value=(1 << bits) - 1 if prefix else 0xFF,
+                            literal=literal)
     if not values:
         raise LiteralError("empty character constant")
+    if prefix == "":
+        # A NARROW CHARACTER CONSTANT IS ITS BYTES IN THE EXECUTION SET, and
+        # that set is UTF-8: `'é'` is the two bytes 0xC3 0xA9 taken as a
+        # multi-character constant, which is what gcc answers and what a
+        # program comparing against `"é"[0]` needs. `'\\xe9'` is still the one
+        # byte it was written as. C calls the value implementation-defined,
+        # so the choice is this one's to make and it is made once, here.
+        data = encode(values, "", literal)
+        if len(data) == 1:
+            v = data[0]
+            # PLAIN CHAR IS SIGNED HERE, so `'\\xff'` is -1 and `'\\xff' < 0`
+            # is true -- as it is on x86 Linux with gcc, and as it is not on
+            # ARM. The choice is the target's; this frontend makes it once.
+            return CharConst(v - 0x100 if v > 0x7F else v, prefix, multi=False)
+        acc = 0
+        for b in data:
+            acc = ((acc << 8) | b) & 0xFFFFFFFF
+        if acc >= 1 << 31:
+            acc -= 1 << 32
+        return CharConst(acc, prefix, multi=True)
     if len(values) == 1:
         v = values[0]
         if prefix == "":
@@ -168,24 +220,28 @@ def decode_char(text: str) -> CharConst:
 
 
 # ── string literals ─────────────────────────────────────────────────────────
-def encode(values: list[int], prefix: str) -> bytes:
+def encode(values: list[int], prefix: str,
+           literal: list[bool] | None = None) -> bytes:
     """Code points to the bytes a string literal occupies.
 
-    Plain and `u8` strings are UTF-8, which is the only encoding under which
-    `"\\u00e9"` and a literal `é` in the source produce the same two bytes. The
-    wide forms are the target's native order, little-endian here.
+    Plain and `u8` strings are UTF-8, which is the execution character set
+    here -- so `"\\u00e9"` and a literal `é` in the source are the same two
+    bytes, and both differ from `"\\xe9"`, which is one. The wide forms are
+    the target's native order, little-endian here.
+
+    `literal` IS THE ONE THING THIS CANNOT WORK OUT FOR ITSELF. A HEX OR
+    OCTAL ESCAPE IS A BYTE and a character is a character, and by the time
+    both are numbers they look identical: 0xE9 is `\\xe9` or `é` depending on
+    how it was written. `decode_escapes` knows and says so, and without the
+    flags this falls back to treating every value as a character -- which is
+    right for the `u8` case and for anything a preprocessor asks about.
     """
     width, _, _ = PREFIXES[prefix]
     if prefix in ("", "u8"):
         out = bytearray()
-        for v in values:
-            # A HEX OR OCTAL ESCAPE IS A BYTE, not a code point: `"\\xff"` is
-            # one 0xFF byte and not the two bytes UTF-8 spells U+00FF with.
-            # Only a value that could not have come from an escape -- one
-            # above 0xFF -- is encoded, and those can only come from a `\\u`
-            # escape or from the source text itself.
-            if v <= 0xFF:
-                out.append(v)
+        for i, v in enumerate(values):
+            if literal is not None and i < len(literal) and literal[i]:
+                out.append(v & 0xFF)
             else:
                 out.extend(chr(v).encode("utf-8"))
         return bytes(out)
@@ -203,14 +259,17 @@ def encode(values: list[int], prefix: str) -> bytes:
     return b"".join(v.to_bytes(width, order) for v in values)
 
 
-def decode_string(text: str) -> tuple[str, list[int]]:
+def decode_string(text: str, literal: list[bool] | None = None
+                  ) -> tuple[str, list[int]]:
     """A string literal's prefix and code points, escapes resolved."""
     prefix, body = split_prefix(text, '"')
     width, _, _ = PREFIXES[prefix]
-    return prefix, decode_escapes(body, max_value=(1 << (width * 8)) - 1)
+    return prefix, decode_escapes(body, max_value=(1 << (width * 8)) - 1,
+                                  literal=literal)
 
 
-def join_strings(texts: list[str]) -> tuple[str, list[int]]:
+def join_strings(texts: list[str], literal: list[bool] | None = None
+                 ) -> tuple[str, list[int]]:
     """Phase 6: adjacent string literals are one string.
 
     THE PREFIX OF THE WHOLE is decided before any escape is decoded, which is
@@ -235,7 +294,8 @@ def join_strings(texts: list[str]) -> tuple[str, list[int]]:
     values: list[int] = []
     for t in texts:
         _, body = split_prefix(t, '"')
-        values.extend(decode_escapes(body, max_value=(1 << (width * 8)) - 1))
+        values.extend(decode_escapes(body, max_value=(1 << (width * 8)) - 1,
+                                     literal=literal))
     return prefix, values
 
 
