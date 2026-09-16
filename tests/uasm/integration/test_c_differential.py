@@ -1543,6 +1543,68 @@ PROGRAMS: dict[str, str] = {
         }
     """,
 
+    "type_generic_dispatch": r"""
+        #include <stdio.h>
+        #include <tgmath.h>
+        /* WHICH FUNCTION THE MACRO PICKED, asked of the answer's type
+           rather than its value: a `_Generic` over the result says `L`
+           exactly when the `l` form was called, which is the thing that
+           was wrong before and that no printed number would have shown.
+           Then the four that are EXACT in the wide type, where dispatching
+           to the `l` form is worth something rather than merely correct. */
+        #define KIND(x) _Generic((x), \
+            float: 'f', double: 'd', long double: 'L', \
+            float _Complex: 'F', double _Complex: 'D', \
+            long double _Complex: 'C', \
+            int: 'i', long: 'l', long long: 'q', default: '?')
+
+        int main(void) {
+            float f = 2.0f;
+            double d = 2.0;
+            long double ld = 2.0L;
+            float complex fz = 1.0f + 1.0fi;
+            double complex z = 3.0 + 4.0*I;
+            long double complex lz = 3.0L + 4.0L*I;
+            long double r;
+            int e, q;
+
+            printf("%c%c%c%c%c%c\n", KIND(sqrt(f)), KIND(sqrt(d)),
+                   KIND(sqrt(ld)), KIND(sqrt(fz)), KIND(sqrt(z)),
+                   KIND(sqrt(lz)));
+            printf("%c%c%c%c%c%c\n", KIND(fabs(f)), KIND(fabs(d)),
+                   KIND(fabs(ld)), KIND(fabs(fz)), KIND(fabs(z)),
+                   KIND(fabs(lz)));
+            printf("%c%c%c %c%c%c\n", KIND(pow(f, f)), KIND(pow(d, ld)),
+                   KIND(pow(z, lz)), KIND(atan2(f, f)), KIND(atan2(d, ld)),
+                   KIND(hypot(ld, ld)));
+            printf("%c%c%c %c%c%c\n", KIND(ldexp(f, 2)), KIND(ldexp(ld, 2)),
+                   KIND(frexp(ld, &e)), KIND(scalbn(ld, 2)),
+                   KIND(scalbln(ld, 2L)), KIND(remquo(ld, ld, &q)));
+            printf("%c%c%c %c%c%c\n", KIND(ilogb(ld)), KIND(lround(ld)),
+                   KIND(llround(ld)), KIND(nexttoward(f, ld)),
+                   KIND(fma(ld, ld, ld)), KIND(erf(ld)));
+            printf("%c%c%c %c%c%c\n", KIND(creal(lz)), KIND(cimag(fz)),
+                   KIND(carg(ld)), KIND(conj(lz)), KIND(cproj(fz)),
+                   KIND(tgamma(ld)));
+
+            printf("%.21Lg\n", (long double)sqrt(2.0L));
+            printf("%.21Lg\n", (long double)fabs(-3.14159265358979323846L));
+            printf("%.21Lg\n", (long double)copysign(1.0L / 3.0L, -1.0L));
+            printf("%.21Lg\n", (long double)ldexp(1.0L / 3.0L, 40));
+            /* `e` AND `q` ARE READ IN THE NEXT STATEMENT, not in the call
+               that sets them: the order of a `printf`'s arguments against
+               its own side effects is unspecified. */
+            r = frexp(1.0L / 3.0L, &e);
+            printf("%.21Lg %d\n", r, e);
+            r = remquo(7.0L, 3.0L, &q);
+            printf("%.21Lg %d\n", r, q);
+            printf("%.6f %.6f\n", (double)carg(z), (double)cabs(z));
+            printf("%d %ld %lld\n", (int)ilogb(1024.0L), lround(2.5L),
+                   llround(-2.5L));
+            return 0;
+        }
+    """,
+
     "the_rest_of_math_h": r"""
         #include <stdio.h>
         #include <math.h>
@@ -1562,6 +1624,147 @@ PROGRAMS: dict[str, str] = {
             printf("%.6f %.6f\n", (double)asinf(0.5f), (double)asinl(0.5L));
             printf("%.6f %.6f\n", (double)truncf(2.7f), (double)roundf(-2.5f));
             printf("%.6f %.6f\n", (double)fmaxf(1.0f, 2.0f), fmin(1.0, 2.0));
+            return 0;
+        }
+    """,
+
+    "long_double_complex_halves": r"""
+        /* A WIDE COMPLEX IS TWO WIDE HALVES, which going through
+           a `double` to build, conjugate or project would not be:
+           `CMPLXL(1e4000L, ...)` would be an infinity. The three
+           that are exact rather than approximate never narrow. */
+        #include <stdio.h>
+        #include <complex.h>
+        #include <math.h>
+        #include <float.h>
+
+        int main(void) {
+            long double complex a = CMPLXL(1e4000L, -1e4000L);
+            long double complex b = CMPLXL(LDBL_MAX, LDBL_TRUE_MIN);
+            long double complex c = CMPLXL(3.0L, 4.0L);
+            long double complex d = CMPLXL((long double)INFINITY, -0.0L);
+            double complex e = CMPLX(1.0, 2.0);
+            float complex f = CMPLXF(1.0f, 2.0f);
+
+            printf("%.21Lg %.21Lg\n", creall(a), cimagl(a));
+            printf("%d %d %d\n", (int)(creall(b) == LDBL_MAX),
+                   (int)(cimagl(b) == LDBL_TRUE_MIN), (int)!!signbit(cimagl(a)));
+            printf("%.21Lg %.21Lg\n", creall(conjl(a)), cimagl(conjl(a)));
+            printf("%.21Lg %.21Lg\n", creall(conjl(c)), cimagl(conjl(c)));
+            printf("%d %d\n", (int)(creall(cprojl(d)) == (long double)INFINITY),
+                   (int)!!signbit(cimagl(cprojl(d))));
+            printf("%.21Lg %.21Lg\n", creall(cprojl(c)), cimagl(cprojl(c)));
+            /* `cargl` IS A SERIES OVER `atan2`, so it is a double's precision in
+               the wider type -- fifteen digits of it, and not twenty-one. */
+            printf("%.21Lg %.15Lg\n", cabsl(c), cargl(c));
+            printf("%.17g %.17g %.9g %.9g\n", creal(e), cimag(e),
+                   (double)crealf(f), (double)cimagf(f));
+            printf("%zu %zu %zu\n", sizeof(long double complex),
+                   sizeof(double complex), sizeof(float complex));
+            printf("%.21Lg %.21Lg\n", creall(a + c), cimagl(a + c));
+            printf("%.21Lg %.21Lg\n", creall(c * c), cimagl(c * c));
+            printf("%.21Lg %.21Lg\n", creall(c / c), cimagl(c / c));
+            return 0;
+        }
+    """,
+
+    "long_double_exactly": r"""
+        /* THE OPERATIONS THAT ARE EXACT RATHER THAN ACCURATE, at
+           the ends of a range double has not got: rounding to an
+           integer, the exponent, the remainder, the step to the
+           next value. Each one computed in double instead would
+           be a DIFFERENT number rather than a less precise one,
+           which is why they are compared against x87 here. */
+        #include <stdio.h>
+        #include <math.h>
+        #include <float.h>
+
+        /* The ordinary range, printed to every digit the format holds. */
+        static const long double V[] = {
+            0.0L, -0.0L, 0.5L, -0.5L, 2.5L, -2.5L, 3.5L, -3.5L, 0.25L, -0.25L,
+            1.0L / 3.0L, -1.0L / 3.0L, 12345.678901234567890L,
+            -12345.678901234567890L, 9223372036854775807.0L,
+            4611686018427387904.5L,
+        };
+        #define N ((int)(sizeof V / sizeof V[0]))
+
+        /* And the ends of it, asked only questions with short answers: the exact
+           decimal of LDBL_TRUE_MIN has four thousand nine hundred and fifty-one
+           digits in it, and printing one is not what is being compared here. */
+        static const long double E[] = {
+            1e30L, -1e30L, 1e4000L, -1e4000L,
+            LDBL_MAX, -LDBL_MAX, LDBL_MIN, LDBL_TRUE_MIN, -LDBL_TRUE_MIN,
+        };
+        #define M ((int)(sizeof E / sizeof E[0]))
+
+        int main(void) {
+            int i, e, q;
+            long double r, w, up, down;
+
+            for (i = 0; i < N; i++) {
+                long double x = V[i];
+                printf("%.21Lg|%.21Lg|%.21Lg|%.21Lg|%.21Lg|%.21Lg\n",
+                       truncl(x), floorl(x), ceill(x), roundl(x), rintl(x),
+                       nearbyintl(x));
+                r = frexpl(x, &e);
+                printf("  frexp %.21Lg %d  ilogb %d  logb %.21Lg\n",
+                       r, e, ilogbl(x), logbl(x));
+                r = modfl(x, &w);
+                printf("  modf %.21Lg %.21Lg  scal %.21Lg %.21Lg\n",
+                       r, w, ldexpl(x, 3), ldexpl(x, -70));
+                up = nextafterl(x, 1e4000L);
+                down = nextafterl(x, -1e4000L);
+                printf("  next %d %d %d  sign %d\n", (int)(up > x), (int)(down < x),
+                       (int)(nextafterl(up, -1e4000L) == x), (int)!!signbit(x));
+                if (x != 0.0L) printf("  step %.21Lg %.21Lg\n", up, down);
+            }
+            for (i = 0; i < N; i++) {
+                long double x = V[i], y = V[(i * 7 + 3) % N];
+                printf("%d fmod %.21Lg rem %.21Lg\n", i, fmodl(x, y),
+                       remainderl(x, y));
+                r = remquol(x, y, &q);
+                /* WHAT `quo` HOLDS WHEN `y` IS ZERO IS UNSPECIFIED, so it is not
+                   something two implementations can be asked to agree on. */
+                printf("  remquo %.21Lg %d  max %.21Lg min %.21Lg dim %.21Lg\n",
+                       r, y == 0.0L ? 0 : q, fmaxl(x, y), fminl(x, y), fdiml(x, y));
+            }
+            for (i = 0; i < M; i++) {
+                long double x = E[i], f, g;
+                r = frexpl(x, &e);
+                up = nextafterl(x, 1e4000L);
+                down = nextafterl(x, -1e4000L);
+                f = fmodl(x, 3.0L);
+                g = remainderl(x, 3.0L);
+                printf("%d %d %d %d %d %d\n", ilogbl(x), e, (int)!!signbit(x),
+                       (int)(x == truncl(x)), (int)(floorl(x) == ceill(x)),
+                       (int)(ldexpl(r, e) == x));
+                printf("  %d %d %d %d %d\n", (int)(up > x), (int)(down < x),
+                       (int)(nextafterl(up, -1e4000L) == x),
+                       (int)(fabsl(f) < 3.0L), (int)(fabsl(g) <= 1.5L));
+                /* THE ANSWER ITSELF where it is a small number. A remainder of
+                   LDBL_TRUE_MIN is LDBL_TRUE_MIN, whose exact decimal is four
+                   thousand nine hundred and fifty-one digits long. */
+                if (fabsl(x) >= 1.0L) printf("  %.21Lg %.21Lg\n", f, g);
+            }
+            /* THE SMALLEST VALUE THE TYPE HOLDS, reached rather than printed. */
+            printf("%d %d %d\n",
+                   (int)(nextafterl(0.0L, 1.0L) == LDBL_TRUE_MIN),
+                   (int)(nextafterl(LDBL_TRUE_MIN, -1.0L) == 0.0L),
+                   (int)(nextafterl(LDBL_MAX, 1e4000L) == 1e4000L));
+            printf("%ld %ld %lld %lld\n", lroundl(2.5L), lrintl(2.5L),
+                   llroundl(-2.5L), llrintl(-2.5L));
+            printf("%ld %ld\n", lroundl(4611686018427387904.5L),
+                   lrintl(4611686018427387904.5L));
+            printf("%.9g %.9g %.9g\n", (double)nextafterf(1.0f, 2.0f),
+                   (double)nextafterf(1.0f, 0.0f), (double)nextafterf(0.0f, -1.0f));
+            printf("%.17g %.17g\n", nexttoward(1.0, 1.0L + LDBL_EPSILON),
+                   nexttoward(1.0, 1.0L));
+            printf("%.9g\n", (double)nexttowardf(1.0f, 1.0L + LDBL_EPSILON));
+            printf("%.17g %.17g %.17g\n", remainder(7.0, 2.0), remainder(5.0, 2.0),
+                   remainder(-7.0, 2.0));
+            printf("%.17g %.17g %.17g\n", fmod(-0.0, 3.0), trunc(-0.5),
+                   remquo(-7.0, 3.0, &q));
+            printf("%d\n", q);
             return 0;
         }
     """,

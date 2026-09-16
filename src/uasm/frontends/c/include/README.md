@@ -50,14 +50,26 @@ What is still absent says so rather than approximating:
 | absent | because |
 | --- | --- |
 | `rename` | the `file` group has ten operations and no rename; copy-and-remove is not one, and `bundled/os.py` refuses `os.rename` for the same reason |
-| `<threads.h>` | there is no way to create one |
 | `_Imaginary` | Annex G, which an implementation may leave out, as gcc does |
 
 `long double` is 80-bit extended, in software: `support.py`'s `ldouble` unit
 is the format written out in C, and the differential suite checks it against
-x87 hardware. The `l` functions in `<math.h>` compute in double and are
-accurate to about a double's precision — `sqrtl`, `fabsl`, `copysignl`,
-`ldexpl`, the four operators, the conversions, `strtold` and `%Lf` are exact.
+x87 hardware.
+
+The `l` **series** in `<math.h>` — `sinl`, `expl`, `powl` and the rest —
+compute in double and widen, so they answer to about a double's precision in
+the wider type. Everything that is exact **by definition** is exact, and is
+written on the sixteen bytes rather than through a double: `sqrtl`, the four
+operators, the conversions, `strtold` and `%Lf`, `frexpl`, `ilogbl`, `logbl`,
+`ldexpl`, `modfl`, `truncl` and the other four roundings, `fmodl`,
+`remainderl`, `remquol`, `nextafterl`, `fabsl`, `copysignl`, `fmaxl`,
+`fminl`. `floorl(1e30L)` computed in double would be a *different integer*
+rather than a less precise one, which is the difference between the two
+lists. `fmal` is the one that is not fused, and says so where it is written.
+
+`<tgmath.h>` dispatches to all of them: a `long double` argument picks the
+`l` function, which is what makes the paragraph above visible to a program
+that only ever writes `sqrt`.
 
 `localtime` is `gmtime`. The host services can say what time it is and cannot
 say what the local offset from UTC is — there is no `TZ` that would mean
@@ -77,15 +89,18 @@ Annex G's algorithms rather than the four-multiply formula, because what an
 infinity times a zero must produce is the hard part and libgcc does the same
 thing. `<tgmath.h>` dispatches to it.
 
-The one header that cannot exist at all is PRESENT AND REFUSES, with
-`#error` and a sentence saying what to write instead: a missing file is a
-mystery and a refusal is an answer.
+`<threads.h>` works where the target has threads: `thrd_create`, a mutex, a
+condition variable, `call_once` and `tss_t` over the `thread` group, and
+`_Thread_local` compiled onto the same keys. The C backend has them over
+pthreads and so does the reference interpreter, whose stack pointer is per
+thread for exactly this reason. `thrd_create` can still FAIL -- on Windows,
+and on any target without the group -- which C allows and a portable program
+checks.
 
-`<stdatomic.h>` is supported and `<threads.h>` is not, which is not a
-contradiction. With one thread a plain load is indivisible with respect to
-every other operation in the program, which is the whole of what
-`atomic_load` promises; the memory orders are accepted and ignored because
-there is no second observer for them to order anything against.
+`<stdatomic.h>` is the one to read carefully now that there can be two
+threads: its operations are ordinary loads and stores with the right names,
+which was right for one thread and is not a promise this library can keep
+for two. A program with real sharing wants a mutex.
 
 All thirty-one headers C23 requires are here, and a test includes every one
 of them alone and then all of them together -- a macro one defines can break

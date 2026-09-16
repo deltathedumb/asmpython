@@ -37,9 +37,14 @@ compile time rather than failing to link.
     arithmetic is `support.py`'s `ldouble` unit rather than the machine's,
     because the IR has `f32` and `f64` and a third width would have to be
     implemented by every backend, including the ones whose machine has no
-    such thing. The `l` functions in `<math.h>` compute in double and are
-    accurate to about a double's precision; `sqrtl`, `fabsl`, `copysignl`,
-    `ldexpl` and the conversions are exact.
+    such thing. The `l` SERIES in `<math.h>` -- `sinl`, `expl`, `powl` and
+    the rest -- compute in double and widen, so they answer to about a
+    double's precision in the wider type. EVERYTHING THAT IS EXACT BY
+    DEFINITION IS EXACT: `sqrtl`, the four operators, the conversions,
+    `strtold` and `%Lf`, `frexpl`, `ilogbl`, `logbl`, `ldexpl`, `modfl`,
+    the five roundings to an integer, `fmodl`, `remainderl`, `remquol`,
+    `nextafterl` and the rest, all on the sixteen bytes rather than through
+    a double that has neither the range nor the precision to hold them.
   * `_Imaginary` IS NOT THERE, which is conforming rather than missing:
     imaginary types are Annex G, supported only by an implementation that
     defines `__STDC_IEC_559_COMPLEX__`, and gcc has never had them either.

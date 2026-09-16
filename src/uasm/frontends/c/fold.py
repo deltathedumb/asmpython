@@ -223,7 +223,14 @@ def _unary(e: S.Unary) -> Const:
     if v is None or isinstance(v, Address):
         return None
     if e.op == "-":
-        return wrap(-v, e.type) if isinstance(v, int) else -v
+        if isinstance(v, int):
+            return wrap(-v, e.type)
+        if e.type.is_ldouble and isinstance(v, Fraction) and v == 0:
+            # `-0.0L` IS NOT `0.0L`, and a `Fraction` cannot say so: the
+            # exact form the wide type folds in has one zero and the format
+            # has two. `ldouble.py` reads this float back as the other one.
+            return -0.0
+        return -v
     if e.op == "~" and isinstance(v, complex):
         return complex(v.real, -v.imag)         # gcc's conjugate
     if e.op in ("__real__", "__imag__"):

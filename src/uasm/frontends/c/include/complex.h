@@ -59,10 +59,17 @@ static float _Complex __c_cmplxf(float __re, float __im)
     __u.__p[1] = __im;
     return __u.__z;
 }
+static long double _Complex __c_cmplxl(long double __re, long double __im)
+{
+    union { long double __p[2]; long double _Complex __z; } __u;
+    __u.__p[0] = __re;
+    __u.__p[1] = __im;
+    return __u.__z;
+}
 
 #define CMPLX(x, y) __c_cmplx((double)(x), (double)(y))
 #define CMPLXF(x, y) __c_cmplxf((float)(x), (float)(y))
-#define CMPLXL(x, y) __c_cmplx((double)(x), (double)(y))
+#define CMPLXL(x, y) __c_cmplxl((long double)(x), (long double)(y))
 
 /* ── the two halves ───────────────────────────────────────────────────── */
 static double creal(double _Complex __z) { return __real__ __z; }
@@ -77,17 +84,19 @@ static double _Complex conj(double _Complex __z)
 static float _Complex conjf(float _Complex __z)
 { return CMPLXF(crealf(__z), -cimagf(__z)); }
 static long double _Complex conjl(long double _Complex __z)
-{ return conj(__z); }
+{ return CMPLXL(creall(__z), -cimagl(__z)); }
 
 static double cabs(double _Complex __z) { return hypot(creal(__z), cimag(__z)); }
 static float cabsf(float _Complex __z)
 { return (float)hypot((double)crealf(__z), (double)cimagf(__z)); }
-static long double cabsl(long double _Complex __z) { return cabs(__z); }
+static long double cabsl(long double _Complex __z)
+{ return hypotl(creall(__z), cimagl(__z)); }
 
 static double carg(double _Complex __z) { return atan2(cimag(__z), creal(__z)); }
 static float cargf(float _Complex __z)
 { return (float)atan2((double)cimagf(__z), (double)crealf(__z)); }
-static long double cargl(long double _Complex __z) { return carg(__z); }
+static long double cargl(long double _Complex __z)
+{ return atan2l(cimagl(__z), creall(__z)); }
 
 /* THE PROJECTION ONTO THE RIEMANN SPHERE: every infinity is the same point,
    and C says which one -- `INFINITY + 0i` with the sign of the imaginary
@@ -105,7 +114,12 @@ static float _Complex cprojf(float _Complex __z)
     return __z;
 }
 static long double _Complex cprojl(long double _Complex __z)
-{ return cproj(__z); }
+{
+    if (isinf(creall(__z)) || isinf(cimagl(__z)))
+        return CMPLXL((long double)INFINITY,
+                      copysignl(0.0L, cimagl(__z)));
+    return __z;
+}
 
 /* ── the elementary functions ─────────────────────────────────────────── */
 static double _Complex cexp(double _Complex __z)
@@ -190,9 +204,13 @@ static double _Complex catanh(double _Complex __z)
     return 0.5 * clog((CMPLX(1.0, 0.0) + __z) / (CMPLX(1.0, 0.0) - __z));
 }
 
-/* THE `f` AND `l` FAMILIES. `long double` IS `double` here, so the `l` forms
-   are the plain ones; the `f` forms compute in double and round once, which
-   is a better answer than float arithmetic would give and costs nothing. */
+/* THE `f` AND `l` FAMILIES. The `f` forms compute in double and round once,
+   which is a better answer than float arithmetic would give and costs
+   nothing; the `l` forms compute in double too and WIDEN, because these are
+   series over `<math.h>`'s real functions and those are double's. The halves
+   are wide even so -- `creall` and `cimagl` of the result are 80-bit -- and
+   the ones that are exact rather than approximate, `CMPLXL`, `conjl` and
+   `cprojl`, never go through a double at all. */
 #define __C_CFLOAT1(NAME) \
     static float _Complex NAME##f(float _Complex __z) \
     { double _Complex __r = NAME(CMPLX(crealf(__z), cimagf(__z))); \

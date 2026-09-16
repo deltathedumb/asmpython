@@ -267,8 +267,10 @@ the whole list, rather than the beginning of one:
     and every printed digit agree with a hosted compiler; the arithmetic is
     a support unit written in C, because the IR has `f32` and `f64` and a
     third width would have to be implemented by every backend. The `l`
-    functions in `<math.h>` compute in double and are accurate to about a
-    double's precision; `sqrtl`, the conversions and the four operators are
+    SERIES in `<math.h>` compute in double and widen, so they answer to
+    about a double's precision; `sqrtl`, the conversions, the four
+    operators and everything exact by definition -- the roundings, the
+    exponent, the remainder, the step to the next value -- are
     exact.
   * `_Imaginary` is not there, which is conforming rather than missing:
     imaginary types are Annex G, supported only by an implementation that

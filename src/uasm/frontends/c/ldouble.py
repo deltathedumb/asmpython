@@ -62,6 +62,8 @@ def round_to(value) -> Fraction | float:
     if isinstance(value, float):
         if math.isinf(value) or math.isnan(value):
             return value
+        if _is_negative_zero(value):
+            return value
         value = Fraction(value)
     value = Fraction(value)
     if value == 0:
@@ -91,8 +93,21 @@ def _round_half_even(x: Fraction) -> int:
     return floor + (floor & 1)
 
 
+def _is_negative_zero(value) -> bool:
+    """NEGATIVE ZERO IS A FLOAT AND NOT A `Fraction`, which is the one place
+    the exact form is not enough: `Fraction(-0.0)` is `Fraction(0)`, and the
+    two are different `long double` objects with different sign bits. A
+    value that is a Python float and compares equal to zero with a negative
+    sign is that number; nothing else in this module is ever a float except
+    an infinity or a NaN."""
+    return (isinstance(value, float) and value == 0.0
+            and math.copysign(1.0, value) < 0)
+
+
 def encode(value) -> bytes:
     """The sixteen bytes a `long double` object holds."""
+    if _is_negative_zero(value):
+        return bytes(8) + (0x8000).to_bytes(2, "little") + bytes(6)
     if isinstance(value, float) and (math.isinf(value) or math.isnan(value)):
         if math.isnan(value):
             return (((1 << 63) | (1 << 62)).to_bytes(8, "little")

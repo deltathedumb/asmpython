@@ -154,6 +154,8 @@ static double ldexp(double __x, int __n)
 static double scalbn(double __x, int __n) { return ldexp(__x, __n); }
 static double scalbln(double __x, long __n) { return ldexp(__x, (int)__n); }
 static float scalbnf(float __x, int __n) { return (float)ldexp((double)__x, __n); }
+static float scalblnf(float __x, long __n)
+{ return (float)ldexp((double)__x, (int)__n); }
 static float ldexpf(float __x, int __n) { return (float)ldexp((double)__x, __n); }
 static float copysignf(float __x, float __y)
 { return (float)__builtin_copysign((double)__x, (double)__y); }
@@ -182,9 +184,10 @@ static double trunc(double __x)
 {
     if (__builtin_isnan(__x) || __builtin_isinf(__x)) return __x;
     if (__x >= 9.007199254740992e15 || __x <= -9.007199254740992e15) return __x;
-    /* Below 2^53 every integer is representable, so the cast is exact and the
-       sign survives -- `(double)(long long)` is the whole of it. */
-    return (double)(long)__x;
+    /* Below 2^53 every integer is representable, so the cast is exact; the
+       `copysign` is what carries the sign of a value that truncates to
+       zero, because `(long)(-0.5)` is `0` and `trunc(-0.5)` is `-0.0`. */
+    return __builtin_copysign((double)(long)__x, __x);
 }
 static double floor(double __x)
 {
@@ -227,42 +230,60 @@ static double modf(double __x, double *__ip)
     double t = trunc(__x);
     *__ip = t;
     if (__builtin_isinf(__x)) return __builtin_copysign(0.0, __x);
+    /* THE ZERO KEEPS x's SIGN, which the subtraction does not: a value with
+       no fractional part gives `x - x`, and that is `+0.0` for a negative
+       x in every rounding mode but one. */
+    if (__x == t) return __builtin_copysign(0.0, __x);
     return __x - t;
 }
 
+/* REPEATED SUBTRACTION IN BINARY, not `x - trunc(x/y)*y`: the latter loses
+   every bit of the answer once x/y exceeds 2^53, and all three of `fmod`,
+   `remainder` and `remquo` are exact by definition. The quotient's low bits
+   come out of the same loop -- one per halving, most significant first --
+   which is what `remquo` is asked for and what tells `remainder` whether a
+   value exactly half way between two multiples rounds up or down. */
+static double __c_divrem(double __x, double __y, unsigned long *__q)
+{
+    double r = fabs(__x), b = fabs(__y), scaled;
+    unsigned long k = 0;
+    int e1, e2, i;
+    if (r < b) { *__q = 0; return r; }
+    frexp(r, &e1);
+    scaled = ldexp(frexp(b, &e2), e1);
+    for (i = e1; i >= e2; i--) {
+        k <<= 1;
+        if (r >= scaled) { r -= scaled; k |= 1; }
+        scaled *= 0.5;
+    }
+    *__q = k;
+    return r;
+}
 static double fmod(double __x, double __y)
 {
+    unsigned long k;
     double r;
-    int neg;
     if (__builtin_isnan(__x) || __builtin_isnan(__y) || __y == 0.0
         || __builtin_isinf(__x)) return __builtin_nan("");
-    if (__builtin_isinf(__y)) return __x;
-    neg = __x < 0.0;
-    r = fabs(__x);
-    __y = fabs(__y);
-    if (r < __y) return __x;
-    {
-        /* REPEATED SUBTRACTION IN BINARY, not `x - trunc(x/y)*y`: the latter
-           loses every bit of the answer once x/y exceeds 2^53, and `fmod` is
-           exact by definition. */
-        int e1, e2, i;
-        double m1 = frexp(r, &e1), m2 = frexp(__y, &e2);
-        double scaled = ldexp(m2, e1);
-        (void)m1;
-        for (i = e1; i >= e2; i--) {
-            if (r >= scaled) r -= scaled;
-            scaled *= 0.5;
-        }
-    }
-    return neg ? -r : r;
+    if (__builtin_isinf(__y) || __x == 0.0) return __x;
+    r = __c_divrem(__x, __y, &k);
+    return __builtin_signbit(__x) ? -r : r;
 }
+/* `r + r` AND NOT `b * 0.5`: doubling is exact until it overflows, and when
+   it does, the comparison it was for has already been decided the right
+   way. A remainder exactly half of `y` rounds to the EVEN quotient, which
+   is why the parity comes back from the loop rather than from `x / y`. */
 static double remainder(double __x, double __y)
 {
-    double r = fmod(__x, __y);
-    double h = fabs(__y) * 0.5;
-    if (r > h) r -= fabs(__y);
-    else if (r < -h) r += fabs(__y);
-    return r;
+    unsigned long k;
+    double r, b;
+    if (__builtin_isnan(__x) || __builtin_isnan(__y) || __y == 0.0
+        || __builtin_isinf(__x)) return __builtin_nan("");
+    if (__builtin_isinf(__y) || __x == 0.0) return __x;
+    b = fabs(__y);
+    r = __c_divrem(__x, __y, &k);
+    if (r + r > b || (r + r == b && (k & 1))) r -= b;
+    return __builtin_signbit(__x) ? -r : r;
 }
 
 static double fmin(double __a, double __b)
@@ -272,7 +293,8 @@ static double fmax(double __a, double __b)
 { if (__builtin_isnan(__a)) return __b; if (__builtin_isnan(__b)) return __a;
   return __a > __b ? __a : __b; }
 static double fdim(double __a, double __b)
-{ return __a > __b ? __a - __b : 0.0; }
+{ if (__builtin_isnan(__a) || __builtin_isnan(__b)) return __builtin_nan("");
+  return __a > __b ? __a - __b : 0.0; }
 static double fma(double __a, double __b, double __c)
 { return __a * __b + __c; }
 
@@ -544,9 +566,11 @@ static double atanh(double __x)
 /* ── the `f` and `l` families ─────────────────────────────────────────── */
 /* COMPUTED IN DOUBLE AND NARROWED, which is what `FLT_EVAL_METHOD == 0`
    permits and what makes the `f` forms as accurate as the double ones
-   rather than half as accurate. `long double` IS `double` here, so an `l`
-   form is the plain one under another name -- a name a program may still
-   take the address of, which is why these are functions and not macros.
+   rather than half as accurate. An `l` form computes in double too and
+   WIDENS: `long double` here is 80-bit and these series are not, so the
+   answer is a double's worth of precision in the wider type rather than a
+   wider answer. `sqrtl`, `fabsl`, `copysignl`, `ldexpl` and the conversions
+   below are the exceptions, and they are exact.
 
    WRITTEN BY A MACRO because there are ninety of them and a hand-written
    list is ninety chances to call `cosh` from `sinhf`. That really is the
@@ -560,6 +584,17 @@ static double atanh(double __x)
     { return (float)NAME((double)__x, (double)__y); } \
     static long double NAME##l(long double __x, long double __y) \
     { return NAME((double)__x, (double)__y); }
+
+/* AND THE SAME TWO WITHOUT THE `l`, for the names whose wide form is EXACT
+   and is written out below: rounding to an integer, the remainder, the two
+   that pick one of their arguments. A double cannot stand in for any of
+   them, and a macro that quietly wrote one would be the whole bug. */
+#define __C_MATHF1(NAME) \
+    static float NAME##f(float __x) { return (float)NAME((double)__x); }
+
+#define __C_MATHF2(NAME) \
+    static float NAME##f(float __x, float __y) \
+    { return (float)NAME((double)__x, (double)__y); }
 
 __C_MATH1(sin)
 __C_MATH1(cos)
@@ -581,19 +616,19 @@ __C_MATH1(log2)
 __C_MATH1(log10)
 __C_MATH1(log1p)
 __C_MATH1(cbrt)
-__C_MATH1(floor)
-__C_MATH1(ceil)
-__C_MATH1(trunc)
-__C_MATH1(round)
-__C_MATH1(rint)
-__C_MATH1(nearbyint)
-__C_MATH2(fmod)
+__C_MATHF1(floor)
+__C_MATHF1(ceil)
+__C_MATHF1(trunc)
+__C_MATHF1(round)
+__C_MATHF1(rint)
+__C_MATHF1(nearbyint)
+__C_MATHF2(fmod)
 __C_MATH2(atan2)
 __C_MATH2(hypot)
-__C_MATH2(fmin)
-__C_MATH2(fmax)
-__C_MATH2(fdim)
-__C_MATH2(remainder)
+__C_MATHF2(fmin)
+__C_MATHF2(fmax)
+__C_MATHF2(fdim)
+__C_MATHF2(remainder)
 
 /* THE ONES THE MACRO CANNOT WRITE, because their signatures are not the two
    shapes above: a different return type, a pointer, or a third argument. */
@@ -653,22 +688,307 @@ static long double copysignl(long double __x, long double __y)
 }
 /* SCALING BY A POWER OF TWO IS EXPONENT ARITHMETIC, and doing it through
    double would overflow for a value this type can hold and double cannot.
-   The multiply-by-two loop is the honest way to say it with the arithmetic
-   this library has; the count is bounded by the exponent range. */
+   The exponent field takes the whole step in one; only the way DOWN into
+   the subnormals is a loop, because that is where bits are lost and
+   halving one at a time is the honest way to lose exactly the ones the
+   format loses. It cannot run more than 64 times before the value is zero. */
 static long double ldexpl(long double __x, int __n)
 {
-    long double __r = __x;
+    union __ld_bits __u;
+    long double __r;
+    int __e;
     if (!__ld_isfinite(__x) || __x == 0.0L) return __x;
-    while (__n > 0) { __r *= 2.0L; __n--; if (__ld_isinf(__r)) return __r; }
-    while (__n < 0) { __r *= 0.5L; __n++; if (__r == 0.0L) return __r; }
-    return __r;
+    __u.__v = __x;
+    if ((__u.__r.__se & 0x7fff) == 0) {          /* subnormal: normalise */
+        __u.__v = __x * 18446744073709551616.0L; /* 2^64, and exact */
+        __n -= 64;
+    }
+    __e = (int)(__u.__r.__se & 0x7fff) + __n;
+    if (__e >= 0x7fff)
+        return __ld_signbit(__x) ? -__builtin_inf() : __builtin_inf();
+    if (__e <= 0) {
+        __u.__r.__se = (unsigned short)((__u.__r.__se & 0x8000) | 1);
+        __r = __u.__v;
+        for (__n = 1 - __e; __n > 0; __n--) {
+            __r *= 0.5L;
+            if (__r == 0.0L) break;
+        }
+        return __r;
+    }
+    __u.__r.__se = (unsigned short)((__u.__r.__se & 0x8000) | (unsigned)__e);
+    return __u.__v;
 }
 static long double scalbnl(long double __x, int __n) { return ldexpl(__x, __n); }
 static long double scalblnl(long double __x, long __n)
 { return ldexpl(__x, (int)__n); }
-static float frexpf(float __x, int *__e) { return (float)frexp((double)__x, __e); }
+
+/* ── the wide type, exactly ───────────────────────────────────────────── */
+/* WHAT FOLLOWS IS NOT AN APPROXIMATION AND MUST NOT BE COMPUTED IN DOUBLE.
+   A series may answer to a double's precision and still be a good answer;
+   `floorl(1e30L)` computed in double is a DIFFERENT INTEGER, and `ilogbl`
+   of `LDBL_MAX` is the answer for infinity. Every function below is integer
+   arithmetic on the encoding -- which, unlike a double's, hands over the
+   whole 64-bit significand with its leading bit in it -- so each is exact
+   for every value the type holds, including the ones double has not got. */
+static int __ld_biased(long double __x)
+{ union __ld_bits __u; __u.__v = __x; return (int)(__u.__r.__se & 0x7fff); }
+static unsigned long __ld_frac(long double __x)
+{ union __ld_bits __u; __u.__v = __x; return __u.__r.__m; }
+static long double __ld_make(int __sign, int __exp, unsigned long __m)
+{
+    union __ld_bits __u;
+    __u.__v = 0.0L;                 /* the padding too, before the halves */
+    __u.__r.__m = __m;
+    __u.__r.__se = (unsigned short)((__sign ? 0x8000 : 0) | (__exp & 0x7fff));
+    return __u.__v;
+}
+
 static long double frexpl(long double __x, int *__e)
-{ return frexp((double)__x, __e); }
+{
+    int __b, __n = 0;
+    if (__x == 0.0L || !__ld_isfinite(__x)) { *__e = 0; return __x; }
+    __b = __ld_biased(__x);
+    if (__b == 0) {                              /* subnormal: 2^64 is exact */
+        __x *= 18446744073709551616.0L;
+        __b = __ld_biased(__x);
+        __n = -64;
+    }
+    *__e = __b - 16382 + __n;
+    return __ld_make(__ld_signbit(__x), 16382, __ld_frac(__x));
+}
+
+static int ilogbl(long double __x)
+{
+    int __b;
+    if (__x == 0.0L) return -2147483647 - 1;     /* FP_ILOGB0 */
+    if (!__ld_isfinite(__x)) return 2147483647;  /* FP_ILOGBNAN, and inf */
+    __b = __ld_biased(__x);
+    if (__b == 0) {
+        __x *= 18446744073709551616.0L;
+        return __ld_biased(__x) - 16383 - 64;
+    }
+    return __b - 16383;
+}
+static long double logbl(long double __x)
+{
+    if (__x == 0.0L) return -__builtin_inf();
+    if (__ld_isnan(__x)) return __x;
+    if (__ld_isinf(__x)) return __builtin_inf();
+    return (long double)ilogbl(__x);
+}
+
+/* TO AN INTEGRAL VALUE, in the five ways C asks for: 0 toward zero, 1 down,
+   2 up, 3 to nearest with halves away from zero, 4 to nearest with halves
+   to even. One function because they differ in one line, and that line is
+   easier to compare when it is the only difference. */
+static long double __ld_integral(long double __x, int __mode)
+{
+    int __s, __e, __n, __sh, __up;
+    unsigned long __m, __keep, __frac, __half, __bit;
+    if (!__ld_isfinite(__x) || __x == 0.0L) return __x;
+    __s = __ld_signbit(__x);
+    __e = __ld_biased(__x);
+    __m = __ld_frac(__x);
+    __n = __e - 16383;
+    if (__n >= 63) return __x;                   /* already an integer */
+    if (__n < 0) {                               /* |x| < 1: +-1 or +-0 */
+        if (__mode == 1) __up = __s;
+        else if (__mode == 2) __up = !__s;
+        else if (__mode == 3) __up = (__n == -1);
+        else if (__mode == 4)
+            __up = (__n == -1) && (__m != ((unsigned long)1 << 63));
+        else __up = 0;
+        if (__up) return __s ? -1.0L : 1.0L;
+        return __ld_make(__s, 0, 0);
+    }
+    __sh = 63 - __n;
+    __bit = (unsigned long)1 << __sh;
+    __keep = __m & ~(__bit - 1);
+    __frac = __m & (__bit - 1);
+    if (__frac == 0) return __x;
+    __half = __bit >> 1;
+    if (__mode == 1) __up = __s;
+    else if (__mode == 2) __up = !__s;
+    else if (__mode == 3) __up = (__frac >= __half);
+    else if (__mode == 4)
+        __up = (__frac > __half)
+            || (__frac == __half && ((__keep >> __sh) & 1));
+    else __up = 0;
+    if (__up) {
+        __keep += __bit;
+        if (__keep == 0) {                       /* carried off the top */
+            __keep = (unsigned long)1 << 63;
+            __e++;
+        }
+    }
+    return __ld_make(__s, __e, __keep);
+}
+static long double truncl(long double __x)     { return __ld_integral(__x, 0); }
+static long double floorl(long double __x)     { return __ld_integral(__x, 1); }
+static long double ceill(long double __x)      { return __ld_integral(__x, 2); }
+static long double roundl(long double __x)     { return __ld_integral(__x, 3); }
+static long double rintl(long double __x)      { return __ld_integral(__x, 4); }
+static long double nearbyintl(long double __x) { return rintl(__x); }
+
+static long double modfl(long double __x, long double *__ip)
+{
+    /* THE POINTER IS THE POINT: `long double *` and `double *` are
+       different types, and the whole part of a value outside double's
+       range has to survive being written through this one. */
+    long double __t = truncl(__x);
+    *__ip = __t;
+    if (__ld_isnan(__x)) return __x;
+    /* THE ZERO KEEPS x's SIGN, which `x - x` does not. */
+    if (__ld_isinf(__x) || __x == __t)
+        return __ld_make(__ld_signbit(__x), 0, 0);
+    return __x - __t;
+}
+
+/* THE NEXT REPRESENTABLE VALUE, and NOT by incrementing the bit pattern:
+   that trick works for a double and not for this format, whose leading
+   significand bit is stored rather than implied -- the pattern after the
+   largest subnormal is a normal number with no leading bit, which is not a
+   number at all. The two halves are stepped separately instead. */
+static long double nextafterl(long double __x, long double __y)
+{
+    int __s, __e;
+    unsigned long __m;
+    if (__ld_isnan(__x) || __ld_isnan(__y)) return __x + __y;
+    if (__x == __y) return __y;
+    if (__x == 0.0L) return __ld_make(__ld_signbit(__y), 0, 1);
+    __s = __ld_signbit(__x);
+    __e = __ld_biased(__x);
+    __m = __ld_frac(__x);
+    if ((__x < __y) == (__s == 0)) {             /* away from zero */
+        if (__e == 0x7fff) return __x;           /* already infinite */
+        __m++;
+        if (__m == 0) { __m = (unsigned long)1 << 63; __e++; }
+        else if (__e == 0 && (__m >> 63)) __e = 1;  /* the first normal */
+    } else {                                     /* toward zero */
+        /* CROSSING DOWN A BINADE HALVES THE SPACING, so the step below the
+           smallest significand is a FULL one at the smaller exponent --
+           2^64-1 and not 2^64-2, which would be a step of the binade the
+           value is leaving. Infinity's neighbour is the same pattern. */
+        if (__e == 0x7fff) { __e = 0x7ffe; __m = ~(unsigned long)0; }
+        else if (__m != ((unsigned long)1 << 63)) __m--;
+        else if (__e > 1) { __e--; __m = ~(unsigned long)0; }
+        else { __e = 0; __m = ((unsigned long)1 << 63) - 1; }
+    }
+    return __ld_make(__s, __e, __m);
+}
+static long double nexttowardl(long double __x, long double __y)
+{ return nextafterl(__x, __y); }
+
+/* THE EXACT REMAINDER, and the low bits of the quotient with it: one loop
+   under `fmodl`, `remainderl` and `remquol`, because `x - truncl(x / y) * y`
+   loses every bit of the answer once the quotient passes 2^64 and all three
+   of them are exact by definition.
+
+   ON THE SIGNIFICANDS AS INTEGERS, which is the whole reason this format is
+   pleasant to work with: both are 64-bit integers with the leading bit in
+   them, so long division is shift-and-subtract in `unsigned long` and the
+   arithmetic below never calls the software floating point at all. The
+   quotient's low three bits are all anybody asks for, and a bit above them
+   cannot carry into them, so the ones that fall off the top are gone with
+   nothing lost. */
+static unsigned long __ld_sig(long double __x)
+{
+    if (__ld_biased(__x) == 0) __x *= 18446744073709551616.0L;
+    return __ld_frac(__x);
+}
+static long double __ld_divrem(long double __x, long double __y,
+                               unsigned long *__q)
+{
+    long double __a = fabsl(__x), __b = fabsl(__y);
+    unsigned long __mx, __my, __k = 0;
+    int __d, __i;
+    if (__a < __b) { *__q = 0; return __a; }
+    __d = ilogbl(__a) - ilogbl(__b);
+    __mx = __ld_sig(__a);
+    __my = __ld_sig(__b);
+    /* `mx < 2^64` and `my >= 2^63`, so one subtraction is the whole of the
+       first quotient digit and `mx < my` holds from here on. */
+    if (__mx >= __my) { __mx -= __my; __k = 1; }
+    for (__i = 0; __i < __d; __i++) {
+        __k <<= 1;
+        if (__mx >> 63) {
+            /* doubling would leave the 64 bits; the subtraction brings it
+               back inside them, and the wrap is exactly the carry out. */
+            __mx = (__mx << 1) - __my;
+            __k |= 1;
+        } else {
+            __mx <<= 1;
+            if (__mx >= __my) { __mx -= __my; __k |= 1; }
+        }
+    }
+    *__q = __k;
+    return ldexpl((long double)__mx, ilogbl(__b) - 63);
+}
+static long double fmodl(long double __x, long double __y)
+{
+    unsigned long __k;
+    long double __r;
+    if (__ld_isnan(__x) || __ld_isnan(__y) || __ld_isinf(__x) || __y == 0.0L)
+        return __builtin_nan("");
+    if (__ld_isinf(__y) || __x == 0.0L) return __x;
+    __r = __ld_divrem(__x, __y, &__k);
+    return __ld_signbit(__x) ? -__r : __r;
+}
+/* `r + r` AND NOT `b * 0.5`: doubling is exact until it overflows, and when
+   it does the comparison it was for is already decided the right way. */
+static long double remainderl(long double __x, long double __y)
+{
+    unsigned long __k;
+    long double __r, __b;
+    if (__ld_isnan(__x) || __ld_isnan(__y) || __ld_isinf(__x) || __y == 0.0L)
+        return __builtin_nan("");
+    if (__ld_isinf(__y) || __x == 0.0L) return __x;
+    __b = fabsl(__y);
+    __r = __ld_divrem(__x, __y, &__k);
+    if (__r + __r > __b || (__r + __r == __b && (__k & 1))) __r -= __b;
+    return __ld_signbit(__x) ? -__r : __r;
+}
+static long double remquol(long double __x, long double __y, int *__quo)
+{
+    unsigned long __k = 0;
+    long double __r, __b;
+    if (__ld_isnan(__x) || __ld_isnan(__y) || __ld_isinf(__x) || __y == 0.0L) {
+        if (__quo) *__quo = 0;
+        return __builtin_nan("");
+    }
+    if (__ld_isinf(__y) || __x == 0.0L) {
+        if (__quo) *__quo = 0;
+        return __x;
+    }
+    __b = fabsl(__y);
+    __r = __ld_divrem(__x, __y, &__k);
+    if (__r + __r > __b || (__r + __r == __b && (__k & 1))) { __r -= __b; __k++; }
+    if (__quo) {
+        int __n = (int)(__k & 7);
+        *__quo = (__ld_signbit(__x) != __ld_signbit(__y)) ? -__n : __n;
+    }
+    return __ld_signbit(__x) ? -__r : __r;
+}
+
+static long double fminl(long double __a, long double __b)
+{ if (__ld_isnan(__a)) return __b; if (__ld_isnan(__b)) return __a;
+  return __a < __b ? __a : __b; }
+static long double fmaxl(long double __a, long double __b)
+{ if (__ld_isnan(__a)) return __b; if (__ld_isnan(__b)) return __a;
+  return __a > __b ? __a : __b; }
+static long double fdiml(long double __a, long double __b)
+{ if (__ld_isnan(__a) || __ld_isnan(__b)) return __builtin_nan("");
+  return __a > __b ? __a - __b : 0.0L; }
+
+/* `fmal` IS THE ONE THAT IS NOT FUSED, and says so: a single rounding of
+   a*b+c needs the product's whole 128-bit significand, which this library
+   has no way to hold. It is computed in the WIDE type even so, which is
+   what makes it better than the double it used to be. */
+static long double fmal(long double __a, long double __b, long double __c)
+{ return __a * __b + __c; }
+
+/* ── the float forms whose shape the macro could not write ────────────── */
+static float frexpf(float __x, int *__e) { return (float)frexp((double)__x, __e); }
 static float modff(float __x, float *__ip)
 {
     double __whole;
@@ -676,30 +996,19 @@ static float modff(float __x, float *__ip)
     *__ip = (float)__whole;
     return __frac;
 }
-static long double modfl(long double __x, long double *__ip)
-{
-    /* THE CAST IS THE POINT: `long double *` and `double *` are different
-       types even where the two are the same size, and a compiler that let
-       them be interchanged silently would be hiding the one place this
-       equivalence is visible. */
-    double __whole;
-    long double __frac = modf((double)__x, &__whole);
-    *__ip = __whole;
-    return __frac;
-}
 static float fmaf(float __a, float __b, float __c)
 { return (float)fma((double)__a, (double)__b, (double)__c); }
-static long double fmal(long double __a, long double __b, long double __c)
-{ return fma((double)__a, (double)__b, (double)__c); }
 static long lroundf(float __x) { return lround((double)__x); }
-static long lroundl(long double __x) { return lround((double)__x); }
 static long lrintf(float __x) { return lrint((double)__x); }
-static long lrintl(long double __x) { return lrint((double)__x); }
 static long long llroundf(float __x) { return llround((double)__x); }
-static long long llroundl(long double __x) { return llround((double)__x); }
 static long long llrint(double __x) { return (long long)lrint(__x); }
 static long long llrintf(float __x) { return llrint((double)__x); }
-static long long llrintl(long double __x) { return llrint((double)__x); }
+/* AND THE WIDE ONES THROUGH THE EXACT ROUNDING ABOVE, not through double:
+   `lroundl` of 2^62 has an answer and `(long)round((double)x)` is not it. */
+static long lroundl(long double __x) { return (long)roundl(__x); }
+static long lrintl(long double __x) { return (long)rintl(__x); }
+static long long llroundl(long double __x) { return (long long)roundl(__x); }
+static long long llrintl(long double __x) { return (long long)rintl(__x); }
 
 /* THE LAST FEW C23 NAMES, which had nothing to be written in terms of. */
 static double nan(const char *__tag) { (void)__tag; return __builtin_nan(""); }
@@ -715,7 +1024,6 @@ static int ilogb(double __x)
     return __e - 1;
 }
 static int ilogbf(float __x) { return ilogb((double)__x); }
-static int ilogbl(long double __x) { return ilogb((double)__x); }
 static double logb(double __x)
 {
     if (__x == 0.0) return -__builtin_inf();
@@ -724,7 +1032,6 @@ static double logb(double __x)
     return (double)ilogb(__x);
 }
 static float logbf(float __x) { return (float)logb((double)__x); }
-static long double logbl(long double __x) { return logb((double)__x); }
 
 /* THE STEP TO THE NEXT REPRESENTABLE VALUE, done on the bits: the doubles
    in increasing order are their bit patterns in increasing order, read as
@@ -744,33 +1051,60 @@ static double nextafter(double __x, double __y)
     return __a.__d;
 }
 static float nextafterf(float __x, float __y)
-{ return (float)nextafter((double)__x, (double)__y); }
-static long double nextafterl(long double __x, long double __y)
-{ return nextafter((double)__x, (double)__y); }
+{
+    union { float __f; unsigned int __u; } __a;
+    if (__builtin_isnan(__x) || __builtin_isnan(__y)) return __x + __y;
+    if (__x == __y) return __y;
+    if (__x == 0.0f) {
+        __a.__u = 1;
+        return __y > 0.0f ? __a.__f : -__a.__f;
+    }
+    __a.__f = __x;
+    if ((__x < __y) == (__x > 0.0f)) __a.__u++;
+    else __a.__u--;
+    return __a.__f;
+}
 static double nexttoward(double __x, long double __y)
-{ return nextafter(__x, (double)__y); }
+{
+    long double __lx = (long double)__x;
+    if (__builtin_isnan(__x) || __ld_isnan(__y)) return __x + (double)__y;
+    if (__lx == __y) return (double)__y;
+    return nextafter(__x, __lx < __y ? __builtin_inf() : -__builtin_inf());
+}
 static float nexttowardf(float __x, long double __y)
-{ return (float)nextafter((double)__x, (double)__y); }
-static long double nexttowardl(long double __x, long double __y)
-{ return nextafter((double)__x, (double)__y); }
+{
+    long double __lx = (long double)__x;
+    if (__builtin_isnan(__x) || __ld_isnan(__y)) return __x + (float)__y;
+    if (__lx == __y) return (float)__y;
+    return nextafterf(__x, __lx < __y ? __builtin_inff() : -__builtin_inff());
+}
 
 static double remquo(double __x, double __y, int *__quo)
 {
-    double __r = remainder(__x, __y);
+    unsigned long __k = 0;
+    double __r, __b;
     /* THE LOW BITS OF THE QUOTIENT, which is all C promises: at least three
        of them, with the sign of x/y. */
-    if (__quo) {
-        double __q = (__x - __r) / __y;
-        long __n = (long)__q;
-        *__quo = (int)(__n & 7) * ((__q < 0.0) ? -1 : 1);
-        if (__q < 0.0) *__quo = -(int)((-__n) & 7);
+    if (__builtin_isnan(__x) || __builtin_isnan(__y) || __y == 0.0
+        || __builtin_isinf(__x)) {
+        if (__quo) *__quo = 0;
+        return __builtin_nan("");
     }
-    return __r;
+    if (__builtin_isinf(__y) || __x == 0.0) {
+        if (__quo) *__quo = 0;
+        return __x;
+    }
+    __b = fabs(__y);
+    __r = __c_divrem(__x, __y, &__k);
+    if (__r + __r > __b || (__r + __r == __b && (__k & 1))) { __r -= __b; __k++; }
+    if (__quo) {
+        int __n = (int)(__k & 7);
+        *__quo = (__builtin_signbit(__x) != __builtin_signbit(__y)) ? -__n : __n;
+    }
+    return __builtin_signbit(__x) ? -__r : __r;
 }
 static float remquof(float __x, float __y, int *__quo)
 { return (float)remquo((double)__x, (double)__y, __quo); }
-static long double remquol(long double __x, long double __y, int *__quo)
-{ return remquo((double)__x, (double)__y, __quo); }
 
 /* `erf` AND `tgamma`, BY SERIES. Accurate to about ten significant figures,
    which is enough for what they are used for and is said rather than
