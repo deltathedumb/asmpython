@@ -39,10 +39,13 @@ where CPython and the dynamic path print `0`. See `_unify_all` in
 from __future__ import annotations
 
 import ast
+import copy
+from pathlib import Path
 
 from ...diagnostics import DiagnosticSink, SourceFile, error, warning
-from ...frontend import Frontend, register
+from ...frontend import BuildContext, Frontend, register
 from ...ir import Module
+from ...options import Option
 from .analysis import Analyzer, span_of
 from . import cffi
 from .bundled import _bound_locally, splice
@@ -184,8 +187,116 @@ class PythonFrontend(Frontend):
     extensions = (".py",)
     description = "statically-annotated Python subset"
 
+    #: THE FLAGS THIS FRONTEND TAKES, and no longer the driver's. Every one
+    #: of them is about resolving Python names or compiling Python: a search
+    #: path, an interpreter to borrow packages from, a declaration of what
+    #: may be imported from a shared library. The driver used to carry all of
+    #: them, which meant a second frontend would inherit `--host-python` and
+    #: have nothing to do with it.
+    options = (
+        Option("import-path", metavar="DIR", repeatable=True,
+               help="where to find the program's own modules; the source's "
+                    "own directory is searched too unless -P"),
+        # CPYTHON'S OWN FLAG, spelled the same. `-P` is what a program uses
+        # when a file beside it is named after a module it imports and it
+        # wants the real one.
+        Option("safe-path", switch=True, short="P",
+               help="do not search the source's own directory, "
+                    "as CPython's -P does"),
+        # THE HOST INSTALLATION'S PACKAGES. Searched LAST, after the bundled
+        # standard library, the source's directory and every --import-path,
+        # so nothing that resolved before this flag existed resolves
+        # differently because of it. See `hostlib.py`.
+        Option("no-site-packages", switch=True,
+               help="do not search the host Python installation's "
+                    "site-packages (see `asmpython libraries`)"),
+        Option("host-python", metavar="PATH",
+               help="the interpreter whose site-packages to search; "
+                    "default is the one running the compiler"),
+        # A SHARED LIBRARY THE PROGRAM MAY `import`. Declared rather than
+        # discovered: a foreign symbol's argument kinds cannot be read out of
+        # the library, and guessing them is how a native call corrupts a
+        # stack. See `nativelib.py`.
+        Option("native-library", metavar="FILE", repeatable=True,
+               help="JSON declaring shared libraries this program may "
+                    "import, and the signatures it calls in them"),
+        # A LIBRARY HAS NO ENTRY AND IS NOT SUPPOSED TO. Every top-level
+        # `def` is exported instead of only `main`, and a module of nothing
+        # but definitions is not "nothing to run" (E0003) but the point.
+        Option("library", switch=True,
+               help="compile definitions only, with no `main`; every "
+                    "top-level function is exported (needed to target "
+                    "`cpyext`, and useful with `run --entry` to call one "
+                    "function directly)"),
+    )
+
+    #: Set by `configure` on the copy it returns; see `compile`.
+    library = False
+
+    def configure(self, values: dict, context: BuildContext,
+                  sink: DiagnosticSink) -> "PythonFrontend | None":
+        """Publish the search path and the native declarations, and take
+        `--library` for this run.
+
+        HERE AND NOT IN THE DRIVER, which is where it used to be: the driver
+        imported `hostlib`, `imports` and `nativelib` out of this package by
+        name, so "the compiler" knew how Python resolves an import and a
+        second frontend could not have been added without the driver growing
+        a branch for it.
+
+        THROUGH MODULE GLOBALS, still: the frontend is handed a source and a
+        sink, so anything the run knows and the compilation needs arrives
+        the way it always has -- `imports.use` and `nativelib.use` are
+        republished on every compilation, so two in one process cannot see
+        each other's.
+        """
+        from . import hostlib, imports as py_imports, nativelib as py_nativelib
+
+        # THE HOST INSTALLATION'S PACKAGES GO LAST, so a name that resolved
+        # before library points existed still resolves to what it resolved
+        # to then.
+        wanted = values.get("host-python")
+        host = (hostlib.HostLibrary() if values.get("no-site-packages")
+                else hostlib.discover(wanted))
+        if host.unavailable and wanted:
+            # ONLY WHEN THE USER NAMED ONE. A failure to introspect the
+            # running interpreter means site-packages are simply not
+            # available and the program may well not need them; a failure to
+            # run the interpreter the user typed is about the flag they
+            # typed, and is worth saying.
+            sink.report(
+                error("E9108", f"--host-python: {host.unavailable}")
+                .help("give the path of a Python interpreter, or pass "
+                      "--no-site-packages to search none"))
+            return None
+        # THE SOURCE'S DIRECTORY IS `sys.path[0]`, and comes first for the
+        # same reason CPython puts it there -- unless `--safe-path` removes
+        # it, as `-P` does.
+        own = () if values.get("safe-path") else (context.source.parent,)
+        extra = tuple(Path(p) for p in values.get("import-path", ()))
+        py_imports.use(own + extra + host.roots, host)
+
+        declared = py_nativelib.Registry()
+        for path in values.get("native-library", ()):
+            try:
+                for library in py_nativelib.read(Path(path)).all():
+                    declared.add(library)
+            except py_nativelib.DeclarationError as exc:
+                sink.report(error("E9109", f"--native-library: {exc}"))
+                return None
+        py_nativelib.use(declared, context.target_os)
+
+        clone = copy.copy(self)
+        clone.library = bool(values.get("library"))
+        return clone
+
     def compile(self, source: SourceFile, sink: DiagnosticSink, *,
-                library: bool = False) -> Module | None:
+                library: bool | None = None) -> Module | None:
+        # THE KEYWORD STILL WINS when a caller passes one. `objects/ir.py`
+        # compiles the shipped runtime by calling this directly, with no
+        # command line anywhere near it; `None` means "whatever `configure`
+        # was told", which is what the driver's call means.
+        library = self.library if library is None else library
         try:
             tree = ast.parse(source.text, filename=source.name)
         except SyntaxError as exc:

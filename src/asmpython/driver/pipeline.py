@@ -48,11 +48,12 @@ class Options:
     source: Path
     output: Path | None = None
     frontend: str | None = None
-    #: Definitions only, no `main`, every top-level function exported. See
-    #: `frontends/python/__init__.py`'s `library` parameter -- this is the
-    #: one place the driver reaches it. Needed to target `cpyext`; also
-    #: useful with `run --entry` to call one function directly.
-    library: bool = False
+    #: Values for the options the chosen FRONTEND declares, keyed by option
+    #: name without the dashes -- {"import-path": ["lib"], "library": True}.
+    #: Not interpreted here: `--import-path`, `--host-python` and
+    #: `--library` were the driver's own flags, which meant the driver knew
+    #: how Python resolves an import.
+    frontend_options: dict = field(default_factory=dict)
     backend: str = "c"
     #: Values for the options the chosen backend declares, keyed by option name
     #: without the dashes -- {"class-version": "75"}. Not interpreted here: the
@@ -69,7 +70,17 @@ class Options:
     #: line, or claimed by the output's extension. False means it was fallen
     #: back to, and the TARGET gets the last word: see below.
     toolchain_chosen: bool = False
+    #: Values for the options the chosen LINKER declares, keyed by option
+    #: name without the dashes. `--link-input` is one of these now: a linker
+    #: that packages rather than links cannot honour it, and until it was a
+    #: declaration neither `--help` nor the driver could say so.
+    linker_options: dict = field(default_factory=dict)
     #: Extra objects/archives/-l names handed to the toolchain.
+    #:
+    #: NOT THE SAME LIST AS `linker_options["link-input"]`, though it starts
+    #: as a copy of it: a `ctypes.CDLL("m")` in the SOURCE is a promise that
+    #: `-lm` will be there, and the driver merges what the program needs into
+    #: what the user named. See `_link_stage`.
     link_inputs: tuple[str, ...] = ()
     workdir: Path | None = None
     keep_intermediates: bool = False
@@ -93,26 +104,6 @@ class Options:
     #: not for making it unavailable. `Backend.object_runtime` is the same
     #: choice at the granularity of one function.
     object_runtime: str = "ir"
-    #: Extra directories to resolve the program's own imports against. The
-    #: source's own directory is searched too unless `safe_path` says not
-    #: to, and is not listed here.
-    import_paths: tuple[Path, ...] = ()
-    #: Leave the SOURCE'S OWN DIRECTORY off the search path -- CPython's
-    #: `-P` / `PYTHONSAFEPATH`, and implied by its `-I`. A program whose
-    #: directory holds a file named after a standard module otherwise
-    #: imports that file, which is what CPython does and what this flag
-    #: exists to switch off.
-    safe_path: bool = False
-    #: Whether to search the host Python installation's `site-packages` --
-    #: LAST, after everything above. `--no-site-packages` turns it off. See
-    #: `frontends/python/hostlib.py` for what a library point is.
-    site_packages: bool = True
-    #: Whose `site-packages`. None means the interpreter running the compiler,
-    #: which is the one whose `pip` the user just ran in the common case.
-    host_python: str | None = None
-    #: Declaration files naming shared libraries the program may `import`.
-    #: See `frontends/python/nativelib.py`.
-    native_libraries: tuple[Path, ...] = ()
 
     @property
     def effective_passes(self) -> tuple[str, ...]:
@@ -219,46 +210,6 @@ def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
         if selected is None:
             return Result()
     _publish_backend_modules(selected)
-    # WHERE THE PROGRAM'S OWN MODULES LIVE. The source's own directory first,
-    # so `import helpers` beside `prog.py` works with no flag at all, then
-    # whatever `--import-path` added. Republished every compilation, so two in
-    # one process cannot see each other's paths.
-    from ..frontends.python import hostlib, imports as py_imports
-    # THE HOST INSTALLATION'S PACKAGES GO LAST, so a name that resolved before
-    # library points existed still resolves to what it resolved to then.
-    host = (hostlib.discover(opts.host_python) if opts.site_packages
-            else hostlib.HostLibrary())
-    if host.unavailable and opts.host_python:
-        # ONLY WHEN THE USER NAMED ONE. A failure to introspect the running
-        # interpreter means site-packages are simply not available and the
-        # program may well not need them; a failure to run the interpreter the
-        # user typed is about the flag they typed, and is worth saying.
-        sink.report(
-            error("E9108", f"--host-python: {host.unavailable}")
-            .help("give the path of a Python interpreter, or pass "
-                  "--no-site-packages to search none"))
-        return Result()
-    # THE SOURCE'S DIRECTORY IS `sys.path[0]`, and comes first for the same
-    # reason CPython puts it there -- unless `--safe-path` removes it, as
-    # `-P` does.
-    own = () if opts.safe_path else (opts.source.parent,)
-    py_imports.use(own + tuple(opts.import_paths) + host.roots, host)
-    # DECLARED NATIVE LIBRARIES. Published beside the search path and for the
-    # same reason: the frontend is handed a source and a sink, so anything the
-    # driver knows and it needs arrives through a module global. Scoped
-    # declarations need the target, which is resolved here exactly as the emit
-    # stage resolves it -- two places deciding what "the target" was is how
-    # a program links against the other platform's library.
-    from ..frontends.python import nativelib as py_nativelib
-    declared = py_nativelib.Registry()
-    for path in opts.native_libraries:
-        try:
-            for library in py_nativelib.read(path).all():
-                declared.add(library)
-        except py_nativelib.DeclarationError as exc:
-            sink.report(error("E9109", f"--native-library: {exc}"))
-            return Result()
-    py_nativelib.use(declared, _target_os(opts, selected))
 
     fe = (frontend_registry.get(opts.frontend) if opts.frontend
           else frontend_registry.for_path(opts.source))
@@ -269,25 +220,26 @@ def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
                   + "|".join(sorted(frontend_registry.available()))))
         return Result()
 
-    if opts.library:
-        # CHECKED BY SIGNATURE, NOT BY CALLING AND CATCHING: a frontend that
-        # has never heard of `library=` (nothing outside `frontends/python`
-        # has) should be told so cleanly, but wrapping the call itself in
-        # `except TypeError` would just as happily catch a genuine bug
-        # inside a frontend that DOES accept the argument, and report it as
-        # "not supported" instead of surfacing it.
-        import inspect
-        try:
-            inspect.signature(fe.compile).bind(source, sink, library=True)
-        except TypeError:
-            sink.report(
-                error("E9110",
-                      f"--library is not supported by the {fe.name!r} frontend"))
-            return Result()
+    # THE FRONTEND'S OWN FLAGS, handed to the frontend. This used to be a
+    # block of driver code importing `hostlib`, `imports` and `nativelib` out
+    # of `frontends/python` by name: the driver knew how Python resolves an
+    # import, and a second frontend could not have been added without it
+    # growing a branch.
+    #
+    # THE TARGET IS RESOLVED HERE and passed, exactly as the emit stage
+    # resolves it -- a scoped native-library declaration picks a library by
+    # it, and two places deciding what "the target" was is how a program
+    # type-checks against `user32.dll` and links against `libX11.so.6`.
+    fe = _configure_frontend(
+        fe, opts,
+        frontend_registry.BuildContext(source=opts.source,
+                                       target_os=_target_os(opts, selected)),
+        sink)
+    if fe is None:
+        return Result()
 
     try:
-        module = (fe.compile(source, sink, library=True) if opts.library
-                 else fe.compile(source, sink))
+        module = fe.compile(source, sink)
     except RecursionError:
         # A long expression is a deep tree, and analysis and lowering both
         # walk it recursively. `1 + 2 + ... + 999` exhausted the interpreter
@@ -370,33 +322,94 @@ def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
     return result
 
 
-def _configure_backend(be, opts: Options, sink: DiagnosticSink):
-    """Hand the backend its own options. Returns the backend, or None to stop.
+#: Which flag selects each kind of component, for an error that has to say
+#: how to reach the component that DOES take the option the user typed.
+_SELECTS = {"backend": "--backend", "frontend": "--frontend",
+            "linker": "--linker"}
 
-    An option the chosen backend does not declare is an ERROR rather than
-    something ignored. `--class-version 75 --backend c` reads as a request the
-    C backend cannot honour, and quietly building without it hands back an
-    artifact that is not what was asked for.
+
+def _who_takes(name: str) -> list[tuple[str, str]]:
+    """Every registered component declaring an option called `name`.
+
+    ACROSS ALL THREE KINDS and not just the one that refused. `--import-path
+    --frontend apir` is a user reaching for the PYTHON frontend's flag, and
+    an answer that searched only frontends would still be right -- but
+    `--class-version --backend c` searching only backends was how a linker's
+    flag or a frontend's got "no idea whose this is" when its owner was one
+    registry over.
     """
     from .. import backend as backend_registry
-    from ..backend.base import OptionError
+    from .. import frontend as frontend_registry
+    from .. import link as link_registry
 
-    declared = {o.name for o in be.options}
-    stray = sorted(set(opts.backend_options) - declared)
-    if stray:
-        for name in stray:
-            takers = sorted(other.name
-                            for other in backend_registry.available().values()
-                            if any(o.name == name for o in other.options))
-            d = error("E9106",
-                      f"the {be.name} backend does not take --{name}")
-            if takers:
-                d.help(f"--{name} belongs to the "
-                       f"{' or '.join(repr(t) for t in takers)} backend; "
-                       f"pass --backend {takers[0]}")
-            sink.report(d)
+    found = []
+    for kind, registry in (("backend", backend_registry),
+                           ("frontend", frontend_registry),
+                           ("linker", link_registry)):
+        for owner, component in sorted(registry.available().items()):
+            if any(o.name == name for o in component.options):
+                found.append((owner, kind))
+    return found
+
+
+def _reject_strays(kind: str, component, values: dict,
+                   sink: DiagnosticSink) -> bool:
+    """Report every option `component` does not declare. True if any was.
+
+    AN ERROR RATHER THAN SOMETHING IGNORED. `--class-version 75 --backend c`
+    reads as a request the C backend cannot honour, and quietly building
+    without it hands back an artifact that is not what was asked for.
+    """
+    declared = {o.name for o in component.options}
+    stray = sorted(set(values) - declared)
+    for name in stray:
+        d = error("E9106",
+                  f"the {component.name} {kind} does not take --{name}")
+        takers = _who_takes(name)
+        if takers:
+            owners = [o for o, _ in takers]
+            spoken = (owners[0] if len(owners) == 1
+                      else ", ".join(owners[:-1]) + " and " + owners[-1])
+            kinds = sorted({k for _, k in takers})
+            d.help(f"--{name} belongs to the {spoken} "
+                   + "/".join(kinds)
+                   + ("" if len(owners) == 1 else "s")
+                   # NO ONE OF THEM SUGGESTED when several take it: which to
+                   # pick is the user's decision about what to build, and
+                   # naming the alphabetically first would read as advice.
+                   + (f"; pass {_SELECTS[takers[0][1]]} {owners[0]}"
+                      if len(owners) == 1 else ""))
+        sink.report(d)
+    return bool(stray)
+
+
+def _configure_frontend(fe, opts: Options, context, sink: DiagnosticSink):
+    """Hand the frontend its own options. Returns it, or None to stop."""
+    from ..options import OptionError
+
+    if _reject_strays("frontend", fe, opts.frontend_options, sink):
+        return None
+    declared = {o.name for o in fe.options}
+    mine = {name: value for name, value in opts.frontend_options.items()
+            if name in declared}
+    try:
+        return fe.configure(mine, context, sink)
+    except OptionError as exc:
+        message, _, detail = str(exc).partition("\n")
+        d = error("E9107", f"{fe.name} frontend: {message}")
+        for line in detail.splitlines():
+            d.note(line)
+        sink.report(d)
         return None
 
+
+def _configure_backend(be, opts: Options, sink: DiagnosticSink):
+    """Hand the backend its own options. Returns the backend, or None to stop."""
+    from ..options import OptionError
+
+    if _reject_strays("backend", be, opts.backend_options, sink):
+        return None
+    declared = {o.name for o in be.options}
     mine = {name: value for name, value in opts.backend_options.items()
             if name in declared}
     try:
@@ -440,6 +453,13 @@ def _link_stage(opts: Options, result: Result, be, target: Target,
         elif target.os == "none":
             name = "baremetal"
     toolchain = link_registry.get(name)
+    # THE LINKER'S OWN FLAGS, checked against the linker that was chosen.
+    # `--link-input -o thing.jar` is a request the jar toolchain cannot
+    # honour, and it used to be found out at link time, as a LinkError about
+    # inputs, rather than said before anything was built.
+    if _reject_strays("linker", toolchain, opts.linker_options, sink):
+        result.module = None          # nothing usable was produced
+        return
     workdir = opts.workdir or (opts.output or opts.source).parent / ".asmpython"
     output = opts.output or opts.source.with_suffix(target.executable_suffix)
     if output.suffix != target.executable_suffix and target.executable_suffix:

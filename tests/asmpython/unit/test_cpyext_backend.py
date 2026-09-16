@@ -72,7 +72,8 @@ def _emit(tmp_path, source=LIB, *, library=True, name="prog", **backend_options)
     sink = DiagnosticSink()
     result = compile_source(
         Options(source=path, backend="cpyext", target=TARGET, link=False,
-               library=library, backend_options=backend_options),
+               frontend_options={"library": library},
+               backend_options=backend_options),
         sink)
     return result, sink
 
@@ -85,7 +86,8 @@ def _load(tmp_path, source=LIB, *, library=True, modname="prog", **backend_optio
     sink = DiagnosticSink()
     result = compile_source(
         Options(source=path, backend="cpyext", target=TARGET, output=so,
-               link=True, library=library, backend_options=backend_options),
+               link=True, frontend_options={"library": library},
+               backend_options=backend_options),
         sink)
     assert result.ok, _msgs(sink)
     assert result.program is not None and result.program.exists()
@@ -222,7 +224,7 @@ class TestTheExtensionActuallyLoads:
         sink = DiagnosticSink()
         result = compile_source(
             Options(source=path, backend="cpyext", target=TARGET, output=so,
-                   link=True, library=True),
+                   link=True, frontend_options={"library": True}),
             sink)
         assert result.ok, _msgs(sink)
         path.unlink()

@@ -26,11 +26,37 @@ whether to continue with other inputs.
 from __future__ import annotations
 
 import abc
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..diagnostics import DiagnosticSink, SourceFile
 from ..ir import Module
 from ..options import Option
+
+
+@dataclass(frozen=True, slots=True)
+class BuildContext:
+    """What a frontend needs about the run that is not one of its own flags.
+
+    A FLAG IS NOT THE WHOLE OF WHAT `configure` NEEDS. `--import-path` adds
+    to a search path whose FIRST entry is the source's own directory, and a
+    scoped native-library declaration picks a library by the platform being
+    built for -- neither is anything the user typed, and both were reasons
+    the driver did this work itself.
+
+    HANDED OVER RATHER THAN LOOKED UP. The driver resolves the target once
+    and passes what it resolved; a frontend working it out again is how a
+    program type-checks against `user32.dll` and links against
+    `libX11.so.6`.
+    """
+
+    #: The file being compiled. Its directory is `sys.path[0]` in CPython's
+    #: terms -- first on the search path, unless a flag says otherwise.
+    source: Path
+    #: The platform the program is being built for, as `Target.os` spells it.
+    #: None when nothing can say yet, which is not an error: it leaves only
+    #: the declarations that named no platform applying.
+    target_os: str | None = None
 
 
 class Frontend(abc.ABC):
@@ -48,6 +74,28 @@ class Frontend(abc.ABC):
     #: general, and a second frontend would have inherited flags that mean
     #: nothing to it.
     options: tuple[Option, ...] = ()
+
+    def configure(self, values: dict, context: BuildContext,
+                  sink: DiagnosticSink) -> "Frontend | None":
+        """The frontend to compile with, given this run's option values.
+
+        `values` holds only the options this frontend declared, keyed by name
+        without the dashes. Return None having reported to `sink` for
+        anything that stops the build -- an interpreter that would not run,
+        a declaration file that will not parse. Raise `OptionError` for a
+        value that is simply unusable.
+
+        RETURN A NEW INSTANCE rather than mutating `self`, for the reason
+        `Backend.configure` does: the registry holds one shared object, so a
+        frontend that stored this run's flags on itself would leak them into
+        the next compilation in the same process -- invisible in a
+        command-line run and wrong in every test suite and embedding tool.
+
+        The default ignores all three, which is right for a frontend with no
+        options: the driver rejects a flag no frontend declared before it
+        ever gets here.
+        """
+        return self
 
     @abc.abstractmethod
     def compile(self, source: SourceFile, sink: DiagnosticSink) -> Module | None:

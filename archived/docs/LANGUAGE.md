@@ -472,6 +472,18 @@ The full set the frontend can emit:
 Each applies wherever the construct appears, including inside an augmented
 assignment -- `x **= n` reports `E0043` exactly as `x = x ** n` does.
 
+### The frontend's own flags
+
+Two codes are about what was passed on the COMMAND LINE rather than about the
+program, and are listed here because the flags are this frontend's:
+`--host-python` and `--native-library` are declared by `PythonFrontend.options`
+and handed to it by the driver, which no longer knows what either means.
+
+| code | what it means |
+| --- | --- |
+| `E9108` | `--host-python` named an interpreter that would not run |
+| `E9109` | `--native-library` named a declaration file that would not parse |
+
 ## Warnings
 
 A warning is a program that COMPILES and is worth a sentence about what it

@@ -42,6 +42,7 @@ from pathlib import Path
 from .base import LinkError, LinkRequest, Toolchain, find_tool, run
 from ..objects.support import POW_INT_C
 from .registry import register
+from .toolchains import LINK_INPUT
 
 #: Where `-M virt` puts RAM, and where the PL011 UART is mapped. Both are
 #: properties of that QEMU machine, not of AArch64.
@@ -512,6 +513,7 @@ class BareMetalToolchain(Toolchain):
     #: A freestanding image, in whichever shape the target asks for.
     artifacts = (".elf", ".bin", ".img")
     backends = ("x86-64", "arm64", "x86-32", "arm32")
+    options = (LINK_INPUT,)
     description = "freestanding image for a bare-metal target (no OS, no libc)"
 
     def supports(self, target) -> bool:

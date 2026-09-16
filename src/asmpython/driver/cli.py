@@ -94,11 +94,12 @@ def _select(args):
 
 def _options(args) -> Options:
     choice, backend, target_name = _select(args)
+    linker_options = dict(getattr(args, "linker_options", None) or {})
     return Options(
         source=Path(args.source),
         output=Path(args.output) if getattr(args, "output", None) else None,
         frontend=choice.frontend,
-        library=getattr(args, "library", False),
+        frontend_options=dict(getattr(args, "frontend_options", None) or {}),
         backend=backend,
         backend_options=dict(getattr(args, "backend_options", None) or {}),
         target=(target_registry.get(target_name) if target_name else None),
@@ -109,7 +110,12 @@ def _options(args) -> Options:
                   or getattr(args, "emit_asm", False)),
         toolchain=choice.linker,
         toolchain_chosen=choice.linker_named,
-        link_inputs=tuple(getattr(args, "link_input", None) or ()),
+        linker_options=linker_options,
+        # SEEDED FROM THE FLAG, then added to: `_link_stage` merges the
+        # libraries the SOURCE asked for into this same list, which is why
+        # the driver keeps a field of its own rather than reading the
+        # linker's table at the point of use.
+        link_inputs=tuple(linker_options.get("link-input", ())),
         workdir=Path(args.workdir) if getattr(args, "workdir", None) else None,
         keep_intermediates=getattr(args, "keep_intermediates", False),
         verbose=getattr(args, "verbose", False),
@@ -123,13 +129,6 @@ def _options(args) -> Options:
         max_errors=getattr(args, "max_errors", 100),
         warnings_are_errors=getattr(args, "werror", False),
         object_runtime=getattr(args, "object_runtime", "ir"),
-        import_paths=tuple(Path(p) for p in
-                           (getattr(args, "import_path", None) or ())),
-        safe_path=getattr(args, "safe_path", False),
-        site_packages=getattr(args, "site_packages", True),
-        host_python=getattr(args, "host_python", None),
-        native_libraries=tuple(Path(p) for p in
-                               (getattr(args, "native_library", None) or ())),
     )
 
 
@@ -304,6 +303,26 @@ def _column(items, floor: int = 10) -> int:
     return max([floor, *(len(name) for name, _ in items)])
 
 
+def _print_options(options, width: int) -> None:
+    """List a component's own flags under its line.
+
+    WITH THE COMPONENT rather than only in `build --help`, where they sit
+    among thirty options that apply to every build and give no hint which one
+    they belong to. Shared by all three listings now that all three kinds can
+    declare flags -- `asmpython frontends` said nothing about
+    `--import-path`, which is the Python frontend's and nobody else's.
+    """
+    for option in options:
+        spelling = option.flag
+        if option.short:
+            spelling = f"-{option.short}, {spelling}"
+        if not option.switch:
+            spelling = f"{spelling} {option.metavar}"
+        print(f"  {'':<{width}}   {spelling}")
+        for line in _wrap(option.help, 60):
+            print(f"  {'':<{width}}     {line}")
+
+
 def cmd_backends(args) -> int:
     backend_registry.load_builtin()
     items = sorted(backend_registry.available().items())
@@ -311,13 +330,7 @@ def cmd_backends(args) -> int:
     for name, be in items:
         flag = "" if be.ready else "   (unfinished)"
         print(f"  {name:<{width}} {be.description}{flag}")
-        # A backend's own flags are listed with it rather than only in
-        # `build --help`, where they sit among thirty options that apply to
-        # every backend and give no hint which one they belong to.
-        for option in be.options:
-            print(f"  {'':<{width}}   {option.flag} {option.metavar}")
-            for line in _wrap(option.help, 60):
-                print(f"  {'':<{width}}     {line}")
+        _print_options(be.options, width)
     # THE FAMILIES AFTER THE BACKENDS, and marked as not being backends. They
     # are selectable with --backend and are not code generators, so listing
     # them among the others would make `asmpython backends` show six entries
@@ -409,6 +422,7 @@ def cmd_toolchains(args) -> int:
     width = _column(items)
     for name, tc in items:
         print(f"  {name:<{width}} {tc.description}")
+        _print_options(tc.options, width)
     return 0
 
 
@@ -468,6 +482,7 @@ def cmd_frontends(args) -> int:
     width = _column(items)
     for name, fe in items:
         print(f"  {name:<{width}} {fe.description:<42} {' '.join(fe.extensions)}")
+        _print_options(fe.options, width)
     return 0
 
 
@@ -693,15 +708,15 @@ class _CollectComponentOption(argparse.Action):
     declared, so the half that does not want it never sees it.
 
     KEYED BY WHAT THE COMPONENT DECLARED, bound here rather than read back off
-    the flag text, so `--opt-level` and `--pybc:opt-level` are guaranteed to
+    the flag text, so `--opt-level`, `--pybc:opt-level` and a short letter all
     land on the same key -- the component never learns which spelling was
-    used, because the qualifier is for the parser and not for it.
+    used, because the spellings are for the parser and not for it.
     """
 
-    def __init__(self, option_strings, dest, *, kinds, key, **kw):
+    def __init__(self, option_strings, dest, *, kinds, option, **kw):
         super().__init__(option_strings, dest, **kw)
         self.kinds = kinds
-        self.key = key
+        self.option = option
 
     def __call__(self, parser, namespace, value, option_string=None):
         for kind in self.kinds:
@@ -709,31 +724,47 @@ class _CollectComponentOption(argparse.Action):
             if table is None:
                 table = {}
                 setattr(namespace, f"{kind}_options", table)
-            table[self.key] = value
+            if self.option.switch:
+                # A SWITCH IS ITS OWN VALUE. `nargs=0` hands this `[]`, and
+                # storing that would make `--library` read as falsey to a
+                # component that asked whether it was given.
+                table[self.option.name] = True
+            elif self.option.repeatable:
+                table.setdefault(self.option.name, []).append(value)
+            else:
+                table[self.option.name] = value
 
 
 class _AmbiguousOption(argparse.Action):
-    """A short flag more than one component declares.
+    """A spelling more than one component declares.
 
     REFUSED RATHER THAN AWARDED TO ONE. Registration order is alphabetical and
     looks deliberate, which is exactly the kind of accident a reader would
     believe -- and the wrong component would then be configured silently. The
     qualified spellings say which was meant, and they are always registered.
+
+    CARRIES THE SPELLINGS AND NOT A NAME, because a contested SHORT letter is
+    not a contested word: `-P` might be `--safe-path` to one component and
+    `--pedantic` to another, and telling the user to write `--x:P` would name
+    a flag that does not exist.
     """
 
-    def __init__(self, option_strings, dest, *, owners, key, **kw):
+    def __init__(self, option_strings, dest, *, owners, spellings, **kw):
         super().__init__(option_strings, dest, **kw)
         self.owners = owners
-        self.key = key
+        self.spellings = spellings
 
     def __call__(self, parser, namespace, value, option_string=None):
-        parser.error(
-            f"{option_string} is ambiguous: "
-            f"{', '.join(self.owners)} all declare it. Write "
-            + " or ".join(f"--{o}:{self.key}" for o in self.owners) + ".")
+        parser.error(f"{option_string} is ambiguous: "
+                     f"{', '.join(self.owners)} all declare it. Write "
+                     + " or ".join(self.spellings) + ".")
 
 
-def _add_component_options(parser: argparse.ArgumentParser) -> None:
+_ALL_KINDS = ("backend", "frontend", "linker")
+
+
+def _add_component_options(parser: argparse.ArgumentParser,
+                           kinds: tuple[str, ...] = _ALL_KINDS) -> None:
     """Give `parser` every registered component's own flags.
 
     EVERY COMPONENT, NOT JUST THE BACKENDS. A backend has declared its own
@@ -748,6 +779,11 @@ def _add_component_options(parser: argparse.ArgumentParser) -> None:
     the flags were typed in. Passing one to a component that does not declare
     it is caught in the driver, which by then knows what was chosen and can
     say who does take it.
+
+    `kinds` NARROWS WHICH STAGES A VERB HAS. `run` and `check` stop at the
+    IR, so a backend's flags on them would be flags for a stage that never
+    happens -- and, worse, could make a frontend's flag ambiguous against one
+    nothing on that command line could ever reach.
     """
     frontend_registry.load_builtin()
     link_registry.load_builtin()
@@ -756,47 +792,103 @@ def _add_component_options(parser: argparse.ArgumentParser) -> None:
     # a name that spans kinds collapse into the one flag a user would expect
     # rather than colliding inside argparse.
     declarations: dict[tuple[str, str], tuple[list[str], Option]] = {}
-    for kind, registry in (("backend", backend_registry),
-                           ("frontend", frontend_registry),
-                           ("linker", link_registry)):
-        for name, component in sorted(registry.available().items()):
+    registries = {"backend": backend_registry, "frontend": frontend_registry,
+                  "linker": link_registry}
+    for kind in kinds:
+        for name, component in sorted(registries[kind].available().items()):
             for option in component.options:
-                kinds, _ = declarations.setdefault(
+                owned, _ = declarations.setdefault(
                     (name, option.name), ([], option))
-                kinds.append(kind)
+                owned.append(kind)
 
-    claimed: dict[str, list[str]] = {}
+    # WHO CLAIMS WHAT. Words and letters are counted apart: two components can
+    # want one letter for two different words, and losing the letter to that
+    # tie should not cost either of them the word.
+    words: dict[str, list[tuple[str, str]]] = {}
+    letters: dict[str, list[tuple[str, str]]] = {}
     for name, flag in declarations:
-        claimed.setdefault(flag, []).append(name)
+        _, option = declarations[name, flag]
+        words.setdefault(flag, []).append((name, flag))
+        if option.short:
+            letters.setdefault(option.short, []).append((name, flag))
 
     group = parser.add_argument_group("component options")
-    for (name, flag), (kinds, option) in declarations.items():
-        # THE QUALIFIED SPELLING IS ALWAYS REGISTERED, collision or not, so a
-        # script written against `--pybc:opt-level` keeps working when a
-        # plugin later claims the short name out from under it.
-        group.add_argument(
-            option.qualified(name), action=_CollectComponentOption,
-            kinds=tuple(kinds), key=option.name, dest=argparse.SUPPRESS,
-            metavar=option.metavar,
-            help=f"[{name} {'/'.join(kinds)}] {option.help}")
-    for flag, owned in sorted(claimed.items()):
-        if len(owned) == 1:
-            kinds, option = declarations[owned[0], flag]
-            group.add_argument(
-                option.flag, action=_CollectComponentOption,
-                kinds=tuple(kinds), key=option.name, dest=argparse.SUPPRESS,
-                metavar=option.metavar, help=f"[{owned[0]}] {option.help}")
-            continue
-        # TWO COMPONENTS WANTING ONE NAME IS A QUESTION, not something to
+
+    def offer(spellings: list[str], option: Option, owned: list[str],
+              help: str) -> None:
+        extra = ({"nargs": 0} if option.switch
+                 else {"metavar": option.metavar})
+        group.add_argument(*spellings, action=_CollectComponentOption,
+                           kinds=tuple(owned), option=option,
+                           dest=argparse.SUPPRESS, help=help, **extra)
+
+    def agreed(claims: list[tuple[str, str]]):
+        """The one option every claimant declared, or None if they differ.
+
+        SEVERAL COMPONENTS DECLARING ONE FLAG IS NOT A COLLISION when what
+        they declared is the same declaration: `cc`, `cpyext` and `baremetal`
+        share `--link-input` because it means the same thing to all three,
+        and refusing it as ambiguous would be telling the user to choose
+        between three spellings of one flag. `Option` is a frozen dataclass,
+        so "the same" is its own value -- a differing help text is a
+        differing flag, which errs towards asking.
+        """
+        declared = {declarations[name, flag][1] for name, flag in claims}
+        return declared.pop() if len(declared) == 1 else None
+
+    def refuse(spelling: str, claims: list[tuple[str, str]]) -> None:
+        # TWO COMPONENTS WANTING ONE SPELLING IS A QUESTION, not something to
         # settle by registration order -- the same shape of refusal an
         # ambiguous `-o` extension gets. `nargs="?"` so that the bare flag
         # stops here too, rather than argparse complaining about a missing
-        # value before anyone gets to say the name was ambiguous.
+        # value before anyone gets to say the spelling was ambiguous.
+        owners = [o for o, _ in claims]
+        qualified = [f"--{o}:{n}" for o, n in claims]
         group.add_argument(
-            "--" + flag, action=_AmbiguousOption, owners=sorted(owned),
-            key=flag, nargs="?", dest=argparse.SUPPRESS,
-            help=("[" + ", ".join(sorted(owned)) + "] ambiguous; write "
-                  + " or ".join(f"--{n}:{flag}" for n in sorted(owned))))
+            spelling, action=_AmbiguousOption, owners=owners,
+            spellings=qualified, nargs="?", dest=argparse.SUPPRESS,
+            metavar="VALUE",
+            help=("[" + ", ".join(owners) + "] ambiguous; write "
+                  + " or ".join(qualified)))
+
+    for (name, flag), (owned, option) in declarations.items():
+        # THE QUALIFIED SPELLING IS ALWAYS REGISTERED, collision or not, so a
+        # script written against `--pybc:opt-level` keeps working when a
+        # plugin later claims the short name out from under it.
+        offer([option.qualified(name)], option, owned,
+              f"[{name} {'/'.join(owned)}] {option.help}")
+    def kinds_of(claims):
+        return sorted({k for name, flag in claims
+                       for k in declarations[name, flag][0]})
+
+    def owners_of(claims):
+        return ", ".join(sorted({name for name, _ in claims}))
+
+    for flag, claims in sorted(words.items()):
+        option = agreed(claims)
+        if option is None:
+            refuse("--" + flag, sorted(claims))
+            continue
+        # THE LETTER RIDES WITH THE WORD when both are uncontested, so
+        # `--help` prints `-P, --safe-path` the way every other flag here is
+        # printed rather than listing the two as unrelated entries.
+        rides = (option.short is not None
+                 and agreed(letters.get(option.short, ())) is option)
+        offer(([f"-{option.short}"] if rides else []) + [option.flag],
+              option, kinds_of(claims),
+              f"[{owners_of(claims)}] {option.help}")
+    for letter, claims in sorted(letters.items()):
+        option = agreed(claims)
+        if option is None:
+            refuse("-" + letter, sorted(claims))
+            continue
+        if agreed(words[option.name]) is option:
+            continue                        # it rode with the word, above
+        # THE WORD WAS CONTESTED AND THE LETTER WAS NOT, so the letter is the
+        # only unqualified way in -- which is fine, and would not be if it
+        # silently meant the other claimant's flag.
+        offer(["-" + letter], option, kinds_of(claims),
+              f"[{owners_of(claims)}] {option.help}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -818,50 +910,17 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="command", required=True)
 
     def source_args(p):
-        p.add_argument("--import-path", action="append", metavar="DIR",
-                       help="where to find the program's own modules; the "
-                            "source's own directory is searched too "
-                            "unless -P")
-        # CPYTHON'S OWN FLAG, spelled the same. `-P` is what a program
-        # uses when a file beside it is named after a module it imports
-        # and it wants the real one.
-        p.add_argument("-P", "--safe-path", action="store_true",
-                       help="do not search the source's own directory, "
-                            "as CPython's -P does")
-        # THE HOST INSTALLATION'S PACKAGES. Searched LAST, after the bundled
-        # standard library, the source's directory and every --import-path,
-        # so nothing that resolved before this flag existed resolves
-        # differently because of it. See frontends/python/hostlib.py.
-        p.add_argument("--no-site-packages", dest="site_packages",
-                       action="store_false", default=True,
-                       help="do not search the host Python installation's "
-                            "site-packages (see `asmpython libraries`)")
-        p.add_argument("--host-python", metavar="PATH",
-                       help="the interpreter whose site-packages to search; "
-                            "default is the one running the compiler")
-        # A SHARED LIBRARY THE PROGRAM MAY `import`. Declared rather than
-        # discovered: a foreign symbol's argument kinds cannot be read out of
-        # the library, and guessing them is how a native call corrupts a
-        # stack. See frontends/python/nativelib.py.
-        p.add_argument("--native-library", action="append", metavar="FILE",
-                       help="JSON declaring shared libraries this program may "
-                            "import, and the signatures it calls in them")
+        # `--import-path`, `-P`, `--no-site-packages`, `--host-python`,
+        # `--native-library` and `--library` USED TO BE HERE. Every one of
+        # them is about resolving Python names or compiling Python, so every
+        # one is the Python frontend's: see `PythonFrontend.options`, and
+        # `_add_component_options` for how a component's flags reach this
+        # parser.
         p.add_argument("source")
         p.add_argument("--frontend")
         p.add_argument("--max-errors", type=int, default=100)
         p.add_argument("--werror", action="store_true",
                        help="treat warnings as errors")
-        # A LIBRARY HAS NO ENTRY AND IS NOT SUPPOSED TO. Every top-level
-        # `def` is exported instead of only `main`, and a module of nothing
-        # but definitions is not "nothing to run" (E0003) but the point.
-        # See `frontends/python/__init__.py`'s `library` parameter, which
-        # this is the one place that reaches -- this flag existed in the
-        # frontend before anything on the command line could ask for it.
-        p.add_argument("--library", action="store_true",
-                       help="compile definitions only, with no `main`; "
-                            "every top-level function is exported "
-                            "(needed to target `cpyext`, and useful with "
-                            "`run --entry` to call one function directly)")
 
     def pass_args(p):
         p.add_argument("-O", "--optimise", action="store_true",
@@ -906,8 +965,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="how to turn artifacts into a program "
                         "(see `asmpython toolchains`). Chosen from the "
                         "output's extension when not given")
-    b.add_argument("--link-input", action="append", metavar="INPUT",
-                   help="extra object, archive or -l name for the link step")
+    # `--link-input` USED TO BE HERE, and was offered for `jar` and `pyc`
+    # too -- neither of which links anything, and neither of which could say
+    # so. It is declared by the three toolchains that do link; see
+    # `link/toolchains.py`.
     b.add_argument("--workdir", help="where intermediates go (default .asmpython)")
     b.add_argument("--keep-intermediates", action="store_true")
     b.add_argument("-v", "--verbose", action="store_true",
@@ -924,11 +985,15 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--entry", default="main")
     r.add_argument("args", nargs="*")
     r.add_argument("--print-result", action="store_true")
+    # THE FRONTEND'S FLAGS AND NOT THE BACKEND'S: `run` stops at the IR, so
+    # `--class-version` on it would name a stage this command never reaches.
+    _add_component_options(r, kinds=("frontend",))
     r.set_defaults(fn=cmd_run)
 
     c = sub.add_parser("check", help="analyse and verify, produce nothing")
     source_args(c)
     pass_args(c)
+    _add_component_options(c, kinds=("frontend",))
     c.set_defaults(fn=cmd_check)
 
     for name, fn, doc in (

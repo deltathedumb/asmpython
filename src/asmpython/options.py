@@ -32,6 +32,26 @@ class Option:
     #: What the value is called in `--help`.
     metavar: str = "VALUE"
 
+    #: A ONE-LETTER SPELLING, without the dash: "P" is `-P`. Rare and worth
+    #: being rare -- there are 26 of them and no namespace to escape into, so
+    #: the qualified form cannot rescue a short flag two components both
+    #: want. Declared because `-P` is CPython's own flag spelled the same
+    #: way, and a Python frontend that could not offer it would be offering
+    #: something else.
+    short: str | None = None
+
+    #: A SWITCH TAKES NO VALUE: present or absent is the whole of it, and
+    #: what the component is handed is True. `--library` is one, and writing
+    #: it as a value-taking option would have made `--library yes` the
+    #: spelling of something every other compiler spells `--library`.
+    switch: bool = False
+
+    #: REPEATABLE: every occurrence is kept and the component is handed a
+    #: list, rather than the last one winning. `--import-path` is one -- a
+    #: search path is a sequence by nature, and "the last --import-path wins"
+    #: is not a rule anybody would guess.
+    repeatable: bool = False
+
     @property
     def flag(self) -> str:
         return "--" + self.name
