@@ -511,6 +511,7 @@ class BareMetalToolchain(Toolchain):
     name = "baremetal"
     #: A freestanding image, in whichever shape the target asks for.
     artifacts = (".elf", ".bin", ".img")
+    backends = ("x86-64", "arm64", "x86-32", "arm32")
     description = "freestanding image for a bare-metal target (no OS, no libc)"
 
     def supports(self, target) -> bool:

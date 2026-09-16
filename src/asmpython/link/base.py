@@ -89,6 +89,26 @@ class Toolchain(abc.ABC):
     #: dot means and cannot be told apart by spelling from any other.
     artifacts: tuple[str, ...] = ()
 
+    #: THE BACKENDS THIS CAN TAKE INPUT FROM, most preferred first.
+    #:
+    #: THE PAIRING WAS ONLY EVER IMPLICIT. A `LinkRequest` carries filenames
+    #: and not the identity of what produced them, so each toolchain worked
+    #: out for itself whether `out.c` or `out.o` was something it could use.
+    #: That is enough to LINK and not enough to CHOOSE: `-o thing.so` names
+    #: the `cpyext` toolchain, and deciding which backend feeds it from the
+    #: artifact extensions alone gives `c` and `cpyext` both, because both
+    #: write `.c`.
+    #:
+    #: ORDER IS PREFERENCE, and it is a declaration rather than a default
+    #: buried in the driver: `cc` naming `c` first is why `-o thing` on a
+    #: Unix still builds through C rather than through the native code
+    #: generator, and changing that is now an edit to the toolchain that
+    #: means it.
+    #:
+    #: EMPTY MEANS ANY, which only `none` can honestly say -- it writes what
+    #: the backend produced and never reads it.
+    backends: tuple[str, ...] = ()
+
     @abc.abstractmethod
     def link(self, request: LinkRequest) -> Path:
         """Produce the program. Returns the path actually written.
