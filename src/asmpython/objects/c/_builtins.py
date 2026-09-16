@@ -931,11 +931,18 @@ APY_API apy_value apy_iterable(apy_value v) {
                              apy_kind_name(it), "");
     }
     if (!it) {
-        /* No `__iter__`. `__len__` plus `__getitem__` is the older protocol
-           and the index walk is already it; `__getitem__` alone is walked
-           until it reports IndexError, which is how CPython ends that one. */
-        if (apy_unary_dunder(v, "__len__")) return v;
-        if (apy_error_occurred()) return 0;
+        /* No `__iter__`. THE OLDER PROTOCOL IS `__getitem__` ALONE, walked
+           from 0 until it reports IndexError -- `__len__` is no part of it
+           and CPython never consults it.
+
+           Reading `__len__` as a BOUND made a class whose two disagree
+           answer differently: one with a `__len__` of 2 and a `__getitem__`
+           good for five stopped at two, and one whose `__getitem__` never
+           raises is endless in CPython and was bounded here, so `a, b = obj`
+           bound where CPython reports too many values. A `__len__` with no
+           `__getitem__` does not make an object iterable at all, which is
+           the other half of the same rule and is what the refusal below
+           now covers. */
         if (!apy_class_find(O(v)->v.o.cls, apy_name("__getitem__")))
             return apy_fail2("TypeError", "'%s' object is not iterable%s",
                              apy_kind_name(v), "");

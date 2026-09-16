@@ -8683,6 +8683,75 @@ PROGRAMS = {
         show("c negative", lambda: format(-1, "c"))
         show("chr is its own", lambda: chr(2 ** 40))
     """,
+    "the_older_iteration_protocol_ignores_dunder_len": """
+        # A CLASS WITH `__len__` AND `__getitem__` WAS WALKED BY READING
+        # `__len__` ONCE and subscripting that many times. CPython never
+        # consults `__len__` for iteration: the older protocol is
+        # `__getitem__` alone, called from 0 until it reports IndexError.
+        #
+        # SO A CLASS WHOSE TWO DISAGREE ANSWERED DIFFERENTLY. One with a
+        # `__len__` of 2 and a `__getitem__` good for five stopped at two --
+        # three elements silently missing, from `for`, from `list`, from
+        # `in`, from `max`, from every consumer at once.
+        #
+        # AND `__len__` ALONE DOES NOT MAKE AN OBJECT ITERABLE, which is the
+        # other half of the same rule: the shortcut answered the object
+        # itself for anything with a `__len__`, so a class with no
+        # `__getitem__` was walked by index anyway.
+        #
+        # THE LAZY PATH ALREADY HAD THIS RIGHT -- a cursor over an instance
+        # reads through `__getitem__` and stops on IndexError -- which is why
+        # only the EAGER funnel needed changing, in all three arrangements.
+        log = []
+
+        class LenLies:
+            def __len__(self):
+                return 2
+
+            def __getitem__(self, i):
+                log.append(i)
+                if i < 5:
+                    return i * 10
+                raise IndexError
+
+        class OnlyLen:
+            def __len__(self):
+                return 3
+
+        class OnlyGet:
+            def __getitem__(self, i):
+                if i < 3:
+                    return i
+                raise IndexError
+
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        # THE WALK GOES PAST WHAT `__len__` CLAIMS.
+        show("comprehension", lambda: [x for x in LenLies()])
+        print("getitem calls", log)
+        show("tuple", lambda: tuple(LenLies()))
+        show("sum", lambda: sum(LenLies()))
+        show("in", lambda: 30 in LenLies())
+        show("max", lambda: max(LenLies()))
+        show("sorted", lambda: sorted(LenLies()))
+        show("star", lambda: [*LenLies()])
+        # AND `__len__` ITSELF STILL ANSWERS, which is what it is for.
+        show("len", lambda: len(LenLies()))
+        show("subscript", lambda: LenLies()[3])
+        # A `__len__` WITH NO `__getitem__` IS NOT ITERABLE.
+        show("only len iterated", lambda: [x for x in OnlyLen()])
+        show("only len listed", lambda: list(OnlyLen()))
+        show("only len measured", lambda: len(OnlyLen()))
+        # AND `__getitem__` WITH NO `__len__` WALKS AS IT ALWAYS DID.
+        show("only getitem", lambda: [x for x in OnlyGet()])
+        show("only getitem star", lambda: [*OnlyGet()])
+        show("only getitem unpack",
+             lambda: (lambda a, b, c: (a, b, c))(*OnlyGet()))
+    """,
     "fstrings": """
         n = 42
         s = 'ab'

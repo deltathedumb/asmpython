@@ -507,10 +507,10 @@ def apy_iterable(v: ptr) -> ptr:
     ASKING A LAZY THING FOR ITS ELEMENTS RUNS IT, and the honest answer is to
     run it once and keep the result. What is consumed stays consumed.
 
-    A CLASS WITH `__len__` AND NO `__iter__` IS ANSWERED AS ITSELF, because
-    the caller was asking a length question and the object can answer it
-    directly -- draining it through `__getitem__` first would be work whose
-    result is thrown away.
+    A CLASS WITH NO `__iter__` IS WALKED BY `__getitem__` from 0 until it
+    reports IndexError, which is the whole of the older protocol -- `__len__`
+    is no part of it, and a class that has one without the other is not
+    iterable at all.
 
     A HELD BUILTIN IS UNWRAPPED only when the class did not override the
     walk: `class C(list)` with no `__iter__` of its own IS its list, and one
@@ -550,10 +550,11 @@ def apy_iterable(v: ptr) -> ptr:
     if apy_error_occurred():
         return ptr(0)
     if not it:
-        if apy_unary_dunder_of(v, rodata(b"__len__\0")):
-            return v
-        if apy_error_occurred():
-            return ptr(0)
+        # THE OLDER PROTOCOL IS `__getitem__` ALONE, walked from 0 until it
+        # reports IndexError -- `__len__` is no part of it and CPython never
+        # consults it. Reading it as a BOUND made a class whose two disagree
+        # answer differently, and made a class with a `__len__` and no
+        # `__getitem__` iterable when CPython says it is not.
         if not apy_class_find_of(cls,
                                  apy_name_of(rodata(b"__getitem__\0"))):
             return apy_raise_fmt(

@@ -13598,11 +13598,13 @@ def _apy_iterable(h, a):
     if h.err is not None:
         return 0
     if got is NotImplemented:
-        # No `__iter__`. `__len__` plus `__getitem__` is the older protocol
-        # and the index walk already IS it; `__getitem__` alone is walked
-        # until it reports IndexError, which is how CPython ends that one.
-        if v.cls.find("__len__") is not None:
-            return a[0]
+        # No `__iter__`. THE OLDER PROTOCOL IS `__getitem__` ALONE, walked
+        # from 0 until it reports IndexError -- `__len__` is no part of it
+        # and CPython never consults it. Reading it as a BOUND made a class
+        # whose two disagree answer differently, and made a class with a
+        # `__len__` and no `__getitem__` iterable when CPython says it is
+        # not. See `apy_iterable` in `objects/c/_builtins.py`, which said the
+        # same thing and has stopped.
         if v.cls.find("__getitem__") is None:
             return h._fail("TypeError",
                            f"'{h.kind_name(v)}' object is not iterable")
