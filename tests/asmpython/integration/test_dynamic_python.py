@@ -8614,6 +8614,75 @@ PROGRAMS = {
         show("own upper", lambda: Own().upper())
         show("inherited", lambda: SubList([3, 1]).pop(0))
     """,
+    "the_format_spec_groups_and_pads_and_refuses_as_cpython_does": """
+        # FIVE RULES, every one of them wrong at MACHINE-WORD size, so none
+        # of them is about big integers -- they surfaced while fixing the
+        # base conversion for those and were each checked against a small
+        # value before being separated out.
+        #
+        # 1. ZERO PADDING WENT BEFORE THE PREFIX: `format(255, "#030x")` was
+        #    `000000000000000000000000000xff`, with the `0x` stranded in the
+        #    middle of the fill where it reads as neither prefix nor digit.
+        #    The `=` fill belongs after the sign AND after the prefix.
+        # 2. GROUPING USED THREE DIGITS IN EVERY BASE. CPython groups the
+        #    non-decimal bases by FOUR and only `d`/`n` by three.
+        # 3. GROUPING WAS SKIPPED PAST 120 DIGITS, on account of a fixed
+        #    scratch buffer -- so every big integer past that came back
+        #    unseparated, which is a wrong answer and a silent one.
+        # 4. `,` AND `_` WERE ACCEPTED WITH `n`, and `,` with the
+        #    non-decimal bases, where CPython refuses all of them by name.
+        #    `_x` IS allowed and `,x` is not, so the rule is about the
+        #    SEPARATOR and not only about the base.
+        # 5. `n` WAS AN INTEGER TYPE ONLY: `format(1.5, "n")` was refused as
+        #    an unknown format code for a float, where it means `g`.
+        #
+        # AND `c` OUT OF RANGE was a ValueError from `chr` where CPython
+        # raises an OverflowError from `%c` -- the wrong TYPE is what a
+        # program catching it sees.
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        n = 10 ** 301
+        b = 2 ** 500
+        # PAST THE OLD CAP.
+        show("302 digits", lambda: format(n, ",d")[:50])
+        show("302 length", lambda: len(format(n, ",d")))
+        show("big hex", lambda: format(b, "_x")[:50])
+        show("big bin length", lambda: len(format(b, "_b")))
+        # THE GROUP SIZES.
+        show("hex", lambda: (format(0x1, "_x"), format(0xFFFF, "_x"),
+                             format(0x12345, "_x"), format(0x123456789, "_x")))
+        show("bin", lambda: (format(0b1, "_b"), format(0b11111, "_b")))
+        show("oct", lambda: (format(0o7, "_o"), format(0o1234567, "_o")))
+        show("dec", lambda: (format(1, "_d"), format(1234, "_d"),
+                             format(1234567890, ",d")))
+        show("float", lambda: (format(1234567.891, ",.2f"), format(1e6, ",.1f")))
+        # THE FILL AND THE PREFIX.
+        show("alt zero", lambda: (format(255, "#030x"), format(-255, "#030x"),
+                                  format(8, "#012o"), format(5, "#012b")))
+        show("alt zero upper", lambda: format(255, "#030X"))
+        show("plain zero", lambda: (format(255, "030x"), format(-255, "030d")))
+        show("explicit =", lambda: (format(255, "*=10x"), format(-255, "*=10d")))
+        show("no width", lambda: (format(255, "#x"), format(255, "#o")))
+        # WHAT A SEPARATOR MAY GO WITH.
+        for spec in (",n", "_n", ",x", ",X", ",o", ",b"):
+            show("refuse " + spec, lambda spec=spec: format(255, spec))
+        for spec in ("_x", "_X", "_o", "_b", ",d", "_d", "n"):
+            show("allow " + spec, lambda spec=spec: format(255, spec))
+        # `n` ON EITHER KIND OF NUMBER.
+        show("float n", lambda: (format(1.5, "n"), format(1234.5678, "10.3n"),
+                                 format(1e21, "n"), format(0.0001, "n")))
+        show("int n", lambda: (format(255, "n"), format(10 ** 40, "n")))
+        # AND `c`.
+        show("c ok", lambda: (format(65, "c"), format(255, "c")))
+        show("c big", lambda: format(2 ** 70, "c"))
+        show("c over", lambda: format(2 ** 40, "c"))
+        show("c negative", lambda: format(-1, "c"))
+        show("chr is its own", lambda: chr(2 ** 40))
+    """,
     "fstrings": """
         n = 42
         s = 'ab'

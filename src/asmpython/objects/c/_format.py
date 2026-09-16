@@ -84,19 +84,56 @@ static int apy_spec_parse(const char *p, int64_t n, apy_spec *out) {
     return i == n;
 }
 
-/* Insert `group` every three digits of `body`, from the right, in place. The
-   caller owns a buffer with room; a spec wide enough to overflow it is
-   refused rather than truncated. */
-static int64_t apy_group_digits(char *body, int64_t n, char group) {
-    char tmp[160];
-    int64_t out = 0, i;
-    if (n > 120) return n;
-    for (i = 0; i < n; i++) {
-        if (i && (n - i) % 3 == 0) tmp[out++] = group;
-        tmp[out++] = body[i];
+/* WHICH TYPES A GROUPING CHARACTER MAY GO WITH, worded as CPython words it,
+   or 0 for a combination it allows.
+
+   `,` IS DECIMAL ONLY and `_` is not: `format(x, "_x")` separates hex digits
+   in fours while `format(x, ",x")` is refused outright, which is a rule
+   about the SEPARATOR and not only about the base. And `n` takes neither,
+   because its whole job is to group the way a locale says. All three were
+   accepted here and quietly did something. */
+static const char *apy_group_refusal(const apy_spec *sp) {
+    if (!sp->group) return 0;
+    if (sp->type == 'n')
+        return sp->group == ',' ? "Cannot specify ',' with 'n'."
+                                : "Cannot specify '_' with 'n'.";
+    if (sp->group == ',' && (sp->type == 'b' || sp->type == 'o'
+                             || sp->type == 'x' || sp->type == 'X'))
+        return sp->type == 'b' ? "Cannot specify ',' with 'b'."
+             : sp->type == 'o' ? "Cannot specify ',' with 'o'."
+             : sp->type == 'x' ? "Cannot specify ',' with 'x'."
+                               : "Cannot specify ',' with 'X'.";
+    return 0;
+}
+
+/* Insert `group` every `every` digits of `body`, from the right, in place.
+   The caller owns a buffer with room for the separators.
+
+   EVERY FOUR IN A NON-DECIMAL BASE, which is CPython's rule and was not this
+   one's: `format(0x123456789, "_x")` is `1_2345_6789` there and was
+   `1_2345_6789`'s three-digit cousin here. Decimal groups by three, and the
+   base is the only thing that decides, so the caller passes it.
+
+   AND NO CAP. This kept a 160-byte scratch buffer and simply DID NOT GROUP a
+   body longer than 120 digits, which is a wrong answer for every big integer
+   past that -- `format(10 ** 301, ",d")` came back unseparated. The buffer
+   the caller already sized for the separators is written backwards in place
+   instead, so there is no second one to overflow. */
+static int64_t apy_group_digits(char *body, int64_t n, char group, int every) {
+    int64_t sep = (n - 1) / every, out = n + sep, i, at = out - 1, k = 0;
+    if (sep <= 0) return n;
+    for (i = n - 1; i >= 0; i--) {
+        if (k == every) { body[at--] = group; k = 0; }
+        body[at--] = body[i];
+        k++;
     }
-    memcpy(body, tmp, (size_t)out);
     return out;
+}
+
+/* How many digits a group holds for a spec's type: four for the non-decimal
+   bases, three for everything else. */
+static int apy_group_every(char type) {
+    return (type == 'b' || type == 'o' || type == 'x' || type == 'X') ? 4 : 3;
 }
 
 /* Pad `body` to the spec's width under its align, and hand back a str.
@@ -124,6 +161,17 @@ static apy_value apy_spec_pad(const char *body, int64_t n, const apy_spec *sp,
     if (align == '=') {
         if (n && (body[0] == '-' || body[0] == '+' || body[0] == ' '))
             signlen = 1;
+        /* AND AFTER THE BASE PREFIX, which is the other thing that has to
+           stay at the front. `format(255, "#030x")` is
+           `0x00000000000000000000000000ff` in CPython and was
+           `000000000000000000000000000xff` here -- the `0x` left stranded in
+           the middle of the fill, which reads as neither a prefix nor a
+           digit. `#` only ever writes `0` and then the type character, so
+           that is exactly what is looked for. */
+        if (n - signlen >= 2 && body[signlen] == '0'
+                && (body[signlen + 1] == 'x' || body[signlen + 1] == 'X'
+                    || body[signlen + 1] == 'o' || body[signlen + 1] == 'b'))
+            signlen += 2;
         memcpy(buf, body, (size_t)signlen);
         out = signlen;
         for (i = 0; i < pad; i++) { memcpy(buf + out, sp->fill,
@@ -196,6 +244,13 @@ APY_API apy_value apy_format(apy_value v, apy_value spec) {
     if (!apy_spec_parse(sptr, slen, &sp))
         return apy_fail2("ValueError", "Invalid format specifier '%s'%s",
                          sptr, "");
+    /* A GROUPING CHARACTER ITS TYPE WILL NOT TAKE is refused before anything
+       is formatted, which is where CPython refuses it -- so the refusal does
+       not depend on what the value turned out to be. */
+    {
+        const char *no = apy_group_refusal(&sp);
+        if (no) return apy_fail("ValueError", no);
+    }
 
     if (sp.type == 's' || (!sp.type && O(v)->kind == APY_STR_K)) {
         apy_value s = apy_str(v);
@@ -209,7 +264,12 @@ APY_API apy_value apy_format(apy_value v, apy_value spec) {
         return apy_spec_pad(APY_CSTR(s), len, &sp, 0);
     }
     if (sp.type == 'b' || sp.type == 'o' || sp.type == 'x' || sp.type == 'X'
-        || sp.type == 'd' || sp.type == 'n' || sp.type == 'c') {
+        || sp.type == 'd' || sp.type == 'c'
+        /* `n` IS AN INTEGER TYPE ONLY FOR AN INTEGER. For a float it means
+           `g`, locale-aware -- and this branch claimed every `n`, so
+           `format(1.5, "n")` fell through to the integer rule and was
+           refused as an unknown format code for a float. */
+        || (sp.type == 'n' && (apy_is_int_like(v) || apy_is_big(v)))) {
         int64_t iv;
         uint64_t mag;
         int base = 10, upper = 0;
@@ -270,7 +330,7 @@ APY_API apy_value apy_format(apy_value v, apy_value spec) {
                 if (sp.alt && base != 10) { big[bn++] = '0'; big[bn++] = sp.type; }
                 if (base == 10) { memcpy(big + bn, ds, (size_t)ndig); dn = ndig; }
                 else dn = apy_big_digits(O(v), bits_per, big + bn, upper);
-                if (sp.group) dn = apy_group_digits(big + bn, dn, sp.group);
+                if (sp.group) dn = apy_group_digits(big + bn, dn, sp.group, apy_group_every(sp.type));
                 bn += dn;
                 big[bn] = 0;
                 out = apy_spec_pad(big, bn, &sp, 1);
@@ -284,7 +344,15 @@ APY_API apy_value apy_format(apy_value v, apy_value spec) {
                a str is stored as UTF-8, so that is two bytes and not one.
                Writing the low byte raw produced a string that compared
                unequal to `chr(255)` and was not valid UTF-8 either. */
-            apy_value ch = apy_chr(v);
+            apy_value ch;
+            /* OUT OF RANGE IS AN OverflowError HERE, whatever `chr` calls
+               it: CPython words this one from `%c` -- the conversion that
+               could not be made -- rather than from the builtin, and the
+               TYPE is what a program catching it sees. */
+            if (iv < 0 || iv > 0x10FFFF)
+                return apy_fail("OverflowError",
+                                "%c arg not in range(0x110000)");
+            ch = apy_chr(v);
             if (!ch) return 0;
             return apy_spec_pad(APY_CSTR(ch), O(ch)->v.s.n, &sp, 0);
         }
@@ -298,7 +366,7 @@ APY_API apy_value apy_format(apy_value v, apy_value spec) {
         }
         {
             int64_t d = apy_int_digits(body + n, mag, base, upper);
-            if (sp.group) d = apy_group_digits(body + n, d, sp.group);
+            if (sp.group) d = apy_group_digits(body + n, d, sp.group, apy_group_every(sp.type));
             n += d;
         }
         body[n] = 0;
@@ -317,6 +385,10 @@ APY_API apy_value apy_format(apy_value v, apy_value spec) {
         if (!apy_is_num(v)) return apy_bad_code(type, v);
         d = apy_as_float(v);
         if (type == '%') { d *= 100.0; type = 'f'; }
+        /* `n` IS `g` WITH THE LOCALE'S SEPARATORS, and the C locale is this
+           runtime's -- so for a float the two are the same conversion, which
+           is the whole of what `n` means here. */
+        if (type == 'n') type = 'g';
         /* PEP 682: `z` turns a negative zero into a positive one -- and it is
            about the ROUNDED value, so `format(-0.001, 'z.1f')` is `0.0` too.
            Applied after the scaling above and before the conversion below,
@@ -370,7 +442,9 @@ APY_API apy_value apy_format(apy_value v, apy_value spec) {
             while (head < len && body[n + head] != '.' && body[n + head] != 'e'
                    && body[n + head] != 'E') head++;
             memcpy(tail, body + n + head, (size_t)(len - head));
-            grouped = apy_group_digits(body + n, head, sp.group);
+            /* A FLOAT ALWAYS GROUPS BY THREE: the four-digit rule is the
+               non-decimal bases', and a float has no base to be in. */
+            grouped = apy_group_digits(body + n, head, sp.group, 3);
             memcpy(body + n + grouped, tail, (size_t)(len - head));
             len = grouped + (len - head);
         }
