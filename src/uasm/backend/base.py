@@ -16,11 +16,15 @@ is a library a backend may call; it is not a stage anyone must implement, and
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
 
 from ..diagnostics import is_real
 
 from ..ir import Module
+# SHARED WITH THE FRONTENDS AND THE LINKERS, so re-exported rather than defined
+# here: a backend has declared its own flags since the beginning and every
+# backend imports `Option` from this module. See `uasm/options.py` for why
+# the other two kinds needed the same thing.
+from ..options import Option, OptionError  # noqa: F401  (re-export)
 # Re-exported so a backend author needs one import. The TYPE belongs to the
 # backend interface -- every `emit` receives one -- but the INSTANCES do not
 # live here: they are registered in `uasm.targets`, so adding a platform never
@@ -35,38 +39,6 @@ from ..target import Target
 #: writing the symbol and the runtime calling it must agree, and two constants
 #: that must agree are one constant.
 ENTRY_SYMBOL = "uasm_main"
-
-
-@dataclass(frozen=True, slots=True)
-class Option:
-    """One command-line option a backend takes.
-
-    Declared rather than added to the driver's parser, for the reason every
-    other extension point here exists: a backend that ships outside this
-    repository gets its flags the same way a built-in does, and `uasm
-    backends` can say what a backend accepts without the driver knowing what
-    any of them mean.
-    """
-
-    #: As typed, without the dashes: "class-version" is `--class-version`.
-    name: str
-    help: str
-    #: What the value is called in `--help`.
-    metavar: str = "VALUE"
-
-    @property
-    def flag(self) -> str:
-        return "--" + self.name
-
-
-class OptionError(Exception):
-    """A backend option nobody can act on.
-
-    Distinct from a crash: the value is the user's and the message says what
-    was wrong with it, so the driver reports it as a diagnostic rather than
-    letting a traceback out.
-    """
-
 
 class Backend(abc.ABC):
     """Turn a verified module into named artifacts."""
@@ -211,6 +183,23 @@ class Backend(abc.ABC):
             f"this program needs host services the {self.name} backend does "
             f"not provide: {listed}. See objects/hostsvc.py for what each group "
             f"is, and `Backend.host_services` for how a backend declares one.")
+
+    #: THE EXTENSIONS THIS BACKEND'S OWN ARTIFACTS CARRY, most specific
+    #: first -- what `emit` writes, BEFORE any linker has run.
+    #:
+    #: THE SYMMETRIC HALF OF `Frontend.extensions`, which has always let the
+    #: source's spelling choose a frontend. A backend had no such declaration,
+    #: so the driver could only default to one name and make every other
+    #: choice the user's to type: `-o foo.wasm` still built C.
+    #:
+    #: NOT WHAT THE PROGRAM ENDS UP AS. `cpyext` writes `.c` here and the
+    #: toolchain of the same name turns it into `.so` -- so an output named
+    #: `.so` is the LINKER's artifact and chooses the backend only through it.
+    #: See `Toolchain.artifacts`.
+    #:
+    #: EMPTY MEANS "NEVER CHOSEN BY SPELLING", which is honest for a backend
+    #: whose artifact has no extension of its own to claim.
+    artifacts: tuple[str, ...] = ()
 
     @abc.abstractmethod
     def emit(self, module: Module, target: Target) -> dict[str, bytes]:

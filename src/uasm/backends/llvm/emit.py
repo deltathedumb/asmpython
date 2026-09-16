@@ -19,6 +19,8 @@ from ...ir import Module
 
 class LlvmBackend(Backend):
     name = "llvm"
+    #: LLVM IR, text form.
+    artifacts = (".ll",)
     description = "LLVM IR (.ll) for any target LLVM supports"
     kind = "language"
     #: The whole point of this module. See the docstring.

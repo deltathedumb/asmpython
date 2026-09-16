@@ -33,6 +33,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..options import Option
 from ..target import Target
 
 
@@ -75,6 +76,45 @@ class Toolchain(abc.ABC):
 
     name: str = ""
     description: str = ""
+
+    #: THE EXTENSIONS THE PROGRAM THIS PRODUCES CARRIES, most specific first.
+    #:
+    #: WHAT THE USER NAMES WITH `-o` is this and not the backend's artifact:
+    #: `-o thing.so` is asking for an extension module, which is the `cpyext`
+    #: toolchain over the `cpyext` backend, and the `.c` in between is an
+    #: implementation detail neither of them was asked about. So the output
+    #: spelling picks the LINKER, and the linker is what implies the backend.
+    #:
+    #: EMPTY MEANS THE PROGRAM HAS NO EXTENSION OF ITS OWN -- a native
+    #: executable on a Unix, which is what `-o thing` with nothing after the
+    #: dot means and cannot be told apart by spelling from any other.
+    artifacts: tuple[str, ...] = ()
+
+    #: THE BACKENDS THIS CAN TAKE INPUT FROM, most preferred first.
+    #:
+    #: THE PAIRING WAS ONLY EVER IMPLICIT. A `LinkRequest` carries filenames
+    #: and not the identity of what produced them, so each toolchain worked
+    #: out for itself whether `out.c` or `out.o` was something it could use.
+    #: That is enough to LINK and not enough to CHOOSE: `-o thing.so` names
+    #: the `cpyext` toolchain, and deciding which backend feeds it from the
+    #: artifact extensions alone gives `c` and `cpyext` both, because both
+    #: write `.c`.
+    #:
+    #: ORDER IS PREFERENCE, and it is a declaration rather than a default
+    #: buried in the driver: `cc` naming `c` first is why `-o thing` on a
+    #: Unix still builds through C rather than through the native code
+    #: generator, and changing that is now an edit to the toolchain that
+    #: means it.
+    #:
+    #: EMPTY MEANS ANY, which only `none` can honestly say -- it writes what
+    #: the backend produced and never reads it.
+    backends: tuple[str, ...] = ()
+
+    #: OPTIONS THIS LINKER TAKES, declared the way a backend declares its
+    #: own. `--link-input` is this kind of flag and lived on the driver,
+    #: which meant it was offered for `jar` and `pyc` too -- neither of which
+    #: links anything, and neither of which could say so.
+    options: tuple[Option, ...] = ()
 
     @abc.abstractmethod
     def link(self, request: LinkRequest) -> Path:

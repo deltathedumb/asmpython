@@ -1,13 +1,15 @@
 # uasm — a retargetable compiler
 
 **UIR** -- *a Universal Intermediate Representation* -- with pluggable
-frontends, backends, targets and toolchains. Python in, a native executable
-out, and no half knows about another. The IR is written `.uir` and shipped
-as `.uirb`; neither spelling mentions Python, because nothing about the IR
-does.
+frontends, backends, targets and toolchains. Python or C in, a native
+executable out, and no half knows about another. The IR is written `.uir`
+and shipped as `.uirb`; neither spelling mentions either language, because
+nothing about the IR does.
 
 ```
 uasm build prog.py                   # -> prog.exe, ready to run
+uasm build prog.c                    # C, too -- the language, not a subset
+uasm build prog.c --include-path inc --define N=4   # the C frontend's own flags
 uasm build prog.py -O                # optimise first
 uasm build prog.py --backend x86-64 --target x86_64-linux
 uasm build prog.py --backend arm --bits 64   # a family; --bits picks the member
@@ -31,7 +33,11 @@ src/uasm/
   ir/            types, opcodes, module, cfg, builder, verifier, printer,
                  parser, interpreter
   passes/        pass manager with invariant checking, and transforms
-  frontend(s)/   source -> IR         (python: the language, not a subset)
+  frontend(s)/   source -> IR         (python and c: each the language, not a
+                 subset. c's standard library is C this frontend compiles,
+                 sitting on the three platform-floor functions and nothing
+                 else, so a C program runs on every backend and in the
+                 interpreter)
   backend(s)/    IR -> artifacts      (c; x86-64 and arm64, which encode their
                  own instructions and write ELF, COFF and Mach-O objects with
                  no assembler anywhere in the path; jvm; pybc (.pyc); cpyext
@@ -249,6 +255,62 @@ is not a CPython extension module, which is `E0129` above.
 [archived/docs/LANGUAGE.md](archived/docs/LANGUAGE.md) describes what the
 Python frontend accepts — which is Python, on two paths — and the four places
 Python and the machine disagree.
+
+## The C frontend
+
+It compiles C, and `src/uasm/frontends/c/__init__.py` lists the four
+places it knowingly differs from a hosted implementation on x86-64 Linux —
+the whole list, rather than the beginning of one:
+
+  * `long double` **is** `double`. The IR has `f32` and `f64` and nothing
+    wider, so `__SIZEOF_LONG_DOUBLE__` says 8 and `<float.h>`'s `LDBL_*`
+    macros carry `double`'s values. A program that asks is told the truth.
+  * `_Complex` and `_Imaginary` are refused, with a diagnostic that says why.
+  * `setjmp`/`longjmp` are refused: a non-local jump needs the machine's
+    frame, and the IR deliberately has no way to name one.
+  * `main`'s parameters are `0` and a null `argv`. The platform floor is
+    `plat_write`, `plat_exit` and `plat_heap`; none of them can ask the host
+    for a command line, and inventing one would be worse than saying so.
+
+Everything else is implemented — VLAs, flexible array members, bit-fields,
+anonymous members, `_Generic`, designated initialisers, compound literals,
+`__VA_OPT__`, K&R definitions, statement expressions, and GNU's `__typeof__`
+and `__restrict` spellings because real headers use them — and the
+preprocessor is Prosser's algorithm, which is to say it agrees with the standard's own
+worked examples rather than with an opinion about what recursive macro
+expansion should mean.
+
+**The standard library is C, compiled by this frontend**, from
+`frontends/c/include/`. It sits on the three floor functions and nothing else,
+which is what makes a C program built here run on every backend and in the IR
+interpreter: a backend that can run a Python program can already run a C one.
+`printf`'s floating-point conversion is exact rather than approximate, because
+every finite double is a terminating decimal and `%f` of `1e300` has a right
+answer with 301 digits in it.
+
+One translation unit per build: `uasm build prog.c` compiles `prog.c`
+and whatever it includes, and a project with several `.c` files builds as a
+unity build. The driver takes one source for every frontend, so that is the
+shape of the tool rather than a limit of the language.
+
+All thirty-one headers C23 requires are there. Three of them refuse with a
+reason rather than being absent — `<complex.h>`, `<setjmp.h>` and
+`<threads.h>`, each explaining what the IR cannot express and what to write
+instead — because a missing file is a mystery and a refusal is an answer.
+`<stdatomic.h>` is supported and `<threads.h>` is not, which is not a
+contradiction: with one thread every operation is already atomic.
+
+Three paths are compared for every test program — the host's `cc`, the
+reference interpreter, and the C backend's output compiled by `cc` — and all
+three must agree on output and exit status. One program goes further and is
+also built through the **x86-64** backend, which encodes its own instructions
+and writes its own ELF object with no assembler in the path, and through the
+**jvm** backend into a jar; both print what `cc` prints, which is the point of
+a language-independent IR stated as a test rather than as a claim.
+
+Struct layout is checked against the host compiler's own `sizeof` and
+`_Alignof`, because a struct's layout is an ABI and a frontend can be
+self-consistently wrong about one.
 
 ## Running the tests
 

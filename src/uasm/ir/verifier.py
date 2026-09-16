@@ -147,7 +147,13 @@ def _instr(fn: Function, where: str, ins: Instruction, labels: set[str],
     # Result.
     if spec.defines_value:
         want = T.I1 if spec.result == "i1" else ins.ty
-        if ins.op is Op.CALL and ins.ty.is_void:
+        if ins.op in (Op.CALL, Op.CALL_PTR) and ins.ty.is_void:
+            # BOTH CALLS, not just the direct one. A call through a function
+            # pointer to something returning `void` is ordinary -- C's
+            # `void (*f)(void); f();` is one -- and requiring a result
+            # register for it made the verifier the only thing in the tree
+            # that could not handle it: every backend already guards on
+            # `ins.dst is not None`, and the interpreter's `put` does too.
             if ins.dst is not None:
                 out.append(f"{where}: void call cannot define %{ins.dst}")
         elif ins.dst is None:

@@ -190,6 +190,8 @@ class JvmBackend(Backend):
     """IR to a JVM class file."""
 
     name = "jvm"
+    #: One class file per class; the jar is the toolchain's.
+    artifacts = (".class",)
     description = "JVM class files, packaged as a runnable jar"
     #: Real class files, written byte by byte by `classfile.py`. The only
     #: backend here that has always been what it claims.

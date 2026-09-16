@@ -65,6 +65,10 @@ class Options:
     #: Produce a program, not just artifacts. False is `--emit`.
     link: bool = False
     toolchain: str = "cc"
+    #: WHETHER `toolchain` WAS POSITIVELY DETERMINED -- named on the command
+    #: line, or claimed by the output's extension. False means it was fallen
+    #: back to, and the TARGET gets the last word: see below.
+    toolchain_chosen: bool = False
     #: Extra objects/archives/-l names handed to the toolchain.
     link_inputs: tuple[str, ...] = ()
     workdir: Path | None = None
@@ -109,6 +113,9 @@ class Options:
     #: Declaration files naming shared libraries the program may `import`.
     #: See `frontends/python/nativelib.py`.
     native_libraries: tuple[Path, ...] = ()
+    #: Values for the options the chosen FRONTEND declared, keyed the same
+    #: way `backend_options` is. A repeatable one holds a list.
+    frontend_options: dict = field(default_factory=dict)
 
     @property
     def effective_passes(self) -> tuple[str, ...]:
@@ -265,6 +272,10 @@ def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
                   + "|".join(sorted(frontend_registry.available()))))
         return Result()
 
+    fe = _configure_frontend(fe, opts, sink)
+    if fe is None:
+        return Result()
+
     if opts.library:
         # CHECKED BY SIGNATURE, NOT BY CALLING AND CATCHING: a frontend that
         # has never heard of `library=` (nothing outside `frontends/python`
@@ -406,6 +417,41 @@ def _configure_backend(be, opts: Options, sink: DiagnosticSink):
         return None
 
 
+def _configure_frontend(fe, opts: Options, sink: DiagnosticSink):
+    """Hand the frontend its own flags. The mirror of `_configure_backend`.
+
+    An option the chosen frontend does not declare is an ERROR rather than
+    something ignored, for the same reason: `-I include --frontend python`
+    reads as a request the Python frontend cannot honour, and compiling
+    without it produces something that is not what was asked for.
+    """
+    from ..frontend.base import OptionError
+
+    declared = {o.name for o in fe.options}
+    stray = sorted(set(opts.frontend_options) - declared)
+    if stray:
+        for name in stray:
+            takers = sorted(other.name
+                            for other in frontend_registry.available().values()
+                            if any(o.name == name for o in other.options))
+            d = error("E9111",
+                      f"the {fe.name} frontend does not take --{name}")
+            if takers:
+                d.help(f"--{name} belongs to the "
+                       f"{' or '.join(repr(t) for t in takers)} frontend; "
+                       f"pass --frontend {takers[0]}")
+            sink.report(d)
+        return None
+
+    mine = {name: value for name, value in opts.frontend_options.items()
+            if name in declared}
+    try:
+        return fe.configure(mine, sink)
+    except OptionError as exc:
+        sink.report(error("E9112", f"{fe.name} frontend: {exc}"))
+        return None
+
+
 def _link_stage(opts: Options, result: Result, be, target: Target,
                 module: Module, sink: DiagnosticSink) -> None:
     """Artifacts to a program.
@@ -422,8 +468,15 @@ def _link_stage(opts: Options, result: Result, be, target: Target,
     # no start files, and a linker script that has to match the machine. Nor
     # can a class file, which is packaged rather than linked. The default
     # follows the target rather than making every invocation say so.
+    # THE TARGET GETS THE LAST WORD ONLY WHEN NOTHING ELSE SAID. This used
+    # to compare the toolchain against the string "cc", which worked only
+    # because "cc" was the hardcoded default and therefore stood in for "not
+    # chosen". Once the driver began choosing from the output's extension,
+    # `-o Prog.class` resolved to `none` -- a real answer, not the sentinel --
+    # and the jvm target's `jar` never applied, so the class file was written
+    # and the jar beside it was not.
     name = opts.toolchain
-    if name == "cc":
+    if not opts.toolchain_chosen:
         if target.default_toolchain:
             name = target.default_toolchain
         elif target.os == "none":

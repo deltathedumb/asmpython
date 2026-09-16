@@ -20,6 +20,8 @@ from ...ir import Module
 
 class X86_32Backend(Backend):
     name = "x86-32"
+    #: An ELF32 or COFF object, or its assembly.
+    artifacts = (".o", ".s")
     description = "32-bit x86 machine code (ELF32/COFF)"
     kind = "binary"
     #: The whole point of this module. See the docstring.
