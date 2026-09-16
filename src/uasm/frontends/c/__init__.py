@@ -12,6 +12,8 @@
     fold.py          constant expressions, which C requires in six places
     lower.py         typed tree -> UIR
     lower_builtins.py  code for the `__builtin_*` names
+    merge.py         several translation units, one module
+    longjmp.py       `setjmp` and `longjmp`, without a machine frame
     builtins.py      which of them exist; `__has_builtin` reads this
     builtin_check.py their type rules, including the three taking a TYPE
     support.py       the VLA arena, written in C and compiled by this frontend
@@ -31,10 +33,13 @@ compile time rather than failing to link.
   * `long double` IS `double`. The IR has `f32` and `f64` and nothing wider.
     `__SIZEOF_LONG_DOUBLE__` says 8 and `<float.h>`'s `LDBL_*` macros have
     `double`'s values, so a program that asks is told the truth.
-  * `_Complex` and `_Imaginary` are refused, for the same reason and with a
-    diagnostic that says so rather than a parse error.
-  * `setjmp`/`longjmp` are refused. A non-local jump needs the machine's
-    frame, and the IR deliberately has no way to name one.
+  * `_Imaginary` IS NOT THERE, which is conforming rather than missing:
+    imaginary types are Annex G, supported only by an implementation that
+    defines `__STDC_IEC_559_COMPLEX__`, and gcc has never had them either.
+    `_Complex` is complete, including Annex G's multiply and divide.
+  * A LOCAL THAT IS NOT `volatile` SURVIVES A `longjmp`. C says its value is
+    indeterminate; here the frame never went away, so it keeps what it had.
+    Stricter than the standard, which is the safe way to differ.
   * `localtime` IS `gmtime`. The host services can say what time it is and
     cannot say what the local offset from UTC is, so the calendar is UTC and
     `tm_isdst` is 0 -- not unknown, not in effect.
@@ -45,10 +50,9 @@ K&R definitions, statement expressions, `__attribute__` where it is advisory,
 and GNU's `__typeof__`/`__restrict` spellings because real headers use them
 -- is implemented.
 
-ALL THIRTY-ONE HEADERS C23 REQUIRES are in `include/`. Three of them refuse
-with a reason rather than being absent -- `<complex.h>`, `<setjmp.h>` and
-`<threads.h>` -- because a missing file is a mystery and a refusal is an
-answer. `<stdatomic.h>` is supported and `<threads.h>` is not, which is not a
+ALL THIRTY-ONE HEADERS C23 REQUIRES are in `include/`. One of them refuses
+with a reason rather than being absent -- `<threads.h>` -- because a missing
+file is a mystery and a refusal is an answer. `<stdatomic.h>` is supported and `<threads.h>` is not, which is not a
 contradiction: with one thread every operation is already atomic.
 
 SEVERAL TRANSLATION UNITS IN ONE BUILD. `uasm build main.c --c:unit parse.c
@@ -76,6 +80,7 @@ from ...diagnostics import DiagnosticSink, SourceFile, error, warning
 from ...frontend import Frontend, register
 from ...options import Option, OptionError
 from ...ir import Module
+from . import longjmp
 from .lower import Lowerer
 from .merge import merge
 from .parser import parse
@@ -162,7 +167,7 @@ class CFrontend(Frontend):
                 return None
             modules.append(module)
         if len(modules) == 1:
-            return modules[0]
+            return self._finish(modules[0], sink)
         joined = merge(modules, [s.name for s in sources], sink)
         if sink.failed:
             return None
@@ -179,7 +184,21 @@ class CFrontend(Frontend):
                             "addresses, and no `main` to run them from")
                     .note("the entry point calls every unit's initialiser; "
                           "without one, none of them runs"))
-        return joined
+        return self._finish(joined, sink)
+
+    def _finish(self, module: Module, sink: DiagnosticSink) -> Module | None:
+        """What is done to the whole program rather than to one unit.
+
+        `setjmp` IS THE ONE THING, and it has to be here: the rewriting puts
+        a check after every call in the PROGRAM, because a frame between the
+        `longjmp` and the `setjmp` may be a library function in a unit that
+        never mentioned either name.
+        """
+        if longjmp.used(module):
+            longjmp.apply(module, sink)
+            if sink.failed:
+                return None
+        return module
 
     def _one(self, source: SourceFile, sink: DiagnosticSink, *,
              prefix: str, inits: tuple[str, ...]) -> Module | None:

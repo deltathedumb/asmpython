@@ -54,6 +54,11 @@ class K(enum.Enum):
     FLOAT = "float"
     DOUBLE = "double"
     LDOUBLE = "long double"
+    #: A COMPLEX TYPE, with `of` naming which of the three it is made of.
+    #: One kind and not three, because every rule C has about complex types
+    #: is about the pair rather than about the element -- the element is a
+    #: parameter, exactly as it is for an array.
+    COMPLEX = "complex"
     POINTER = "pointer"
     ARRAY = "array"
     FUNCTION = "function"
@@ -215,7 +220,26 @@ class CType:
     def is_float(self) -> bool: return self.kind in _FLOATING
 
     @property
-    def is_arithmetic(self) -> bool: return self.is_integer or self.is_float
+    def is_complex(self) -> bool: return self.kind is K.COMPLEX
+
+    @property
+    def is_arithmetic(self) -> bool:
+        # C CALLS A COMPLEX TYPE ARITHMETIC, and every rule that says
+        # "arithmetic type" -- the usual conversions, what `+` takes, what a
+        # cast may name, what an `if` may test -- includes it.
+        return self.is_integer or self.is_float or self.is_complex
+
+    @property
+    def in_memory(self) -> bool:
+        """Whether a value of this type is handled as its ADDRESS.
+
+        The lowering convention (`lower.py`) is that an aggregate IS a
+        pointer to its storage, because the IR has no aggregate type. A
+        complex value is two floats side by side and is carried the same
+        way -- so everything that asks this question about a struct has the
+        same answer for a complex, and asks it in one place.
+        """
+        return self.is_record or self.is_array or self.is_complex
 
     @property
     def is_pointer(self) -> bool: return self.kind is K.POINTER
@@ -273,6 +297,8 @@ class CType:
     @property
     def size(self) -> int:
         """Bytes. Raises on an incomplete type -- the caller must have checked."""
+        if self.kind is K.COMPLEX:
+            return self.of.size * 2
         if self.kind in _SCALAR:
             return _SCALAR[self.kind][0]
         if self.kind is K.POINTER:
@@ -296,6 +322,11 @@ class CType:
 
     @property
     def align(self) -> int:
+        # THE ELEMENT'S, not the pair's: `double _Complex` is 16 bytes
+        # aligned to 8, which is what every ABI that has one says and what
+        # `_Alignof(double _Complex)` must answer.
+        if self.kind is K.COMPLEX:
+            return self.of.align
         if self.kind in _SCALAR:
             return _SCALAR[self.kind][0]
         if self.kind is K.POINTER:
@@ -356,6 +387,29 @@ ULLONG = CType(K.ULLONG)
 FLOAT = CType(K.FLOAT)
 DOUBLE = CType(K.DOUBLE)
 LDOUBLE = CType(K.LDOUBLE)
+
+#: The three complex types. `complex_of` is how one is made from an element;
+#: these are here so that the common ones are the same object, which is what
+#: makes `is` work in the places that compare types cheaply.
+CFLOAT = CType(K.COMPLEX, of=FLOAT)
+CDOUBLE = CType(K.COMPLEX, of=DOUBLE)
+CLDOUBLE = CType(K.COMPLEX, of=LDOUBLE)
+
+
+def complex_of(elem: CType) -> CType:
+    """`float _Complex` from `float`, and so on.
+
+    ONLY THE THREE REAL FLOATING TYPES. C says the element of a complex type
+    is one of them; `int _Complex` is a GNU extension that nothing portable
+    uses, and accepting it would mean an integer complex in every rule below.
+    The parser refuses it before this is reached.
+    """
+    k = elem.unqualified().kind
+    if k is K.FLOAT:
+        return CFLOAT
+    if k is K.LDOUBLE:
+        return CLDOUBLE
+    return CDOUBLE
 
 #: The types the language names for itself. `size_t` is `unsigned long` and
 #: `ptrdiff_t` is `long`, which `<stddef.h>` repeats and the predefined
@@ -444,6 +498,14 @@ def promote_bitfield(ty: CType, width: int) -> CType:
 def usual_arithmetic(a: CType, b: CType) -> CType:
     """The usual arithmetic conversions, 6.3.1.8. The common type of a binary
     arithmetic operator's operands."""
+    if a.is_complex or b.is_complex:
+        # THE RESULT IS COMPLEX AND THE ELEMENT IS THE USUAL CONVERSION OF
+        # THE TWO ELEMENTS, which is 6.3.1.8's own rule read literally: the
+        # corresponding real type of each operand decides, and the result is
+        # the complex type with that element.
+        real_a = a.of if a.is_complex else a
+        real_b = b.of if b.is_complex else b
+        return complex_of(usual_arithmetic(real_a, real_b))
     if a.is_float or b.is_float:
         for k in (K.LDOUBLE, K.DOUBLE, K.FLOAT):
             if a.kind is k or b.kind is k:
@@ -529,6 +591,8 @@ def compatible(a: CType, b: CType, *, qualifiers: bool = True) -> bool:
         return False
     if a.kind in (K.STRUCT, K.UNION, K.ENUM):
         return a.tag is b.tag
+    if a.kind is K.COMPLEX:
+        return compatible(a.of, b.of)
     if a.kind is K.POINTER:
         return compatible(a.of, b.of)
     if a.kind is K.ARRAY:
@@ -703,7 +767,9 @@ def spell(ty: CType, inner: str = "") -> str:
             if ty.variadic:
                 args += ", ..."
         return spell(ty.ret, f"{inner}({args})")
-    if k in (K.STRUCT, K.UNION, K.ENUM):
+    if k is K.COMPLEX:
+        base = f"{ty.of.kind.value} _Complex"
+    elif k in (K.STRUCT, K.UNION, K.ENUM):
         name = ty.tag.name if ty.tag and ty.tag.name else "(anonymous)"
         base = f"{k.value} {name}"
     else:

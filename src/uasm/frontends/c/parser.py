@@ -236,6 +236,12 @@ class Parser:
             self.next()
             operand = self.unary()
             return self.sema.build_unary(t.text, operand, t.span)
+        if self.at_kw("__real__", "__imag__"):
+            # gcc's TWO HALVES OF A COMPLEX VALUE, spelled as operators
+            # rather than as functions. Real headers use them -- glibc's own
+            # `<complex.h>` is written with them -- and so is this one's.
+            self.next()
+            return self.sema.build_unary(_kw(t.text), self.unary(), t.span)
         if self.at_kw("sizeof", "_Alignof"):
             self.next()
             is_align = _kw(t.text) == "_Alignof"
@@ -399,6 +405,13 @@ class Parser:
             return self.sema.poison(t.span)
         if isinstance(got, FloatConst):
             ty = C.FLOAT if got.size == 4 else C.DOUBLE
+            if got.imaginary:
+                # THE VALUE IS THE PAIR, which is what makes the rest of the
+                # compiler need no special case: a complex literal is a
+                # `FloatLit` whose value is a Python complex, folding
+                # computes with it, and lowering stores two halves.
+                return S.FloatLit(t.span, C.complex_of(ty), False,
+                                  complex(0.0, got.value))
             return S.FloatLit(t.span, ty, False, got.value)
         return S.IntLit(t.span, C.integer(got.bits, got.signed), False,
                         got.value)
@@ -594,6 +607,7 @@ class Parser:
         words: list[str] = []
         quals: set[str] = set()
         made: CType | None = None
+        complex_ = False
         start = self.tok.span
         spec.span = start
         while True:
@@ -669,10 +683,29 @@ class Parser:
                 spec.explicit = True
                 self.next()
                 continue
-            if word in ("_Complex", "_Imaginary"):
-                self.sema.error("E1214", f"`{word}` is not supported", t.span,
-                                note="this frontend has no complex types; the "
-                                     "IR has no way to carry one")
+            if word == "_Complex":
+                # A FLAG RATHER THAN A WORD, because it combines with the
+                # words rather than replacing them: `long double _Complex`
+                # and `_Complex double` are the same type, and `_BASIC`
+                # would need three more entries for each element to say so.
+                complex_ = True
+                spec.explicit = True
+                self.next()
+                continue
+            if word == "_Imaginary":
+                # NOT A GAP, AND NOT REFUSABLE ELSEWHERE. Imaginary types are
+                # Annex G, which is CONDITIONAL: an implementation supports
+                # them only if it defines `__STDC_IEC_559_COMPLEX__`, which
+                # this one does not -- and neither does gcc, which has never
+                # had them. `_Complex` says everything they can say, and
+                # `_Complex_I` is how you write i.
+                self.sema.error("E1214", "`_Imaginary` is not supported",
+                                t.span,
+                                note="imaginary types are Annex G, which an "
+                                     "implementation may leave out; this one "
+                                     "does, as gcc does",
+                                help="use `_Complex` and `_Complex_I`: "
+                                     "`double _Complex z = 2.0 * I;`")
                 self.next()
                 continue
             if made is None and not words and self.is_typedef(t):
@@ -700,6 +733,23 @@ class Parser:
                 made = C.INT
             else:
                 made = C.INT
+        if complex_:
+            # `_Complex` ALONE IS `_Complex double`. C's grammar lists the
+            # three spellings with a real floating type in them, so a bare
+            # one is a constraint violation -- but gcc reads it as `double`,
+            # every header that uses it means that, and refusing would be a
+            # diagnostic about nothing.
+            if made.is_float:
+                made = C.complex_of(made)
+            elif not spec.explicit or made.kind is C.K.INT:
+                made = C.CDOUBLE
+            else:
+                self.sema.error(
+                    "E1217",
+                    f"`{C.spell(made)} _Complex` is not a complex type", start,
+                    note="the element of a complex type is `float`, `double` "
+                         "or `long double`")
+                made = C.CDOUBLE
         spec.type = made.qualified(quals) if quals else made
         return spec
 

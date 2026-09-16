@@ -180,7 +180,7 @@ class TestItRefusesWithAReason:
             "int f(int i, unsigned n){ return i < n; }")
 
     def test_an_unsupported_construct_says_so(self):
-        assert "E1214" in codes("_Complex double z;")
+        assert "E1214" in codes("_Imaginary double z;")
 
     def test_every_error_has_a_position(self):
         _, sink = compile_c("int f(void){ return nope; }")
@@ -271,7 +271,7 @@ C23_HEADERS = [
 
 #: The three that cannot exist here, and the diagnostic each one gives. A
 #: refusal with a reason is a feature; a missing file is a mystery.
-REFUSING = {"complex.h", "setjmp.h", "threads.h"}
+REFUSING = {"threads.h"}
 
 
 class TestItAlwaysTerminates:
@@ -331,17 +331,51 @@ class TestTheFourDivergences:
             "_Static_assert(LDBL_MAX == DBL_MAX, \"\");\n")
         assert not sink.failed, [d.message for d in sink.diagnostics]
 
-    def test_complex_is_refused_with_a_reason(self):
-        _, sink = compile_c("_Complex double z;")
-        assert [d.code for d in sink.diagnostics] == ["E1214"]
-        assert "complex" in sink.diagnostics[0].notes[0]
+    def test_complex_is_two_of_its_element(self):
+        """The layout C requires, which is what `creal` and `CMPLX` read."""
+        module, sink = compile_c(
+            "#include <complex.h>\n"
+            "_Static_assert(sizeof(double _Complex) == 16, \"\");\n"
+            "_Static_assert(sizeof(float _Complex) == 8, \"\");\n"
+            "_Static_assert(_Alignof(double _Complex) == 8, \"\");\n"
+            "double _Complex z = 3.0 + 4.0 * I;\n"
+            "double re(void){ return __real__ z; }\n")
+        assert not sink.failed, [d.message for d in sink.diagnostics]
+        got = [g for g in module.globals if g.name.endswith("z")]
+        assert got and got[0].size == 16
 
-    def test_setjmp_says_why_rather_than_going_missing(self):
-        """The header exists so the error names the problem instead of
-        `cannot find include file 'setjmp.h'`."""
-        _, sink = compile_c("#include <setjmp.h>\nint main(void){return 0;}")
-        assert [d.code for d in sink.diagnostics] == ["E1112"]
-        assert "machine frame" in sink.diagnostics[0].message
+    def test_imaginary_types_are_refused_as_annex_g_allows(self):
+        _, sink = compile_c("_Imaginary double z;")
+        assert [d.code for d in sink.diagnostics] == ["E1214"]
+        assert "Annex G" in sink.diagnostics[0].notes[0]
+
+    def test_setjmp_compiles_into_the_function_that_calls_it(self):
+        """There is no `setjmp` function to call: `longjmp.py` turns the
+        call into a branch and every call site into a check."""
+        module, sink = compile_c(
+            "#include <setjmp.h>\n"
+            "static jmp_buf e;\n"
+            "static void go(void){ longjmp(e, 1); }\n"
+            "int main(void){ if (setjmp(e) == 0) go(); return 0; }")
+        assert not sink.failed, [d.message for d in sink.diagnostics]
+        names = {f.name for f in module.functions}
+        assert "__c_setjmp" not in names and "__c_longjmp" not in names
+        assert {"__c_jmp_active", "__c_jmp_target"} <= {
+            g.name for g in module.globals}
+
+    def test_the_address_of_setjmp_is_refused(self):
+        _, sink = compile_c(
+            "#include <setjmp.h>\n"
+            "int (*f)(void *) = __c_setjmp;\n"
+            "int main(void){ return f == 0; }")
+        assert "E1603" in [d.code for d in sink.diagnostics]
+
+    def test_a_program_without_setjmp_is_not_rewritten(self):
+        """The check after every call is what `setjmp` costs, and a program
+        that does not use it must not pay."""
+        module, _ = compile_c(
+            "#include <stdio.h>\nint main(void){ puts(\"hi\"); return 0; }")
+        assert not [g for g in module.globals if g.name.startswith("__c_jmp")]
 
     def test_main_with_parameters_gets_the_command_line(self):
         """`argc` and `argv` are built from the `env` host service by the

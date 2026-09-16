@@ -1,26 +1,62 @@
-/* <setjmp.h> -- refused, and here is why.
+/* <setjmp.h>.
 
-   `longjmp` restores a saved MACHINE FRAME: a stack pointer, a program
-   counter, and whichever callee-saved registers the ABI says survive a call.
-   The UIR has none of those. It has virtual registers, basic blocks and
-   branches within one function, and deliberately no way to name a frame at
-   all -- that absence is what lets the same IR run in an interpreter, as
-   JVM bytecode, as a `.pyc` and as x86-64 machine code without any of them
-   agreeing about what a stack is.
+   IT WORKS, AND NOT BY SAVING A FRAME. There is nothing here to save one
+   with: the UIR has virtual registers, blocks and branches within a
+   function, and deliberately no way to name a stack -- which is what lets
+   one module run in an interpreter, as JVM bytecode and as machine code.
+   So a `longjmp` does not throw frames away; it asks them to leave. It sets
+   a flag, every call site in the program checks that flag the moment its
+   call returns and returns too if it is set, and the frame that recognises
+   the jump's token branches back to its own `setjmp`. `longjmp.py` is that
+   rewriting and says at length why it is shaped this way.
 
-   So this is not a gap waiting for someone with an afternoon. A `setjmp`
-   that compiled and then did not unwind would be far worse than one that
-   does not compile: the program would run, and be wrong somewhere else.
+   WHAT IT COSTS is a load and a branch after every call -- in a program that
+   uses `setjmp`, and in no other: the rewriting runs only when one of these
+   two names is called.
 
-   WHAT TO DO INSTEAD, if the code is yours: return an error code, or use a
-   flag and a `goto` within the function. Non-local exit BETWEEN functions is
-   the one thing this compiler cannot express.
+   WHAT YOU GET, COMPARED TO A HOSTED IMPLEMENTATION.
 
-   This file exists rather than being absent so that the error names the
-   problem instead of saying `cannot find include file 'setjmp.h'`. */
-#error <setjmp.h> is not supported: longjmp restores a machine frame, and the UIR has no way to name one. Return an error code, or use a flag and a goto within the function.
+     * `setjmp` answers 0 the first time and `longjmp`'s value, or 1, after.
+     * A local that is not `volatile` and changed in between has an
+       INDETERMINATE value, says C. Here it keeps the value it had: the frame
+       never went away. Stricter than the standard, which is the safe way to
+       differ -- code written for a real implementation still works.
+     * `longjmp` to a frame that has returned is undefined in C and undefined
+       here: the token belongs to that ACTIVATION, so nothing matches it and
+       the unwinding runs out of the program.
+     * The address of `setjmp` cannot be taken (E1603). It is a branch inside
+       its caller, so there is no function to point at.
 
-/* Declared anyway, so that a program guarded on `__has_include` or compiled
-   with the error suppressed gets one complaint rather than a hundred. */
-typedef long jmp_buf[8];
-typedef long sigjmp_buf[8];
+   `jmp_buf` IS ONE WORD, because one word is what is in it: the token of the
+   activation that saved it. A hosted `jmp_buf` is a register file and a
+   sigmask; this one is a number, and `sizeof (jmp_buf)` says 8. */
+#ifndef _UASM_SETJMP_H
+#define _UASM_SETJMP_H
+
+/* AN ARRAY, as C requires -- which is what makes `jmp_buf env;` and then
+   `setjmp(env)` pass the address without an `&`, and what stops a program
+   copying one by assignment. */
+typedef long jmp_buf[1];
+
+/* THE COMPILER RECOGNISES THESE TWO NAMES, which is why they are not spelled
+   `setjmp` and `longjmp`: C says `setjmp` is a macro, and a program that
+   `#undef`s it is entitled to a function -- which cannot exist here. Calling
+   these directly is the same as using the macros. */
+extern int __c_setjmp(void *__env);
+extern _Noreturn void __c_longjmp(void *__env, int __val);
+
+#define setjmp(env) __c_setjmp(env)
+#define longjmp(env, val) __c_longjmp((env), (val))
+
+/* POSIX'S SPELLINGS, for code that uses them. `_setjmp` and `_longjmp`
+   differ from the plain ones only in not touching the signal mask, and
+   `sigsetjmp`'s `savemask` says whether to save it -- there is no mask here
+   (see `<signal.h>`), so all four are the same jump and the flag is ignored
+   rather than pretended about. */
+typedef long sigjmp_buf[1];
+#define _setjmp(env) __c_setjmp(env)
+#define _longjmp(env, val) __c_longjmp((env), (val))
+#define sigsetjmp(env, savemask) ((void)(savemask), __c_setjmp(env))
+#define siglongjmp(env, val) __c_longjmp((env), (val))
+
+#endif
