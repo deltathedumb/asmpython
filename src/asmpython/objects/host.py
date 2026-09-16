@@ -11018,25 +11018,34 @@ def _apy_default_delattr(h, a):
 
 
 def _apy_iter_until(h, a):
-    """`iter(f, sentinel)` -- the CALLABLE form. The calls all happen now, so
-    what comes back is a cursor over their results rather than something that
-    will call `f` again later; a generator is the shape that would."""
+    """`iter(f, sentinel)` -- the CALLABLE form.
+
+    A CURSOR IN THE CALL MODE, which calls on every step. The calls USED TO
+    ALL HAPPEN HERE, into a list, with a guard at a million to stop a
+    callable that never answers the sentinel from running forever. Two things
+    were wrong with that and both are what a program sees: the calls happened
+    at CONSTRUCTION, so `iter(f, 4)` had already called `f` four times before
+    the first `next()`, and a callable that never answers the sentinel made
+    `for v in iter(f, s): break` -- which CPython leaves after ONE call --
+    run a million times and then stop short of what it was asked for.
+
+    NAMED AFTER THE FORM: CPython calls this a `callable_iterator`, and
+    nothing about the mode or the sentinel says so.
+    """
     fn = h._get(a[0], "apy_iter_until")
-    stop = h._get(a[1], "apy_iter_until")
-    out = []
-    try:
-        for _ in range(1000000):
-            v = h._invoke(fn, [])
-            if v == stop:
-                break
-            out.append(v)
-    except _UserFailed:
-        return 0
-    # NAMED AFTER THE FORM AND NOT AFTER THE LIST: CPython calls this a
-    # `callable_iterator`, and the list the calls drained into is an
-    # implementation detail of this runtime's eagerness.
-    made = Iterator(out)
+    # REFUSED WHEN IT IS MADE, not when it is walked. CPython checks the
+    # first argument here and says so in those words; leaving it to the walk
+    # reported `'int' object is not callable` from the first `next()`, which
+    # names the wrong moment and the wrong thing.
+    if not h._get(_apy_callable(h, [a[0]]), "apy_iter_until"):
+        return h._fail("TypeError", "iter(v, w): v must be callable")
+    made = Iterator(h._get(a[1], "apy_iter_until"), fn, Iterator.CALL)
     made.named = _CURSOR_NAMES["callable"][0]
+    # THE SENTINEL IS NOT A SOURCE TO WALK. `Iterator` reads a dict source's
+    # size to refuse one that changes under the walk, and a dict SENTINEL is
+    # not being walked at all -- `iter(f, {})` would have measured it and
+    # then reported it as changed.
+    made.n0 = -1
     return h._new(made)
 
 
@@ -13745,7 +13754,12 @@ class Iterator:
     #: something as they go, which is what makes `map(f, xs)` lazy -- `f` runs
     #: when the result is walked, not when it is made. `REV` walks the same
     #: source by index, counting DOWN -- see `_apy_reversed`.
-    PLAIN, MAP, FILTER, ENUMERATE, ZIP, REV = range(6)
+    #: `CALL` is `iter(f, sentinel)`: call `fn` on every step until it
+    #: answers the sentinel, which is what `src` holds. A mode and not a list
+    #: drained at construction, because CPython's is lazy -- the calls happen
+    #: as the walk asks for them, and the position slot is 0 until the
+    #: sentinel arrives and 1 after.
+    PLAIN, MAP, FILTER, ENUMERATE, ZIP, REV, CALL = range(7)
 
     def __init__(self, src, fn=None, mode: int = 0, start: int = 0) -> None:
         self.src = src
@@ -15169,6 +15183,24 @@ def _step_cursor(h, it):
             return h._stop
         at, it.i = it.i, it.i + 1
         return h._new((at, v))
+    if it.mode == Iterator.CALL:
+        # `iter(f, sentinel)`. ONE CALL PER STEP, and the sentinel ends it
+        # for good: CPython drops the callable the moment it arrives, so a
+        # second `next()` answers StopIteration without calling again.
+        if it.i:
+            return h._stop
+        try:
+            v = h._invoke(it.fn, [])
+        except _UserFailed:
+            return 0
+        if h.err is not None:
+            return 0
+        # COMPARED BY VALUE and not by identity: `iter(f, "")` stops on any
+        # empty string, which is what CPython does.
+        if v == it.src:
+            it.i = 1
+            return h._stop
+        return h._value(v)
     # zip. `zip()` with no arguments is EMPTY, not endless.
     if not it.src:
         return h._stop

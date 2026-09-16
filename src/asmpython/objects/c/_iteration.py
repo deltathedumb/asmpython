@@ -251,6 +251,24 @@ APY_API apy_value apy_step(apy_value it) {
         O(it)->v.it.i = at - 1;
         return apy_key_at(src, at);
     }
+    /* `iter(f, sentinel)`. One call per step, and the sentinel ends it for
+       good: CPython drops the callable the moment it arrives, so a second
+       `next()` answers StopIteration without calling again. */
+    case APY_IT_CALL: {
+        apy_value v, same;
+        if (O(it)->v.it.i) return apy_stop();
+        v = apy_call_n(O(it)->v.it.fn, 0, 0);
+        if (!v) return 0;
+        /* COMPARED BY VALUE and not by identity: `iter(f, "")` stops on any
+           empty string, which is what CPython does. */
+        same = apy_eq(v, O(it)->v.it.src);
+        if (!same) return 0;
+        if (apy_truth(same)) {
+            O(it)->v.it.i = 1;
+            return apy_stop();
+        }
+        return v;
+    }
     default: break;
     }
     {

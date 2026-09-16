@@ -298,6 +298,11 @@ static apy_value apy_call_kind(int kind, apy_value src);
 APY_API int64_t apy_class_builtin_kind(apy_value cls);
 APY_API apy_value apy_to_dict(apy_value src);
 APY_API apy_value apy_iter(apy_value v);
+/* `callable(x)`, defined with the descriptors because an instance is callable
+   only when its class writes `__call__`. Declared here because `iter(f, s)`
+   refuses a non-callable when the iterator is MADE, and that is six parts
+   earlier. */
+APY_API apy_value apy_callable(apy_value v);
 APY_API apy_value apy_getiter(apy_value v);
 APY_API apy_value apy_step(apy_value it);
 APY_API apy_value apy_stop(void);

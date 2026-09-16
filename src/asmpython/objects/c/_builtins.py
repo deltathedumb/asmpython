@@ -1872,28 +1872,33 @@ APY_API apy_value apy_vars(apy_value obj) {
     return apy_copy(O(obj)->v.o.dict);
 }
 
-/* `iter(f, sentinel)` -- the CALLABLE form, which keeps calling `f` until it
-   answers `sentinel`. Nothing lazy underneath, so the calls all happen here
-   and the result is a cursor over what they returned. A generator would be
-   the honest shape and is what `yield` would need. */
+/* `iter(f, sentinel)` -- the CALLABLE form, which calls `f` until it answers
+   `sentinel`.
+
+   A CURSOR IN THE `APY_IT_CALL` MODE, which calls on every step. The calls
+   USED TO ALL HAPPEN HERE, into a list, with a guard at a million to stop a
+   callable that never answers the sentinel from running forever. Two things
+   were wrong with that and both are what a program sees: the calls happened
+   at CONSTRUCTION, so `iter(f, 4)` had already called `f` four times before
+   the first `next()`, and a callable that never answers the sentinel made
+   `for v in iter(f, s): break` -- which CPython leaves after ONE call -- run
+   a million times and then stop short of what it was asked for.
+
+   NAMED AFTER THE FORM: CPython calls this a `callable_iterator`, and
+   nothing about the mode or the sentinel says so. */
 APY_API apy_value apy_iter_until(apy_value fn, apy_value sentinel) {
-    apy_value out = apy_seq_new(APY_LIST_K, 8);
-    int64_t guard;
-    for (guard = 0; guard < 1000000; guard++) {
-        apy_value v = apy_call_n(fn, NULL, 0);
-        if (!v) return 0;
-        if (apy_truth(apy_eq(v, sentinel))) break;
-        apy_seq_push(out, v);
-    }
-    {
-        /* NAMED AFTER THE FORM AND NOT AFTER THE LIST: CPython calls this a
-           `callable_iterator`, and the list the calls drained into is an
-           implementation detail of this runtime's eagerness. */
-        apy_value out2 = apy_iter(out);
-        if (out2 && O(out2)->kind == APY_ITER_K)
-            O(out2)->v.it.named = APY_IT_CALLABLE;
-        return out2;
-    }
+    apy_value out;
+    /* REFUSED WHEN IT IS MADE, not when it is walked. CPython checks the
+       first argument here and says so in those words; leaving it to the walk
+       reported `'int' object is not callable` from the first `next()`, which
+       names the wrong moment and the wrong thing. */
+    if (!apy_truth(apy_callable(fn)))
+        return apy_fail2("TypeError", "iter(v, w): v must be callable%s%s",
+                         "", "");
+    out = apy_cursor(sentinel, fn, APY_IT_CALL, 0);
+    if (out && O(out)->kind == APY_ITER_K)
+        O(out)->v.it.named = APY_IT_CALLABLE;
+    return out;
 }
 
 /* `isinstance(v, T)` where T is named by a string the frontend supplies. A

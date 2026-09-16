@@ -364,6 +364,24 @@ def apy_step(it: ptr) -> ptr:
             apy_seq_push(row, v)
             i = i + 1
         return row
+    if mode == apy_it_call():
+        # `iter(f, sentinel)`. ONE CALL PER STEP, and the sentinel ends it for
+        # good: CPython drops the callable the moment it arrives, so a second
+        # `next()` answers StopIteration without calling again.
+        if load(i64, offset(it, apy_it_i_offset())):
+            return apy_stop()
+        v: ptr = apy_call(fn, ptr(0), 0)
+        if not v:
+            return ptr(0)
+        # COMPARED BY VALUE and not by identity: `iter(f, "")` stops on any
+        # empty string, which is what CPython does.
+        same: ptr = apy_eq(v, src)
+        if not same:
+            return ptr(0)
+        if apy_truth(same):
+            store(i64, 1, offset(it, apy_it_i_offset()))
+            return apy_stop()
+        return v
     if mode == apy_it_rev():
         # BACKWARDS, from the index `reversed` started it at. The position
         # counts DOWN and -1 is exhaustion, so the forward walk's own slot
@@ -946,32 +964,26 @@ def apy_any(v: ptr) -> ptr:
 def apy_iter_until(fn: ptr, sentinel: ptr) -> ptr:
     """`iter(f, sentinel)` -- the CALLABLE form.
 
-    NOTHING LAZY UNDERNEATH, so the calls all happen here and the result is a
-    cursor over what they returned. A generator would be the honest shape and
-    there is none to build one from; the guard is what keeps a callable that
-    never answers the sentinel from running forever.
+    A CURSOR IN THE CALL MODE, which calls on every step. The calls USED TO
+    ALL HAPPEN HERE, into a list, with a guard at a million to stop a
+    callable that never answers the sentinel from running forever. Two things
+    were wrong with that and both are what a program sees: the calls happened
+    at CONSTRUCTION, so `iter(f, 4)` had already called `f` four times before
+    the first `next()`, and a callable that never answers the sentinel made
+    `for v in iter(f, s): break` -- which CPython leaves after ONE call --
+    run a million times and then stop short of what it was asked for.
 
-    THE SENTINEL IS COMPARED BY VALUE, not by identity: `iter(f, "")` stops
-    on any empty string, which is what CPython does.
+    NAMED AFTER THE FORM: CPython calls this a `callable_iterator`, and
+    nothing about the mode or the sentinel says so.
     """
-    out: ptr = apy_seq_new_of(apy_list_kind(), 8)
-    if not out:
-        return out
-    guard: i64 = 0
-    going: i64 = 1
-    while going:
-        if guard >= 1000000:
-            going = 0
-        else:
-            v: ptr = apy_call(fn, ptr(0), 0)
-            if not v:
-                return ptr(0)
-            if apy_truth(apy_eq(v, sentinel)):
-                going = 0
-            else:
-                apy_seq_push(out, v)
-                guard = guard + 1
-    walk: ptr = apy_iter(out)
+    # REFUSED WHEN IT IS MADE, not when it is walked. CPython checks the first
+    # argument here and says so in those words; leaving it to the walk
+    # reported `'int' object is not callable` from the first `next()`, which
+    # names the wrong moment and the wrong thing.
+    if not apy_truth(apy_callable(fn)):
+        return apy_raise_at(rodata(b"TypeError\0"),
+                            rodata(b"iter(v, w): v must be callable\0"))
+    walk: ptr = apy_cursor_of(sentinel, fn, apy_it_call(), 0)
     if walk:
         store(i32, i32(apy_it_callable()),
               offset(walk, apy_it_named_offset()))

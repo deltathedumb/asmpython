@@ -139,6 +139,14 @@ def apy_it_rev() -> i64:
     return 5
 
 
+# `iter(f, sentinel)`: call `f` on every step until it answers the sentinel.
+# A mode and not a list drained at construction, because CPython's is lazy --
+# the calls happen as the walk asks for them. `fn` is the callable and `src`
+# the sentinel; the position slot is 0 until the sentinel arrives and 1 after.
+def apy_it_call() -> i64:
+    return 6
+
+
 # WHAT A CURSOR IS NAMED AFTER, in its `named` slot: the KIND of what it was
 # made from, or `apy_it_viewed() + part` for a dict view, or
 # `apy_it_callable()` for `iter(f, sentinel)`. Both are past every kind, so

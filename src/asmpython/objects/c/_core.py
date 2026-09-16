@@ -157,7 +157,16 @@ enum apy_iter_mode {
        an iterator, not a sequence, so it has no length, cannot be indexed
        and cannot be walked twice. Building the list answered all three
        wrongly and cost the whole copy. */
-    APY_IT_REV
+    APY_IT_REV,
+    /* `iter(f, sentinel)`: call `f` on every step until it answers the
+       sentinel. A MODE and not a list drained at construction, because
+       CPython's is lazy -- the calls happen as the walk asks for them, which
+       is the difference between `for v in iter(f, s): break` leaving after
+       one call and never returning at all. `fn` is the callable and `src`
+       the sentinel; `i` is 0 until the sentinel arrives and 1 after, because
+       CPython drops the callable at that moment and a second `next()` must
+       not call again. */
+    APY_IT_CALL
 };
 
 /* WHAT A CURSOR IS NAMED AFTER, in `v.it.named`: the KIND of what it was

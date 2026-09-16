@@ -9054,6 +9054,88 @@ PROGRAMS = {
         show("and unbound too",
              lambda: inspect.iscoroutinefunction(Var.am))
     """,
+    "iter_with_a_sentinel_calls_as_the_walk_asks": """
+        # `iter(f, sentinel)` CALLED `f` UNTIL THE SENTINEL AT CONSTRUCTION
+        # and handed back a cursor over the results. Two things were wrong
+        # with that and a program sees both.
+        #
+        # THE CALLS HAPPENED TOO EARLY. `iter(feed, 4)` had already called
+        # `feed` four times before the first `next()`, so anything with a side
+        # effect -- reading a file a block at a time, which is what this form
+        # is FOR -- ran to the end before the caller asked for one item.
+        #
+        # AND A CALLABLE THAT NEVER ANSWERS THE SENTINEL was capped at a
+        # million calls. `for v in iter(f, s): break` leaves after ONE call in
+        # CPython; here it made a million and then stopped, so a program that
+        # works there did not terminate in any useful time here.
+        #
+        # IT IS A CURSOR MODE NOW, alongside map, filter, enumerate, zip and
+        # reversed, which were already lazy for the same reason. The sentinel
+        # lives where a plain cursor keeps its source and the callable where
+        # `map` keeps its function.
+        #
+        # EXHAUSTED STAYS EXHAUSTED: CPython drops the callable the moment the
+        # sentinel arrives, so a second `next()` answers StopIteration without
+        # calling again -- which the call count below is what proves.
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        calls = []
+
+        def feed():
+            calls.append(len(calls))
+            return len(calls)
+
+        it = iter(feed, 4)
+        print("named", type(it).__name__)
+        # NOTHING HAS BEEN CALLED YET.
+        print("before", calls)
+        print("first", next(it), calls)
+        print("second", next(it), calls)
+        print("rest", list(it), len(calls))
+
+        seen = []
+
+        def forever():
+            seen.append(1)
+            return 0
+
+        # A CALLABLE THAT NEVER ANSWERS THE SENTINEL IS ENDLESS, and a walk
+        # that leaves early has made exactly as many calls as it took.
+        inf = iter(forever, -1)
+        n = 0
+        for v in inf:
+            n += 1
+            if n >= 5:
+                break
+        print("bounded", n, len(seen))
+        print("resumes", next(inf), len(seen))
+
+        done = []
+
+        def three():
+            done.append(1)
+            return len(done)
+
+        walk = iter(three, 3)
+        print("drained", list(walk), len(done))
+        print("exhausted", next(walk, "gone"), len(done))
+        print("still exhausted", next(walk, "gone"), len(done))
+
+        # THE SENTINEL IS COMPARED BY VALUE and not by identity: a callable
+        # that answers a fresh empty string still stops.
+        def empties():
+            return ""
+
+        print("by value", list(iter(empties, "")))
+
+        # AND THE ERRORS THE FORM ITSELF REPORTS.
+        show("not callable", lambda: list(iter(5, 1)))
+        show("through next", lambda: next(iter(feed, 4)))
+    """,
     "fstrings": """
         n = 42
         s = 'ab'
