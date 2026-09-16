@@ -167,6 +167,55 @@ class TestItRefusesWithAReason:
     def test_the_code_is_the_one_documented(self, source, code):
         assert code in codes(source), codes(source)
 
+    @harness.cases("source,code", [
+        # `restrict` IS A PROMISE ABOUT A POINTER and means nothing else, so
+        # C makes it a constraint violation rather than a no-op.
+        ("int restrict x;", "E1218"),
+        ("int f(double restrict d){ return (int)d; }", "E1218"),
+        # A BIT-FIELD HAS NO ADDRESS for an alignment to be a property of.
+        ("struct s { _Alignas(8) int b : 3; };", "E1225"),
+    ])
+    def test_a_constraint_violation_with_no_sensible_reading(self, source,
+                                                             code):
+        got = codes(source)
+        assert code in got, got
+
+    @harness.cases("source,code", [
+        # THE THREE GNU EXTENSIONS THIS FRONTEND KEEPS, each a constraint
+        # violation C requires a diagnostic for -- and a warning is one. The
+        # program still compiles, which is the whole point of keeping them:
+        # real headers use the struct hack, and `sizeof(void)` is 1 so that
+        # `p + 1` on a `void *` means what everybody writes it to mean.
+        ("int a[0];", "W1236"),
+        ("struct s { };", "W1221"),
+        ("union u { };", "W1221"),
+        ("int n = sizeof(void);", "W1202"),
+        ("int n = _Alignof(void);", "W1202"),
+        # And this one C asks for outright.
+        ("int a[2] = {1, 2, 3};", "W1243"),
+    ])
+    def test_an_extension_is_diagnosed_and_still_compiles(self, source, code):
+        module, sink = compile_c(source + "\nint main(void){ return 0; }\n")
+        got = [d.code for d in sink.diagnostics]
+        assert code in got, got
+        assert module is not None and not sink.failed, got
+
+    @harness.cases("source", [
+        "int *restrict p;",
+        "int f(int a[restrict 4]){ return a[0]; }",
+        "int f(char *restrict a, const char *restrict b){ return *a + *b; }",
+        "struct s { _Alignas(8) int b; };",
+        "struct s { int a; };",
+        "int a[3];",
+        "int n = sizeof(int);",
+        "int a[2] = {1, 2};",
+    ])
+    def test_and_the_valid_spellings_stay_quiet(self, source):
+        module, sink = compile_c(source + "\nint main(void){ return 0; }\n")
+        got = [(d.code, d.message) for d in sink.diagnostics]
+        assert got == [], got
+        assert module is not None
+
     def test_a_misspelled_member_suggests_the_right_one(self):
         _, sink = compile_c("struct s { int count; };\n"
                             "int f(struct s *p){ return p->cout; }")

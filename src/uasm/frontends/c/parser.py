@@ -322,6 +322,16 @@ class Parser:
 
     def _sizeof_type(self, ty: CType, span: Span, alignment: bool,
                      operand: S.Expr | None = None) -> S.Expr:
+        if ty.unqualified().is_void:
+            # ANOTHER GNU EXTENSION KEPT WITH A DIAGNOSTIC: `void` is an
+            # incomplete type that can never be completed, so C makes this a
+            # constraint violation; gcc answers 1 so that `p + 1` on a
+            # `void *` means what everybody writes it to mean, and so does
+            # this. The warning is the diagnostic C requires.
+            self.sema.warn(
+                "W1202", f"`{'_Alignof' if alignment else 'sizeof'}` of "
+                         f"`void`", span,
+                note="C gives `void` no size; this answers 1, as gcc does")
         node = S.SizeofType(span, C.SIZE_T, False, ty, None, alignment)
         if ty.is_vla and not alignment:
             node.dynamic = self.sema.vla_size(ty, span)
@@ -942,6 +952,15 @@ class Parser:
                     note="the element of a complex type is `float`, `double` "
                          "or `long double`")
                 made = C.CDOUBLE
+        if "restrict" in quals and not (made.is_pointer or made.is_array):
+            # `restrict` IS A PROMISE ABOUT A POINTER and means nothing on
+            # anything else, which is why C makes it a constraint violation
+            # rather than a no-op. An ARRAY passes: a parameter declared
+            # `int a[restrict 4]` is a restrict-qualified pointer.
+            self.sema.error(
+                "E1218", f"`restrict` needs a pointer, not {C.spell(made)}",
+                start, help="drop the `restrict`")
+            quals = quals - {"restrict"}
         spec.type = made.qualified(quals) if quals else made
         return spec
 
@@ -1138,6 +1157,14 @@ class Parser:
                             if tag.span else None)
         self.next()
         self._members(tag)
+        if not tag.members:
+            # THE THIRD GNU EXTENSION IN THIS FILE, and the same treatment:
+            # C requires a member list to declare at least one member, and
+            # an empty one is a real thing to want -- a tag used only as a
+            # marker. `sizeof` of it is 0 here, as it is in gcc.
+            self.sema.warn(
+                "W1221", f"this `{kw.text}` has no members", kw.span,
+                note="C requires at least one member; this is an extension")
         self.expect("}", f"this `{kw.text}` body is never closed")
         self._skip_attributes()
         C.layout(tag)
@@ -1175,6 +1202,16 @@ class Parser:
                 bits: int | None = None
                 if self.eat(":"):
                     bits = self._bitfield_width(ty, span)
+                    if spec.align is not None:
+                        # A BIT-FIELD HAS NO ADDRESS, so there is nothing for
+                        # an alignment to be. C forbids it outright and so
+                        # does this -- unlike the three extensions above,
+                        # there is no reading of it that means anything.
+                        self.sema.error(
+                            "E1225", "a bit-field cannot be `_Alignas`",
+                            span,
+                            note="alignment is a property of an address, and "
+                                 "a bit-field has not got one")
                 self._skip_attributes()
                 if name is None and bits is None:
                     self.sema.error("E1221", "expected a member name", span)
@@ -1414,6 +1451,17 @@ class Parser:
                                     size.span)
                     count = 1
                 else:
+                    if got == 0:
+                        # A CONSTRAINT VIOLATION AND NOT AN ERROR HERE, the
+                        # way gcc has it: C says the bound "shall have a
+                        # value greater than zero", and a zero-length array
+                        # is a GNU extension this frontend keeps -- struct
+                        # hacks in real headers use it. A diagnostic is what
+                        # C asks for and a warning is one.
+                        self.sema.warn(
+                            "W1236", "an array of no elements", size.span,
+                            note="C requires an array bound greater than "
+                                 "zero; this is an extension")
                     count = got
             self.expect("]", "this `[` is never closed")
             rest = self._suffixes()
