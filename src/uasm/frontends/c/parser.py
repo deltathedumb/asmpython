@@ -123,7 +123,15 @@ class Parser:
         #: scope -- collected here and emitted by lowering.
         self.strings: dict[tuple[str, bytes], str] = {}
         self.anon: list[Any] = []
-        self._gotos: list[tuple[str, Span]] = []
+        self._gotos: list[tuple[str, Span, tuple[str, ...]]] = []
+        #: THE VARIABLY MODIFIED OBJECTS IN SCOPE, outermost first. A `goto`
+        #: may leave such a scope and may not enter one -- the length was
+        #: computed where the declaration is, and a jump past it reaches an
+        #: array whose size was never worked out. Recorded at each `goto`
+        #: and at each label, and compared when the function closes, because
+        #: a label may be written after the `goto` that reaches it.
+        self._vm_scope: list[str] = []
+        self._label_vm: dict[str, tuple[str, ...]] = {}
 
     # ── token access ────────────────────────────────────────────────────────
     @property
@@ -324,7 +332,7 @@ class Parser:
                 # container's size, which is not what anybody asking means.
                 # C forbids the question rather than picking an answer.
                 self.sema.error(
-                    "E1226", "`sizeof` of a bit-field", t.span,
+                    "E1220", "`sizeof` of a bit-field", t.span,
                     note="a bit-field is part of an object, not one of its "
                          "own", help="ask for the width you declared")
                 return self.sema.poison(t.span)
@@ -739,7 +747,7 @@ class Parser:
 
         __slots__ = ("type", "storage", "inline", "noreturn", "align",
                      "attrs", "constexpr", "infer",
-                     "span", "thread_local", "explicit")
+                     "span", "thread_local", "explicit", "align_span")
 
         def __init__(self) -> None:
             self.type: CType = C.INT
@@ -750,6 +758,7 @@ class Parser:
             self.constexpr = False
             self.infer = False
             self.align: int | None = None
+            self.align_span: Span | None = None
             self.thread_local = False
             self.span: Span | None = None
             #: False when no type specifier was written at all, which C99
@@ -819,14 +828,32 @@ class Parser:
                 self.next()
                 continue
             if word == "_Alignas":
-                self.next()
+                at = self.next()
                 self.expect("(")
                 if self._type_starts(self.tok):
                     spec.align = self.type_name().align
                 else:
-                    got = fold_int(self.conditional())
-                    spec.align = got if got and got > 0 else None
+                    e = self.conditional()
+                    got = fold_int(e)
+                    if got is None:
+                        self.sema.error(
+                            "E1257", "an alignment must be a constant",
+                            e.span or at.span,
+                            note="`_Alignas` is part of the type and is "
+                                 "decided when the type is")
+                    elif got <= 0 or (got & (got - 1)) != 0:
+                        # A POWER OF TWO AND NOT ZERO, which is what an
+                        # alignment IS: an address is aligned to `n` when it
+                        # is a multiple of `n`, and every valid one here is
+                        # a whole number of bytes that a machine can ask for.
+                        self.sema.error(
+                            "E1257",
+                            f"an alignment of {got} is not a positive power "
+                            f"of two", e.span or at.span)
+                        got = None
+                    spec.align = got
                 self.expect(")")
+                spec.align_span = at.span
                 continue
             if word in ("struct", "union"):
                 made = self.struct_or_union()
@@ -1162,8 +1189,24 @@ class Parser:
                             also=(tag.span, "the first definition")
                             if tag.span else None)
         self.next()
+        if self.sema.scope.is_function_prototype:
+            # A TAG DEFINED IN A PARAMETER LIST goes out of scope with the
+            # list, so nothing outside can name the type and no caller can
+            # make one to pass. The declaration compiles and is useless,
+            # which is worth a word -- gcc says the same.
+            self.sema.warn(
+                "W1222",
+                f"this `{kw.text}` is declared inside a parameter list",
+                kw.span,
+                note="its scope ends with the list, so no caller can name "
+                     "the type")
+        before = len(self.sema.sink.diagnostics)
         self._members(tag)
-        if not tag.members:
+        # AND NOT AFTER A MEMBER WAS REJECTED. A body whose only member was
+        # refused is empty because of that refusal, and saying so a second
+        # time in different words sends the reader looking for a second
+        # mistake.
+        if not tag.members and len(self.sema.sink.diagnostics) == before:
             # THE THIRD GNU EXTENSION IN THIS FILE, and the same treatment:
             # C requires a member list to declare at least one member, and
             # an empty one is a real thing to want -- a tag used only as a
@@ -1268,6 +1311,18 @@ class Parser:
                             f"type {C.spell(ty)}", span,
                             help="use a function pointer")
             return
+        if ty.is_vla:
+            # A STRUCTURE HAS ONE LAYOUT, decided when the type is, and a
+            # member whose length is an expression has not got one. C
+            # forbids a variably modified member outright; this reached
+            # `layout`, which asks every member for its size, and raised.
+            self.sema.error(
+                "E1248",
+                f"a member cannot have a variable length; {name!r} has "
+                f"type {C.spell(ty)}", span,
+                note="a structure's layout is fixed when its type is",
+                help="use a pointer and allocate the elements")
+            return
         if ty.is_array and ty.count is None and not ty.is_vla:
             if tag.kind is C.K.UNION or not tag.members:
                 self.sema.error(
@@ -1329,6 +1384,16 @@ class Parser:
                                     n.span)
                 else:
                     value = got
+            if base is not None and not _fits_in(value, base):
+                # A FIXED UNDERLYING TYPE IS A PROMISE ABOUT THE VALUES, so
+                # one that does not fit is the declaration contradicting
+                # itself rather than a type to be widened.
+                self.sema.error(
+                    "E1289",
+                    f"the enumerator {n.text!r} is {value}, which "
+                    f"{C.spell(base)} cannot hold", n.span,
+                    note=f"this `enum` has a fixed underlying type")
+                value = 0
             tag.values[n.text] = value
             lo, hi = min(lo, value), max(hi, value)
             existing = self.sema.scope.names.get(n.text)
@@ -1726,7 +1791,16 @@ class Parser:
             if self.at("[", "."):
                 picked = self._designation(ty, offset)
                 if picked is None:
-                    return
+                    # THE DESIGNATOR WAS REJECTED, and the rest of this entry
+                    # still has to be CONSUMED. Returning here left the `= 1`
+                    # and everything after it to the enclosing declaration,
+                    # which then reported seven more errors about the one
+                    # mistake -- and the seventh is what the reader sees.
+                    self.eat("=")
+                    self._skip_initializer()
+                    if not self.eat(","):
+                        break
+                    continue
                 index, sub_ty, sub_off, member = picked
                 self.expect("=", "a designator is followed by `=`")
             else:
@@ -1740,6 +1814,20 @@ class Parser:
                     continue
                 sub_ty, rel, member = got
                 sub_off = offset + rel
+            if sub_ty.is_array and sub_ty.count is None and not sub_ty.is_vla:
+                # A FLEXIBLE ARRAY MEMBER HAS NO ELEMENTS until something
+                # allocates room for them, so there is nowhere for an
+                # initialiser to put anything. C forbids it and gcc reports
+                # it; the struct hack works by allocating and assigning.
+                self.sema.error(
+                    "E1302", "a flexible array member cannot be initialised",
+                    self.tok.span,
+                    note="it has no elements until an allocation gives it "
+                         "some", help="allocate the room and assign after")
+                self._skip_initializer()
+                if not self.eat(","):
+                    break
+                continue
             self._one(sub_ty, sub_off, out, member)
             index += 1
             highest = max(highest, index)
@@ -1818,6 +1906,12 @@ class Parser:
                                     f"`[...]` designates an array element, and "
                                     f"this is {C.spell(cur)}", open_tok.span)
                     return None
+                if low < 0:
+                    self.sema.error(
+                        "E1247",
+                        f"element {low} is before the start of "
+                        f"{C.spell(cur)}", open_tok.span)
+                    return None
                 if cur.count is not None and low >= cur.count:
                     self.sema.error(
                         "E1247",
@@ -1880,6 +1974,7 @@ class Parser:
         open_tok = self.expect("{", "a block starts with `{`") or self.tok
         block = S.Compound(open_tok.span)
         self.sema.push()
+        vm_depth = len(self._vm_scope)
         try:
             while not self.at("}") and self.tok.kind is not Kind.EOF:
                 if self.is_declaration():
@@ -1892,6 +1987,7 @@ class Parser:
                     block.items.append(self.statement())
         finally:
             self.sema.pop()
+            del self._vm_scope[vm_depth:]
         self.expect("}", "this block's `{` is never closed")
         return block
 
@@ -1917,6 +2013,7 @@ class Parser:
                     self.sema.error("E1251", f"label {name!r} appears twice",
                                     t.span)
                 self.function.labels[name] = self.label(f"L.{name}")
+                self._label_vm[name] = tuple(self._vm_scope)
             # C23 LET A LABEL PRECEDE A DECLARATION, and let one end a
             # block. Both are the same shape here: the label's body is an
             # empty statement and whatever follows is the next item of the
@@ -2095,8 +2192,15 @@ class Parser:
         value = fold_int(self.conditional())
         high = None
         if self.at("..."):
-            self.next()
+            dots = self.next()
             high = fold_int(self.conditional())
+            # ANOTHER GNU EXTENSION THAT WORKS, and says so. C has one value
+            # per `case` label; a range is gcc's, and a program using one is
+            # not portable to a compiler that has not got it.
+            self.sema.warn(
+                "W1256", "a `case` range is not standard C", dots.span,
+                note="C gives a `case` label one value; this is gcc's "
+                     "extension")
         self.expect(":", "a `case` label ends with `:`")
         if value is None:
             self.sema.error("E1256", "a `case` label must be a constant", t.span)
@@ -2160,7 +2264,7 @@ class Parser:
             return S.Empty(t.span)
         self.next()
         self.expect(";")
-        self._gotos.append((name.text, name.span))
+        self._gotos.append((name.text, name.span, tuple(self._vm_scope)))
         return S.Goto(t.span, name.text)
 
     def _return(self) -> S.Stmt:
@@ -2204,6 +2308,15 @@ class Parser:
         if got is None:
             self.sema.error("E1266",
                             "_Static_assert needs a constant expression", t.span)
+        elif not e.type.is_integer:
+            # AN INTEGER CONSTANT EXPRESSION, which a string literal and a
+            # floating constant are not -- and `_Static_assert("x", "no")`
+            # would otherwise be an assertion that always holds, which is
+            # the opposite of what it was written for.
+            self.sema.error(
+                "E1268",
+                f"_Static_assert needs an integer, not {C.spell(e.type)}",
+                e.span or t.span)
         elif not got:
             text = ""
             if isinstance(message, S.StringLit):
@@ -2241,6 +2354,18 @@ class Parser:
                 out.append(self._declare(name, ty, spec, span))
             if not self.eat(","):
                 break
+            if spec.infer:
+                # `auto a = 1, b = 2;` HAS NO TYPE TO SHARE. Every other
+                # declaration's declarators are built on one specifier list;
+                # here the type comes from each initialiser, so two
+                # declarators would be two different types written as one
+                # declaration. C23 allows exactly one.
+                self.sema.error(
+                    "E1249", "`auto` allows one declarator and this is the "
+                             "second", self.tok.span,
+                    note="the type comes from the initialiser, so two "
+                         "declarators would be two types",
+                    help="write a second declaration")
             name, build, span = self._declarator(abstract=True)
             ty = build(spec.type)
             self._skip_attributes()
@@ -2324,7 +2449,17 @@ class Parser:
                 self.sema.error("E1269",
                                 f"{name!r} is declared `extern` and "
                                 f"initialised", span)
-            if not sym.type.complete and not (
+            if sym.type.is_vla:
+                # NOTHING TO INITIALISE IT FROM. The length is not known
+                # until the declaration is reached, so there is no list a
+                # translator could check against and no storage to write
+                # into before the size is computed. C forbids it outright.
+                self.sema.error(
+                    "E1301",
+                    f"{name!r} has a variable length and cannot be "
+                    f"initialised", span,
+                    help="assign to the elements after the declaration")
+            elif not sym.type.complete and not (
                     sym.type.is_array and sym.type.count is None):
                 self.sema.error("E1270",
                                 f"cannot initialise the incomplete type "
@@ -2351,6 +2486,8 @@ class Parser:
                      "be one")
         elif sym.type.is_vla:
             decl.vla_size = self.sema.vla_size(sym.type, span)
+            if self.function is not None:
+                self._vm_scope.append(name)
             if sym.is_global:
                 self.sema.error("E1271",
                                 "a variable-length array cannot have static "
@@ -2367,7 +2504,18 @@ class Parser:
                                 f"{C.spell(sym.type)}", span,
                                 note="its size is not known here")
         if spec.align is not None:
-            sym.align = spec.align
+            if spec.align < sym.type.align:
+                # STRENGTHENING ONLY. A weaker alignment is not a request the
+                # machine could honour and still have the object work: C says
+                # the specifier shall not be less strict than the type's own.
+                self.sema.error(
+                    "E1258",
+                    f"an alignment of {spec.align} is weaker than "
+                    f"{C.spell(sym.type)}'s own {sym.type.align}",
+                    spec.align_span or span,
+                    help="`_Alignas` can ask for more and not for less")
+            else:
+                sym.align = spec.align
         if self.function is not None and sym not in self.function.locals:
             # A BLOCK-SCOPE `static` IS STILL DECLARED IN THIS FUNCTION, and
             # it was left off this list because it has static storage -- so
@@ -2556,6 +2704,17 @@ class Parser:
 
     def _declare_function(self, name: str, ty: CType, spec: Spec,
                           span: Span) -> S.Decl:
+        if spec.constexpr:
+            # C23 GAVE `constexpr` TO OBJECTS AND NOT TO FUNCTIONS, which is
+            # the difference from C++ that surprises people: there is no
+            # constant-evaluated call here, and a function saying `constexpr`
+            # would be claiming one. Checked HERE and not in `_declare`,
+            # because a definition never passes through that one.
+            self.sema.error(
+                "E1300",
+                f"{name!r} is a function and cannot be `constexpr`", span,
+                note="C23 has `constexpr` objects and not `constexpr` "
+                     "functions")
         linkage = (Linkage.INTERNAL if spec.storage is Storage.STATIC
                    else Linkage.EXTERNAL)
         target = self.sema.scope if self.sema.scope.is_file else self.sema.file_scope
@@ -2679,6 +2838,8 @@ class Parser:
         fn = S.FunctionDef(span, name, sym.type, sym, variadic=ty.variadic)
         self.function = fn
         self._gotos = []
+        self._vm_scope = []
+        self._label_vm = {}
         self.sema.push()
         try:
             for index, p in enumerate(params):
@@ -2716,16 +2877,42 @@ class Parser:
         finally:
             self.sema.pop()
             self.function = None
-        for label, where in self._gotos:
+        for label, where, at_goto in self._gotos:
             if label not in fn.labels:
                 self.sema.error("E1283", f"no label {label!r} in this function",
                                 where)
+                continue
+            at_label = self._label_vm.get(label, ())
+            if at_label[:len(at_goto)] != at_goto[:len(at_label)] \
+                    or len(at_label) > len(at_goto):
+                # THE LABEL IS INSIDE A SCOPE THE `goto` IS OUTSIDE OF, and
+                # something in that scope has a length that is computed when
+                # the declaration is reached. Jumping past the declaration
+                # reaches an array whose size was never worked out, so C
+                # forbids the jump rather than leaving the array undefined.
+                inside = [v for v in at_label if v not in at_goto]
+                self.sema.error(
+                    "E1303",
+                    f"this `goto` jumps into the scope of "
+                    f"{inside[0]!r}, which has a variable length", where,
+                    note="its length is computed where it is declared, and "
+                         "this jump goes past that")
         self.unit.decls.append(fn)
 
 
 def _same_type(ty: CType) -> CType:
     """The identity, as the starting point of a declarator's composition."""
     return ty
+
+
+def _fits_in(value: int, ty: CType) -> bool:
+    """Whether an integer is representable in `ty`. Written from the type's
+    WIDTH and signedness rather than from a table of limits, so a
+    `_BitInt(5)` is answered as readily as an `int`."""
+    bits = ty.bits
+    if ty.signed:
+        return -(1 << (bits - 1)) <= value < (1 << (bits - 1))
+    return 0 <= value < (1 << bits)
 
 
 def _kw(text: str) -> str:

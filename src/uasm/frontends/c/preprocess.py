@@ -555,7 +555,7 @@ class Preprocessor:
             return
         if name in self._PROTECTED:
             self.sink.report(
-                error("E1124", f"`{name}` is predefined and cannot be "
+                error("E1125", f"`{name}` is predefined and cannot be "
                                f"redefined").at(name_tok.span)
                 .note("C reserves the seven predefined macro names and "
                       "`defined` from `#define` and `#undef`"))
@@ -653,7 +653,7 @@ class Preprocessor:
             return
         if name in self._PROTECTED:
             self.sink.report(
-                error("E1124", f"`{name}` is predefined and cannot be "
+                error("E1125", f"`{name}` is predefined and cannot be "
                                f"undefined").at(rest[0].span)
                 .note("C reserves the seven predefined macro names and "
                       "`defined` from `#define` and `#undef`"))

@@ -182,15 +182,48 @@ class TestItRefusesWithAReason:
         ("void f(void a[3]);", "E1238"),
         # A BIT-FIELD IS PART OF AN OBJECT and not one of its own.
         ("struct s{int b:3;}; int n(struct s v){ return (int)sizeof v.b; }",
-         "E1226"),
+         "E1220"),
         # AND THE TWO SPELLINGS OF ONE OPERATOR AGREE. The postfix form had
         # its own copy of the checks, missing two of them.
         ("void f(void *p){ p++; }", "E1413"),
         ("void f(void){ _Complex double z = 0; z++; }", "E1414"),
         # 6.10.9.3: the seven predefined names and `defined`.
-        ("#define __LINE__ 5", "E1124"),
-        ("#undef __STDC_VERSION__", "E1124"),
+        ("#define __LINE__ 5", "E1125"),
+        ("#undef __STDC_VERSION__", "E1125"),
         ("#undef defined", "E1123"),
+        # `_Alignas` MAY STRENGTHEN AN ALIGNMENT AND NEVER WEAKEN ONE, and
+        # what it asks for is a constant that is a positive power of two.
+        ("_Alignas(1) double d;", "E1258"),
+        ("_Alignas(3) int x;", "E1257"),
+        ("int n; _Alignas(n) int x;", "E1257"),
+        # `_Static_assert` CONTROLS ON AN INTEGER: a string literal would
+        # be an assertion that always holds, which is the opposite of what
+        # anybody writes one for.
+        ('_Static_assert("x", "no");', "E1268"),
+        ('_Static_assert(1.5, "no");', "E1268"),
+        # A FIXED UNDERLYING TYPE IS A PROMISE ABOUT THE VALUES.
+        ("enum e : unsigned char { A = 300 };", "E1289"),
+        ("enum e : unsigned char { A = 255, B };", "E1289"),
+        # C23 HAS `constexpr` OBJECTS AND NOT `constexpr` FUNCTIONS, which
+        # is the difference from C++ that catches people.
+        ("constexpr int f(void){ return 1; }", "E1300"),
+        # `auto` TAKES ITS TYPE FROM ONE INITIALISER, so there can be one.
+        ("int f(void){ auto x = 1, y = 2; return x + y; }", "E1249"),
+        # AND THE TWO THAT REACHED LOWERING AND RAISED. An argument copied
+        # by value needs a size; a member's offset is fixed when the type is.
+        ("struct s; void g(struct s); void f(struct s *p){ g(*p); }", "E1243"),
+        ("int f(int n){ struct s { int a[n]; } v; return v.a[0]; }", "E1248"),
+        # A DESIGNATOR BELOW ZERO, which the upper bound already covered.
+        ("int a[2] = { [-1] = 1 };", "E1247"),
+        # NOTHING TO INITIALISE A VARIABLE LENGTH FROM.
+        ("int f(int n){ int a[n] = {1}; return a[0]; }", "E1301"),
+        # A FLEXIBLE ARRAY MEMBER HAS NO ELEMENTS until something allocates
+        # room for them.
+        ("struct s{int n; int a[];}; struct s v = {1, {2}};", "E1302"),
+        # AND A JUMP PAST THE DECLARATION THAT COMPUTES A LENGTH.
+        ("int f(int n){ goto in; { int a[n]; in: return a[0]; } }", "E1303"),
+        ("int f(int n){ { int a[n]; l: a[0]=1; } { int b[n]; b[0]=2;"
+         " goto l; } return 0; }", "E1303"),
     ])
     def test_a_constraint_violation_with_no_sensible_reading(self, source,
                                                              code):
@@ -214,6 +247,11 @@ class TestItRefusesWithAReason:
         ("int f(int x){ return x % 0; }", "W1417"),
         ("int f(int x){ return x << -1; }", "W1418"),
         ("int f(int x){ return x << 40; }", "W1418"),
+        # A `case` RANGE WORKS and is gcc's, not C's.
+        ("int f(int v){ switch(v){ case 1 ... 3: return 1; } return 0; }",
+         "W1256"),
+        # A TAG DECLARED IN A PARAMETER LIST goes out of scope with it.
+        ("void f(struct inner { int x; } v);", "W1222"),
     ])
     def test_an_extension_is_diagnosed_and_still_compiles(self, source, code):
         module, sink = compile_c(source + "\nint main(void){ return 0; }\n")
@@ -237,6 +275,20 @@ class TestItRefusesWithAReason:
         "struct s{int b;}; int n(struct s v){ return (int)sizeof v.b; }",
         "#define Q 1\n#undef Q\nint q = 1;",
         "#define __STDC_WANT_LIB_EXT1__ 1\nint q = 1;",
+        "_Alignas(16) double d;",
+        "_Alignas(8) double d;",
+        "_Alignas(double) int x;",
+        '_Static_assert(sizeof(int) == 4, "yes");',
+        "enum e : unsigned char { A = 255 };",
+        "enum e { A = 2147483647, B };",
+        "constexpr int x = 1;",
+        "int f(void){ auto x = 1; return x; }",
+        "struct s{int a;}; void g(struct s); void f(struct s *p){ g(*p); }",
+        "int a[3] = { [1] = 7, [0] = 1 };",
+        "int f(int n){ int a[n]; a[0] = 1; return a[0]; }",
+        "struct s{int n; int a[];}; struct s v = {1};",
+        "int f(int n){ { int a[n]; a[0]=1; goto out; } out: return 0; }",
+        "int f(void){ goto in; { int a[3]; in: return a[0]; } }",
     ])
     def test_and_the_valid_spellings_stay_quiet(self, source):
         module, sink = compile_c(source + "\nint main(void){ return 0; }\n")

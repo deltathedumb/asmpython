@@ -948,10 +948,36 @@ class Sema:
             name = getattr(func, "name", None)
             what = (f"argument {i + 1} of {name!r}" if name
                     else f"argument {i + 1}")
+            if self._incomplete_argument(arg, what):
+                return self.poison(span)
             converted = self.assignable(p.type, arg, what, arg.span)
             named.append(converted if converted is not None else arg)
+        for i, arg in enumerate(args[len(params):]):
+            if self._incomplete_argument(arg, f"argument {len(params) + i + 1}"):
+                return self.poison(span)
         varargs = [self._default_promote(a) for a in args[len(params):]]
         return S.Call(span, sig.ret, False, f, named, varargs)
+
+    def _incomplete_argument(self, arg: S.Expr, what: str) -> bool:
+        """An argument with no size to copy.
+
+        `void g(struct S);` IS LEGAL where `struct S` is still incomplete --
+        the parameter type need not be known until the function is defined
+        or called -- so the check belongs at the CALL and not at the
+        declaration. Without it this reached lowering, which asked the type
+        for its size and raised: a traceback where a diagnostic belonged.
+
+        An ARRAY or a FUNCTION designator is never the problem, whatever its
+        completeness: both decay to a pointer before anything is copied.
+        """
+        t = arg.type
+        if t.complete or t.is_array or t.is_function or t.is_void:
+            return False
+        self.error("E1243",
+                   f"{what} has the incomplete type {C.spell(t)}", arg.span,
+                   note="an argument is copied, and an incomplete type has "
+                        "no size to copy")
+        return True
 
     def _default_promote(self, e: S.Expr) -> S.Expr:
         """The default argument promotions, 6.5.2.2p6: anything narrower than
