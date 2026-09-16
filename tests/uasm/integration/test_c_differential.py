@@ -1697,6 +1697,72 @@ PROGRAMS: dict[str, str] = {
         }
     """,
 
+    "a_header_name_that_is_a_macro": r"""
+        /* Preprocessor corners the expansion tests do not reach: a header name
+           that is itself a macro, `#` and `##` against each other, `__VA_OPT__`
+           where the expansion is EMPTY, and `_Atomic` in both spellings. */
+        #include <stdio.h>
+        #include <stdatomic.h>
+
+        /* A HEADER NAME THAT IS A MACRO. C says the tokens after `include` are
+           expanded when they are not already one of the two forms, and that how
+           `<`, `string`, `.`, `h`, `>` become one name is implementation-defined. */
+        #define WHICH <string.h>
+        #include WHICH
+        #define QUOTED "stdlib.h"
+        #include QUOTED
+        #define PICK(name) <name.h>
+        #include PICK(limits)
+
+        #define EMPTY
+        #define CAT(a, b) a##b
+        #define XCAT(a, b) CAT(a, b)
+        #define STR(x) #x
+        #define XSTR(x) STR(x)
+        /* AN EMPTY EXPANSION IS NOT AN EMPTY ARGUMENT, so every one of these is
+           concatenated onto a string literal rather than passed on its own. */
+        #define SHOW(...) "" __VA_OPT__(#__VA_ARGS__)
+        #define MAYBE(...) "1" __VA_OPT__("+2")
+        #define HASH(x) #x
+        #define TWO(a, b) HASH(a) HASH(b)
+
+        int main(void) {
+            /* `#` STRINGISES THE ARGUMENT BEFORE EXPANSION and `##` pastes before
+               it: `STR(CAT(1,2))` is the text, `XSTR(CAT(1,2))` is the result. */
+            printf("[%s][%s][%s]\n", XSTR(CAT(1, 2)), STR(CAT(1, 2)),
+                   XSTR(XCAT(a, XCAT(b, c))));
+            printf("[%s][%s][%s][%s]\n", SHOW(), SHOW(a, b), MAYBE(), MAYBE(z));
+            printf("[%s]\n", TWO(x EMPTY y, "q\\z"));
+            /* WHITESPACE INSIDE A STRINGISED ARGUMENT collapses to one space and is
+               dropped at the ends, which is the rule nobody remembers. */
+            printf("[%s]\n", STR(  a   +   b  ));
+            /* `STR(__LINE__)` IS THE SPELLING and `XSTR(__LINE__)` is the number.
+               Only the first is compared: the two builds put different preludes
+               above this file, so the NUMBER differs between them and says
+               nothing about either. */
+            printf("[%s][%d]\n", STR(__LINE__), XSTR(__LINE__)[0] != 0);
+            printf("%s %d %d\n",
+                   strlen("abc") == 3 ? "string.h" : "no",
+                   abs(-3), (int)(CHAR_BIT == 8));
+
+            /* `_Atomic` AS A QUALIFIER AND AS A SPECIFIER, which are two different
+               pieces of grammar for the same thing. */
+            {   _Atomic int q = 0;
+                _Atomic(long) spec = 0;
+                atomic_int named = 0;
+                atomic_init(&named, 7);
+                q = 3;
+                spec = 4;
+                printf("%d %ld %d %d\n", (int)q, (long)spec,
+                       (int)atomic_load(&named), (int)sizeof(_Atomic(int)));
+                atomic_store(&named, 9);
+                {   int was = (int)atomic_fetch_add(&named, 1);
+                    printf("%d %d %d\n", was, (int)atomic_load(&named),
+                           atomic_is_lock_free(&named) != 0); } }
+            return 0;
+        }
+    """,
+
     "the_streams_the_round_trip_does_not_reach": r"""
         /* The stream operations the round-trip program does not reach: the two
            position pairs, the two ways to make a temporary, reopening, and the
@@ -4388,6 +4454,70 @@ class TestSeveralTranslationUnits:
 #: reason that is its own choice rather than C's. So the expected text is
 #: written out, and the two paths that ARE comparable still are.
 NO_ORACLE: dict[str, tuple[str, str]] = {
+    "checked_arithmetic_at_every_width": (r"""
+        /* `<stdckdint.h>` at every width, on both sides of each edge, and with the
+           operand types deliberately mixed -- which is where the header earns its
+           keep: `ckd_sub(&u64, (int64_t)-1, (uint64_t)0)` has a negative operand,
+           an unsigned one and an unsigned destination, and the answer is that it
+           does not fit.
+
+           NOT AGAINST THE HOST, because gcc 13 has no `<stdckdint.h>`: C23 added
+           the header and glibc 2.39 has not caught up. The answers below were
+           taken from the same compiler's `__builtin_add_overflow` family, which is
+           what its `<stdckdint.h>` is a wrapper around where it exists, and every
+           one of the sixteen agrees. */
+        #include <stdio.h>
+        #include <stdckdint.h>
+        #include <stdint.h>
+
+        /* EACH CALL ON ITS OWN STATEMENT, not sharing a `printf` with the variable
+           it writes: the order in which arguments are evaluated is unspecified, so
+           the destination could be read before the call that sets it. */
+        #define P(call, fmt, var) do { int o_ = (call); \
+            printf("%d " fmt "\n", o_, var); } while (0)
+
+        int main(void) {
+            int8_t a8; int32_t a32; int64_t a64;
+            uint8_t u8; uint32_t u32; uint64_t u64;
+            P(ckd_add(&a8, (int8_t)127, (int8_t)1), "%d", (int)a8);
+            P(ckd_add(&a8, (int8_t)126, (int8_t)1), "%d", (int)a8);
+            P(ckd_sub(&u8, (uint8_t)0, (uint8_t)1), "%d", (int)u8);
+            P(ckd_mul(&a32, 65536, 65536), "%d", a32);
+            P(ckd_mul(&a32, 1000, 1000), "%d", a32);
+            P(ckd_add(&a64, INT64_MAX, (int64_t)1), "%lld", (long long)a64);
+            P(ckd_mul(&u64, UINT64_MAX, (uint64_t)2), "%llu", (unsigned long long)u64);
+            P(ckd_sub(&u32, 5u, 7u), "%u", u32);
+            P(ckd_add(&a8, 200, 100), "%d", (int)a8);
+            P(ckd_sub(&a8, (int8_t)-128, (int8_t)1), "%d", (int)a8);
+            P(ckd_add(&u64, UINT64_MAX, (uint64_t)1), "%llu", (unsigned long long)u64);
+            P(ckd_mul(&a64, INT64_MIN, (int64_t)-1), "%lld", (long long)a64);
+            P(ckd_add(&a32, (int64_t)INT32_MAX, (int32_t)1), "%d", a32);
+            P(ckd_sub(&u64, (int64_t)-1, (uint64_t)0), "%llu",
+              (unsigned long long)u64);
+            P(ckd_add(&u32, (int32_t)-1, (uint32_t)2), "%u", u32);
+            P(ckd_mul(&a64, (int64_t)3037000500, (int64_t)3037000500), "%lld",
+              (long long)a64);
+            return 0;
+        }
+    """, """\
+1 -128
+0 127
+1 255
+1 0
+0 1000000
+1 -9223372036854775808
+1 18446744073709551614
+1 4294967294
+1 44
+1 127
+1 0
+1 -9223372036854775808
+1 -2147483648
+1 18446744073709551615
+0 1
+1 -9223372036709301616
+"""),
+
     "the_pow_errors_glibc_does_not_report": (r"""
         /* NOT AGAINST THE HOST, because glibc disagrees with C here
            and this follows C. glibc sets `math_errhandling` to 3 and

@@ -502,6 +502,23 @@ class Preprocessor:
             return False, len(toks)
         i += 1
         name, angled, i = self._header_name(toks, i, at)
+        if name is None:
+            # `__has_include(WHICH)` -- the same second try `#include` makes
+            # above, and for the same reason: C says the argument is macro
+            # expanded when it is not already one of the two header-name
+            # forms. The argument is everything up to the matching `)`.
+            start, depth, k = i, 0, i
+            while k < len(toks):
+                if toks[k].is_punct("("):
+                    depth += 1
+                elif toks[k].is_punct(")"):
+                    if depth == 0:
+                        break
+                    depth -= 1
+                k += 1
+            name, angled, _ = self._header_name(
+                self.expand(toks[start:k]), 0, at, verbatim=False)
+            i = k
         if i < len(toks) and toks[i].is_punct(")"):
             i += 1
         if name is None:
@@ -610,8 +627,8 @@ class Preprocessor:
         self._expect_end(rest[1:], "#undef")
 
     # ── #include ────────────────────────────────────────────────────────────
-    def _header_name(self, toks: list[Token], i: int,
-                     at: Token) -> tuple[str | None, bool, int]:
+    def _header_name(self, toks: list[Token], i: int, at: Token,
+                     *, verbatim: bool = True) -> tuple[str | None, bool, int]:
         """The header name starting at `i`, and the index after it.
 
         `<stdio.h>` IS NOT A TOKEN after phase 3 -- it is `<`, `stdio`, `.`,
@@ -619,6 +636,14 @@ class Preprocessor:
         in `<sys / types.h>`. So the name is cut out of the ORIGINAL source
         text between the two angle brackets, which is what the standard's
         h-char-sequence actually is.
+
+        `verbatim=False` FOR TOKENS A MACRO PRODUCED, which have no original
+        text to cut: an expanded token carries the span of the INVOCATION, so
+        that a diagnostic points at what the program actually wrote, and
+        slicing between two of those gives an empty string. There the
+        spellings are joined instead -- which is what C means by the method
+        of combining them being implementation-defined, and makes
+        `#include WHICH` after `#define WHICH <string.h>` read `string.h`.
         """
         if i >= len(toks):
             return None, False, i
@@ -635,7 +660,8 @@ class Preprocessor:
                     .at(t.span))
                 return None, True, len(toks)
             close = toks[depth]
-            if close.span.file is t.span.file:
+            if (verbatim and close.span.file is t.span.file
+                    and t.span.end <= close.span.start):
                 name = t.span.file.text[t.span.end:close.span.start]
             else:
                 name = "".join(x.text for x in toks[i + 1:depth])
@@ -657,7 +683,8 @@ class Preprocessor:
             # second because `#include <a/b.h>` must NOT have `a` expanded if
             # a macro of that name happens to exist.
             expanded = self.expand(rest)
-            name, angled, used = self._header_name(expanded, 0, at)
+            name, angled, used = self._header_name(expanded, 0, at,
+                                                   verbatim=False)
             rest = expanded
         if name is None:
             self.sink.report(
@@ -723,7 +750,8 @@ class Preprocessor:
         name, angled, used = self._header_name(rest, 0, at)
         if name is None:
             expanded = self.expand(rest)
-            name, angled, used = self._header_name(expanded, 0, at)
+            name, angled, used = self._header_name(expanded, 0, at,
+                                                   verbatim=False)
             rest = expanded
         if not name:
             self.sink.report(

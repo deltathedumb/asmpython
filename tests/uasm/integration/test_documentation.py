@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import contextlib
 import re
 import textwrap
 from dataclasses import fields
@@ -45,6 +46,7 @@ from pathlib import Path
 from tests import harness
 
 from uasm import link as link_registry
+from uasm.link import registry as link_reg
 from uasm import target as target_registry
 from uasm.diagnostics import DiagnosticSink
 from uasm.driver import Options, compile_source
@@ -255,6 +257,31 @@ def _sessions() -> dict[str, list[tuple[int, str, bool]]]:
 _SESSIONS = _sessions()
 
 
+@contextlib.contextmanager
+def _registries_restored():
+    """Whatever a document registers, unregistered again on the way out.
+
+    A SHALLOW COPY OF EACH DICT is enough: registering replaces an entry
+    rather than mutating one, so putting the old mapping back restores what
+    every later test sees.
+    """
+    from uasm.backend import base as backend_base
+    from uasm.target import registry as target_reg
+
+    saved = [(mod, name, dict(getattr(mod, name)))
+             for mod, name in ((link_reg, "_REGISTRY"),
+                               (backend_base, "_REGISTRY"),
+                               (target_reg, "_REGISTRY"),
+                               (target_reg, "_ALIASES"))]
+    try:
+        yield
+    finally:
+        for mod, name, before in saved:
+            live = getattr(mod, name)
+            live.clear()
+            live.update(before)
+
+
 @harness.cases(
     "doc", [d for d in sorted(_SESSIONS)
             if any(runnable for _, _, runnable in _SESSIONS[d])])
@@ -268,17 +295,26 @@ def test_every_document_runs_as_a_session(doc: str) -> None:
     """
     namespace: dict = dict(_READER)
     executed = 0
-    for line, source, runnable in _SESSIONS[doc]:
-        if not runnable:
-            continue
-        try:
-            exec(compile(source, f"{doc}:{line}", "exec"), namespace)
-        except Exception as exc:                    # noqa: BLE001 -- reporting
-            if re.search(rf"raise {type(exc).__name__}\b", source):
-                continue                  # the raise IS the example
-            harness.fail(f"{doc}:{line} raised {type(exc).__name__}: "
-                        f"{exc}\n\n{source}")
-        executed += 1
+    # AND THE REGISTRIES ARE PUT BACK AFTERWARDS. `LINKERS.md` shows how to
+    # write a toolchain and then REGISTERS it, which is the example working
+    # -- and left `my-linker` in a registry that the rest of this worker
+    # process goes on to read. The suite runs its tests in a pool, so which
+    # other tests saw it depended on how they happened to be partitioned:
+    # adding a test anywhere moved the failure somewhere else. Saved and
+    # restored here rather than subtracted by name over there, because the
+    # next document to register something would start it again.
+    with _registries_restored():
+        for line, source, runnable in _SESSIONS[doc]:
+            if not runnable:
+                continue
+            try:
+                exec(compile(source, f"{doc}:{line}", "exec"), namespace)
+            except Exception as exc:                # noqa: BLE001 -- reporting
+                if re.search(rf"raise {type(exc).__name__}\b", source):
+                    continue              # the raise IS the example
+                harness.fail(f"{doc}:{line} raised {type(exc).__name__}: "
+                            f"{exc}\n\n{source}")
+            executed += 1
     assert executed, f"no example in {doc} was executed"
 
 
@@ -319,7 +355,11 @@ def test_the_documented_toolchains_are_the_shipped_ones() -> None:
     table = re.findall(r"^\| `(\w[\w-]*)` \|",
                        _doc("docs/LINKERS.md").read_text(encoding="utf-8"),
                        re.M)
-    assert set(table) == set(link_registry.available()) - {"my-linker"}
+    # NO LONGER `- {"my-linker"}`: the session test above puts the
+    # registries back, so nothing a document registers survives into this
+    # one. If that stops being true this assertion is where it should
+    # show, rather than being subtracted away here and somewhere else.
+    assert set(table) == set(link_registry.available())
 
 
 def test_the_version_is_one_number() -> None:
