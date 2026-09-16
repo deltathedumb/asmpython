@@ -425,7 +425,8 @@ class Lowerer:
             return
         if sym.type.in_memory or sym.addressed:
             sym.in_register = False
-            sym.slot = self.b.alloca(max(1, sym.type.size))
+            sym.slot = self._aligned_slot(sym.type.size,
+                                          sym.align or sym.type.align)
             return
         # EVERY REGISTER LOCAL IS ZEROED IN THE ENTRY BLOCK, not where it is
         # declared. `goto L; int x; L: use(x);` jumps over the declaration and
@@ -1498,6 +1499,39 @@ class Lowerer:
         if want not in slot:
             slot[want] = self._entry_alloca(want)
         return slot[want]
+
+    #: WHAT EVERY BACKEND'S `alloca` GUARANTEES. The reference interpreter
+    #: aligns one to 8 and the C backend's `alloca` to 16, so 8 is the number
+    #: a program may rely on and anything stricter has to be arranged here.
+    ALLOCA_ALIGN = 8
+
+    def _aligned_slot(self, size: int, align: int) -> int:
+        """An `alloca` whose address is a multiple of `align`.
+
+        `Op.ALLOCA` TAKES A SIZE AND NOT AN ALIGNMENT, and giving it one
+        would be a change to the IR that every backend has to implement for
+        a case most programs never reach. Over-allocating and rounding the
+        address up is the same answer, arrived at in the frontend: it costs
+        `align - 1` bytes of a frame and four instructions, and only for an
+        object that asked for more than the floor above.
+
+        `_Alignas(32) char buf[64]` IS THE WHOLE REASON. Without this the
+        address is whatever the backend's `alloca` happened to give, which
+        is 8 in the interpreter -- and a program that checks, or a machine
+        instruction that requires it, is not wrong to have believed the
+        declaration.
+        """
+        size = max(1, size)
+        if align <= self.ALLOCA_ALIGN:
+            return self.b.alloca(size)
+        raw = self.b.alloca(size + align - 1)
+        addr = self._bitcast(raw, IR.U64)
+        addr = self.b.add(IR.U64, addr, self.b.const(IR.U64, align - 1))
+        mask = (~(align - 1)) & 0xFFFFFFFFFFFFFFFF
+        d = self.b.reg(IR.U64)
+        self.b.emit(Instruction(Op.AND, IR.U64, dst=d,
+                                args=[addr, self.b.const(IR.U64, mask)]))
+        return self._bitcast(d, IR.PTR)
 
     def _entry_alloca(self, size: int) -> int:
         """An ALLOCA in the entry block, wherever we are now.

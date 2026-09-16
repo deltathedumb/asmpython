@@ -419,6 +419,62 @@ class TestTheDivergences:
         assert "__c_tls_get" in names and "host_tss_new" in names
         assert [g for g in module.globals if g.name.endswith("mine.key")]
 
+    def test_nodiscard_and_deprecated_are_the_two_that_warn(self):
+        """`attributes.py` divides the standard attributes into the ones
+        with an effect here and the ones without. These are the two, and
+        both are diagnostics at the point of USE rather than of
+        declaration -- which is why they live on the symbol."""
+        module, sink = compile_c(
+            "[[nodiscard]] static int f(void){ return 1; }\n"
+            "[[deprecated]] static int g(void){ return 2; }\n"
+            "int main(void){ f(); (void)f(); return g(); }\n")
+        assert module is not None, [d.message for d in sink.diagnostics]
+        assert not sink.failed, [d.message for d in sink.diagnostics]
+        codes = [d.code for d in sink.diagnostics]
+        assert codes.count("W1221") == 1, codes   # the dropped result
+        assert codes.count("W1219") == 1, codes   # the deprecated call
+        # `(void)f()` IS THE WAY TO SAY "I MEANT IT" and must not warn.
+
+    def test_an_unknown_attribute_is_ignored_and_named(self):
+        """C says an implementation ignores an attribute it does not know.
+        An UNPREFIXED one is in the standard's namespace, so it is worth a
+        word; a prefixed one belongs to somebody else and is not."""
+        module, sink = compile_c(
+            "[[no_such_thing]] static int a(void){ return 1; }\n"
+            "[[gnu::always_inline]] static int b(void){ return 2; }\n"
+            "int main(void){ return a() + b() - 3; }\n")
+        assert module is not None, [d.message for d in sink.diagnostics]
+        assert not sink.failed, [d.message for d in sink.diagnostics]
+        codes = [d.code for d in sink.diagnostics]
+        assert codes.count("W1218") == 1, codes
+
+    def test_constexpr_needs_a_constant_and_then_is_one(self):
+        """The two halves of C23's `constexpr`: the initialiser must fold,
+        and afterwards the NAME folds. Both are refusals rather than silent
+        behaviour, which is why they are checked here and the working case
+        is compared against a real compiler in the differential suite."""
+        module, sink = compile_c(
+            "int f(void);\n"
+            "int main(void){ constexpr int n = f(); return n; }\n")
+        assert sink.failed
+        assert [d.code for d in sink.diagnostics if d.code.startswith("E")] \
+            == ["E1280"], [d.code for d in sink.diagnostics]
+
+        module, sink = compile_c("int main(void){ constexpr int n; return n; }")
+        assert sink.failed
+        assert "E1279" in [d.code for d in sink.diagnostics]
+
+        # AND THE NAME IS A CONSTANT: an array bound written with one is an
+        # ordinary array rather than a variable-length one, which is the
+        # difference a program can see.
+        module, sink = compile_c(
+            "constexpr int n = 4;\n"
+            "_Static_assert(n == 4, \"\");\n"
+            "int main(void){ int a[n]; a[3] = 1; return a[3] - 1; }\n")
+        assert module is not None, [d.message for d in sink.diagnostics]
+        assert not sink.failed, [d.message for d in sink.diagnostics]
+        assert not any(f.name.endswith("vla_alloc") for f in module.functions)
+
     def test_the_multibyte_encoding_is_utf_8(self):
         """C leaves the execution character set to the implementation, and
         this one chose the source's. glibc's `"C"` locale chose one byte per

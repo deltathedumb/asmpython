@@ -71,6 +71,15 @@ def fold(e: S.Expr) -> Const:
             # names. The symbol is assigned by lowering; until then the name
             # is None and the caller keeps the node instead.
             return Address(e.symbol) if e.symbol else None
+        case S.CompoundLiteral() if e.type.is_array:
+            # AND SO IS A COMPOUND LITERAL AT FILE SCOPE, for the same
+            # reason: `static int *p = (int[]){1, 2, 3};` names an unnamed
+            # object with static storage duration, and the value of the
+            # initialiser is that object's address. `parser._compound_literal`
+            # gave it a symbol; one inside a function did not get one,
+            # because there it has AUTOMATIC storage and its address is not
+            # a constant -- which is the error a program gets, and gcc's.
+            return Address(e.symbol) if e.symbol else None
         case S.SizeofType():
             return None if e.dynamic is not None else _sizeof(e)
         case S.Conv() | S.Cast():
@@ -93,6 +102,10 @@ def fold(e: S.Expr) -> Const:
             return fold(e.right)
         case S.Ident():
             sym = e.sym
+            if sym is not None and sym.const_value is not None:
+                # `constexpr int n = 7;` -- THE NAME IS THE VALUE, which is
+                # the one thing `constexpr` gives that `const` never did.
+                return sym.const_value
             if sym is not None and sym.storage.name == "ENUM_CONST":
                 return sym.value
             if sym is not None and sym.type.is_function:
@@ -143,6 +156,10 @@ def _address_of_fold(e: S.Expr) -> Const:
             return Address(sym.ir_name or sym.name,
                            function=sym.type.is_function)
         case S.StringLit():
+            return Address(e.symbol) if e.symbol else None
+        case S.CompoundLiteral():
+            # `&(int){7}` and `(struct P){1, 2}.x` -- the object is the
+            # file-scope one `parser._compound_literal` named.
             return Address(e.symbol) if e.symbol else None
         case S.MemberAccess():
             base = fold(e.base) if e.arrow else _address_of_fold(e.base)

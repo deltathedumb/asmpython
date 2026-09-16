@@ -429,9 +429,24 @@ class Preprocessor:
                                                    "__has_attribute",
                                                    "__has_c_attribute"):
                 name, i = self._query_name(toks, i + 1, t)
-                from .builtins import BUILTINS
-                known = name in BUILTINS if t.text == "__has_builtin" else False
-                out.append(_number(1 if known else 0, t.span))
+                if t.text == "__has_builtin":
+                    from .builtins import BUILTINS
+                    out.append(_number(1 if name in BUILTINS else 0, t.span))
+                elif t.text == "__has_c_attribute":
+                    # THE ANSWER IS A DATE, not a 1: C versions its
+                    # attributes, so a program that wants the `nodiscard`
+                    # that takes a message tests `>= 202003L` and a `0`
+                    # would tell it nothing it could act on.
+                    from .attributes import STANDARD
+                    out.append(_number(STANDARD.get(name, 0), t.span))
+                else:
+                    # `__has_attribute` AND `__has_feature` ARE NOT C's, and
+                    # answering 0 is the truthful answer rather than a
+                    # placeholder: `parser._attributes` parses
+                    # `__attribute__((...))` and acts on none of it, so a
+                    # header asking whether one works should take its
+                    # fallback.
+                    out.append(_number(0, t.span))
                 continue
             out.append(t)
             i += 1

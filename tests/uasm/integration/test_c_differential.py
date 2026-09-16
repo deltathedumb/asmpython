@@ -1639,6 +1639,64 @@ PROGRAMS: dict[str, str] = {
         }
     """,
 
+    "alignas_is_the_address_it_promised": r"""
+        /* AN OVER-ALIGNED OBJECT IS AT AN ADDRESS THAT SAYS SO,
+           which `Op.ALLOCA` cannot be asked for -- it takes a size
+           and no alignment -- so `lower._aligned_slot` rounds one
+           up by hand. The interpreter's `alloca` aligns to 8, so
+           without it an `_Alignas(32)` local was 8-aligned and the
+           declaration was a wish. Every byte is written and read
+           back too, because the way to get the address right by
+           accident is to overlap the slot next to it. */
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <stddef.h>
+
+        _Alignas(32) static char g[64];
+        static struct { char c; _Alignas(16) int i; } s;
+
+        struct over { _Alignas(64) char b[8]; };
+
+        static int touch(char *p, int n) { int i, k = 0; for (i = 0; i < n; i++) { p[i] = (char)i; k += p[i]; } return k; }
+
+        int main(void) {
+            _Alignas(32) char a[64];
+            _Alignas(64) int b;
+            _Alignas(16) long double ld;
+            struct over o;
+            char plain[3];
+            int i, bad = 0;
+
+            printf("%d %d %d %d\n", (int)((unsigned long)a & 31),
+                   (int)((unsigned long)&b & 63), (int)((unsigned long)g & 31),
+                   (int)((unsigned long)&s.i & 15));
+            printf("%d %d\n", (int)((unsigned long)o.b & 63),
+                   (int)((unsigned long)&ld & 15));
+            printf("%zu %zu %zu %zu\n", sizeof(struct over), _Alignof(struct over),
+                   sizeof s, _Alignof(max_align_t));
+            /* THE SLOT IS STILL A SLOT: over-aligning it must not move it on top of
+               anything else, so every byte of every one is written and read back. */
+            touch(a, 64);
+            touch(o.b, 8);
+            touch(plain, 3);
+            touch(g, 64);
+            for (i = 0; i < 64; i++) if (a[i] != (char)i) bad++;
+            for (i = 0; i < 8; i++) if (o.b[i] != (char)i) bad++;
+            for (i = 0; i < 3; i++) if (plain[i] != (char)i) bad++;
+            b = 7;
+            ld = 1.5L;
+            printf("%d %d %.1Lf\n", bad, b, ld);
+            /* In a loop, where an alloca that ran per turn would show. */
+            for (i = 0; i < 3; i++) {
+                _Alignas(128) char loop[16];
+                if ((unsigned long)loop & 127) bad++;
+                touch(loop, 16);
+            }
+            printf("%d\n", bad);
+            return 0;
+        }
+    """,
+
     "the_names_c23_added_to_the_library": r"""
         /* `strdup`, `memccpy`, `strcoll`, `strxfrm`,
            `aligned_alloc`, `strfrom*` and `quick_exit`. The host
@@ -1704,6 +1762,230 @@ PROGRAMS: dict[str, str] = {
             fflush(stdout);
             quick_exit(0);
             return 1;
+        }
+    """,
+
+    "attributes_in_every_position": r"""
+        /* C23's `[[...]]` wherever C allows one: before a
+           declaration, after a declarator, on a tag, a member, an
+           enumerator, a parameter either side, a statement and a
+           label. None of the standard ones changes what this
+           program prints, which is the point -- an attribute a
+           compiler mis-parses changes whether it compiles at all.
+           `__has_c_attribute` is the preprocessor's and is asked
+           in a `#if`, which is the only place it exists. */
+        #include <stdio.h>
+
+        #if __has_c_attribute(nodiscard) >= 202003L
+        #define HAS_NODISCARD 1
+        #else
+        #define HAS_NODISCARD 0
+        #endif
+        #if __has_c_attribute(deprecated) >= 201904L
+        #define HAS_DEPRECATED 1
+        #else
+        #define HAS_DEPRECATED 0
+        #endif
+        #if __has_c_attribute(fallthrough) >= 201904L
+        #define HAS_FALLTHROUGH 1
+        #else
+        #define HAS_FALLTHROUGH 0
+        #endif
+        #if __has_c_attribute(no_such_attribute_at_all)
+        #define HAS_NONSENSE 1
+        #else
+        #define HAS_NONSENSE 0
+        #endif
+
+        [[deprecated]] [[maybe_unused]] static int old_one(void) { return 1; }
+
+        [[nodiscard]] static int must_use(void) { return 2; }
+
+        static int plain(void) { return 3; }
+
+        [[noreturn]] static void gone(int c) { (void)c; for (;;) { } }
+
+        struct [[maybe_unused]] tagged { int a; [[maybe_unused]] int b; };
+
+        enum colour { RED [[maybe_unused]] = 1, GREEN = 2 };
+
+        typedef int myint;
+
+        static int params([[maybe_unused]] int a, int b [[maybe_unused]]) { return a + b; }
+
+        /* A vendor's, which is ignored quietly because the prefix says it is not
+           the standard's. */
+        [[gnu::always_inline]] static int vendored(void) { return 4; }
+
+        [[deprecated("say why")]] static int with_argument(void) { return 5; }
+
+        int main(void) {
+            [[maybe_unused]] int unused_here = 9;
+            int n = 0;
+            struct tagged t = { 1, 2 };
+            enum colour c = GREEN;
+            myint m = 6;
+
+            printf("%d %d %d\n", old_one(), must_use(), plain());
+            printf("%d %d %d\n", params(1, 2), vendored(), with_argument());
+            printf("%d %d %d %d\n", t.a, t.b, (int)c, m);
+
+            switch (n) {
+            case 0:
+                n += 1;
+                [[fallthrough]];
+            case 1:
+                n += 10;
+                break;
+            default:
+                n += 100;
+            }
+            printf("%d %d\n", n, unused_here);
+
+            [[maybe_unused]] again: ;
+            if (n > 1000) gone(n);
+            /* `__has_c_attribute` IS THE PREPROCESSOR'S, not an expression: it is
+               only defined inside a `#if`, which is where a program asks whether
+               it may use an attribute at all. */
+            printf("%d %d %d %d\n", HAS_NODISCARD, HAS_DEPRECATED, HAS_FALLTHROUGH,
+                   HAS_NONSENSE);
+            return 0;
+        }
+    """,
+
+    "compound_literals_and_labelled_declarations": r"""
+        /* A COMPOUND LITERAL AT FILE SCOPE IS A STATIC OBJECT --
+           C99 -- so its address is a constant and a pointer may
+           be initialised with it; one of its own type initialises
+           a struct BY VALUE, which is the entries spliced rather
+           than a copy at run time. And C23 let a label come before
+           a declaration and end a block, which is the same shape
+           here: the label's body is empty and the declaration is
+           the next item of the enclosing block. */
+        #include <stdio.h>
+
+        struct point { int x, y; };
+
+        /* A COMPOUND LITERAL AT FILE SCOPE IS A STATIC OBJECT, so its address is a
+           constant and a pointer may be initialised with it. */
+        static int *const numbers = (int[]){10, 20, 30};
+        static const char *const *const names = (const char *const[]){"a", "b", 0};
+        static int *const one = &(int){7};
+        static struct point origin = (struct point){1, 2};
+        static int scalar = (int){5};
+        static struct point *const moved = &(struct point){3, 4};
+
+        struct pair { struct point a; int n; };
+        static struct pair nested = (struct pair){ (struct point){8, 9}, 10 };
+
+        struct bits { unsigned a : 3; unsigned b : 5; };
+        static struct bits packed_one = (struct bits){5, 17};
+
+        int main(void) {
+            int total = 0;
+            printf("%d %d %d\n", numbers[0], numbers[1], numbers[2]);
+            printf("%s %s %d\n", names[0], names[1], names[2] == 0);
+            printf("%d %d %d %d\n", *one, origin.x, origin.y, scalar);
+            printf("%d %d\n", moved->x, moved->y);
+            printf("%d %d %d\n", nested.a.x, nested.a.y, nested.n);
+            printf("%u %u\n", packed_one.a, packed_one.b);
+
+            /* Inside a function the same literal is an ordinary object with the
+               lifetime of its block, and a `struct` one initialises by value. */
+            {
+                struct point p = (struct point){11, 12};
+                int *q = (int[]){13, 14};
+                total = p.x + p.y + q[0] + q[1];
+            }
+            printf("%d\n", total);
+
+            /* C23 LET A LABEL COME BEFORE A DECLARATION, and end a block. */
+            goto start;
+            total = 999;
+        start:
+            int a = 1;
+            total += a;
+            if (total < 100) goto again;
+            goto done;
+        again:
+            int b = 2;
+            total += b;
+        done:
+            printf("%d %d %d\n", total, a, b);
+            {
+                int c = 3;
+                total += c;
+            last:
+            }
+            printf("%d\n", total);
+            return 0;
+        }
+    """,
+
+    "constexpr_objects": r"""
+        /* C23's `constexpr`: `const int n = 7;` has always
+           produced the same code and has never been a CONSTANT
+           EXPRESSION, which is the whole of what this specifier
+           buys. So the test is the places a constant is required
+           -- an array bound, a `case` label, an enumerator, a
+           `_Static_assert`, a static initialiser -- and that the
+           object is still an object whose address may be taken. */
+        #include <stdio.h>
+
+        constexpr int WIDTH = 8;
+        constexpr int HEIGHT = WIDTH / 2;
+        constexpr double RATIO = 1.5;
+        constexpr char LETTER = 'q';
+        constexpr unsigned long BIG = 1UL << 40;
+        constexpr long double WIDE = 2.5L;
+
+        /* The name is a constant expression, so these are ordinary arrays and not
+           variable-length ones, and `_Static_assert` can read them. */
+        static int grid[HEIGHT][WIDTH];
+        _Static_assert(WIDTH == 8, "");
+        _Static_assert(HEIGHT == 4, "");
+        _Static_assert(sizeof grid == 4 * 8 * sizeof(int), "");
+
+        enum sized { SMALL = HEIGHT, LARGE = WIDTH };
+
+        struct fixed { int cells[WIDTH]; };
+
+        /* An aggregate `constexpr` keeps the requirement and not the value: it must
+           be constant-initialised, and its name is still not an integer constant. */
+        constexpr struct fixed BLANK = { {0} };
+        constexpr int PRIMES[4] = { 2, 3, 5, 7 };
+
+        int main(void) {
+            constexpr int local = 3;
+            int a[local];
+            int i, total = 0;
+            static int keep = WIDTH * 2;
+
+            for (i = 0; i < local; i++) a[i] = i;
+            for (i = 0; i < local; i++) total += a[i];
+            printf("%d %d %d %d\n", WIDTH, HEIGHT, (int)(RATIO * 4), LETTER);
+            printf("%lu %d %d\n", BIG, (int)SMALL, (int)LARGE);
+            printf("%zu %zu %d\n", sizeof grid, sizeof(struct fixed), keep);
+            printf("%d %d %d %d\n", PRIMES[0], PRIMES[1], PRIMES[2], PRIMES[3]);
+            printf("%d %d %.1Lf\n", BLANK.cells[0], total, WIDE);
+
+            switch (total) {
+            case HEIGHT - 1:
+                printf("three\n");
+                break;
+            case WIDTH:
+                printf("eight\n");
+                break;
+            default:
+                printf("other\n");
+            }
+            /* The address of one may be taken, and it is `const`. */
+            {
+                const int *p = &local;
+                const int *q = &WIDTH;
+                printf("%d %d\n", *p, *q);
+            }
+            return 0;
         }
     """,
 

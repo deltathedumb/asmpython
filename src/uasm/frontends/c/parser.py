@@ -468,6 +468,10 @@ class Parser:
             return self.sema.poison(t.span)
         if sym.storage is Storage.ENUM_CONST:
             return S.IntLit(t.span, sym.type, False, sym.value)
+        if "deprecated" in sym.attrs:
+            self.sema.warn(
+                "W1219", f"{t.text!r} is deprecated", t.span,
+                note="its declaration carries `[[deprecated]]`")
         return S.Ident(t.span, sym.type, not sym.type.is_function, t.text, sym)
 
     def _func_name(self, t: Token) -> S.Expr:
@@ -561,13 +565,49 @@ class Parser:
                     "union", "enum", "const", "volatile", "restrict",
                     "_Atomic", "typedef", "extern", "static", "auto",
                     "register", "inline", "_Noreturn", "_Alignas",
-                    "_Thread_local", "typeof", "typeof_unqual"):
+                    "_Thread_local", "typeof", "typeof_unqual", "constexpr"):
             return True
         return self.is_typedef(t)
+
+    def _past_attributes(self, j: int) -> int:
+        """The index just past any `[[...]]` sequences starting at `j`.
+
+        A LOOKAHEAD AND NOT A PARSE, because the caller has not decided yet
+        what it is looking at. The brackets nest, so counting them is enough:
+        an attribute's argument clause may contain its own `[` and `]` and a
+        string with a `]` in it is one token rather than a punctuator.
+        """
+        while (j + 1 < len(self.toks) and self.toks[j].is_punct("[")
+               and self.toks[j + 1].is_punct("[")):
+            depth = 0
+            while j < len(self.toks) and self.toks[j].kind is not Kind.EOF:
+                if self.toks[j].is_punct("["):
+                    depth += 1
+                elif self.toks[j].is_punct("]"):
+                    depth -= 1
+                    if depth == 0:
+                        j += 1
+                        break
+                j += 1
+        return j
 
     def is_declaration(self) -> bool:
         """Whether what follows is a declaration rather than a statement."""
         t = self.tok
+        if self._at_attribute():
+            # `[[maybe_unused]] int x;` AND `[[fallthrough]];` BOTH BEGIN
+            # WITH `[[`, and only the token after the sequence says which of
+            # the two it is. Nothing is consumed here; whichever branch the
+            # caller takes parses the attributes itself.
+            j = self._past_attributes(self.i)
+            t = self.toks[j]
+            if t.kind is Kind.IDENT and _kw(t.text) == "_Static_assert":
+                return True
+            if not self._type_starts(t):
+                return False
+            return not (self.is_typedef(t)
+                        and j + 1 < len(self.toks)
+                        and self.toks[j + 1].is_punct(":"))
         if self.at_kw("_Static_assert"):
             return True
         if not self._type_starts(t):
@@ -593,6 +633,7 @@ class Parser:
         """What a declaration's specifiers said."""
 
         __slots__ = ("type", "storage", "inline", "noreturn", "align",
+                     "attrs", "constexpr",
                      "span", "thread_local", "explicit")
 
         def __init__(self) -> None:
@@ -600,6 +641,8 @@ class Parser:
             self.storage: Storage | None = None
             self.inline = False
             self.noreturn = False
+            self.attrs: set[str] = set()
+            self.constexpr = False
             self.align: int | None = None
             self.thread_local = False
             self.span: Span | None = None
@@ -611,12 +654,19 @@ class Parser:
         spec = Parser.Spec()
         words: list[str] = []
         quals: set[str] = set()
+        attrs: set[str] = set()
         made: CType | None = None
         complex_ = False
         start = self.tok.span
         spec.span = start
         while True:
             t = self.tok
+            if self._at_attribute():
+                # `[[noreturn]] void f(void);` -- the sequence may come
+                # before the specifiers, between them or after them, and C
+                # says it appertains to the whole declaration either way.
+                attrs |= self._std_attributes()
+                continue
             if t.kind is not Kind.IDENT:
                 break
             word = _kw(t.text)
@@ -631,6 +681,15 @@ class Parser:
                 continue
             if word == "_Thread_local":
                 spec.thread_local = True
+                self.next()
+                continue
+            if word == "constexpr":
+                # A STORAGE-CLASS SPECIFIER THAT IS NOT ONE OF THE OTHERS.
+                # C23 lets it appear WITH `static`, `auto`, `register` or
+                # `thread_local` -- it says the value is known now, not
+                # where the object lives -- so it is a flag beside
+                # `spec.storage` rather than an entry in `_STORAGE`.
+                spec.constexpr = True
                 self.next()
                 continue
             if word in _QUALIFIERS:
@@ -723,6 +782,11 @@ class Parser:
                 self._attributes()
                 continue
             break
+        if "noreturn" in attrs or "_Noreturn" in attrs:
+            # THE SAME THING AS `_Noreturn`, which is what C23 says: the two
+            # spellings name one promise, and a program may write either.
+            spec.noreturn = True
+        spec.attrs = attrs
         if words:
             key = tuple(sorted(words))
             basic = _BASIC.get(key)
@@ -757,6 +821,88 @@ class Parser:
                 made = C.CDOUBLE
         spec.type = made.qualified(quals) if quals else made
         return spec
+
+    def _at_attribute(self) -> bool:
+        """`[[`, WHICH IS TWO TOKENS AND NOT ONE. It has to be: `a[[0]]` is
+        a subscript by an array element and C23 did not break it, so the
+        opening of an attribute is recognised by the pair and nothing in the
+        lexer is allowed to join them."""
+        return self.tok.is_punct("[") and self.peek().is_punct("[")
+
+    def _skip_attributes(self) -> set[str]:
+        """Both spellings, in any order, and what the C23 ones said.
+
+        ONE CALL SITE PER PLACE C ALLOWS THEM, and there are a dozen -- a
+        declaration, a declarator, a member, an enumerator, a parameter, a
+        statement, a label. `__attribute__` was already at most of them;
+        this answers the standard names on top of that.
+        """
+        seen: set[str] = set()
+        while True:
+            if self.at("__attribute__", "__attribute"):
+                self._attributes()
+            elif self._at_attribute():
+                seen |= self._std_attributes()
+            else:
+                return seen
+
+    def _std_attributes(self) -> set[str]:
+        """`[[a, b::c(...), d]]`, one or more sequences of them.
+
+        WHAT COMES BACK IS THE STANDARD NAMES, unprefixed: the caller acts on
+        `noreturn` and on `nodiscard`, and a prefixed name is somebody else's
+        and is dropped here. `attributes.py` says why an unknown one is a
+        warning rather than an error.
+        """
+        from .attributes import STANDARD
+        seen: set[str] = set()
+        while self._at_attribute():
+            self.next()
+            self.next()
+            while not (self.at("]") or self.tok.kind is Kind.EOF):
+                if self.eat(","):
+                    continue            # an empty item is allowed
+                if self.tok.kind is not Kind.IDENT:
+                    self.sema.error("E1219", "expected an attribute name",
+                                    self.tok.span)
+                    break
+                first = self.next()
+                name, prefixed = first.text, False
+                if self.at("::"):
+                    self.next()
+                    prefixed = True
+                    if self.tok.kind is Kind.IDENT:
+                        self.next()
+                if self.at("("):
+                    self._balanced()
+                if prefixed:
+                    continue            # a vendor's, and not this one
+                if name in STANDARD:
+                    seen.add(name)
+                    continue
+                self.sema.warn(
+                    "W1218", f"ignoring unknown attribute `{name}`",
+                    first.span,
+                    note="the unprefixed attribute names are the "
+                         "standard's, and this is not one of them",
+                    help="a vendor's attribute goes in its own namespace, "
+                         "like `[[gnu::packed]]`, which is ignored quietly")
+            self.expect("]")
+            self.expect("]")
+        return seen
+
+    def _balanced(self) -> None:
+        """A parenthesised token sequence, skipped. Nesting counted."""
+        depth = 0
+        while self.tok.kind is not Kind.EOF:
+            if self.at("("):
+                depth += 1
+            elif self.at(")"):
+                depth -= 1
+                if depth == 0:
+                    self.next()
+                    return
+            self.next()
 
     def _attributes(self) -> None:
         """`__attribute__((...))`, parsed and discarded.
@@ -799,8 +945,7 @@ class Parser:
     def struct_or_union(self) -> CType:
         kw = self.next()
         kind = C.K.STRUCT if _kw(kw.text) == "struct" else C.K.UNION
-        while self.at("__attribute__", "__attribute"):
-            self._attributes()
+        self._skip_attributes()
         name: str | None = None
         if self.tok.kind is Kind.IDENT and not self.tok.is_keyword:
             name = self.next().text
@@ -832,8 +977,7 @@ class Parser:
         self.next()
         self._members(tag)
         self.expect("}", f"this `{kw.text}` body is never closed")
-        while self.at("__attribute__", "__attribute"):
-            self._attributes()
+        self._skip_attributes()
         C.layout(tag)
         return C.record(tag)
 
@@ -869,8 +1013,7 @@ class Parser:
                 bits: int | None = None
                 if self.eat(":"):
                     bits = self._bitfield_width(ty, span)
-                while self.at("__attribute__", "__attribute"):
-                    self._attributes()
+                self._skip_attributes()
                 if name is None and bits is None:
                     self.sema.error("E1221", "expected a member name", span)
                 elif _ends_with_flexible(tag):
@@ -972,8 +1115,7 @@ class Parser:
                                 n.span)
                 break
             self.next()
-            while self.at("__attribute__", "__attribute"):
-                self._attributes()
+            self._skip_attributes()
             if self.eat("="):
                 got = fold_int(self.conditional())
                 if got is None:
@@ -1020,8 +1162,7 @@ class Parser:
                     ) -> tuple[str | None, Callable[[CType], CType], Span]:
         """Returns (name, build, span). See the module docstring."""
         start = self.tok.span
-        while self.at("__attribute__", "__attribute"):
-            self._attributes()
+        self._skip_attributes()
         if self.at("*"):
             self.next()
             quals: set[str] = set()
@@ -1067,6 +1208,13 @@ class Parser:
         return False
 
     def _suffixes(self) -> Callable[[CType], CType]:
+        if self._at_attribute():
+            # `int a [[maybe_unused]]` AND NOT AN ARRAY OF `[maybe_unused]`.
+            # Nothing else can follow a declarator with `[` `[`, because a
+            # `[` cannot begin an expression -- so C23 could take the pair
+            # here without breaking an array bound.
+            self._std_attributes()
+            return self._suffixes()
         if self.at("["):
             open_tok = self.next()
             # `int a[static 3]` and `int a[const 4]` -- legal only in a
@@ -1171,6 +1319,10 @@ class Parser:
                     break
                 spec = self.declaration_specifiers()
                 name, build, span = self._declarator(abstract=True)
+                # `int a [[maybe_unused]]` -- after the declarator as well as
+                # before the specifiers, which C allows for a parameter and
+                # for nothing else in a parameter list.
+                self._skip_attributes()
                 ty = build(spec.type)
                 # A PARAMETER'S ARRAY TYPE IS A POINTER, 6.7.6.3p7. `int a[4]`
                 # as a parameter is `int *a`, which is why `sizeof a` inside
@@ -1209,6 +1361,56 @@ class Parser:
         return params, variadic, False
 
     # ── initialisers ────────────────────────────────────────────────────────
+    def _at_compound_literal(self) -> bool:
+        """`(T){` -- which a cast and a parenthesised expression both look
+        like until the token after the `)`."""
+        if not self.at("(") or not self._type_starts(self.peek()):
+            return False
+        depth = 0
+        j = self.i
+        while j < len(self.toks) and self.toks[j].kind is not Kind.EOF:
+            if self.toks[j].is_punct("("):
+                depth += 1
+            elif self.toks[j].is_punct(")"):
+                depth -= 1
+                if depth == 0:
+                    return (j + 1 < len(self.toks)
+                            and self.toks[j + 1].is_punct("{"))
+            j += 1
+        return False
+
+    def _splice_compound(self, ty: CType, offset: int, e: S.Expr,
+                         out: S.Init, member: C.Member | None) -> bool:
+        """`= (T){...}` -- the literal's own entries, at this offset.
+
+        AN INITIALISER IS NOT A COPY OF AN OBJECT, it is the bytes. C says
+        the value of a compound literal initialising an object of its own
+        type is that object's value, and a nested initialiser is exactly the
+        flat list `S.Init` already holds -- so splicing leaves one shape for
+        `_check_static_init` and `_init_bytes` to understand rather than two,
+        and makes `static struct P p = (struct P){1, 2};` the constant it is.
+
+        NOT FOR AN ARRAY, because `int a[3] = (int[]){1, 2, 3};` is not C:
+        an array is not assignable from an expression, and splicing would
+        quietly accept it. An ARRAY literal's address is the constant there,
+        and `fold` answers that one. Not for a bit-field either -- the width
+        lives on the entry, and a spliced one would not carry it.
+        """
+        if ty.is_array or (member is not None and member.bits is not None):
+            return False
+        inner = e
+        while isinstance(inner, S.Conv) and inner.operand is not None:
+            inner = inner.operand
+        if not isinstance(inner, S.CompoundLiteral):
+            return False
+        if not C.compatible(inner.type.unqualified(), ty.unqualified()):
+            return False
+        for ent in inner.init.entries:
+            out.entries.append(S.InitEntry(offset + ent.offset, ent.type,
+                                           ent.value, ent.bits,
+                                           ent.bit_offset, ent.data))
+        return True
+
     def initializer(self, ty: CType, span: Span) -> S.Init:
         out = S.Init(span)
         if self.at("{"):
@@ -1235,7 +1437,10 @@ class Parser:
         # so is the innermost brace of an elided nest.
         braced = bool(self.eat("{"))
         e = self.assignment()
-        converted = self.sema.assignable(ty, e, "initialisation", e.span)
+        if self._splice_compound(ty, offset, e, out, member):
+            converted = None            # spliced; there is nothing to add
+        else:
+            converted = self.sema.assignable(ty, e, "initialisation", e.span)
         if converted is not None:
             out.entries.append(S.InitEntry(
                 offset, ty, converted,
@@ -1334,6 +1539,13 @@ class Parser:
             self._string_init(ty, offset, out)
             return
         if ty.is_array or ty.is_record:
+            if ty.is_record and self._at_compound_literal():
+                # `{ (struct point){8, 9}, 10 }` -- a member of struct type
+                # initialised by a compound literal of THAT type, which is
+                # not brace elision: elision would read the `8` as the first
+                # scalar inside it and complain about the `struct point`.
+                self._scalar(ty, offset, out, member)
+                return
             self._elided(ty, offset, out)
             return
         self._scalar(ty, offset, out, member)
@@ -1462,6 +1674,12 @@ class Parser:
         return block
 
     def statement(self) -> S.Stmt:
+        # A STATEMENT MAY CARRY ATTRIBUTES: `[[fallthrough]];` is the one
+        # every program writes, and `[[maybe_unused]] again: ;` labels one.
+        # None of the standard ones changes what the statement means here,
+        # so they are read and dropped -- see `attributes.py`.
+        if self._at_attribute():
+            self._std_attributes()
         t = self.tok
         if self.at("{"):
             return self.compound_statement()
@@ -1477,8 +1695,16 @@ class Parser:
                     self.sema.error("E1251", f"label {name!r} appears twice",
                                     t.span)
                 self.function.labels[name] = self.label(f"L.{name}")
-            body = self.statement() if not self.at("}") else S.Empty(t.span)
-            return S.Label(t.span, name, body)
+            # C23 LET A LABEL PRECEDE A DECLARATION, and let one end a
+            # block. Both are the same shape here: the label's body is an
+            # empty statement and whatever follows is the next item of the
+            # enclosing block, which is where a declaration has to go --
+            # `block.items` holds declarations and statements in order, so
+            # control reaches the declaration by falling into it and its
+            # initialiser runs exactly as it would have.
+            if self.at("}") or self.is_declaration():
+                return S.Label(t.span, name, S.Empty(t.span))
+            return S.Label(t.span, name, self.statement())
         word = _kw(t.text) if t.kind is Kind.IDENT else ""
         if word == "if":
             return self._if()
@@ -1513,7 +1739,34 @@ class Parser:
             return self._return()
         e = self.expression()
         self.expect(";", "a statement ends with `;`")
+        self._check_discard(e)
         return S.ExprStmt(t.span, e)
+
+    def _check_discard(self, e: S.Expr) -> None:
+        """`[[nodiscard]] int f(void); f();` -- the one attribute whose whole
+        purpose is a diagnostic at the call.
+
+        `(void)f()` IS THE WAY TO SAY "I MEANT IT", which is why the cast is
+        checked for rather than the warning being unconditional: C says the
+        attribute is for a result that is almost always a mistake to drop,
+        and a program that drops one on purpose has a spelling for it.
+        """
+        if isinstance(e, S.Cast) and e.type.is_void:
+            return
+        while isinstance(e, S.Conv) and e.operand is not None:
+            e = e.operand
+        if not isinstance(e, S.Call):
+            return
+        func = e.func
+        while isinstance(func, S.Conv) and func.operand is not None:
+            func = func.operand
+        sym = func.sym if isinstance(func, S.Ident) else None
+        if sym is not None and "nodiscard" in sym.attrs:
+            self.sema.warn(
+                "W1221", f"the result of {sym.name!r} is not used", e.span,
+                note="its declaration carries `[[nodiscard]]`",
+                help=f"write `(void){sym.name}(...)` to say that dropping "
+                     f"it is deliberate")
 
     def _condition(self, keyword: str) -> S.Expr | None:
         self.expect("(", f"`{keyword}` needs a parenthesised condition")
@@ -1749,8 +2002,7 @@ class Parser:
                                spec.span)
             return out
         name, build, span = self._declarator(abstract=True)
-        while self.at("__attribute__", "__attribute"):
-            self._attributes()
+        self._skip_attributes()
         if self.at("__asm__", "__asm", "asm"):
             self._skip_asm_name()
         return self.declaration_rest(spec, name, build(spec.type), span)
@@ -1769,8 +2021,7 @@ class Parser:
                 break
             name, build, span = self._declarator(abstract=True)
             ty = build(spec.type)
-            while self.at("__attribute__", "__attribute"):
-                self._attributes()
+            self._skip_attributes()
             if self.at("__asm__", "__asm", "asm"):
                 self._skip_asm_name()
         self.expect(";", "a declaration ends with `;`")
@@ -1813,6 +2064,10 @@ class Parser:
         else:
             storage, linkage = Storage.AUTO, Linkage.NONE
         sym = self._merge(name, ty, storage, linkage, span)
+        if spec.constexpr:
+            sym.type = ty = ty.qualified({"const"})
+        if spec.attrs:
+            sym.attrs |= frozenset(spec.attrs)
         if spec.thread_local:
             # ONE COPY PER THREAD, which is a property of the OBJECT rather
             # than of this declaration: a second declaration without the
@@ -1854,6 +2109,14 @@ class Parser:
             if sym.is_global:
                 sym.init = init
             self._check_static_init(sym, init)
+            if spec.constexpr:
+                self._check_constexpr(sym, init, span)
+        elif spec.constexpr:
+            self.sema.error(
+                "E1279", f"{name!r} is `constexpr` and has no initialiser",
+                span,
+                note="`constexpr` says what the value IS, so there has to "
+                     "be one")
         elif sym.type.is_vla:
             decl.vla_size = self.sema.vla_size(sym.type, span)
             if sym.is_global:
@@ -1882,6 +2145,42 @@ class Parser:
             # lowering asks about the storage itself.
             self.function.locals.append(sym)
         return decl
+
+    def _check_constexpr(self, sym: Symbol, init: S.Init, span: Span) -> None:
+        """`constexpr int n = 7;` -- and then `n` IS 7 wherever a constant is.
+
+        THE CHECK AND THE VALUE ARE THE SAME WORK. Every entry has to fold
+        for the object to be constant at all, and a SCALAR one's single
+        folded entry is what makes the name usable in an array bound, a
+        `case` label or another `constexpr` -- which is the whole of what
+        this specifier buys over `const`, since `const int n = 7;` has
+        always produced the same code and never been a constant expression.
+
+        AN AGGREGATE KEEPS THE CHECK AND NOT THE VALUE: `constexpr struct P
+        p = {1, 2};` is required to be constant-initialised and `p` is still
+        not something an array bound can be written with, so there is
+        nothing to remember.
+        """
+        for entry in init.entries:
+            if entry.value is None or entry.data is not None:
+                continue
+            if fold(entry.value) is None:
+                if not sym.is_global:
+                    # ONE COMPLAINT AND NOT TWO: an object with static
+                    # storage has already been told its initialiser is not
+                    # constant, by `_check_static_init`, in the same words.
+                    self.sema.error(
+                        "E1280",
+                        f"the initialiser for {sym.name!r} is not a constant",
+                        entry.value.span,
+                        note="`constexpr` says the value is known at compile "
+                             "time, and this one is not")
+                return
+        if sym.type.is_record or sym.type.is_array:
+            return
+        only = [e for e in init.entries if e.value is not None]
+        if len(only) == 1 and only[0].offset == 0:
+            sym.const_value = fold(only[0].value)
 
     def _check_static_init(self, sym: Symbol, init: S.Init) -> None:
         """An object with static storage duration needs constant initialisers.
@@ -1983,6 +2282,12 @@ class Parser:
         if saved is not target:
             saved.declare(sym)
         sym.inline = sym.inline or spec.inline
+        # ATTRIBUTES ACCUMULATE ACROSS DECLARATIONS, which is what C says: a
+        # header declaring `[[nodiscard]] int f(void);` and a file defining
+        # `int f(void) { ... }` describe one function, and the definition
+        # does not take the attribute away.
+        if spec.attrs:
+            sym.attrs |= frozenset(spec.attrs)
         return S.Decl(span, name, sym.type, sym)
 
     # ── the unit ────────────────────────────────────────────────────────────
@@ -2021,13 +2326,15 @@ class Parser:
         spec = self.declaration_specifiers()
         if self.at(";"):
             self.next()
-            if not spec.explicit:
+            if not spec.explicit and not spec.attrs:
+                # `[[deprecated]];` DECLARES NOTHING ON PURPOSE: C calls it
+                # an attribute declaration and a program writes one to
+                # attach an attribute to a statement or to nothing at all.
                 self.sema.warn("W1220", "declaration declares nothing", spec.span)
             return
         name, build, span = self._declarator(abstract=True)
         ty = build(spec.type)
-        while self.at("__attribute__", "__attribute"):
-            self._attributes()
+        self._skip_attributes()
         if self.at("__asm__", "__asm", "asm"):
             self._skip_asm_name()
         # A FUNCTION DEFINITION is a declarator followed by `{` -- or, in the

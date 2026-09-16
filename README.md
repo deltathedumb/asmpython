@@ -299,12 +299,17 @@ the whole list, rather than the beginning of one:
     mistake — and `<locale.h>` has one locale to choose it in.
 
 Everything else is implemented — VLAs, flexible array members, bit-fields,
-anonymous members, `_Generic`, designated initialisers, compound literals,
-`__VA_OPT__`, K&R definitions, statement expressions, and GNU's `__typeof__`
-and `__restrict` spellings because real headers use them — and the
-preprocessor is Prosser's algorithm, which is to say it agrees with the standard's own
-worked examples rather than with an opinion about what recursive macro
-expansion should mean.
+anonymous members, `_Generic`, designated initialisers, compound literals
+(including at file scope, where one is a static object whose address is a
+constant), `__VA_OPT__`, K&R definitions, statement expressions, and GNU's
+`__typeof__` and `__restrict` spellings because real headers use them — and
+C23's own: `constexpr` objects whose name is a constant expression,
+`[[...]]` attributes everywhere C allows them, `nullptr`, `typeof`, an
+`enum` with a fixed underlying type, and a label before a declaration.
+
+The preprocessor is Prosser's algorithm, which is to say it agrees with the
+standard's own worked examples rather than with an opinion about what
+recursive macro expansion should mean.
 
 **The standard library is C, compiled by this frontend**, from
 `frontends/c/include/`. Computing and printing sit on the three floor

@@ -90,6 +90,17 @@ class Symbol:
     #: Set by lowering: True when the object lives in an IR register rather
     #: than in frame storage. Only a scalar whose address is never taken can.
     in_register: bool = False
+    #: `constexpr`: the object's value, folded, so that the NAME is a
+    #: constant expression -- which is the whole of what the specifier
+    #: buys over `const`. None for an object that is not one, and for one
+    #: whose value is not a number (an aggregate is still constant, but
+    #: its name is not usable where an integer constant is asked for).
+    const_value: Any = None
+    #: The C23 `[[...]]` attributes this name was declared with, standard
+    #: ones only. `attributes.py` says which of them do anything; the two
+    #: that do are `nodiscard` and `deprecated`, and both are warnings at
+    #: the point of USE, which is why they have to live on the symbol.
+    attrs: frozenset[str] = frozenset()
 
     @property
     def is_global(self) -> bool:

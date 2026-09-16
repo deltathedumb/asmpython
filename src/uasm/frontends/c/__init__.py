@@ -15,6 +15,7 @@
     merge.py         several translation units, one module
     longjmp.py       `setjmp` and `longjmp`, without a machine frame
     builtins.py      which of them exist; `__has_builtin` reads this
+    attributes.py    C23's `[[...]]`: which exist and what each one does
     builtin_check.py their type rules, including the three taking a TYPE
     ldouble.py       `long double` at compile time: exact, and encoded
     support.py       the VLA arena, the command line, complex and long double
@@ -55,18 +56,29 @@ compile time rather than failing to link.
   * `localtime` IS `gmtime`. The host services can say what time it is and
     cannot say what the local offset from UTC is, so the calendar is UTC and
     `tm_isdst` is 0 -- not unknown, not in effect.
-
   * THE MULTIBYTE ENCODING IS UTF-8, ALWAYS. C leaves the execution
     character set to the implementation and this one chose the source's, so
     `mbrtowc` decodes UTF-8, `MB_CUR_MAX` is 4 and two bytes of UTF-8 are
     one wide character. glibc's `"C"` locale calls each byte a character and
     answers -1 for the same input; `<locale.h>` here has one locale, so
     there is nowhere to put the other answer even if it were wanted.
+
 Everything else -- VLAs, flexible array members, bit-fields, anonymous
-members, `_Generic`, designated initialisers, compound literals, `__VA_OPT__`,
-K&R definitions, statement expressions, `__attribute__` where it is advisory,
-and GNU's `__typeof__`/`__restrict` spellings because real headers use them
--- is implemented.
+members, `_Generic`, designated initialisers, compound literals (including at
+file scope, where one is a static object and its address is a constant),
+`__VA_OPT__`, K&R definitions, statement expressions, `__attribute__` where it
+is advisory, and GNU's `__typeof__`/`__restrict` spellings because real headers
+use them -- is implemented.
+
+AND C23's OWN: `constexpr` objects, whose NAME is a constant expression --
+which is the whole of what the specifier buys, since `const int n = 7;` has
+always produced the same code and never been one; `[[...]]` attributes
+everywhere C allows them, with `nodiscard` and `deprecated` the two that
+warn and `attributes.py` saying why the rest do not; `nullptr` and
+`nullptr_t`; `typeof` and `typeof_unqual`; an `enum` with a fixed underlying
+type; `#elifdef`, `#embed`, `__has_include` and `__has_c_attribute`; a label
+before a declaration and at the end of a block; `u8` character constants,
+binary literals and digit separators; and `unreachable()`.
 
 ALL THIRTY-ONE HEADERS C23 REQUIRES are in `include/`, and all thirty-one
 work. `<threads.h>` is `objects/hostsvc.py`'s `thread` group: threads are a
