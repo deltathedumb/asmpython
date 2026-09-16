@@ -1628,6 +1628,54 @@ PROGRAMS: dict[str, str] = {
         }
     """,
 
+    "float_h_describes_the_three_types": r"""
+        /* WHAT THE IMPLEMENTATION SAYS ITS FLOATING TYPES ARE,
+           against what the host's says: every one of these is a
+           number a program branches on, and a header that got one
+           wrong -- `DECIMAL_DIG` stayed at 17 for a while after
+           `long double` stopped being a double -- is wrong in a
+           way no arithmetic test reaches.
+
+           C23's `*_IS_IEC_60559` and `*_NORM_MAX` are NOT here:
+           the host build is `-std=c11`, where gcc does not define
+           them, so there would be nothing to compare against. The
+           unit suite checks those. */
+        #include <stdio.h>
+        #include <float.h>
+        #include <limits.h>
+        int main(void) {
+            printf("%d %d %d %d\n", FLT_RADIX, DECIMAL_DIG, FLT_EVAL_METHOD,
+                   FLT_ROUNDS);
+            printf("%d %d %d %d %d %d %d %d\n", FLT_MANT_DIG, FLT_DIG,
+                   FLT_MIN_EXP, FLT_MAX_EXP, FLT_MIN_10_EXP, FLT_MAX_10_EXP,
+                   FLT_DECIMAL_DIG, FLT_HAS_SUBNORM);
+            printf("%d %d %d %d %d %d %d %d\n", DBL_MANT_DIG, DBL_DIG,
+                   DBL_MIN_EXP, DBL_MAX_EXP, DBL_MIN_10_EXP, DBL_MAX_10_EXP,
+                   DBL_DECIMAL_DIG, DBL_HAS_SUBNORM);
+            printf("%d %d %d %d %d %d %d %d\n", LDBL_MANT_DIG, LDBL_DIG,
+                   LDBL_MIN_EXP, LDBL_MAX_EXP, LDBL_MIN_10_EXP, LDBL_MAX_10_EXP,
+                   LDBL_DECIMAL_DIG, LDBL_HAS_SUBNORM);
+            printf("%.9g %.9g %.9g %.9g\n", (double)FLT_MAX, (double)FLT_MIN,
+                   (double)FLT_EPSILON, (double)FLT_TRUE_MIN);
+            printf("%.17g %.17g %.17g %.17g\n", DBL_MAX, DBL_MIN, DBL_EPSILON,
+                   DBL_TRUE_MIN);
+            /* NOT `LDBL_MIN` AND `LDBL_TRUE_MIN` HERE: their exact decimals are
+               nearly five thousand digits long, `long_double_is_eighty_bit` already
+               compares both, and the reference interpreter has a step limit. */
+            printf("%.21Lg %.21Lg\n", LDBL_MAX, LDBL_EPSILON);
+            printf("%zu %zu %zu\n", sizeof(float), sizeof(double),
+                   sizeof(long double));
+            /* `_Alignof`, because a wide type is sixteen bytes with ten in use and
+               the padding is part of the ABI rather than an implementation's
+               business. */
+            printf("%zu %zu %zu\n", _Alignof(float), _Alignof(double),
+                   _Alignof(long double));
+            printf("%d %d %d %d\n", CHAR_BIT, (int)(CHAR_MIN < 0), SCHAR_MAX,
+                   (int)sizeof(long long));
+            return 0;
+        }
+    """,
+
     "long_double_complex_halves": r"""
         /* A WIDE COMPLEX IS TWO WIDE HALVES, which going through
            a `double` to build, conjugate or project would not be:

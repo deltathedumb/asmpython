@@ -320,6 +320,28 @@ class TestTheStandardHeaders:
         assert module is not None, [d.message for d in sink.diagnostics]
         assert not sink.failed, [d.message for d in sink.diagnostics]
 
+    def test_float_h_has_c23s_own_macros(self):
+        """`*_IS_IEC_60559` and `*_NORM_MAX` are C23's, which the
+        differential suite cannot compare because the host build is
+        `-std=c11` and gcc hides them there. `*_SNAN` is absent on
+        purpose -- a signaling NaN needs an exception flag, and the IR has
+        no instruction that reads one -- so this checks that too."""
+        module, sink = compile_c(
+            "#include <float.h>\n"
+            "_Static_assert(FLT_IS_IEC_60559 == 1, \"\");\n"
+            "_Static_assert(DBL_IS_IEC_60559 == 1, \"\");\n"
+            "_Static_assert(LDBL_IS_IEC_60559 == 1, \"\");\n"
+            "_Static_assert(FLT_NORM_MAX == FLT_MAX, \"\");\n"
+            "_Static_assert(DBL_NORM_MAX == DBL_MAX, \"\");\n"
+            "_Static_assert(LDBL_NORM_MAX == LDBL_MAX, \"\");\n"
+            "_Static_assert(DECIMAL_DIG == LDBL_DECIMAL_DIG, \"\");\n"
+            "#if defined(FLT_SNAN) || defined(__STDC_IEC_559__)\n"
+            "#error \"claiming what there is no status flag to support\"\n"
+            "#endif\n"
+            "int main(void){ return 0; }\n")
+        assert module is not None, [d.message for d in sink.diagnostics]
+        assert not sink.failed, [d.message for d in sink.diagnostics]
+
 
 class TestTheFourDivergences:
     """`frontends/c/__init__.py` names the places this frontend differs from
