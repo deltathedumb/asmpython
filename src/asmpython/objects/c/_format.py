@@ -214,12 +214,69 @@ APY_API apy_value apy_format(apy_value v, apy_value spec) {
         uint64_t mag;
         int base = 10, upper = 0;
         if (!apy_is_int_like(v) && !apy_is_big(v)) return apy_bad_code(sp.type, v);
+        if (sp.type == 'b') base = 2;
+        else if (sp.type == 'o') base = 8;
+        else if (sp.type == 'x') base = 16;
+        else if (sp.type == 'X') { base = 16; upper = 1; }
         if (apy_is_big(v)) {
-            /* A big integer has no int64 to divide down; its decimal text is
-               what there is, so only the plain forms are offered. */
-            apy_value s = apy_str(v);
-            if (!s) return 0;
-            return apy_spec_pad(APY_CSTR(s), O(s)->v.s.n, &sp, 1);
+            /* `c` OF A BIG IS NO CHARACTER, and CPython says so in the words
+               of the conversion that could not be made. Refused HERE rather
+               than through `apy_chr`, which reads the machine word out of a
+               value that has none -- for a big that is the limb pointer, and
+               it only fails to be observable because a heap address is
+               larger than 0x10FFFF. */
+            if (sp.type == 'c')
+                return apy_fail("OverflowError",
+                                "Python int too large to convert to C long");
+            {
+                /* THE DIGITS IN THE BASE THE SPEC ASKED FOR. This answered
+                   the DECIMAL text for every base, with nothing to say the
+                   base had been ignored -- `format(2 ** 70, "x")` came back
+                   as `1180591620717411303424`, a wrong answer rather than a
+                   missing feature, and `%x` inherits it because `%` is
+                   translated into this language. `hex()` has converted a big
+                   integer all along; this path just never asked it.
+
+                   THE SAME LAYOUT THE MACHINE-WORD PATH BELOW BUILDS: the
+                   sign the spec asks for, then the optional prefix, then the
+                   digits, then grouping. Only the digits differ, which is
+                   why only the digits are shared. */
+                int bits_per = base == 2 ? 1 : (base == 8 ? 3 : 4);
+                int neg = O(v)->v.big.neg;
+                apy_value dec = 0;
+                const char *ds = 0;
+                int64_t ndig, bn = 0, dn;
+                char *big;
+                apy_value out;
+                if (base == 10) {
+                    /* Its DECIMAL digits are what `apy_str` already makes;
+                       the sign it writes is dropped here because the spec
+                       decides which sign goes on. */
+                    dec = apy_str(v);
+                    if (!dec) return 0;
+                    ds = APY_CSTR(dec) + (neg ? 1 : 0);
+                    ndig = O(dec)->v.s.n - (neg ? 1 : 0);
+                } else {
+                    ndig = apy_big_digit_count(O(v), bits_per);
+                }
+                /* Room for the digits, a separator between every one of them
+                   even though grouping never puts in that many, the sign,
+                   the two prefix characters and the terminator. */
+                big = (char *)malloc((size_t)(ndig * 2 + 8));
+                if (!big) { fputs("asmpython: out of memory\n", stderr); exit(1); }
+                if (neg) big[bn++] = '-';
+                else if (sp.sign == '+') big[bn++] = '+';
+                else if (sp.sign == ' ') big[bn++] = ' ';
+                if (sp.alt && base != 10) { big[bn++] = '0'; big[bn++] = sp.type; }
+                if (base == 10) { memcpy(big + bn, ds, (size_t)ndig); dn = ndig; }
+                else dn = apy_big_digits(O(v), bits_per, big + bn, upper);
+                if (sp.group) dn = apy_group_digits(big + bn, dn, sp.group);
+                bn += dn;
+                big[bn] = 0;
+                out = apy_spec_pad(big, bn, &sp, 1);
+                free(big);
+                return out;
+            }
         }
         iv = O(v)->v.i;
         if (sp.type == 'c') {
@@ -231,10 +288,6 @@ APY_API apy_value apy_format(apy_value v, apy_value spec) {
             if (!ch) return 0;
             return apy_spec_pad(APY_CSTR(ch), O(ch)->v.s.n, &sp, 0);
         }
-        if (sp.type == 'b') base = 2;
-        else if (sp.type == 'o') base = 8;
-        else if (sp.type == 'x') base = 16;
-        else if (sp.type == 'X') { base = 16; upper = 1; }
         mag = iv < 0 ? (uint64_t)(-(iv + 1)) + 1u : (uint64_t)iv;
         if (iv < 0) body[n++] = '-';
         else if (sp.sign == '+') body[n++] = '+';

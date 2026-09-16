@@ -853,26 +853,43 @@ static int apy_big_cmp(const apy_obj *a, const apy_obj *b) {
 /* A power-of-two base needs no division at all: each output digit is a fixed
    run of bits. That is why `bin`, `oct` and `hex` are cheap on a big where
    `str` is quadratic. */
-APY_API apy_value apy_big_base_text_of(apy_value ov, int64_t bits_per,
-                                      apy_value prefixv) {
-    const apy_obj *o = (const apy_obj *)ov;
-    const char *prefix = (const char *)prefixv;
-    int64_t nbits = apy_mag_bits(o), ndig, i, out = 0;
-    char *buf;
-    if (nbits == 0) ndig = 1;
-    else ndig = (nbits + bits_per - 1) / bits_per;
-    buf = (char *)malloc((size_t)ndig + 4);
-    if (o->v.big.neg) buf[out++] = '-';
-    buf[out++] = prefix[0];
-    buf[out++] = prefix[1];
+/* HOW MANY DIGITS a magnitude takes in a power-of-two base. `bits_per` is 1,
+   3 or 4 for base 2, 8 and 16. */
+static int64_t apy_big_digit_count(const apy_obj *o, int64_t bits_per) {
+    int64_t nbits = apy_mag_bits(o);
+    return nbits == 0 ? 1 : (nbits + bits_per - 1) / bits_per;
+}
+
+/* THE MAGNITUDE'S DIGITS, and how many there were. NO SIGN AND NO PREFIX:
+   what goes around them is the caller's, and it differs -- `hex()` writes
+   `-0x...` while the format mini-language has its own sign rule, its own
+   optional `0x`, and grouping between. Only this part is the same, so only
+   this part is shared. */
+static int64_t apy_big_digits(const apy_obj *o, int64_t bits_per, char *buf,
+                              int upper) {
+    const char *set = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+    int64_t ndig = apy_big_digit_count(o, bits_per), i, out = 0;
     for (i = ndig - 1; i >= 0; i--) {
         int64_t bit = i * bits_per;
         int64_t w = bit / APY_LIMB_BITS, off = bit % APY_LIMB_BITS;
         uint64_t chunk = w < o->v.big.n ? (o->v.big.limb[w] >> off) : 0;
         if (off && w + 1 < o->v.big.n)
             chunk |= (uint64_t)o->v.big.limb[w + 1] << (APY_LIMB_BITS - off);
-        buf[out++] = "0123456789abcdef"[chunk & (((uint64_t)1 << bits_per) - 1)];
+        buf[out++] = set[chunk & (((uint64_t)1 << bits_per) - 1)];
     }
+    return out;
+}
+
+APY_API apy_value apy_big_base_text_of(apy_value ov, int64_t bits_per,
+                                      apy_value prefixv) {
+    const apy_obj *o = (const apy_obj *)ov;
+    const char *prefix = (const char *)prefixv;
+    int64_t out = 0;
+    char *buf = (char *)malloc((size_t)apy_big_digit_count(o, bits_per) + 4);
+    if (o->v.big.neg) buf[out++] = '-';
+    buf[out++] = prefix[0];
+    buf[out++] = prefix[1];
+    out += apy_big_digits(o, bits_per, buf + out, 0);
     buf[out] = '\0';
     return apy_str_take(buf, out);
 }

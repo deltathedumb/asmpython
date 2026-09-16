@@ -8486,6 +8486,68 @@ PROGRAMS = {
         show("sum", lambda: sum(SelfIter()))
         show("not iterable at all", lambda: list(object()))
     """,
+    "a_big_integer_formats_in_the_base_it_was_asked_for": """
+        # `format(2 ** 70, "x")` ANSWERED THE DECIMAL DIGITS, with nothing to
+        # say the base had been ignored -- a wrong answer rather than a
+        # missing feature, and `%x` inherits it because `%` is translated
+        # into this language. `hex()` has converted a big integer all along;
+        # this path just never asked it, and said so in a comment.
+        #
+        # AND THE BIG PATH DID NOT DO WHAT THE MACHINE-WORD PATH DOES. It
+        # returned the decimal text padded, so a sign flag was dropped and
+        # grouping never happened: `format(2 ** 70, "+d")` lost the `+` and
+        # `format(2 ** 70, ",d")` came back ungrouped. The two paths now
+        # build the same layout -- the sign the spec asks for, the optional
+        # prefix, the digits, then grouping -- and only the DIGITS differ,
+        # which is the only part that has to.
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        n = 2 ** 70
+        m = 2 ** 100 + 12345
+        # THE BASE THAT WAS ASKED FOR.
+        show("x", lambda: format(n, "x"))
+        show("X", lambda: format(n, "X"))
+        show("o", lambda: format(n, "o"))
+        show("b", lambda: format(n, "b"))
+        show("neg", lambda: (format(-n, "x"), format(-n, "o"), format(-n, "b")))
+        show("alt", lambda: (format(n, "#x"), format(n, "#o"), format(n, "#b")))
+        show("alt neg", lambda: (format(-n, "#x"), format(-n, "#X")))
+        show("upper", lambda: (format(m, "X"), format(m, "#X")))
+        show("width", lambda: (format(n, "30x"), format(n, "<30x"),
+                               format(n, "^30x")))
+        show("sign", lambda: (format(n, "+x"), format(n, " x"),
+                              format(-n, "+x")))
+        # THE DECIMAL SIDE, which had the same gap.
+        show("plus", lambda: format(n, "+d"))
+        show("space", lambda: format(n, " d"))
+        show("plus neg", lambda: format(-n, "+d"))
+        show("comma", lambda: format(n, ",d"))
+        show("under", lambda: format(n, "_d"))
+        show("comma neg", lambda: format(-n, ",d"))
+        show("plus comma", lambda: format(n, "+,d"))
+        show("comma width", lambda: format(n, ">35,d"))
+        show("plain", lambda: (format(n, "d"), format(n, ""), format(-n, "d")))
+        # `c` OF A BIG IS NO CHARACTER, and refusing it is what keeps
+        # `apy_chr` from reading a machine word out of a value that has none.
+        show("c", lambda: format(n, "c"))
+        # THE MACHINE-WORD PATH MUST NOT HAVE MOVED.
+        show("small", lambda: (format(255, "x"), format(-255, "#X"),
+                               format(0, "x"), format(0, "#b")))
+        show("boundary", lambda: (format(2 ** 63 - 1, "x"), format(2 ** 63, "x"),
+                                  format(2 ** 64, "x"), format(-(2 ** 63), "x")))
+        show("small dec", lambda: (format(1234567890, "+d"),
+                                   format(1234567890, ",d"),
+                                   format(-1234567890, "030d")))
+        # AND THE OTHER SPELLINGS OF THE SAME CONVERSION.
+        show("fstring", lambda: f"{n:x}|{n:#X}|{-n:+#o}")
+        show("percent", lambda: ("%x" % n, "%X" % n, "%o" % n, "%d" % n))
+        show("builtins", lambda: (bin(n), oct(n), hex(n), hex(-n)))
+        show("floats", lambda: (format(1.5, ".2f"), format(1e21, ".3e")))
+    """,
     "fstrings": """
         n = 42
         s = 'ab'
