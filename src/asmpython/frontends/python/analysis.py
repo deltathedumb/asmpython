@@ -3872,19 +3872,39 @@ class Analyzer:
         required = len(params) - len(info.defaults)
         given = list(node.args)
         by_name = {kw.arg: kw for kw in node.keywords if kw.arg}
+        # A POSITIONAL-ONLY PARAMETER IS NOT REACHABLE BY NAME, and this
+        # check did not know that: `/` was never consulted, so a keyword
+        # naming one read either as a slot already filled by position
+        # (`multiple values`) or, when it was some OTHER name that did not
+        # match, as an unexpected keyword. Both are the wrong complaint about
+        # the wrong argument.
+        #
+        # GATHERED, IN DECLARATION ORDER, AND ALL AT ONCE, which is the rule
+        # CPython follows and the one the runtime binder was taught: `pos(a=1,
+        # zz=2)` against `def pos(a, b, /, c)` names `a` and never mentions
+        # `zz`, because the positional-only complaint outranks the unknown
+        # name.
+        #
+        # THE `**kw` CASE NEVER REACHES HERE. A callee with one takes the name
+        # into the collection rather than refusing it, and this whole check
+        # returned above for that.
+        hit = [p for p in params[:info.posonly] if p in by_name]
+        if hit:
+            self._call_keyword_fault(
+                node, info, name, "E0069",
+                f"{name}() got some positional-only arguments passed as "
+                f"keyword arguments: '{', '.join(hit)}'")
+            return
         for kw in by_name:
             if kw not in params:
-                self.sink.report(
-                    error("E0068", f"{name}() got an unexpected keyword "
-                                   f"argument {kw!r}")
-                    .at(self._span(node))
-                    .also(self._span_of_def(info), f"{name} is defined here"))
+                self._call_keyword_fault(
+                    node, info, name, "E0068",
+                    f"{name}() got an unexpected keyword argument {kw!r}")
                 return
             if kw in positional and positional.index(kw) < len(given):
-                self.sink.report(
-                    error("E0069", f"{name}() got multiple values for "
-                                   f"argument {kw!r}")
-                    .at(self._span(node)))
+                self._call_keyword_fault(
+                    node, info, name, "E0069",
+                    f"{name}() got multiple values for argument {kw!r}")
                 return
         if info.vararg is None and len(given) > len(positional):
             self._arity_mismatch(
@@ -3899,6 +3919,39 @@ class Analyzer:
                 node, info,
                 f"{name}() missing {len(missing)} required argument(s): "
                 + ", ".join(repr(m) for m in missing), name)
+
+    def _call_keyword_fault(self, node: ast.Call, info: FunctionInfo,
+                            name: str, code: str, message: str) -> None:
+        """A keyword this call gets wrong.
+
+        A REFUSAL FOR A STATIC FUNCTION and a RUNTIME RAISE for a dynamic one
+        -- the split `_arity_mismatch` already draws, for the same reason and
+        now applied to the keywords too. Python's answer is a TypeError a
+        program may CATCH, and a module whose wrong call sits on a branch
+        nothing takes compiles under CPython; while this was an error it did
+        not compile here at all.
+
+        THE CODE IS KEPT for the static half, because `got an unexpected
+        keyword argument` and `got multiple values` are different mistakes
+        and a reader of the refusal wants to know which. The dynamic half is
+        the same warning an arity mismatch raises, since what it says is the
+        same thing: this is reported when the line runs.
+        """
+        if not info.dynamic:
+            self.sink.report(
+                error(code, message)
+                .at(self._span(node))
+                .also(self._span_of_def(info), f"{name} is defined here"))
+            return
+        self.sink.report(
+            warning("W0053", message + " -- raised at run time")
+            .at(self._span(node))
+            .also(self._span_of_def(info), f"{name} is defined here"))
+        # LOWERING HAS TO KNOW -- see `_arity_mismatch`. The direct call path
+        # hands the arguments straight to the symbol, which has no slot for a
+        # keyword the callee does not declare; routing the call through the
+        # value path is what lets the runtime report it.
+        self.late_arity.add(id(node))
 
     def _arity_mismatch(self, node: ast.Call, info: FunctionInfo,
                         message: str, name: str) -> None:

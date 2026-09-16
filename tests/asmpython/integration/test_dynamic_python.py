@@ -9505,6 +9505,64 @@ PROGRAMS = {
         show("list dir has append", lambda: "append" in dir(L))
         show("str dir has upper", lambda: "upper" in dir(S))
     """,
+    "a_positional_only_keyword_is_refused_when_the_line_runs": """
+        # TWO FAULTS IN THE COMPILE-TIME KEYWORD CHECK, and the written
+        # spelling is the only one that met them -- the same calls made
+        # through a value were right, because the RUNTIME binder knows both
+        # rules.
+        #
+        # IT DID NOT KNOW ABOUT `/`. A keyword naming a positional-only
+        # parameter read either as a slot already filled by position
+        # (`multiple values for argument 'a'`) or, when some OTHER name did
+        # not match, as an unexpected keyword -- the wrong complaint about
+        # the wrong argument. CPython gathers every positional-only name into
+        # ONE refusal, in DECLARATION order, and says it BEFORE anything else
+        # about the keywords: `pos(a=1, zz=2)` names `a` and never mentions
+        # `zz`.
+        #
+        # AND IT WAS AN ERROR, not a warning. Python's answer is a TypeError
+        # a program may CATCH, so a module whose wrong call sits on a branch
+        # nothing takes compiles under CPython -- and did not compile here at
+        # all. The frontend already drew that line for a wrong argument
+        # COUNT; the keywords now get the same treatment, so the call reaches
+        # the runtime and raises when the line runs.
+        def show(label, f):
+            try:
+                print(label, f())
+            except TypeError as e:
+                print(label, "TypeError:", e)
+
+        def pos(a, b, /, c):
+            return (a, b, c)
+
+        def poskw(a, b, /, **kw):
+            return (a, b, kw)
+
+        def pos1(a, /, b):
+            return (a, b)
+
+        def plain(a, b):
+            return (a, b)
+
+        # EVERY POSITIONAL-ONLY NAME, GATHERED AND IN DECLARATION ORDER.
+        show("all by name", lambda: pos(a=1, b=2, c=3))
+        show("call order reversed", lambda: pos(b=2, a=1, c=3))
+        show("one of them", lambda: pos(1, 2, a=9, c=3))
+        # AND AHEAD OF THE UNKNOWN NAME.
+        show("alongside an unknown", lambda: pos(a=1, zz=2, c=3))
+        # WHICH IS STILL WHAT IS SAID WHEN NO POSITIONAL-ONLY IS NAMED.
+        show("unknown alone", lambda: pos(1, 2, 3, zz=4))
+        show("unknown, no slash", lambda: plain(1, zz=2))
+        show("multiple values", lambda: plain(1, a=2))
+        # A `**kw` TAKES THEM IN rather than refusing.
+        show("kwrest takes them", lambda: poskw(a=1, b=2))
+        show("kwrest keeps its own", lambda: poskw(1, 2, a=1))
+        show("one positional-only", lambda: pos1(a=1, b=2))
+        # AND A CALL THAT FITS STILL ANSWERS.
+        show("fits", lambda: pos(1, 2, 3))
+        show("fits by name", lambda: pos(1, 2, c=3))
+        show("fits with rest", lambda: poskw(1, 2, z=3))
+    """,
     "fstrings": """
         n = 42
         s = 'ab'
