@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "asmpython"
+name = "uasm"
 description = "A retargetable compiler: language-independent IR, pluggable frontends and backends"
 # 3.14 AND NOT LOWER, because the Python frontend parses a user's program with
 # the HOST's `ast` -- so on 3.12 this compiler rejects `except A, B:` and every
@@ -12,7 +12,7 @@ description = "A retargetable compiler: language-independent IR, pluggable front
 requires-python = ">=3.14"
 dependencies = []
 # ONE NUMBER, in `VERSION` at the root. It was three -- here, `VERSION`, and
-# `asmpython.__version__` -- and two of them were `0.1.0` against a project
+# `uasm.__version__` -- and two of them were `0.1.0` against a project
 # calling itself 3.14.0-preview.
 dynamic = ["version"]
 
@@ -20,7 +20,7 @@ dynamic = ["version"]
 version = { file = "VERSION" }
 
 [project.scripts]
-asmpython = "asmpython.driver.cli:main"
+uasm = "uasm.driver.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

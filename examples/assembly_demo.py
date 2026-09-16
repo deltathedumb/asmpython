@@ -1,17 +1,17 @@
-"""Demonstrates asmpython.assembly: inline NASM functions + included packages.
+"""Demonstrates uasm.assembly: inline NASM functions + included packages.
 
-Compile and run (Windows shown; on Linux drop the .exe and use asmpython.sh):
+Compile and run (Windows shown; on Linux drop the .exe and use uasm.sh):
 
-    python -m asmpython examples/assembly_demo.py -o build/asmdemo.exe
+    python -m uasm examples/assembly_demo.py -o build/asmdemo.exe
     build/asmdemo.exe
 
-`@assembly_func` gives a function a raw-NASM body that asmpython emits verbatim;
+`@assembly_func` gives a function a raw-NASM body that uasm emits verbatim;
 the Python signature is the contract (symbol name + arg/return types). Arguments
 arrive in the target ABI's integer registers — rdi, rsi, rdx, ... on System V;
 rcx, rdx, r8, ... on Win64 — and the body returns its result in rax.
 """
 
-from asmpython.stdlib.assembly import asm_func
+from uasm.stdlib.assembly import asm_func
 
 
 @asm_func

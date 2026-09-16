@@ -8398,7 +8398,7 @@
   },
   "counted": 1668,
   "passed": 0,
-  "shim": "asmpython",
+  "shim": "uasm",
   "tiers": [
     "spec",
     "cpython",

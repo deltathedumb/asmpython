@@ -11,7 +11,7 @@
 # format=VALUE; get_annotate_from_class_namespace.
 #
 # NOT TESTED HERE: format=FORWARDREF and format=STRING in get_annotations and
-# call_annotate_function (asmpython refuses both BY NAME -- its __annotate__
+# call_annotate_function (uasm refuses both BY NAME -- its __annotate__
 # thunk evaluates every annotation as real code with no source text or
 # per-entry failure handling kept alongside it, so there is nothing to build
 # either format from; see bundled/annotationlib.py); and, in ForwardRef.evaluate
@@ -20,7 +20,7 @@
 # bundled module here, a compiler bug bundled/annotationlib.py documents in
 # full. CPython implements every one of these fully, so asserting the refusal
 # here would only ever diverge from the oracle; it belongs in a test measured
-# against asmpython alone, the way tests/asmpython/integration/test_stdlib.py
+# against uasm alone, the way tests/uasm/integration/test_stdlib.py
 # already does for `re`'s and `pathlib`'s refusals.
 import annotationlib
 from annotationlib import Format, ForwardRef
@@ -148,7 +148,7 @@ print(annotationlib.call_evaluate_function(my_annotate, Format.VALUE))
 # format=STRING/FORWARDREF on call_annotate_function is NOT exercised here --
 # see the coverage line: CPython's real implementation does not simply raise
 # in that case, it re-invokes `annotate` under a fake-globals STRING/
-# FORWARDREF reconstruction, which asmpython's simpler upfront refusal does
+# FORWARDREF reconstruction, which uasm's simpler upfront refusal does
 # not reproduce, so the two would diverge for reasons that have nothing to do
 # with what this module actually covers.
 

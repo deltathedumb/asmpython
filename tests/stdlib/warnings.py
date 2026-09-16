@@ -97,7 +97,7 @@ except UserWarning:
 # ---- PEP 702, `deprecated` ------------------------------------------------
 # The decorated things are built at module level, OUTSIDE any recording block:
 # under CPython `class Sub(Old)` warns at the class statement itself, and that
-# warning is not one asmpython issues. Keeping the definitions out here means
+# warning is not one uasm issues. Keeping the definitions out here means
 # the difference lands on stderr, where it belongs, rather than inside a count
 # this compares.
 #

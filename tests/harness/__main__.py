@@ -21,9 +21,9 @@ _MARK = {Outcome.PASS: ".", Outcome.FAIL: "F", Outcome.SKIP: "s",
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m tests.harness",
-        description="Run the asmpython test suite.")
+        description="Run the uasm test suite.")
     parser.add_argument("targets", nargs="*", default=None,
-                        help="paths to collect from (default: tests/asmpython)")
+                        help="paths to collect from (default: tests/uasm)")
     parser.add_argument("-k", dest="match", default="",
                         help="run only tests whose id contains this")
     parser.add_argument("-j", dest="jobs", type=int, default=0,
@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run(args, frozen) -> int:
-    targets = args.targets or ["tests/asmpython"]
+    targets = args.targets or ["tests/uasm"]
     tests = collect(ROOT, targets)
     if args.match:
         tests = [t for t in tests if args.match in t.id]

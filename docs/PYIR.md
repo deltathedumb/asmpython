@@ -7,14 +7,14 @@ the rest ever happens.
 
 ## The measurement
 
-`asmpython build` compiles Python to a native binary with no interpreter in
+`uasm build` compiles Python to a native binary with no interpreter in
 it. On a compute loop that binary is **19x slower than CPython**:
 
 | | fib(27) + a 3,000,000-iteration loop |
 |---|---|
 | CPython 3.14 | 0.156s |
-| asmpython, dynamic path, `-O` | 2.97s |
-| asmpython, statically annotated (`n: i64`) | 0.008s |
+| uasm, dynamic path, `-O` | 2.97s |
+| uasm, statically annotated (`n: i64`) | 0.008s |
 
 The third row is the same compiler and the same backends, so the codegen is
 not the problem. The problem is what the dynamic frontend hands the backends.
@@ -43,14 +43,14 @@ operands are `ptr`; it cannot know that `apy_getattr` may raise, that
 `apy_mul` on two int cells is pure, or that `apy_from_int` always yields an
 int. So no pass can fold, specialise or reorder any of it.
 
-asmpython therefore already has two IRs. The upper one is undocumented and
+uasm therefore already has two IRs. The upper one is undocumented and
 expressed in a form nothing can reason about. PYIR is that level, written
 down.
 
 ## The decision that shapes everything: guards, not deoptimisation
 
 CPython, PyPy and V8 speculate and **deoptimise** — a failed guard bails to an
-interpreter. asmpython is ahead-of-time and ships no interpreter, so it
+interpreter. uasm is ahead-of-time and ships no interpreter, so it
 cannot. That sounds like a limitation and is not: it means specialisation is a
 **guard and a branch**, with both paths compiled in and merging back to a
 `ptr`.
@@ -136,7 +136,7 @@ machine-level and language-neutral, PYIR knows what a Python object is. So it
 carries Python's name where UIR must not.
 
 PYIR always lowers before anything else sees it. `ir/interpreter.py` never
-learns it, so `asmpython run` stays the oracle the corpus is diffed against.
+learns it, so `uasm run` stays the oracle the corpus is diffed against.
 
 ## What this is not
 

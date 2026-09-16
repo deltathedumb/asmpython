@@ -1,0 +1,488 @@
+"""Orchestration: source in, artifacts out.
+
+One function, `compile_source`, running the stages in order and stopping at the
+first that fails. It exists so the CLI, the test suite and any embedding tool
+drive the compiler through exactly the same path -- a test that reproduces a
+bug through a different sequence of calls is testing something the user never
+runs.
+
+    parse + analyse   frontend      -> Module or None (errors reported)
+    verify            ir.verify     -> internal error if the frontend is wrong
+    optimise          passes        -> Module
+    verify again      ir.verify     -> internal error if a pass is wrong
+    emit              backend       -> {filename: bytes}
+
+THE TWO VERIFY CALLS ARE NOT REDUNDANT. The first attributes bad IR to the
+frontend, the second to the pass pipeline. Without both, a malformed module
+reaching a backend is a crash whose cause could be either, and the difference
+is which file you open.
+
+Invalid IR is reported as an INTERNAL error, distinctly from a user error. A
+user handed a list of IR invariants will reasonably assume their program is at
+fault, and go looking in the wrong place.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+
+from .. import backend as backend_registry
+from .. import frontend as frontend_registry
+from .. import target as target_registry
+from ..target import Target
+from ..diagnostics import DiagnosticSink, Severity, SourceFile, error
+from ..ir import Module, print_module, verify
+from ..backend.base import BackendUnsupported
+from ..ir.verifier import VerifyError
+from ..objects import ir as objects_ir, support as objects_support
+from ..passes import PassManager
+
+#: Passes run when the user asks for optimisation but names none.
+DEFAULT_PASSES = ("constfold", "copyprop", "dce", "simplifycfg")
+
+
+@dataclass
+class Options:
+    """Everything that varies between invocations."""
+
+    source: Path
+    output: Path | None = None
+    frontend: str | None = None
+    #: Definitions only, no `main`, every top-level function exported. See
+    #: `frontends/python/__init__.py`'s `library` parameter -- this is the
+    #: one place the driver reaches it. Needed to target `cpyext`; also
+    #: useful with `run --entry` to call one function directly.
+    library: bool = False
+    backend: str = "c"
+    #: Values for the options the chosen backend declares, keyed by option name
+    #: without the dashes -- {"class-version": "75"}. Not interpreted here: the
+    #: driver knows the flags exist because a backend said so, and knows
+    #: nothing about what any of them mean.
+    backend_options: dict[str, str] = field(default_factory=dict)
+    target: Target | None = None
+    passes: tuple[str, ...] = ()
+    optimise: bool = False
+    #: Produce a program, not just artifacts. False is `--emit`.
+    link: bool = False
+    toolchain: str = "cc"
+    #: Extra objects/archives/-l names handed to the toolchain.
+    link_inputs: tuple[str, ...] = ()
+    workdir: Path | None = None
+    keep_intermediates: bool = False
+    verbose: bool = False
+    emit_ir: bool = False
+    #: Ask the backend for its assembly instead of its artifacts. Only a
+    #: machine backend has one; the rest refuse with a reason.
+    emit_asm: bool = False
+    show_spans: bool = False
+    verify_each: bool = False
+    time_passes: bool = False
+    max_errors: int = 100
+    warnings_are_errors: bool = False
+    #: Where the object runtime comes from: `"ir"` compiles the ported part
+    #: from `runtime/*.py` and splices it in; `"c"` uses the hand-written C for
+    #: all of it, exactly as every build did before any of it was ported.
+    #:
+    #: BOTH ARE SUPPORTED ARRANGEMENTS, not a migration and a legacy. The
+    #: reason to write the runtime in IR is that a backend should not HAVE to
+    #: define 229 functions; that is an argument for making the C unnecessary,
+    #: not for making it unavailable. `Backend.object_runtime` is the same
+    #: choice at the granularity of one function.
+    object_runtime: str = "ir"
+    #: Extra directories to resolve the program's own imports against. The
+    #: source's own directory is searched too unless `safe_path` says not
+    #: to, and is not listed here.
+    import_paths: tuple[Path, ...] = ()
+    #: Leave the SOURCE'S OWN DIRECTORY off the search path -- CPython's
+    #: `-P` / `PYTHONSAFEPATH`, and implied by its `-I`. A program whose
+    #: directory holds a file named after a standard module otherwise
+    #: imports that file, which is what CPython does and what this flag
+    #: exists to switch off.
+    safe_path: bool = False
+    #: Whether to search the host Python installation's `site-packages` --
+    #: LAST, after everything above. `--no-site-packages` turns it off. See
+    #: `frontends/python/hostlib.py` for what a library point is.
+    site_packages: bool = True
+    #: Whose `site-packages`. None means the interpreter running the compiler,
+    #: which is the one whose `pip` the user just ran in the common case.
+    host_python: str | None = None
+    #: Declaration files naming shared libraries the program may `import`.
+    #: See `frontends/python/nativelib.py`.
+    native_libraries: tuple[Path, ...] = ()
+
+    @property
+    def effective_passes(self) -> tuple[str, ...]:
+        if self.passes:
+            return self.passes
+        return DEFAULT_PASSES if self.optimise else ()
+
+
+@dataclass
+class Result:
+    """What a compilation produced, plus how it got there."""
+
+    module: Module | None = None
+    artifacts: dict[str, bytes] = field(default_factory=dict)
+    ir_text: str | None = None
+    pass_report: str = ""
+    #: The executable, if the link stage ran and succeeded.
+    program: Path | None = None
+    #: External commands the link stage ran, in order.
+    commands: list[list[str]] = field(default_factory=list)
+    #: The target actually used. Recorded because the link stage needs the
+    #: object format and suffixes, and re-deriving them from the options
+    #: would mean two places deciding what "the target" was.
+    target: Target | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.module is not None
+
+
+def _target_os(opts: "Options", be) -> str | None:
+    """The platform this build is for, before the emit stage resolves it.
+
+    THE SAME EXPRESSION the emit stage uses, and deliberately so: a scoped
+    native-library declaration picks a library by it, and two places deciding
+    what "the target" was is how a program type-checks against `user32.dll`
+    and links against `libX11.so.6`. None when nothing can say yet, which
+    leaves only unscoped declarations applying.
+    """
+    chosen = None
+    if opts.target is not None:
+        chosen = opts.target.os
+    elif be is not None:
+        try:
+            chosen = target_registry.get(be.default_target).os
+        except Exception:
+            chosen = None
+    # `any` MEANS THE HOST, and this is the C backend's whole case. Its target
+    # is `any/any` because it emits SOURCE -- but the toolchain then compiles
+    # that source for the machine it is running on, so the program really is
+    # a host program and `user32.dll` really is the library it wants. Left as
+    # `any`, a declaration scoped to a platform could never apply to the
+    # default backend, which is every ordinary build.
+    if chosen in (None, "any"):
+        try:
+            return target_registry.host().os
+        except Exception:
+            return None
+    return chosen
+
+
+def _publish_backend_modules(be) -> None:
+    """Tell the Python frontend what the selected backend makes importable.
+
+    Reaching into the frontend from here rather than having the frontend ask
+    for a backend: the frontend is one of several and none of them should know
+    the backend registry exists. What travels is a table, not a dependency.
+    """
+    try:
+        from uasm.frontends.python import modules as py_modules
+    except ImportError:                     # the frontend is not installed
+        return
+    py_modules.use_backend(be.name if be else "", getattr(be, "modules", {}),
+                           getattr(be, "java_classes", None))
+
+
+def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
+    """Run the pipeline. Errors go to `sink`; `Result.ok` says whether to write."""
+    frontend_registry.load_builtin()
+    backend_registry.load_builtin()
+
+    try:
+        source = SourceFile.read(opts.source)
+    except OSError as exc:
+        sink.report(error("E9100", f"cannot read {opts.source}: {exc.strerror}"))
+        return Result()
+
+    # WHICH BACKEND IS COMPILING decides which names are importable, so it is
+    # published BEFORE the frontend runs -- a backend for a board can offer
+    # the board, and `import hw` has to resolve while the source is analysed
+    # rather than when the artifacts are emitted. Republished every compile,
+    # so two in one process do not see each other's backends.
+    # Looked up through `available()` rather than `get()`: an unknown backend
+    # is reported below, with the rest of the options checked, and `get` exits
+    # the process rather than raising.
+    #
+    # CONFIGURED FIRST, because a backend's options can decide what it offers:
+    # the JVM backend's `--classpath` is the whole of which Java packages are
+    # importable, and publishing the unconfigured backend's modules would have
+    # offered none of them.
+    selected = backend_registry.available().get(opts.backend)
+    if selected is not None:
+        selected = _configure_backend(selected, opts, sink)
+        if selected is None:
+            return Result()
+    _publish_backend_modules(selected)
+    # WHERE THE PROGRAM'S OWN MODULES LIVE. The source's own directory first,
+    # so `import helpers` beside `prog.py` works with no flag at all, then
+    # whatever `--import-path` added. Republished every compilation, so two in
+    # one process cannot see each other's paths.
+    from ..frontends.python import hostlib, imports as py_imports
+    # THE HOST INSTALLATION'S PACKAGES GO LAST, so a name that resolved before
+    # library points existed still resolves to what it resolved to then.
+    host = (hostlib.discover(opts.host_python) if opts.site_packages
+            else hostlib.HostLibrary())
+    if host.unavailable and opts.host_python:
+        # ONLY WHEN THE USER NAMED ONE. A failure to introspect the running
+        # interpreter means site-packages are simply not available and the
+        # program may well not need them; a failure to run the interpreter the
+        # user typed is about the flag they typed, and is worth saying.
+        sink.report(
+            error("E9108", f"--host-python: {host.unavailable}")
+            .help("give the path of a Python interpreter, or pass "
+                  "--no-site-packages to search none"))
+        return Result()
+    # THE SOURCE'S DIRECTORY IS `sys.path[0]`, and comes first for the same
+    # reason CPython puts it there -- unless `--safe-path` removes it, as
+    # `-P` does.
+    own = () if opts.safe_path else (opts.source.parent,)
+    py_imports.use(own + tuple(opts.import_paths) + host.roots, host)
+    # DECLARED NATIVE LIBRARIES. Published beside the search path and for the
+    # same reason: the frontend is handed a source and a sink, so anything the
+    # driver knows and it needs arrives through a module global. Scoped
+    # declarations need the target, which is resolved here exactly as the emit
+    # stage resolves it -- two places deciding what "the target" was is how
+    # a program links against the other platform's library.
+    from ..frontends.python import nativelib as py_nativelib
+    declared = py_nativelib.Registry()
+    for path in opts.native_libraries:
+        try:
+            for library in py_nativelib.read(path).all():
+                declared.add(library)
+        except py_nativelib.DeclarationError as exc:
+            sink.report(error("E9109", f"--native-library: {exc}"))
+            return Result()
+    py_nativelib.use(declared, _target_os(opts, selected))
+
+    fe = (frontend_registry.get(opts.frontend) if opts.frontend
+          else frontend_registry.for_path(opts.source))
+    if fe is None:
+        sink.report(
+            error("E9101", f"no frontend claims {opts.source.suffix!r}")
+            .help("choose one with --frontend "
+                  + "|".join(sorted(frontend_registry.available()))))
+        return Result()
+
+    if opts.library:
+        # CHECKED BY SIGNATURE, NOT BY CALLING AND CATCHING: a frontend that
+        # has never heard of `library=` (nothing outside `frontends/python`
+        # has) should be told so cleanly, but wrapping the call itself in
+        # `except TypeError` would just as happily catch a genuine bug
+        # inside a frontend that DOES accept the argument, and report it as
+        # "not supported" instead of surfacing it.
+        import inspect
+        try:
+            inspect.signature(fe.compile).bind(source, sink, library=True)
+        except TypeError:
+            sink.report(
+                error("E9110",
+                      f"--library is not supported by the {fe.name!r} frontend"))
+            return Result()
+
+    try:
+        module = (fe.compile(source, sink, library=True) if opts.library
+                 else fe.compile(source, sink))
+    except RecursionError:
+        # A long expression is a deep tree, and analysis and lowering both
+        # walk it recursively. `1 + 2 + ... + 999` exhausted the interpreter
+        # stack and reached the user as a traceback ending in `_binop`, which
+        # reads as a compiler crash. It is a real limit and it has a real
+        # cause, so it gets said.
+        sink.report(
+            error("E9105", "expression is too deeply nested to compile")
+            .note("analysis and lowering walk the expression tree "
+                  "recursively, and this one is deeper than the stack allows")
+            .help("split it across several statements"))
+        return Result()
+    if module is None or sink.failed:
+        return Result()
+
+    if not _verify_stage(module, sink, "the frontend"):
+        return Result()
+
+    # THE PART OF THE OBJECT RUNTIME THAT IS IR, merged in before anything
+    # downstream looks at the module. Here rather than in the frontend because
+    # it is not the frontend's: a second frontend producing the same `apy_*`
+    # calls gets the same runtime, which is the whole point of writing it in
+    # IR. And before the passes, so the runtime is optimised with everything
+    # else rather than being the one part that is not.
+    #
+    # A program that does not reach the runtime gets nothing at all -- see
+    # `objects_ir.wants_runtime`.
+    objects_ir.splice(
+        module, sink,
+        provided=getattr(selected, "object_runtime", frozenset()),
+        enabled=opts.object_runtime != "c")
+    if not _verify_stage(module, sink, "the IR runtime splice"):
+        return Result()
+
+    result = Result(module=module)
+
+    names = opts.effective_passes
+    if names:
+        pm = PassManager.from_names(list(names), verify_each=opts.verify_each)
+        pm.run(module, sink)
+        if sink.failed:
+            return Result()
+        if opts.time_passes:
+            result.pass_report = pm.report()
+        if not _verify_stage(module, sink, "the pass pipeline"):
+            return Result()
+
+    if opts.emit_ir:
+        result.ir_text = print_module(module, show_spans=opts.show_spans)
+        return result
+
+    # The instance configured above, not a fresh one: a backend's `configure`
+    # may have built state the frontend has since been reading from -- the JVM
+    # backend records which Java calls were named while the source was
+    # analysed, and emits exactly those.
+    be = selected if selected is not None else backend_registry.get(opts.backend)
+    if not be.ready:
+        sink.report(
+            error("W9102", f"backend {be.name!r} is not finished")
+            .note("its output may be incorrect or incomplete"))
+        sink.diagnostics[-1].severity = Severity.WARNING
+    target = opts.target if opts.target is not None \
+        else target_registry.get(be.default_target)
+    result.target = target
+    try:
+        # BEFORE `emit`, so a missing capability is a diagnostic naming the
+        # group rather than an undefined symbol naming an object file.
+        be.check_host_services(module)
+        result.artifacts = (be.assembly(module, target) if opts.emit_asm
+                            else be.emit(module, target))
+    except BackendUnsupported as exc:
+        sink.report(
+            error("E9103", f"the {be.name} backend cannot compile this program "
+                           f"for {target.name}")
+            .note(str(exc)))
+        return Result()
+
+    if opts.link:
+        _link_stage(opts, result, be, target, module, sink)
+    return result
+
+
+def _configure_backend(be, opts: Options, sink: DiagnosticSink):
+    """Hand the backend its own options. Returns the backend, or None to stop.
+
+    An option the chosen backend does not declare is an ERROR rather than
+    something ignored. `--class-version 75 --backend c` reads as a request the
+    C backend cannot honour, and quietly building without it hands back an
+    artifact that is not what was asked for.
+    """
+    from .. import backend as backend_registry
+    from ..backend.base import OptionError
+
+    declared = {o.name for o in be.options}
+    stray = sorted(set(opts.backend_options) - declared)
+    if stray:
+        for name in stray:
+            takers = sorted(other.name
+                            for other in backend_registry.available().values()
+                            if any(o.name == name for o in other.options))
+            d = error("E9106",
+                      f"the {be.name} backend does not take --{name}")
+            if takers:
+                d.help(f"--{name} belongs to the "
+                       f"{' or '.join(repr(t) for t in takers)} backend; "
+                       f"pass --backend {takers[0]}")
+            sink.report(d)
+        return None
+
+    mine = {name: value for name, value in opts.backend_options.items()
+            if name in declared}
+    try:
+        return be.configure(mine, sink)
+    except OptionError as exc:
+        message, _, detail = str(exc).partition("\n")
+        d = error("E9107", f"{be.name} backend: {message}")
+        for line in detail.splitlines():
+            d.note(line)
+        sink.report(d)
+        return None
+
+
+def _link_stage(opts: Options, result: Result, be, target: Target,
+                module: Module, sink: DiagnosticSink) -> None:
+    """Artifacts to a program.
+
+    Separate from emission because they fail for unrelated reasons and the
+    user needs to know which happened: a backend that cannot compile a
+    construct is a compiler limitation, while a missing assembler is a machine
+    that needs a package installed. Collapsing both into "build failed" sends
+    people to the wrong place.
+    """
+    from .. import link as link_registry
+
+    # A bare-metal target cannot be linked by the hosted toolchain: no libc,
+    # no start files, and a linker script that has to match the machine. Nor
+    # can a class file, which is packaged rather than linked. The default
+    # follows the target rather than making every invocation say so.
+    name = opts.toolchain
+    if name == "cc":
+        if target.default_toolchain:
+            name = target.default_toolchain
+        elif target.os == "none":
+            name = "baremetal"
+    toolchain = link_registry.get(name)
+    workdir = opts.workdir or (opts.output or opts.source).parent / ".uasm"
+    output = opts.output or opts.source.with_suffix(target.executable_suffix)
+    if output.suffix != target.executable_suffix and target.executable_suffix:
+        output = output.with_suffix(target.executable_suffix)
+
+    # NATIVE LIBRARIES THE SOURCE NAMED, as `-l` flags. A `ctypes.CDLL("m")`
+    # is a promise to the linker and this is where it is kept; see
+    # `frontends/python/cffi.py`.
+    try:
+        from ..frontends.python import cffi as py_cffi
+        named = tuple(py_cffi.link_flag(lib)
+                      for lib in py_cffi.named_libraries())
+    except ImportError:                     # the frontend is not installed
+        named = ()
+    if named:
+        opts = replace(opts, link_inputs=opts.link_inputs + named)
+
+    runtime_sources: tuple[Path, ...] = ()
+    if not be.self_contained and objects_support.needs_runtime(module):
+        # THE MODULE DECIDES which `apy_*` the C still defines: whatever this
+        # program supplies in IR, the C stands aside for. See
+        # `objects.ir.omitted_by`.
+        runtime_sources = (
+            objects_support.write_runtime(workdir, module=module),)
+
+    request = link_registry.LinkRequest(
+        artifacts=result.artifacts, target=target, output=output,
+        workdir=workdir, extra_inputs=opts.link_inputs,
+        runtime_sources=runtime_sources,
+        keep_intermediates=opts.keep_intermediates, verbose=opts.verbose)
+    try:
+        result.program = toolchain.link(request)
+    except link_registry.LinkError as exc:
+        d = error("E9104", exc.message)
+        if exc.detail:
+            d.note(exc.detail)
+        if exc.help:
+            d.help(exc.help)
+        sink.report(d)
+        result.module = None          # nothing usable was produced
+    finally:
+        result.commands = [list(c) for c in request.commands]
+
+
+def _verify_stage(module: Module, sink: DiagnosticSink, who: str) -> bool:
+    try:
+        verify(module)
+        return True
+    except VerifyError as exc:
+        d = error("E9999", f"internal error: {who} produced invalid IR")
+        d.note("This is a bug in the compiler, not in your program.")
+        for problem in exc.problems[:10]:
+            d.note(problem)
+        if len(exc.problems) > 10:
+            d.note(f"... and {len(exc.problems) - 10} more")
+        sink.report(d)
+        return False

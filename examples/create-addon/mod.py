@@ -9,7 +9,7 @@ So this makes magma blocks heat a Create steam boiler, at a heat level between
 a passive source and a full blaze burner.
 """
 import java
-from asmpython import Public, access
+from uasm import Public, access
 
 MOD_ID = "createpy"
 

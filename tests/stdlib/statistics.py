@@ -16,9 +16,9 @@
 # sides compute them exactly via Fraction arithmetic rather than a running
 # float total.
 #
-# Run under CPython and under asmpython; the outputs must be identical, so
+# Run under CPython and under uasm; the outputs must be identical, so
 # every assertion below is written against the SPECIFICATION rather than
-# against whatever asmpython currently prints. NormalDist.pdf/.cdf are the
+# against whatever uasm currently prints. NormalDist.pdf/.cdf are the
 # one exception: .cdf goes through a hand-rolled erfc (see the module
 # docstring for why) that is correct to ~1e-15 relative but not guaranteed
 # bit-identical to CPython's glibc-backed erfc, so those two are printed

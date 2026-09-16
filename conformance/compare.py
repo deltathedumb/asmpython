@@ -1,8 +1,8 @@
 """Diff two `harness.py --json` results.
 
-    python conformance/harness.py --shim asmpython --json before.json
+    python conformance/harness.py --shim uasm --json before.json
     ... change the implementation ...
-    python conformance/harness.py --shim asmpython --json after.json
+    python conformance/harness.py --shim uasm --json after.json
     python conformance/compare.py before.json after.json
 
 Exists because a score cannot tell "fixed three, broke three" from "changed

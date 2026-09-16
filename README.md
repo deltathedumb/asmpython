@@ -7,26 +7,26 @@ as `.uirb`; neither spelling mentions Python, because nothing about the IR
 does.
 
 ```
-asmpython build prog.py                   # -> prog.exe, ready to run
-asmpython build prog.py -O                # optimise first
-asmpython build prog.py --backend x86-64 --target x86_64-linux
-asmpython build prog.py --backend arm --bits 64   # a family; --bits picks the member
-asmpython build prog.py --backend jvm --java-version 21   # -> prog.jar
-asmpython build prog.py --backend pybc    # -> prog.pyc, `python prog.pyc` runs it
-asmpython build lib.py --backend cpyext --library   # -> lib.so/.pyd, `import lib`
-asmpython build prog.py --emit            # artifacts only; do not link
-asmpython build prog.py --backend x86-64 --emit-asm   # read the generated code
-asmpython build prog.py --emit-ir         # stop at the IR and read it
-asmpython run prog.py                     # execute in the reference interpreter
-asmpython check prog.py                   # analyse and verify, produce nothing
-asmpython ops | types | passes | backends | frontends | targets | toolchains
-asmpython libraries                       # where installed packages resolve from
+uasm build prog.py                   # -> prog.exe, ready to run
+uasm build prog.py -O                # optimise first
+uasm build prog.py --backend x86-64 --target x86_64-linux
+uasm build prog.py --backend arm --bits 64   # a family; --bits picks the member
+uasm build prog.py --backend jvm --java-version 21   # -> prog.jar
+uasm build prog.py --backend pybc    # -> prog.pyc, `python prog.pyc` runs it
+uasm build lib.py --backend cpyext --library   # -> lib.so/.pyd, `import lib`
+uasm build prog.py --emit            # artifacts only; do not link
+uasm build prog.py --backend x86-64 --emit-asm   # read the generated code
+uasm build prog.py --emit-ir         # stop at the IR and read it
+uasm run prog.py                     # execute in the reference interpreter
+uasm check prog.py                   # analyse and verify, produce nothing
+uasm ops | types | passes | backends | frontends | targets | toolchains
+uasm libraries                       # where installed packages resolve from
 ```
 
 ## Layout
 
 ```
-src/asmpython/
+src/uasm/
   diagnostics/   spans, structured diagnostics, terminal rendering
   ir/            types, opcodes, module, cfg, builder, verifier, printer,
                  parser, interpreter
@@ -36,7 +36,7 @@ src/asmpython/
                  own instructions and write ELF, COFF and Mach-O objects with
                  no assembler anywhere in the path; jvm; pybc (.pyc); cpyext
                  (a real CPython extension module, .so/.pyd) -- and five more
-                 registered but unfinished: see `asmpython backends`. `x86`
+                 registered but unfinished: see `uasm backends`. `x86`
                  and `arm` are families: --bits chooses the member)
   target(s)/     the platforms        (x86_64-*, aarch64-*, c, jvm, pybc,
                  x86_64-{linux,windows}-cpyext)
@@ -45,16 +45,19 @@ src/asmpython/
                  format, shared by every architecture that uses it)
   objects/       what a Python value IS at run time: the object runtime as C,
                  the part of it rewritten in IR, and the floor beneath both
-  runtime/       that IR part's source, in asmpython's own machine subset --
+  runtime/       that IR part's source, in uasm's own machine subset --
                  compiled into every program that needs it, not imported
   plugins/       third-party registrations: manifest, resolution, install
   driver/        options, pipeline, command line
 ```
 
 `archived/legacy/asmpython/` is the pre-rewrite compiler, kept for its code
-generation and not maintained. It answers to the same import name, and two
-packages cannot share one — so the rewrite owns `asmpython` and the old tree
-needs `PYTHONPATH=archived/legacy`. See
+generation and not maintained. It used to collide on the import name — both
+this tree and that one answered to `asmpython`, and two packages cannot
+share one, so the rewrite claimed the name and the old tree needed
+`PYTHONPATH=archived/legacy` to be reached at all. Renaming this tree to
+`uasm` retired that collision; the archived tree still isn't installed
+anywhere, so `PYTHONPATH=archived/legacy` is still how you reach it. See
 [archived/legacy/README.md](archived/legacy/README.md).
 
 Four registries — frontends, backends, targets, toolchains — and the
@@ -65,20 +68,20 @@ A plugin declares what it provides and is installed once:
 
 ```python
 # my_plugin_module.py
-from asmpython.plugins import Plugin, Backend, Target, Frontend, Linker
+from uasm.plugins import Plugin, Backend, Target, Frontend, Linker
 
 plugin = Plugin("mypack")
 plugin.backends.append(MyBackend())
 plugin.add_target(Target("my-machine", arch="my"), aliases=("mm",))
 
-__asmpython_plugin__ = plugin
+__uasm_plugin__ = plugin
 ```
 
 ```
-asmpython plugin add my_plugin_module     # remembered; loaded every run
-asmpython plugin show my_plugin_module    # what it provides, registering none of it
-asmpython plugin list | remove
-asmpython build prog.py --backend my-backend
+uasm plugin add my_plugin_module     # remembered; loaded every run
+uasm plugin show my_plugin_module    # what it provides, registering none of it
+uasm plugin list | remove
+uasm build prog.py --backend my-backend
 ```
 
 `plugin add` resolves from the working directory, then the Python path, then
@@ -106,10 +109,10 @@ compiler is run from another directory. `origin` stays recorded for exactly
 one purpose:
 
 ```bash
-asmpython plugin invalidate mypack           # one id
-asmpython plugin invalidate a,b              # comma-separated
-asmpython plugin invalidate a b              # or repeated
-asmpython plugin invalidate --all
+uasm plugin invalidate mypack           # one id
+uasm plugin invalidate a,b              # comma-separated
+uasm plugin invalidate a b              # or repeated
+uasm plugin invalidate --all
 ```
 
 `invalidate` goes back to the origin, re-resolves, and refreshes the cache --
@@ -118,8 +121,8 @@ gone it fails and says so, leaving the cached copy in place: a cache that no
 longer matches any real source is exactly the state worth being told about.
 
 For one invocation, or without installing: `--plugin MODULE`, or
-`ASMPYTHON_PLUGINS=mypack`. An installed distribution needs none of it if it
-advertises an `asmpython.plugins` entry point.
+`UASM_PLUGINS=mypack`. An installed distribution needs none of it if it
+advertises an `uasm.plugins` entry point.
 
 ## The three decisions
 
@@ -160,7 +163,7 @@ metal: the image boots directly with `-M virt -kernel`, no guest OS involved.
 
 `import requests` resolves against the host Python installation's
 `site-packages` — a **library point**, which is a search root that came from
-an interpreter rather than from the command line. `asmpython libraries` prints
+an interpreter rather than from the command line. `uasm libraries` prints
 the ones in force and which interpreter they came from; `--host-python PATH`
 asks a different installation, and `--no-site-packages` searches none.
 
@@ -188,11 +191,11 @@ with `E0129` naming the file and the distribution it came from, rather than
 built against CPython's C API, so using a THIRD-PARTY one needs that API
 implemented against this object runtime; loading it is the smaller half, and
 `dynlib` in `objects/hostsvc.py` is that half. That is the LOAD direction. The
-EMIT direction — asmpython producing its own `.pyd`/`.so`, rather than
+EMIT direction — uasm producing its own `.pyd`/`.so`, rather than
 consuming someone else's — is the `cpyext` backend, and does not need CPython's
 C-API implemented against this object runtime: it needs only enough of that
 API to convert values at the boundary, written once as hand-generated glue
-around the ordinary `c` backend's output. See `asmpython build --backend
+around the ordinary `c` backend's output. See `uasm build --backend
 cpyext --library` and `backends/cpyext/emit.py`.
 
 ## Native libraries
@@ -211,7 +214,7 @@ print(user32.GetSystemMetrics(0))     # 1920
 ```
 
 ```sh
-asmpython build app.py --native-library libs.json
+uasm build app.py --native-library libs.json
 ```
 
 A declared function **is a `ctypes` function whose `argtypes` are already
@@ -238,10 +241,10 @@ is not a CPython extension module, which is `E0129` above.
 
 | you want | read | register with |
 | --- | --- | --- |
-| a language | [archived/docs/FRONTENDS.md](archived/docs/FRONTENDS.md) | `asmpython.frontend.register` |
-| a code generator | [archived/docs/BACKENDS.md](archived/docs/BACKENDS.md) | `asmpython.backend.register` |
-| a platform | [archived/docs/TARGETS.md](archived/docs/TARGETS.md) | `asmpython.target.register` |
-| a way to link | [archived/docs/LINKERS.md](archived/docs/LINKERS.md) | `asmpython.link.register` |
+| a language | [archived/docs/FRONTENDS.md](archived/docs/FRONTENDS.md) | `uasm.frontend.register` |
+| a code generator | [archived/docs/BACKENDS.md](archived/docs/BACKENDS.md) | `uasm.backend.register` |
+| a platform | [archived/docs/TARGETS.md](archived/docs/TARGETS.md) | `uasm.target.register` |
+| a way to link | [archived/docs/LINKERS.md](archived/docs/LINKERS.md) | `uasm.link.register` |
 
 [archived/docs/LANGUAGE.md](archived/docs/LANGUAGE.md) describes what the
 Python frontend accepts — which is Python, on two paths — and the four places
@@ -271,6 +274,6 @@ usual install locations are checked as well, and either can be pointed
 somewhere else:
 
 ```
-ASMPYTHON_AARCH64_BIN=/path/to/aarch64-none-elf/bin
-ASMPYTHON_QEMU_BIN=/path/to/qemu
+UASM_AARCH64_BIN=/path/to/aarch64-none-elf/bin
+UASM_QEMU_BIN=/path/to/qemu
 ```

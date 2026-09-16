@@ -3,9 +3,9 @@
 # 3.14 heapq_max family (heappush_max, heappop_max, heapify_max,
 # heapreplace_max, heappushpop_max).
 #
-# Run under CPython and under asmpython; the outputs must be identical. So
+# Run under CPython and under uasm; the outputs must be identical. So
 # every assertion below is written against what the module IS SPECIFIED to
-# do, not against what asmpython currently does.
+# do, not against what uasm currently does.
 import heapq
 
 

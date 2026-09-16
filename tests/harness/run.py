@@ -36,7 +36,7 @@ def _aarch64_available() -> bool:
     the looking, which is why this is a function: the probe must not run at
     import time in a process that will never need it."""
     try:
-        from tests.asmpython.integration import aarch64
+        from tests.uasm.integration import aarch64
     except ImportError:
         return False
     return bool(aarch64.AVAILABLE)
@@ -54,7 +54,7 @@ GUARDS = {
     #: so only the tests that execute one declare this.
     "java": lambda: bool(shutil.which("java")),
     #: A COMPILER, not a JVM. Only the Java-interop tests need one, and only to
-    #: build the API they then import -- nothing in asmpython calls javac.
+    #: build the API they then import -- nothing in uasm calls javac.
     "javac": lambda: bool(shutil.which("javac")),
     #: AN ASSEMBLER, to CHECK an encoder against and not to run one. The
     #: encoders produce their own bytes; binutils is the second opinion that

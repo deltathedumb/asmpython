@@ -1,6 +1,6 @@
 """A frozen copy of the compiler, so a run measures one tree.
 
-THE PROBLEM THIS SOLVES. A run imports `asmpython` out of `src/`, compiles a
+THE PROBLEM THIS SOLVES. A run imports `uasm` out of `src/`, compiles a
 few hundred programs with it, and takes minutes. Editing `src/` while that
 happens means some cases were compiled with the old code and some with the
 new, and the result describes a tree that never existed. The only defence was
@@ -14,7 +14,7 @@ finish, whatever anyone does to the original meanwhile.
 WHERE THE WORKERS GET IT. `multiprocessing` sends the parent's `sys.path` to
 each spawned child, so redirecting the parent before the pool exists is enough
 for every worker. Tests that reach for the tree by PATH -- the CLI and plugin
-ones, which start subprocesses -- read `ASMPYTHON_SRC` instead of building
+ones, which start subprocesses -- read `UASM_SRC` instead of building
 `root/"src"` themselves.
 
 WHAT IS NOT SNAPSHOT. `tests/` itself. A test file is read once at collection,
@@ -33,7 +33,7 @@ CACHE_DIR = ".harness-src"
 
 #: The environment variable a worker -- or a test that starts a subprocess --
 #: reads to find the tree this run is measuring.
-ENV = "ASMPYTHON_SRC"
+ENV = "UASM_SRC"
 
 
 def _ignore(_dir, names):

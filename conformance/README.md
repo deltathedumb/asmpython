@@ -1,6 +1,6 @@
-# conformance — asmpython's CPython oracle
+# conformance — uasm's CPython oracle
 
-**A developer tool, not a distributable package.** It exists so asmpython can be
+**A developer tool, not a distributable package.** It exists so uasm can be
 measured against *the language* instead of against `tests/`, a corpus that grew
 up alongside the compiler and therefore cannot contain the shapes the compiler
 was never asked to handle.
@@ -52,14 +52,14 @@ id(x)                          # an address, not a specified value
 hash("abc")                    # salted per process
 ```
 
-Pinning those would hold asmpython to CPython's *accidents* — refcount-driven
-collection timing, small-int caching, address values — none of which asmpython
+Pinning those would hold uasm to CPython's *accidents* — refcount-driven
+collection timing, small-int caching, address values — none of which uasm
 should reproduce. Pinning *nothing* misses the microbehaviour the oracle exists
 for.
 
 So every case declares which side of that line it sits on, and the tier is a
 field, not a convention. The `impl` tier is what lets the oracle record a
-divergence without asserting asmpython is wrong to have it.
+divergence without asserting uasm is wrong to have it.
 
 | tier | meaning | counted in the score |
 |---|---|---|
@@ -126,16 +126,16 @@ should be expected to satisfy.
 
 ---
 
-## Scoring asmpython
+## Scoring uasm
 
 ```
-python conformance/harness.py --shim asmpython --matrix
+python conformance/harness.py --shim uasm --matrix
 python conformance/harness.py --shim cpython
-python conformance/harness.py --shim asmpython --tier spec,cpython
-python conformance/harness.py --shim asmpython --matrix          # cross-product view
+python conformance/harness.py --shim uasm --tier spec,cpython
+python conformance/harness.py --shim uasm --matrix          # cross-product view
 python conformance/harness.py --list-groups                      # what can be selected
-python conformance/harness.py --shim asmpython --groups pep,functions
-python conformance/harness.py --shim asmpython --groups generated/boundary
+python conformance/harness.py --shim uasm --groups pep,functions
+python conformance/harness.py --shim uasm --groups generated/boundary
 ```
 
 Every run of the whole suite is a compile-and-link per case, so `--groups`
@@ -158,10 +158,10 @@ unknown group is a hard error rather than an empty selection — zero cases scor
 
 There are four shims and they play different roles. `cpython` is the **oracle** —
 it is what `regen.py` derives expectations from and what `selftest.py` checks
-the suite against. `asmpython` is the **subject**. Everything else in the tree
+the suite against. `uasm` is the **subject**. Everything else in the tree
 is implementation-neutral, which is not an aspiration toward portability but the
-property that keeps the oracle honest: a suite that knew about asmpython could
-be bent, however unintentionally, toward what asmpython already does.
+property that keeps the oracle honest: a suite that knew about uasm could
+be bent, however unintentionally, toward what uasm already does.
 
 The other two point the same oracle at the **embedded** interpreter — `_pylex`,
 `_pyparse`, `_pyvalidate` and `_pyrun`, the Python-in-Python compiler and tree
@@ -178,7 +178,7 @@ correctly.
 
 `embedded_host` is the loop to develop `_pyrun` inside; `embedded` is the
 checkpoint. THEY CAN DISAGREE, and a disagreement is its own finding: the
-bundled modules are compiled by asmpython in one and interpreted by CPython in
+bundled modules are compiled by uasm in one and interpreted by CPython in
 the other, so a case that passes on the host and fails in a binary is a bug in
 the compiler's handling of the interpreter's source rather than in the
 interpreter. That is the corpus's three-paths-must-agree argument, one level up.
@@ -193,12 +193,12 @@ def run(case_path, timeout):
     """-> (stdout, stderr, returncode). returncode None means REFUSED."""
 ```
 
-`shims/asmpython.py` puts this checkout's `src/` on the path explicitly, and
+`shims/uasm.py` puts this checkout's `src/` on the path explicitly, and
 that line is load-bearing rather than tidy: a developer machine usually has a
-released `asmpython` installed under the same import name, and `-m asmpython`
+released `uasm` installed under the same import name, and `-m uasm`
 finds THAT unless the checkout is placed ahead of it. The failure is silent and
 expensive — the suite scores a build nobody in the tree can edit, and every fix
-appears to change nothing. `results/asmpython.json` was recorded that way.
+appears to change nothing. `results/uasm.json` was recorded that way.
 
 Each compile also gets its own `--workdir`. The harness runs cases on threads
 of one process, and the compiler's default intermediate directory is one path

@@ -1,11 +1,11 @@
-# asmpython refactor todo list
+# uasm refactor todo list
 
 | Task                                      | Status    |
 |-------------------------------------------|-----------|
-| Finish closing asmpythons conformance gap | In-flight |
+| Finish closing uasms conformance gap | In-flight |
 
-The goal: `python conformance/harness.py --shim asmpython` passes every counted
-case. CPython passes 100% of them, so any divergence is asmpython's bug.
+The goal: `python conformance/harness.py --shim uasm` passes every counted
+case. CPython passes 100% of them, so any divergence is uasm's bug.
 
 ## Where it stands
 
@@ -75,7 +75,7 @@ case. CPython passes 100% of them, so any divergence is asmpython's bug.
 | with PEP 657: a traceback that names a frame, a frame that names a code object, and `co_positions()` -- recorded per statement, and only for a program that asks | 1649/1668 |
 | with `compile()`, `eval()` and `exec()` -- a Python lexer, parser, validator and tree-walker written as BUNDLED PYTHON and spliced into any program that names one | **1668**/1668 |
 
-**FULL CONFORMANCE. 1668/1668 on spec+cpython**, measured `--shim asmpython
+**FULL CONFORMANCE. 1668/1668 on spec+cpython**, measured `--shim uasm
 -j 2` over 1679 cases. The nine remaining divergences are all impl tier and
 none is counted: small-int caching, string interning (twice), the recursion
 limit, PEP 709's frameless comprehensions, `__length_hint__`, and weak
@@ -91,7 +91,7 @@ names: nothing else in the suite fails. The ceiling without a compiler in the
 produced binary is exactly where the score now is.
 
 Read the first two rows together. The suite's shim invoked
-`python -m asmpython` without putting this checkout on the path, so it resolved
+`python -m uasm` without putting this checkout on the path, so it resolved
 to whatever was installed in site-packages — a released build of the compiler
 now in `archived/legacy/`, not the tree it sits in. Against the actual 3.14
 compiler the score was zero, and for one reason: the frontend accepted only
@@ -119,7 +119,7 @@ lines of tree walk against a language this suite spends 1668 cases on, and it
 had never been pointed at them. Pointing the same oracle at it:
 
     --shim embedded_host       871/1668   (52.2%)
-    --shim asmpython          1668/1668  (100.0%)
+    --shim uasm          1668/1668  (100.0%)
 
 So the interpreter a produced binary carries implements about HALF of what the
 compiler around it does. That is not a regression and nothing depended on it
@@ -780,7 +780,7 @@ WHAT THE WORK FOUND, which is the part no case would have named:
   `yield_in_every_expression_position`,
   `await_in_slices_specs_and_asserts` and `generators_and_coroutines_mixed`.
   AND FORTY-FOUR SHAPES ARE PINNED in
-  `tests/asmpython/unit/test_suspension_positions.py`, which asks only whether
+  `tests/uasm/unit/test_suspension_positions.py`, which asks only whether
   the frontend produced IR the verifier accepts. No backend runs, so the whole
   sweep is two seconds and can be run beside a measurement -- which is what
   makes it the right net for this bug class, where the corpus's three paths
@@ -855,12 +855,12 @@ dozen PEP cases. Nothing else is a block at all -- the stdlib group that used
 to be second-biggest is gone, and so are the class-machinery, typing and
 Unicode groups.
 
-REGENERATE THIS from `results/asmpython.json` rather than trusting it. The
+REGENERATE THIS from `results/uasm.json` rather than trusting it. The
 split above is one line of Python:
 
     python - <<'EOF'
     import json, pathlib, re
-    d = json.loads(pathlib.Path("conformance/results/asmpython.json").read_text())
+    d = json.loads(pathlib.Path("conformance/results/uasm.json").read_text())
     for k, v in sorted(d["cases"].items()):
         if v.get("tier") in ("spec", "cpython") and v["status"] != "PASS":
             src = (pathlib.Path("conformance/cases") / (k + ".py")).read_text()
@@ -870,7 +870,7 @@ split above is one line of Python:
 
 The counts on each item are from the last measurement that touched it, so read
 them as an order of magnitude rather than a total. Regenerate the breakdown
-from `results/asmpython.json` rather than trusting this list: it goes stale
+from `results/uasm.json` rather than trusting this list: it goes stale
 every time something lands, which is how it should be.
 
 * **`compile`/`eval`** (19) — DONE. The cases call `compile()` on a bad
@@ -1123,7 +1123,7 @@ CPython by eye, and only then promoted to a corpus program.
 **And a FRONTEND-ONLY check is a tenth of a second.** `compile_source(...).ok`
 answers whether the IR verifier accepted the program, which is the whole
 question for a bug class that produces invalid IR --
-`tests/asmpython/unit/test_suspension_positions.py` sweeps forty-four shapes
+`tests/uasm/unit/test_suspension_positions.py` sweeps forty-four shapes
 in two seconds because it asks nothing else.
 
 **Do not run two of them at once.** Both fail in ways that are not in the
@@ -1201,11 +1201,11 @@ score.
 
 * **Every path agrees**: CPython, the reference interpreter, the C backend,
   x86-64 and bare-metal AArch64, on the same program.
-  `tests/asmpython/integration/test_dynamic_python.py` checks three of them
+  `tests/uasm/integration/test_dynamic_python.py` checks three of them
   over a corpus; the differential fuzzers cover the rest.
 * **A runtime symbol needs a host binding.** 118 of 177 were unbound at one
-  point, so `asmpython run` trapped on programs the compiled binary ran
-  correctly. `tests/asmpython/unit/test_objects_host.py` is a ratchet over what
+  point, so `uasm run` trapped on programs the compiled binary ran
+  correctly. `tests/uasm/unit/test_objects_host.py` is a ratchet over what
   remains.
 * **`conformance/cases/` is never edited.** Bending a case to match the
   compiler is the one change that makes the whole measurement worthless.
@@ -1216,12 +1216,12 @@ score.
   first's rows. Broken five times so far, and it fails as a WRONG ANSWER on
   the second run -- which reads as a flaky test, because whether the two runs
   share a worker decides who sees it.
-  `tests/asmpython/unit/test_host_state_is_per_run.py` runs a program twice,
+  `tests/uasm/unit/test_host_state_is_per_run.py` runs a program twice,
   and after a different one, and is mutation-checked.
 * **A SUSPENSION MAY APPEAR WHEREVER AN EXPRESSION MAY**, and nothing computed
   before it may be held in a register. `await`, `yield`, `yield from` and an
   `async for` inside a comprehension all compile to a return out of the step
-  function. `tests/asmpython/unit/test_suspension_positions.py` enumerates
+  function. `tests/uasm/unit/test_suspension_positions.py` enumerates
   forty-four positions; adding a lowering that holds a value across an operand
   means adding a case to it.
 * `archived/legacy/` is the pre-rewrite compiler. It is not part of 3.14 and is

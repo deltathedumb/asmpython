@@ -174,10 +174,10 @@ print(re.compile(r"\d+").search("12345", 1, 3).group(0))
 
 # ---- the errors ------------------------------------------------------------
 # THE REFUSALS ARE NOT HERE. Lookbehind, atomic groups and possessive
-# quantifiers are features CPython HAS, so a test that asserts asmpython
+# quantifiers are features CPython HAS, so a test that asserts uasm
 # refuses them is asserting a difference and cannot be a differential one.
-# They are measured against asmpython alone, in
-# `tests/asmpython/integration/test_stdlib.py::test_re_refuses_what_it_does_not_have`.
+# They are measured against uasm alone, in
+# `tests/uasm/integration/test_stdlib.py::test_re_refuses_what_it_does_not_have`.
 #
 # What IS here is the patterns both refuse: an ordinary mistake is an error in
 # CPython too, and a module that accepted one would be silently wrong.
