@@ -19,7 +19,7 @@ which path disagreed and where the outputs diverged — so a bare `assert a == b
 is reconstructed from the traceback and the first differing line is printed:
 
 ```
-FAILED tests.asmpython.integration.test_dynamic_python::...[with_statement]
+FAILED tests.uasm.integration.test_dynamic_python::...[with_statement]
   assert ran.stdout.split("\n")[:-1] == cpython(src)
   first difference at index 2:
     got:  'exit 2 None'

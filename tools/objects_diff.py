@@ -16,7 +16,7 @@ program, so the cost is four executions and two `gcc` invocations however many
 cases there are. That is what makes a sweep of this size affordable at all.
 
   cpython      the reference
-  interp       `asmpython run` -- the host object runtime
+  interp       `uasm run` -- the host object runtime
   ir           compiled, object runtime in the machine subset
   c            compiled, `--object-runtime c`
 
@@ -292,7 +292,7 @@ def group_keywords():
     """
     sys.path.insert(0, str(SRC))
     try:
-        from asmpython.frontends.python.methods import (
+        from uasm.frontends.python.methods import (
             METHOD_PARAMS, POSITIONAL_ONLY)
     finally:
         sys.path.remove(str(SRC))
@@ -539,7 +539,7 @@ def _env():
 
 
 def run_interp(path: pathlib.Path) -> list[str]:
-    r = subprocess.run([sys.executable, "-m", "asmpython", "run", str(path)],
+    r = subprocess.run([sys.executable, "-m", "uasm", "run", str(path)],
                        capture_output=True, text=True, encoding="utf-8",
                        errors="replace", env=_env())
     return [ln for ln in r.stdout.splitlines() if ln != "no diagnostics"]
@@ -548,7 +548,7 @@ def run_interp(path: pathlib.Path) -> list[str]:
 def run_compiled(path: pathlib.Path, mode: str, work: pathlib.Path):
     exe = work / f"prog_{mode}.exe"
     build = subprocess.run(
-        [sys.executable, "-m", "asmpython", "build", str(path),
+        [sys.executable, "-m", "uasm", "build", str(path),
          "--backend", "c", "--object-runtime", mode, "-o", str(exe),
          "--workdir", str(work / mode)],
         capture_output=True, text=True, encoding="utf-8", errors="replace",

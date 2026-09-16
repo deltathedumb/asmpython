@@ -17,9 +17,9 @@
 # `imatmul` below is exercised against a class with no `__imatmul__` of its
 # own (seven of the twelve in-place operators do not consult one yet).
 #
-# Run under CPython and under asmpython; the outputs must be identical. So
+# Run under CPython and under uasm; the outputs must be identical. So
 # the assertions below are written against what the module IS SPECIFIED to
-# do, not against what asmpython currently does.
+# do, not against what uasm currently does.
 import operator
 
 

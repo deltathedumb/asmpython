@@ -10,7 +10,7 @@
 #
 # TWO THINGS ARE DELIBERATELY NOT COMPARED, both because they cannot be:
 #   * repr(MISSING) and repr(a Field) embed an object address.
-#   * a NESTED class's __qualname__ is the bare name under asmpython, so a
+#   * a NESTED class's __qualname__ is the bare name under uasm, so a
 #     nested dataclass's repr differs. Every dataclass here is top-level.
 import typing
 
@@ -576,7 +576,7 @@ except TypeError as exc:
 # ---- weakref_slot without slots is an error in BOTH -------------------
 # `slots=True` ITSELF IS NOT TESTED HERE: CPython implements it and this module
 # refuses it by name, so asserting the refusal would be asserting a difference
-# and could only ever fail. It is measured against asmpython alone, in
+# and could only ever fail. It is measured against uasm alone, in
 # test_stdlib.py::test_dataclasses_refuses_slots.
 try:
     @dataclass(weakref_slot=True)

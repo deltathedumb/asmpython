@@ -1,14 +1,14 @@
 """Score an implementation against the CPython oracle, via a shim.
 
-    python conformance/harness.py --shim asmpython --matrix
-    python conformance/harness.py --shim asmpython --groups pep,functions
+    python conformance/harness.py --shim uasm --matrix
+    python conformance/harness.py --shim uasm --groups pep,functions
     python conformance/harness.py --shim cpython            # must be 100%
 
-A developer tool for asmpython, not a distributable package. The `cpython` shim
+A developer tool for uasm, not a distributable package. The `cpython` shim
 is the ORACLE (what regen derives expectations from and selftest validates
-against); `asmpython` is the SUBJECT. Nothing here is asmpython-specific except
-that one shim -- deliberately, because a suite that knew about asmpython could
-be bent toward what asmpython already does.
+against); `uasm` is the SUBJECT. Nothing here is uasm-specific except
+that one shim -- deliberately, because a suite that knew about uasm could
+be bent toward what uasm already does.
 
 Exit codes: 0 = every counted case passed; 1 = at least one counted failure.
 `impl`-tier cases are run and reported but never counted (see README.md).
@@ -33,7 +33,7 @@ SHIMS = ROOT / "shims"
 
 #: Tiers whose failures count against an implementation. `impl` is recorded but
 #: excluded: those are CPython accidents -- refcount-driven collection timing,
-#: small-int caching, address values -- not language guarantees. asmpython has
+#: small-int caching, address values -- not language guarantees. uasm has
 #: no obligation to reproduce them, and counting them would put permanent
 #: failures in the score that no one should ever fix.
 COUNTED_TIERS = ("spec", "cpython")
@@ -626,7 +626,7 @@ def main(argv: list[str] | None = None) -> int:
     # minutes. Editing `src/` in the middle mixes two compilers into one
     # score -- which has already cost a discarded measurement.
     frozen = None
-    if not args.live_src and args.shim == "asmpython":
+    if not args.live_src and args.shim == "uasm":
         import atexit
         import os
         root = Path(__file__).resolve().parents[1]
@@ -702,7 +702,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if use_processes:
         # Run ONE case here first. An implementation shim may build a shared
-        # artifact on its first compile (asmpython builds its runtime archive
+        # artifact on its first compile (uasm builds its runtime archive
         # lazily), and the lock that stops two THREADS racing to build it does
         # not span processes -- so without this, N workers would all find it
         # missing at once and build into the same directory. Threads keep using

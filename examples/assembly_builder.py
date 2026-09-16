@@ -1,4 +1,4 @@
-from asmpython.assembly import Assembly
+from uasm.assembly import Assembly
 
 asm = Assembly()
 asm.section(".text")

@@ -1,7 +1,20 @@
 # Changelog
 
-All notable changes to asmpython are documented here.
+All notable changes to uasm are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+
+
+## [Unreleased]
+
+### Changed
+
+- **Renamed the project from `asmpython` to `uasm`**, and its IR format from
+  `apir` (`.apir`/`.apirc`) to `uir` (`.uir`/`.uirb`). The import path, CLI
+  command, PyPI project name, environment variables (`ASMPYTHON_*` ->
+  `UASM_*`), and the plugin entry-point group (`asmpython.plugins` ->
+  `uasm.plugins`) all moved with it — a hard cutover, not aliased for
+  compatibility. Entries below predate the rename and use the names that
+  were current when they were written.
 
 
 ## [3.14.0-preview] — in progress — Win64 ABI fixes, stdlib depth, SSA optimisation

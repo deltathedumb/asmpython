@@ -2,9 +2,9 @@
 
 The oracle rests on one property: **CPython scores 100% on the counted tiers.**
 Every rule below exists to keep that true, because the moment it isn't, the
-suite is asserting something CPython does not actually do -- and every asmpython
+suite is asserting something CPython does not actually do -- and every uasm
 measurement taken against it is then wrong in the direction that looks like an
-asmpython bug.
+uasm bug.
 
 That is the failure mode to fear here. A broken case does not report as a broken
 case; it reports as a compiler defect, and someone goes looking for it.

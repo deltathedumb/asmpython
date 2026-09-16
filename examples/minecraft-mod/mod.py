@@ -1,4 +1,4 @@
-"""A Minecraft mod written in Python, compiled to JVM bytecode by asmpython.
+"""A Minecraft mod written in Python, compiled to JVM bytecode by uasm.
 
 No loader mod and no interpreter: this file becomes the mod jar. It drives real
 NeoForge APIs through `java`, and registers a real item -- which NeoForge takes
@@ -8,7 +8,7 @@ one through `jproxy`.
 import java
 import java.net.neoforged.neoforge.registries as registries
 
-from asmpython import Public, access
+from uasm import Public, access
 
 
 @access(Public)

@@ -7,7 +7,7 @@ modId = "demomod"
 version = "1.0.0"
 displayName = "Demo Mod (Python)"
 description = '''
-A Minecraft mod written in Python and compiled to JVM bytecode by asmpython.
+A Minecraft mod written in Python and compiled to JVM bytecode by uasm.
 Registers demomod:bat through the real NeoForge registries.
 '''
 

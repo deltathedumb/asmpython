@@ -437,7 +437,7 @@ def run(source: Path, workdir: Path, native: bool) -> "tuple[bool, str]":
     """Compile and run one case, returning (ok, output-or-error)."""
     suffix = ".exe" if native else ".jar"
     artifact = workdir / (source.stem + suffix)
-    command = [sys.executable, "-m", "asmpython", "build", str(source), "-o", str(artifact)]
+    command = [sys.executable, "-m", "uasm", "build", str(source), "-o", str(artifact)]
     if not native:
         command += ["--backend", "jvm"]
 

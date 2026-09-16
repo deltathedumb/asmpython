@@ -1,4 +1,4 @@
-"""Compile one case (or one snippet) with the asmpython shim and show both sides.
+"""Compile one case (or one snippet) with the uasm shim and show both sides.
 
 A triage tool, not part of scoring. `harness.py --filter` runs a case and tells
 you it failed; this prints the compiler's own stderr, which is where a refusal
@@ -33,7 +33,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("case", nargs="?", help="case id, e.g. numeric/int/pow-with-modulus")
     ap.add_argument("-e", "--expr", help="compile this source instead of a case")
-    ap.add_argument("--shim", default="asmpython")
+    ap.add_argument("--shim", default="uasm")
     ap.add_argument("--timeout", type=int, default=120)
     args = ap.parse_args()
 

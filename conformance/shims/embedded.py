@@ -5,13 +5,13 @@ The subject is not the compiler's native path. It is `_pylex`, `_pyparse`,
 that `bundled.py` splices into any program naming `compile`, `eval` or `exec`.
 A case is wrapped in a three-line driver that `exec`s it, that driver is
 compiled to a native binary, and the binary runs the case. So the case is
-parsed and executed by asmpython's own interpreter, which is itself compiled by
-asmpython.
+parsed and executed by uasm's own interpreter, which is itself compiled by
+uasm.
 
 WHY THIS IS WORTH MEASURING SEPARATELY. The embedded interpreter was written to
 answer nineteen conformance cases that call `compile()`, and what it is
 measured against is those nineteen plus 87 probes read out of them
-(`tests/asmpython/unit/test_bundled_compile.py`). That says it agrees with
+(`tests/uasm/unit/test_bundled_compile.py`). That says it agrees with
 CPython about which programs are WELL-FORMED. It says almost nothing about
 whether it RUNS them correctly -- `_pyrun` is 537 lines of tree walk against a
 language the rest of this suite spends 1668 cases on. Pointing the same oracle
@@ -47,7 +47,7 @@ from pathlib import Path
 import importlib.util as _il
 
 _spec = _il.spec_from_file_location(
-    "_shim_native_for_embedded", Path(__file__).with_name("asmpython.py"))
+    "_shim_native_for_embedded", Path(__file__).with_name("uasm.py"))
 _native = _il.module_from_spec(_spec)
 _spec.loader.exec_module(_native)
 

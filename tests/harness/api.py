@@ -3,7 +3,7 @@
 Everything here either ATTACHES METADATA to a function or raises one of the
 outcome signals. Nothing runs a test -- `run.py` does that -- so a test file
 can be imported by anything without a runner being involved, which is what
-keeps `python -c "import tests.asmpython.unit.test_ir"` a sane thing to do.
+keeps `python -c "import tests.uasm.unit.test_ir"` a sane thing to do.
 """
 from __future__ import annotations
 

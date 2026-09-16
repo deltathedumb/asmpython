@@ -4,9 +4,9 @@
 # its wrap/fill methods; the module functions wrap, fill, shorten, dedent,
 # indent.
 #
-# Run under CPython and under asmpython; the outputs must be identical. So
+# Run under CPython and under uasm; the outputs must be identical. So
 # the assertions below are written against what the module IS SPECIFIED to
-# do, not against what asmpython currently does.
+# do, not against what uasm currently does.
 import textwrap
 
 PROSE = ("Beautiful is better than ugly. Explicit is better than implicit. "

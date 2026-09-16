@@ -41,7 +41,7 @@ class Box(typing.Generic[T]):
 
 
 b = Box[int]
-# NOT a raw class repr: asmpython's user-class repr omits the module
+# NOT a raw class repr: uasm's user-class repr omits the module
 # qualifier CPython includes (`<class 'Box'>` vs `<class '__main__.Box'>`),
 # a pre-existing, unrelated difference -- so this checks identity instead.
 show("Box[int].__origin__ is Box", b.__origin__ is Box)
