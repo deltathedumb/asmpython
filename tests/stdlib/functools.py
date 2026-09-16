@@ -41,6 +41,147 @@ class Version:
 a, b = Version(1), Version(2)
 print(a < b, a <= b, a > b, a >= b, a == b, a != b)
 
+
+# THE ROOT IS WHICHEVER ORDERING OPERATOR THE CLASS WROTE, and only the
+# MISSING ones are filled. This assumed `__lt__` and wrote all four
+# regardless, so a class rooted on `__gt__` got a `__gt__` back that recursed
+# through a `__lt__` it never had, and an operator the class DID write was
+# replaced by a derived one.
+#
+# AND A DERIVED OPERATOR HANDS BACK NotImplemented rather than raising. Each
+# one reaches the root as a METHOD -- `type(self).__lt__(self, other)` --
+# because spelling it as the OPERATOR raises the moment the root declines,
+# from inside the synthesised method and with that call's operands. `5 < v`
+# then reported a refusal between 'Version' and 'int', in that order, about a
+# comparison the program never wrote.
+def rooted(name):
+    if name == "lt":
+        @functools.total_ordering
+        class R:
+            def __init__(self, n):
+                self.n = n
+
+            def __eq__(self, other):
+                return isinstance(other, R) and self.n == other.n
+
+            def __lt__(self, other):
+                if not isinstance(other, R):
+                    return NotImplemented
+                return self.n < other.n
+
+            def __hash__(self):
+                return hash(self.n)
+        return R
+    if name == "le":
+        @functools.total_ordering
+        class R:
+            def __init__(self, n):
+                self.n = n
+
+            def __eq__(self, other):
+                return isinstance(other, R) and self.n == other.n
+
+            def __le__(self, other):
+                if not isinstance(other, R):
+                    return NotImplemented
+                return self.n <= other.n
+
+            def __hash__(self):
+                return hash(self.n)
+        return R
+    if name == "gt":
+        @functools.total_ordering
+        class R:
+            def __init__(self, n):
+                self.n = n
+
+            def __eq__(self, other):
+                return isinstance(other, R) and self.n == other.n
+
+            def __gt__(self, other):
+                if not isinstance(other, R):
+                    return NotImplemented
+                return self.n > other.n
+
+            def __hash__(self):
+                return hash(self.n)
+        return R
+
+    @functools.total_ordering
+    class R:
+        def __init__(self, n):
+            self.n = n
+
+        def __eq__(self, other):
+            return isinstance(other, R) and self.n == other.n
+
+        def __ge__(self, other):
+            if not isinstance(other, R):
+                return NotImplemented
+            return self.n >= other.n
+
+        def __hash__(self):
+            return hash(self.n)
+    return R
+
+
+for root in ("lt", "le", "gt", "ge"):
+    K = rooted(root)
+    one, two = K(1), K(2)
+    print(root, one < two, one > two, one <= two, one >= two)
+    print(root, two < one, two > one, two <= one, two >= one)
+    print(root, K(1) <= K(1), K(1) >= K(1), K(1) == K(1), K(1) != K(1))
+    print(root, "sorted", [v.n for v in sorted([K(3), K(1), K(2)])])
+    # THE ROOT DECLINING IS HANDED BACK, not raised, so the refusal is the
+    # one the program's own comparison words -- operands in the order it
+    # wrote them, and the operator it used.
+    for label, call in (("v < int", lambda: one < 5),
+                        ("v > int", lambda: one > 5),
+                        ("v <= int", lambda: one <= 5),
+                        ("int < v", lambda: 5 < one),
+                        ("int > v", lambda: 5 > one)):
+        try:
+            print(root, label, repr(call()))
+        except TypeError as e:
+            print(root, label, "TypeError:", e)
+
+
+# AN OPERATOR THE CLASS WROTE IS LEFT ALONE.
+@functools.total_ordering
+class Keeps:
+    def __init__(self, n):
+        self.n = n
+
+    def __eq__(self, other):
+        return isinstance(other, Keeps) and self.n == other.n
+
+    def __lt__(self, other):
+        return self.n < other.n
+
+    def __ge__(self, other):
+        return "OWN GE"
+
+    def __hash__(self):
+        return hash(self.n)
+
+
+print("keeps", Keeps(1) >= Keeps(2), Keeps(1) <= Keeps(2), Keeps(1) > Keeps(2))
+
+
+# AND A CLASS WITH NO ORDERING OPERATOR HAS NOTHING TO DERIVE FROM.
+try:
+    @functools.total_ordering
+    class NoOrder:
+        def __eq__(self, other):
+            return True
+
+        def __hash__(self):
+            return 1
+
+    print("no error")
+except ValueError as e:
+    print("ValueError:", e)
+
 calls = []
 
 

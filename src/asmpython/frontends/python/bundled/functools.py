@@ -51,28 +51,171 @@ def wraps(fn):
     return deco
 
 
+# ── total_ordering ───────────────────────────────────────────────────────
+#
+# THE ROOT OPERATOR IS CALLED DIRECTLY, not spelled as an operator, and that
+# is the whole of what these twelve exist to get right. `not (self < other)`
+# RAISES when the class's own `__lt__` answers NotImplemented and nothing
+# else claims the pair -- so a synthesised `__gt__` written that way raises
+# from inside, and that error escapes before the comparison the PROGRAM
+# wrote can word its own refusal. `1 < Num(2)` reported `'<' not supported
+# between instances of 'Num' and 'int'`: the right operator name, the wrong
+# operands, and both belonging to a call the program never made.
+#
+# `type(self).__lt__(self, other)` REACHES THE METHOD AND NOT THE OPERATOR,
+# so NotImplemented comes back as a value and is handed straight on. That is
+# what CPython's `functools` does, and each body below is its arithmetic.
+
+
+def _gt_from_lt(self, other):
+    """`a > b` from `not a < b and a != b`."""
+    got = type(self).__lt__(self, other)
+    if got is NotImplemented:
+        return got
+    return not got and self != other
+
+
+def _le_from_lt(self, other):
+    """`a <= b` from `a < b or a == b`."""
+    got = type(self).__lt__(self, other)
+    if got is NotImplemented:
+        return got
+    return got or self == other
+
+
+def _ge_from_lt(self, other):
+    """`a >= b` from `not a < b`."""
+    got = type(self).__lt__(self, other)
+    if got is NotImplemented:
+        return got
+    return not got
+
+
+def _lt_from_le(self, other):
+    """`a < b` from `a <= b and a != b`."""
+    got = type(self).__le__(self, other)
+    if got is NotImplemented:
+        return got
+    return got and self != other
+
+
+def _gt_from_le(self, other):
+    """`a > b` from `not a <= b`."""
+    got = type(self).__le__(self, other)
+    if got is NotImplemented:
+        return got
+    return not got
+
+
+def _ge_from_le(self, other):
+    """`a >= b` from `not a <= b or a == b`."""
+    got = type(self).__le__(self, other)
+    if got is NotImplemented:
+        return got
+    return not got or self == other
+
+
+def _lt_from_gt(self, other):
+    """`a < b` from `not a > b and a != b`."""
+    got = type(self).__gt__(self, other)
+    if got is NotImplemented:
+        return got
+    return not got and self != other
+
+
+def _ge_from_gt(self, other):
+    """`a >= b` from `a > b or a == b`."""
+    got = type(self).__gt__(self, other)
+    if got is NotImplemented:
+        return got
+    return got or self == other
+
+
+def _le_from_gt(self, other):
+    """`a <= b` from `not a > b`."""
+    got = type(self).__gt__(self, other)
+    if got is NotImplemented:
+        return got
+    return not got
+
+
+def _lt_from_ge(self, other):
+    """`a < b` from `not a >= b`."""
+    got = type(self).__ge__(self, other)
+    if got is NotImplemented:
+        return got
+    return not got
+
+
+def _gt_from_ge(self, other):
+    """`a > b` from `a >= b and a != b`."""
+    got = type(self).__ge__(self, other)
+    if got is NotImplemented:
+        return got
+    return got and self != other
+
+
+def _le_from_ge(self, other):
+    """`a <= b` from `not a >= b or a == b`."""
+    got = type(self).__ge__(self, other)
+    if got is NotImplemented:
+        return got
+    return not got or self == other
+
+
 def total_ordering(cls):
     """Fill in the ordering operators a class did not write.
 
-    `__lt__` and `__eq__` are the two it must have; the other four follow from
-    them, and writing them out by hand is what this exists to avoid.
+    ONE ROOT AND THREE DERIVED, and which one is the root is decided by what
+    the class actually defined: `__lt__` for preference, then `__le__`, then
+    `__gt__`, then `__ge__` -- CPython's own order. A class that defined NONE
+    of them has nothing to derive from and is refused by name; this used to
+    assume `__lt__` and write all four regardless, so a class that wrote only
+    `__gt__` got a `__gt__` back that recursed through a `__lt__` it never
+    had.
+
+    ONLY THE MISSING ONES ARE FILLED. An operator the class wrote is its own
+    and is left alone, which is the other half of the same rule.
+
+    NO `__ne__`. CPython's `total_ordering` does not touch it and neither
+    does this: Python derives `!=` from `__eq__` on its own, and writing one
+    here shadowed that for no gain.
     """
-    def __gt__(self, other):
-        return not (self < other or self == other)
-
-    def __le__(self, other):
-        return self < other or self == other
-
-    def __ge__(self, other):
-        return not self < other
-
-    def __ne__(self, other):
-        return not self == other
-
-    cls.__gt__ = __gt__
-    cls.__le__ = __le__
-    cls.__ge__ = __ge__
-    cls.__ne__ = __ne__
+    has_lt = hasattr(cls, "__lt__")
+    has_le = hasattr(cls, "__le__")
+    has_gt = hasattr(cls, "__gt__")
+    has_ge = hasattr(cls, "__ge__")
+    if not has_lt and not has_le and not has_gt and not has_ge:
+        raise ValueError(
+            "must define at least one ordering operation: < > <= >=")
+    if has_lt:
+        if not has_gt:
+            cls.__gt__ = _gt_from_lt
+        if not has_le:
+            cls.__le__ = _le_from_lt
+        if not has_ge:
+            cls.__ge__ = _ge_from_lt
+    elif has_le:
+        if not has_ge:
+            cls.__ge__ = _ge_from_le
+        if not has_lt:
+            cls.__lt__ = _lt_from_le
+        if not has_gt:
+            cls.__gt__ = _gt_from_le
+    elif has_gt:
+        if not has_lt:
+            cls.__lt__ = _lt_from_gt
+        if not has_ge:
+            cls.__ge__ = _ge_from_gt
+        if not has_le:
+            cls.__le__ = _le_from_gt
+    else:
+        if not has_le:
+            cls.__le__ = _le_from_ge
+        if not has_gt:
+            cls.__gt__ = _gt_from_ge
+        if not has_lt:
+            cls.__lt__ = _lt_from_ge
     return cls
 
 
