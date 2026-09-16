@@ -77,7 +77,6 @@ def _host_run(source: str, tmp_path: Path) -> tuple[int, str]:
 
 def _compile(source: str):
     sink = DiagnosticSink()
-    c_frontend.use()
     module = c_frontend.CFrontend().compile(
         SourceFile(OURS_PRELUDE + source, "prog.c"), sink)
     assert module is not None, [d.message for d in sink.diagnostics]
@@ -1477,8 +1476,9 @@ class TestTheDriverBuildsAndRuns:
 
     @harness.cases("flags,want", [
         ([], "hello 1\n"),
-        (["-D", "N=7"], "hello 7\n"),
-        (["-D", 'GREETING="hi"'], "hi 1\n"),
+        (["--define", "N=7"], "hello 7\n"),
+        (["--define", 'GREETING="hi"'], "hi 1\n"),
+        (["--c:define", "N=7", "--c:define", 'GREETING="hi"'], "hi 7\n"),
     ])
     def test_the_command_line_reaches_the_preprocessor(self, flags, want,
                                                        tmp_path):
@@ -1493,6 +1493,22 @@ class TestTheDriverBuildsAndRuns:
         assert ran.returncode == 0, ran.stderr
         assert ran.stdout.endswith(want), ran.stdout
 
+    def test_a_flag_the_chosen_frontend_does_not_take_says_who_does(
+            self, tmp_path):
+        """`--include-path` is the C frontend's and nobody else's. Handed to a
+        Python build it is an error that names the frontend that takes it --
+        not something ignored, because compiling without it produces
+        something that is not what was asked for."""
+        source = tmp_path / "prog.py"
+        source.write_text("def main() -> int:\n    return 0\n",
+                          encoding="utf-8")
+        ran = _asmpython("run", str(source), "--include-path", str(tmp_path),
+                         cwd=tmp_path)
+        said = ran.stdout + ran.stderr
+        assert ran.returncode != 0
+        assert "the python frontend does not take --include-path" in said, said
+        assert "pass --frontend c" in said, said
+
     def test_include_path_finds_the_projects_own_header(self, tmp_path):
         (tmp_path / "inc").mkdir()
         (tmp_path / "inc" / "mine.h").write_text(
@@ -1502,7 +1518,7 @@ class TestTheDriverBuildsAndRuns:
             "#include <stdio.h>\n#include <mine.h>\n"
             "int main(void){ printf(\"%d\\n\", ANSWER); return 0; }\n",
             encoding="utf-8")
-        ran = _asmpython("run", str(source), "-I", str(tmp_path / "inc"),
-                         cwd=tmp_path)
+        ran = _asmpython("run", str(source), "--include-path",
+                         str(tmp_path / "inc"), cwd=tmp_path)
         assert ran.returncode == 0, ran.stderr
         assert ran.stdout.endswith("42\n"), ran.stdout

@@ -57,7 +57,18 @@ deliverable.
   answer. GNU's `__typeof__`, `__restrict` and the rest of the
   double-underscore spellings are keywords, because real headers use them.
 
-  Eighty-six programs are compiled three ways — the host's `cc`, this
+  Its flags are declared the way a backend's always were, on the frontend
+  itself: `--include-path`, `--define`, `--trigraphs` and
+  `--bundled-headers`, each also spellable `--c:include-path` and so on. A
+  frontend could not declare options until this release; `Option` grew a
+  `repeat` flag so that a search path could be one, and `Frontend.configure`
+  is the mirror of `Backend.configure` -- returning a new instance, because
+  the registry holds one shared object and a frontend that stored a run's
+  flags on itself would leak them into the next compilation in the same
+  process. `run` and `check` get those flags too, not only `build`: they put
+  the same source through the same frontend.
+
+  Eighty-seven programs are compiled three ways — the host's `cc`, this
   frontend's IR in the reference interpreter, and this frontend's IR through
   the C backend and then `cc` — and all three must agree on output and exit
   status. One is built through the **x86-64** backend and the **jvm** one as

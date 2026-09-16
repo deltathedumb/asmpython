@@ -30,8 +30,10 @@ from asmpython.ir import verify
 
 def compile_c(source: str, name: str = "t.c"):
     """The module, and every diagnostic. Neither may be an exception."""
+    # A FRESH FRONTEND EVERY TIME, which is what `Frontend.configure`
+    # returning a new instance is for: one shared object carrying a run's
+    # flags would leak them into the next compilation in the same process.
     sink = DiagnosticSink()
-    c_frontend.use()
     module = c_frontend.CFrontend().compile(SourceFile(source, name), sink)
     return module, sink
 

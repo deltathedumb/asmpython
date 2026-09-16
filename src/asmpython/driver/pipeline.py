@@ -113,20 +113,9 @@ class Options:
     #: Declaration files naming shared libraries the program may `import`.
     #: See `frontends/python/nativelib.py`.
     native_libraries: tuple[Path, ...] = ()
-    #: `-I`: where `#include <...>` looks, before the bundled headers. A C
-    #: notion, kept separate from `import_paths` because the two search
-    #: different things in different orders and one flag doing both would
-    #: put a Python package directory on a C header path.
-    include_paths: tuple[Path, ...] = ()
-    #: `-D NAME[=VALUE]`, as the C preprocessor sees them. A name with no
-    #: value is defined as `1`, which is what every C compiler does.
-    defines: tuple[tuple[str, str], ...] = ()
-    #: Whether `??=` is a `#`. C23 deleted trigraphs and gcc needs a flag for
-    #: them; so does this.
-    trigraphs: bool = False
-    #: Search the frontend's own `<stdio.h>` and the rest. Off for a project
-    #: that supplies a whole library of its own on an `-I` path.
-    bundled_headers: bool = True
+    #: Values for the options the chosen FRONTEND declared, keyed the same
+    #: way `backend_options` is. A repeatable one holds a list.
+    frontend_options: dict = field(default_factory=dict)
 
     @property
     def effective_passes(self) -> tuple[str, ...]:
@@ -274,17 +263,6 @@ def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
             return Result()
     py_nativelib.use(declared, _target_os(opts, selected))
 
-    # WHERE `#include` LOOKS, published the same way and for the same reason
-    # as the Python frontend's import paths: a frontend is handed a source and
-    # a sink, so what the driver knows and it needs arrives through a module
-    # global, republished every compilation.
-    from ..frontends import c as c_frontend
-    c_frontend.use(include_paths=opts.include_paths,
-                   quote_paths=opts.import_paths,
-                   defines=dict(opts.defines),
-                   bundled=opts.bundled_headers,
-                   trigraphs=opts.trigraphs)
-
     fe = (frontend_registry.get(opts.frontend) if opts.frontend
           else frontend_registry.for_path(opts.source))
     if fe is None:
@@ -292,6 +270,10 @@ def compile_source(opts: Options, sink: DiagnosticSink) -> Result:
             error("E9101", f"no frontend claims {opts.source.suffix!r}")
             .help("choose one with --frontend "
                   + "|".join(sorted(frontend_registry.available()))))
+        return Result()
+
+    fe = _configure_frontend(fe, opts, sink)
+    if fe is None:
         return Result()
 
     if opts.library:
@@ -432,6 +414,41 @@ def _configure_backend(be, opts: Options, sink: DiagnosticSink):
         for line in detail.splitlines():
             d.note(line)
         sink.report(d)
+        return None
+
+
+def _configure_frontend(fe, opts: Options, sink: DiagnosticSink):
+    """Hand the frontend its own flags. The mirror of `_configure_backend`.
+
+    An option the chosen frontend does not declare is an ERROR rather than
+    something ignored, for the same reason: `-I include --frontend python`
+    reads as a request the Python frontend cannot honour, and compiling
+    without it produces something that is not what was asked for.
+    """
+    from ..frontend.base import OptionError
+
+    declared = {o.name for o in fe.options}
+    stray = sorted(set(opts.frontend_options) - declared)
+    if stray:
+        for name in stray:
+            takers = sorted(other.name
+                            for other in frontend_registry.available().values()
+                            if any(o.name == name for o in other.options))
+            d = error("E9111",
+                      f"the {fe.name} frontend does not take --{name}")
+            if takers:
+                d.help(f"--{name} belongs to the "
+                       f"{' or '.join(repr(t) for t in takers)} frontend; "
+                       f"pass --frontend {takers[0]}")
+            sink.report(d)
+        return None
+
+    mine = {name: value for name, value in opts.frontend_options.items()
+            if name in declared}
+    try:
+        return fe.configure(mine, sink)
+    except OptionError as exc:
+        sink.report(error("E9112", f"{fe.name} frontend: {exc}"))
         return None
 
 

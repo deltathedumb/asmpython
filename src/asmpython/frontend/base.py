@@ -30,7 +30,7 @@ from pathlib import Path
 
 from ..diagnostics import DiagnosticSink, SourceFile
 from ..ir import Module
-from ..options import Option
+from ..options import Option, OptionError  # noqa: F401  (re-export)
 
 
 class Frontend(abc.ABC):
@@ -48,6 +48,23 @@ class Frontend(abc.ABC):
     #: general, and a second frontend would have inherited flags that mean
     #: nothing to it.
     options: tuple[Option, ...] = ()
+
+    def configure(self, values: dict, sink: DiagnosticSink) -> "Frontend":
+        """The frontend to compile with, given this run's option values.
+
+        THE MIRROR OF `Backend.configure`, and for the same reasons. `values`
+        holds only the options this frontend declared, keyed by name without
+        the dashes; a repeatable one arrives as a list. Raise `OptionError`
+        for a value that cannot be used and report anything advisory to
+        `sink`.
+
+        RETURN A NEW INSTANCE rather than mutating `self`. The registry holds
+        one shared frontend object, so a frontend that stored its flags on
+        itself would leak them into the next compilation in the same process
+        -- invisible in a command-line run and wrong in every test suite and
+        every embedding tool.
+        """
+        return self
 
     @abc.abstractmethod
     def compile(self, source: SourceFile, sink: DiagnosticSink) -> Module | None:

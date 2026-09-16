@@ -67,32 +67,11 @@ from pathlib import Path
 
 from ...diagnostics import DiagnosticSink, SourceFile, error
 from ...frontend import Frontend, register
+from ...options import Option, OptionError
 from ...ir import Module
 from .lower import Lowerer
 from .parser import parse
 from .preprocess import Preprocessor, Search
-
-#: Set by the driver before a compile. A module global for the same reason
-#: `frontends/python/imports.py` uses one: a frontend is handed a source and a
-#: sink, so anything the driver knows and it needs arrives this way.
-_SEARCH = Search()
-_DEFINES: dict[str, str] = {}
-_TRIGRAPHS = False
-
-
-def use(*, include_paths=(), quote_paths=(), defines=None, bundled=True,
-        trigraphs=False) -> None:
-    """Publish the include search path and command-line macros.
-
-    Republished on every compilation, so two in one process cannot see each
-    other's paths -- the same rule the Python frontend's `imports.use` keeps.
-    """
-    global _SEARCH, _DEFINES, _TRIGRAPHS
-    _SEARCH = Search(quote=[Path(p) for p in quote_paths],
-                     angle=[Path(p) for p in include_paths],
-                     bundled=bundled)
-    _DEFINES = dict(defines or {})
-    _TRIGRAPHS = trigraphs
 
 
 class CFrontend(Frontend):
@@ -103,9 +82,44 @@ class CFrontend(Frontend):
     extensions = (".c", ".i")
     description = "C23, with the standard library compiled from C"
 
+    #: THE FLAGS A C COMPILER HAS ALWAYS HAD, declared here rather than on
+    #: the driver's parser: they are this frontend's and nobody else's, and a
+    #: Python build offered `--include-path` would be offered a flag that
+    #: means nothing to it. `--c:include-path` is always spellable too.
+    options = (
+        Option("include-path",
+               "where #include <...> looks, before the bundled headers",
+               metavar="DIR", repeat=True),
+        Option("define", "define a preprocessor macro; no value means 1",
+               metavar="NAME[=VALUE]", repeat=True),
+        Option("trigraphs",
+               "translate ??= and the rest; C23 deleted them", metavar="1|0"),
+        Option("bundled-headers",
+               "search the frontend's own standard headers",
+               metavar="1|0"),
+    )
+
+    def __init__(self, *, include_paths: tuple[Path, ...] = (),
+                 defines: tuple[tuple[str, str], ...] = (),
+                 trigraphs: bool = False, bundled: bool = True) -> None:
+        self.include_paths = include_paths
+        self.defines = defines
+        self.trigraphs = trigraphs
+        self.bundled = bundled
+
+    def configure(self, values: dict, sink: DiagnosticSink) -> "CFrontend":
+        """A frontend carrying this run's flags. See `Frontend.configure`."""
+        return CFrontend(
+            include_paths=tuple(Path(p) for p in
+                                values.get("include-path", ())),
+            defines=tuple(_split_define(d) for d in values.get("define", ())),
+            trigraphs=_truth(values, "trigraphs", self.trigraphs),
+            bundled=_truth(values, "bundled-headers", self.bundled))
+
     def compile(self, source: SourceFile, sink: DiagnosticSink) -> Module | None:
-        pp = Preprocessor(sink, _SEARCH, trigraphs=_TRIGRAPHS,
-                          defines=_DEFINES)
+        search = Search(angle=list(self.include_paths), bundled=self.bundled)
+        pp = Preprocessor(sink, search, trigraphs=self.trigraphs,
+                          defines=dict(self.defines))
         tokens = pp.run(source)
         if sink.failed:
             return None
@@ -124,6 +138,29 @@ class CFrontend(Frontend):
                 .note("lowering walks the tree recursively, and this one is "
                       "deeper than the interpreter stack allows"))
             return None
+
+
+def _split_define(item: str) -> tuple[str, str]:
+    """`-D NAME=VALUE` and `-D NAME`, the latter defined as `1`.
+
+    Split on the FIRST `=` only, because a macro body may contain one:
+    `-D MAX(a,b)=((a)>(b)?(a):(b))` is a definition every build system
+    writes, and splitting on all of them loses most of it.
+    """
+    name, sep, value = item.partition("=")
+    return name, value if sep else "1"
+
+
+def _truth(values: dict, name: str, default: bool) -> bool:
+    """A `1|0` flag. The spelling `plugin add --cwd 1|0` already uses."""
+    raw = values.get(name)
+    if raw is None:
+        return default
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise OptionError(f"--{name} takes 1 or 0, not {raw!r}")
 
 
 register(CFrontend())

@@ -31,6 +31,16 @@ class Option:
     help: str
     #: What the value is called in `--help`.
     metavar: str = "VALUE"
+    #: True when the flag may be given more than once and every value counts.
+    #: The component is then handed a LIST rather than a string.
+    #:
+    #: NOT EVERY OPTION IS ONE VALUE, and the two flags this module's own
+    #: docstring names as belonging to a frontend -- `--import-path` and a C
+    #: frontend's `--include-path` -- are both search paths, which are lists
+    #: by nature. Without this they would have to be one string with a
+    #: separator in it, and `-D NAME=a,b` shows why that does not generalise:
+    #: a macro body may contain any separator you pick.
+    repeat: bool = False
 
     @property
     def flag(self) -> str:

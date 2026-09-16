@@ -9,7 +9,7 @@ nothing about the IR does.
 ```
 asmpython build prog.py                   # -> prog.exe, ready to run
 asmpython build prog.c                    # C, too -- the language, not a subset
-asmpython build prog.c -I include -D N=4  # the flags C compilers spell that way
+asmpython build prog.c --include-path inc --define N=4   # the C frontend's own flags
 asmpython build prog.py -O                # optimise first
 asmpython build prog.py --backend x86-64 --target x86_64-linux
 asmpython build prog.py --backend arm --bits 64   # a family; --bits picks the member

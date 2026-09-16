@@ -130,26 +130,8 @@ def _options(args) -> Options:
         host_python=getattr(args, "host_python", None),
         native_libraries=tuple(Path(p) for p in
                                (getattr(args, "native_library", None) or ())),
-        include_paths=tuple(Path(p) for p in
-                            (getattr(args, "include_path", None) or ())),
-        defines=_defines(getattr(args, "define", None) or ()),
-        trigraphs=getattr(args, "trigraphs", False),
-        bundled_headers=getattr(args, "bundled_headers", True),
+        frontend_options=dict(getattr(args, "frontend_options", None) or {}),
     )
-
-
-def _defines(items) -> tuple[tuple[str, str], ...]:
-    """`-D NAME=VALUE` and `-D NAME`, the latter defined as `1`.
-
-    Split on the FIRST `=` only, because a macro body may contain one:
-    `-D MAX(a,b)=((a)>(b)?(a):(b))` is a definition every build system
-    writes, and splitting on all of them loses most of it.
-    """
-    out = []
-    for item in items:
-        name, sep, value = item.partition("=")
-        out.append((name, value if sep else "1"))
-    return tuple(out)
 
 
 def cmd_build(args) -> int:
@@ -717,10 +699,11 @@ class _CollectComponentOption(argparse.Action):
     used, because the qualifier is for the parser and not for it.
     """
 
-    def __init__(self, option_strings, dest, *, kinds, key, **kw):
+    def __init__(self, option_strings, dest, *, kinds, key, repeat=False, **kw):
         super().__init__(option_strings, dest, **kw)
         self.kinds = kinds
         self.key = key
+        self.repeat = repeat
 
     def __call__(self, parser, namespace, value, option_string=None):
         for kind in self.kinds:
@@ -728,7 +711,12 @@ class _CollectComponentOption(argparse.Action):
             if table is None:
                 table = {}
                 setattr(namespace, f"{kind}_options", table)
-            table[self.key] = value
+            if self.repeat:
+                # A REPEATABLE FLAG KEEPS EVERY VALUE, and in the order it was
+                # typed: a search path is a list and its order is its meaning.
+                table.setdefault(self.key, []).append(value)
+            else:
+                table[self.key] = value
 
 
 class _AmbiguousOption(argparse.Action):
@@ -795,16 +783,19 @@ def _add_component_options(parser: argparse.ArgumentParser) -> None:
         # plugin later claims the short name out from under it.
         group.add_argument(
             option.qualified(name), action=_CollectComponentOption,
-            kinds=tuple(kinds), key=option.name, dest=argparse.SUPPRESS,
-            metavar=option.metavar,
-            help=f"[{name} {'/'.join(kinds)}] {option.help}")
+            kinds=tuple(kinds), key=option.name, repeat=option.repeat,
+            dest=argparse.SUPPRESS, metavar=option.metavar,
+            help=f"[{name} {'/'.join(kinds)}] {option.help}"
+                 + (" (repeatable)" if option.repeat else ""))
     for flag, owned in sorted(claimed.items()):
         if len(owned) == 1:
             kinds, option = declarations[owned[0], flag]
             group.add_argument(
                 option.flag, action=_CollectComponentOption,
-                kinds=tuple(kinds), key=option.name, dest=argparse.SUPPRESS,
-                metavar=option.metavar, help=f"[{owned[0]}] {option.help}")
+                kinds=tuple(kinds), key=option.name, repeat=option.repeat,
+                dest=argparse.SUPPRESS, metavar=option.metavar,
+                help=f"[{owned[0]}] {option.help}"
+                     + (" (repeatable)" if option.repeat else ""))
             continue
         # TWO COMPONENTS WANTING ONE NAME IS A QUESTION, not something to
         # settle by registration order -- the same shape of refusal an
@@ -837,6 +828,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="command", required=True)
 
     def source_args(p):
+        # EVERY COMMAND THAT COMPILES, not only `build`. `run` and `check`
+        # put the same source through the same frontend, so a flag the
+        # frontend needs is as necessary there -- `asmpython run prog.c
+        # --include-path inc` was refused as an unrecognised argument while
+        # the identical `build` accepted it.
+        _add_component_options(p)
         p.add_argument("--import-path", action="append", metavar="DIR",
                        help="where to find the program's own modules; the "
                             "source's own directory is searched too "
@@ -862,22 +859,6 @@ def build_parser() -> argparse.ArgumentParser:
         # discovered: a foreign symbol's argument kinds cannot be read out of
         # the library, and guessing them is how a native call corrupts a
         # stack. See frontends/python/nativelib.py.
-        # THE C FRONTEND'S OWN FLAGS, spelled as every C compiler spells
-        # them. On the shared parser rather than a C-specific one because
-        # `--frontend` is chosen on the same command line and an option that
-        # only exists once a frontend has been named is one nobody can
-        # discover from `--help`.
-        p.add_argument("-I", "--include-path", action="append", metavar="DIR",
-                       help="where #include <...> looks, before the bundled "
-                            "headers (C)")
-        p.add_argument("-D", "--define", action="append", metavar="NAME[=VAL]",
-                       help="define a preprocessor macro; no value means 1 (C)")
-        p.add_argument("--trigraphs", action="store_true",
-                       help="translate ??= and the rest; C23 deleted them (C)")
-        p.add_argument("--no-bundled-headers", dest="bundled_headers",
-                       action="store_false",
-                       help="do not search the frontend's own standard "
-                            "headers (C)")
         p.add_argument("--native-library", action="append", metavar="FILE",
                        help="JSON declaring shared libraries this program may "
                             "import, and the signatures it calls in them")
@@ -950,7 +931,6 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--emit-ir", action="store_true")
     b.add_argument("--show-spans", action="store_true",
                    help="annotate each instruction with its source position")
-    _add_component_options(b)
     b.set_defaults(fn=cmd_build)
 
     r = sub.add_parser("run", help="execute in the reference interpreter")
