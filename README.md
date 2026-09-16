@@ -265,7 +265,10 @@ the whole list, rather than the beginning of one:
   * `long double` **is** `double`. The IR has `f32` and `f64` and nothing
     wider, so `__SIZEOF_LONG_DOUBLE__` says 8 and `<float.h>`'s `LDBL_*`
     macros carry `double`'s values. A program that asks is told the truth.
-  * `_Complex` and `_Imaginary` are refused, with a diagnostic that says why.
+  * `_Imaginary` is not there, which is conforming rather than missing:
+    imaginary types are Annex G, supported only by an implementation that
+    says so, and gcc has never had them either. `_Complex` is complete,
+    Annex G's multiply and divide included.
   * A local that is not `volatile` **survives** a `longjmp`. C says its
     value is indeterminate; here the frame never went away, so it keeps what
     it had — `setjmp` is compiled into a branch and every call site into a
@@ -303,10 +306,10 @@ one external name is an error naming both files. It is a flag rather than
 several positional sources because the driver hands each frontend one source,
 and that is what names the output and roots the search path.
 
-All thirty-one headers C23 requires are there. Two of them refuse with a
-reason rather than being absent — `<complex.h>` and `<threads.h>`, each
-explaining what the IR cannot express and what to write instead — because a
-missing file is a mystery and a refusal is an answer.
+All thirty-one headers C23 requires are there. One of them refuses with a
+reason rather than being absent — `<threads.h>`, explaining what the IR
+cannot express and what to write instead — because a missing file is a
+mystery and a refusal is an answer.
 `<stdatomic.h>` is supported and `<threads.h>` is not, which is not a
 contradiction: with one thread every operation is already atomic.
 

@@ -339,6 +339,17 @@ class Sema:
         if op in ("++", "--"):
             return self._incdec(op, operand, span, postfix=False)
         e = self.lvalue_conversion(operand)
+        if op in ("__real__", "__imag__"):
+            if not e.type.is_arithmetic:
+                self.error("E1409",
+                           f"`{op}` needs an arithmetic operand, not "
+                           f"{C.spell(e.type)}", span)
+                return self.poison(span)
+            # A REAL OPERAND HAS AN IMAGINARY PART, and it is zero. gcc says
+            # so, and it is what makes these usable in a macro that does not
+            # know which it was given.
+            half = e.type.of if e.type.is_complex else C.promote(e.type)
+            return S.Unary(span, half, False, op, e)
         if op in ("+", "-"):
             if not e.type.is_arithmetic:
                 self.error("E1409",
@@ -427,6 +438,15 @@ class Sema:
                            f"{C.spell(t.of)}", span)
                 return self.poison(span)
             scale = self.scale_of(t.of, span)
+        elif t.is_complex:
+            # C REQUIRES A REAL OPERAND, 6.5.2.4p1. gcc extends `++` to
+            # complex by adding one to the real part; that is a GNU
+            # extension, it is not what a reader expects, and `z += 1`
+            # says it in a way every compiler agrees about.
+            self.error("E1414", f"cannot {what} {C.spell(t)}", span,
+                       note="C requires a real or pointer operand here",
+                       help=f"write `z {'+' if op == '++' else '-'}= 1`")
+            return self.poison(span)
         elif t.is_arithmetic:
             scale = 1
         else:
@@ -567,6 +587,17 @@ class Sema:
         return S.Binary(span, C.SIZE_T, False, "*", count, inner)
 
     def _relational(self, op: str, a: S.Expr, b: S.Expr, span: Span) -> S.Expr:
+        # A COMPLEX VALUE IS NOT ORDERED, and C says so by requiring REAL
+        # operands here where `==` takes any arithmetic ones. There is no
+        # sensible answer for `z < w` and inventing one -- comparing the
+        # real parts, say -- would compile a program that means nothing.
+        for e in (a, b):
+            if e.type.is_complex:
+                self.error("E1421",
+                           f"`{op}` needs real operands; {C.spell(e.type)} "
+                           f"is not ordered", e.span,
+                           note="use `creal` or `cabs` to compare magnitudes")
+                return self.poison(span)
         if a.type.is_arithmetic and b.type.is_arithmetic:
             t = C.usual_arithmetic(a.type, b.type)
             self._sign_compare_warning(op, a, b, t, span)
@@ -798,8 +829,8 @@ class Sema:
                        span,
                        note="only a scalar value can be cast")
             return self.poison(span)
-        if target.is_pointer and e.type.is_float or \
-                target.is_float and e.type.is_pointer:
+        if target.is_pointer and (e.type.is_float or e.type.is_complex) or \
+                (target.is_float or target.is_complex) and e.type.is_pointer:
             self.error("E1435",
                        f"cannot cast {C.spell(e.type)} to {C.spell(target)}",
                        span,

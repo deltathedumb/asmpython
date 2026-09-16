@@ -33,8 +33,10 @@ compile time rather than failing to link.
   * `long double` IS `double`. The IR has `f32` and `f64` and nothing wider.
     `__SIZEOF_LONG_DOUBLE__` says 8 and `<float.h>`'s `LDBL_*` macros have
     `double`'s values, so a program that asks is told the truth.
-  * `_Complex` and `_Imaginary` are refused, for the same reason and with a
-    diagnostic that says so rather than a parse error.
+  * `_Imaginary` IS NOT THERE, which is conforming rather than missing:
+    imaginary types are Annex G, supported only by an implementation that
+    defines `__STDC_IEC_559_COMPLEX__`, and gcc has never had them either.
+    `_Complex` is complete, including Annex G's multiply and divide.
   * A LOCAL THAT IS NOT `volatile` SURVIVES A `longjmp`. C says its value is
     indeterminate; here the frame never went away, so it keeps what it had.
     Stricter than the standard, which is the safe way to differ.
@@ -48,9 +50,9 @@ K&R definitions, statement expressions, `__attribute__` where it is advisory,
 and GNU's `__typeof__`/`__restrict` spellings because real headers use them
 -- is implemented.
 
-ALL THIRTY-ONE HEADERS C23 REQUIRES are in `include/`. Two of them refuse with
-a reason rather than being absent -- `<complex.h>` and `<threads.h>` --
-because a missing file is a mystery and a refusal is an answer. `<stdatomic.h>` is supported and `<threads.h>` is not, which is not a
+ALL THIRTY-ONE HEADERS C23 REQUIRES are in `include/`. One of them refuses
+with a reason rather than being absent -- `<threads.h>` -- because a missing
+file is a mystery and a refusal is an answer. `<stdatomic.h>` is supported and `<threads.h>` is not, which is not a
 contradiction: with one thread every operation is already atomic.
 
 SEVERAL TRANSLATION UNITS IN ONE BUILD. `uasm build main.c --c:unit parse.c

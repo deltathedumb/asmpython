@@ -49,7 +49,7 @@ What is still absent says so rather than approximating:
 | --- | --- |
 | `rename` | the `file` group has ten operations and no rename; copy-and-remove is not one, and `bundled/os.py` refuses `os.rename` for the same reason |
 | `<threads.h>` | there is no way to create one |
-| `<complex.h>` | the IR has no aggregate type to make a complex value out of |
+| `_Imaginary` | Annex G, which an implementation may leave out, as gcc does |
 
 `localtime` is `gmtime`. The host services can say what time it is and cannot
 say what the local offset from UTC is — there is no `TZ` that would mean
@@ -62,7 +62,14 @@ recognises the jump's token branches back to its own `setjmp`. It costs a
 load and a branch per call in a program that uses it, and nothing in one that
 does not. `longjmp.py` says why it is shaped that way.
 
-The two headers that cannot exist at all are PRESENT AND REFUSE, with
+`<complex.h>` works. A complex value is two floats side by side, which is
+what C says it is and what an aggregate already is here, so the machinery
+that passes and returns a struct passes and returns one; `*` and `/` are
+Annex G's algorithms rather than the four-multiply formula, because what an
+infinity times a zero must produce is the hard part and libgcc does the same
+thing. `<tgmath.h>` dispatches to it.
+
+The one header that cannot exist at all is PRESENT AND REFUSES, with
 `#error` and a sentence saying what to write instead: a missing file is a
 mystery and a refusal is an answer.
 

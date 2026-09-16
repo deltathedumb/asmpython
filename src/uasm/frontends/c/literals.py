@@ -258,6 +258,12 @@ class FloatConst:
     #: 4 for an `f` suffix, 8 otherwise. `long double` IS double here.
     size: int
     spelling: str
+    #: An `i` or `j` suffix: `1.0i` is `0 + 1i`, a complex constant. NOT in
+    #: the standard -- C has no imaginary constants at all and `<complex.h>`
+    #: writes `i` as `_Complex_I` -- but gcc has had this for thirty years,
+    #: glibc's own `<complex.h>` defines `_Complex_I` as `1.0iF`, and a
+    #: header that does that is the reason to support it.
+    imaginary: bool = False
 
 
 def _strip_separators(text: str) -> str:
@@ -273,6 +279,17 @@ def is_float_spelling(text: str) -> bool:
     this backwards makes `0xE5` a float, which then fails to be a case label.
     """
     t = _strip_separators(text).lower()
+    # AN IMAGINARY SUFFIX MAKES IT FLOATING whatever the digits look like.
+    # `1i` is `0 + 1i` here, not gcc's `_Complex int` -- an integer complex
+    # is a GNU extension of a GNU extension, and every use of the spelling
+    # in a real header means the floating one.
+    body = t
+    tail = ""
+    while body and body[-1] in "flij":
+        tail = body[-1] + tail
+        body = body[:-1]
+    if "i" in tail or "j" in tail:
+        return True
     if t.startswith("0x"):
         return "." in t or "p" in t
     if t.startswith("0b"):
@@ -295,14 +312,19 @@ def parse_number(text: str) -> IntConst | FloatConst:
 def _float(raw: str, spelling: str) -> FloatConst:
     body, size = raw, 8
     suffix = ""
-    while body and body[-1] in "fFlL":
+    while body and body[-1] in "fFlLiIjJ":
         suffix = body[-1] + suffix
         body = body[:-1]
-    if suffix.lower() == "f":
+    imaginary = any(c in "iIjJ" for c in suffix)
+    # `1.0iF` AND `1.0fi` ARE THE SAME CONSTANT: gcc accepts the imaginary
+    # letter on either side of the size letter, and glibc's `<complex.h>`
+    # uses the first spelling.
+    letters = "".join(c for c in suffix if c not in "iIjJ")
+    if letters.lower() == "f":
         size = 4
-    elif suffix.lower() not in ("", "l"):
+    elif letters.lower() not in ("", "l"):
         raise LiteralError(f"invalid suffix {suffix!r} on floating constant")
-    if len(suffix) > 1:
+    if len(letters) > 1 or len(suffix) - len(letters) > 1:
         raise LiteralError(f"invalid suffix {suffix!r} on floating constant")
     try:
         if body.lower().startswith("0x"):
@@ -319,7 +341,7 @@ def _float(raw: str, spelling: str) -> FloatConst:
         raise
     except ValueError:
         raise LiteralError(f"{spelling!r} is not a valid floating constant") from None
-    return FloatConst(value, size, spelling)
+    return FloatConst(value, size, spelling, imaginary)
 
 
 def _integer(raw: str, spelling: str) -> IntConst:

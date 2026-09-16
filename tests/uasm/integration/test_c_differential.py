@@ -1436,6 +1436,132 @@ PROGRAMS: dict[str, str] = {
             return 0;
         }
     """,
+    "complex_arithmetic": r"""
+        #include <stdio.h>
+        #include <math.h>
+        #include <complex.h>
+        /* THE FOUR OPERATORS, the two halves, the comparisons and the
+           awkward cases: `*` and `/` are Annex G's algorithms rather than
+           the four-multiply formula, and an infinity is where the two
+           differ. */
+        static double complex twice(double complex z) { return z + z; }
+        struct pair { double complex z; int tag; };
+        static struct pair make(double complex z)
+        { struct pair p = { z * 2.0, 7 }; return p; }
+
+        static double complex table[3] = { 1.0 + 2.0*I, 3.0, 4.0*I };
+
+        int main(void) {
+            double complex z = 3.0 + 4.0*I, w = 1.0 - 2.0*I;
+            float complex fz = 1.0f + 2.0fi, fw = 3.0f - 1.0fi;
+            struct pair p;
+            double complex acc = 0.0;
+            int i;
+            printf("%g %g\n", creal(z + w), cimag(z + w));
+            printf("%g %g\n", creal(z - w), cimag(z - w));
+            printf("%g %g\n", creal(z * w), cimag(z * w));
+            printf("%g %g\n", creal(z / w), cimag(z / w));
+            printf("%g %g\n", creal(-z), cimag(conj(z)));
+            printf("%d %d %d %d\n", z == w, z == z, !z, !!(0.0*I));
+            printf("%g %g\n", __real__ z, __imag__ z);
+            for (i = 0; i < 3; i++) acc += table[i];
+            printf("%g %g\n", creal(acc), cimag(acc));
+            printf("%g %g\n", creal(twice(z)), cimag(twice(z)));
+            p = make(z);
+            printf("%g %g %d %zu\n", creal(p.z), cimag(p.z), p.tag, sizeof p);
+            printf("%g %g / %g %g\n", (double)crealf(fz * fw),
+                   (double)cimagf(fz * fw), (double)crealf(fz / fw),
+                   (double)cimagf(fz / fw));
+            printf("%zu %zu %zu\n", sizeof(double complex),
+                   sizeof(float complex), _Alignof(double complex));
+            /* ANNEX G: an infinity times anything is an infinity, not a
+               nan, and that needs the recovery step libgcc has. */
+            printf("%g %g\n", creal((INFINITY + 0.0*I) * (2.0 + 3.0*I)),
+                   cimag((INFINITY + 0.0*I) * (2.0 + 3.0*I)));
+            printf("%g %g\n", creal((1.0 + 1.0*I) / (0.0 + 0.0*I)),
+                   cimag((1.0 + 1.0*I) / (0.0 + 0.0*I)));
+            printf("%g %g\n", creal(1e300 + 1e300*I) / 1e300,
+                   creal((1e300 + 1e300*I) / (1e300 + 1e300*I)));
+            { double complex q = z; q *= w; q -= 1.0;
+              printf("%g %g\n", creal(q), cimag(q)); }
+            return 0;
+        }
+    """,
+
+    "complex_functions": r"""
+        #include <stdio.h>
+        #include <math.h>
+        #include <complex.h>
+        /* `<complex.h>`'s own functions, against glibc's. Six figures: the
+           formulas here are the principal-value ones over real `<math.h>`
+           and are not bit-for-bit anybody's. */
+        int main(void) {
+            double complex z = 3.0 + 4.0*I;
+            printf("%.6f %.6f\n", cabs(z), carg(z));
+            printf("%.6f %.6f\n", creal(csqrt(z)), cimag(csqrt(z)));
+            printf("%.6f %.6f\n", creal(cexp(z)), cimag(cexp(z)));
+            printf("%.6f %.6f\n", creal(clog(z)), cimag(clog(z)));
+            printf("%.6f %.6f\n", creal(cpow(z, 2.0)), cimag(cpow(z, 2.0)));
+            printf("%.6f %.6f\n", creal(csin(z)), cimag(csin(z)));
+            printf("%.6f %.6f\n", creal(ccos(z)), cimag(ccos(z)));
+            printf("%.6f %.6f\n", creal(ctan(z)), cimag(ctan(z)));
+            printf("%.6f %.6f\n", creal(csinh(z)), cimag(csinh(z)));
+            printf("%.6f %.6f\n", creal(catan(z)), cimag(catan(z)));
+            printf("%.6f %.6f\n", creal(casin(0.5 + 0.25*I)),
+                   cimag(casin(0.5 + 0.25*I)));
+            printf("%.6f %.6f\n", creal(CMPLX(1.0, INFINITY)),
+                   cimag(CMPLX(1.0, INFINITY)));
+            printf("%.6f %.6f\n", creal(cproj(CMPLX(INFINITY, -0.0))),
+                   cimag(cproj(CMPLX(INFINITY, -0.0))));
+            return 0;
+        }
+    """,
+
+    "type_generic_math": r"""
+        #include <stdio.h>
+        #include <tgmath.h>
+        /* ONE NAME, FOUR FUNCTIONS, and `fabs` of a complex answering a
+           real is the case that proves the macro is reading the type. */
+        int main(void) {
+            float f = 2.0f;
+            double d = 2.0;
+            double complex z = 3.0 + 4.0*I;
+            float complex fz = 1.0f + 1.0fi;
+            printf("%.6f %.6f\n", (double)sqrt(f), sqrt(d));
+            printf("%.6f %.6f\n", creal(sqrt(z)), cimag(sqrt(z)));
+            printf("%.6f %.6f\n", (double)crealf(sqrt(fz)),
+                   (double)cimagf(sqrt(fz)));
+            printf("%.6f %.6f %.6f\n", fabs(-2.5), fabs(z), (double)fabs(-1.5f));
+            printf("%.6f %.6f\n", creal(pow(z, 2.0)), cimag(pow(z, 2.0)));
+            printf("%.6f %.6f\n", carg(z), creal(conj(z)));
+            printf("%.6f %.6f\n", atan2(1.0, 2.0), (double)atan2(1.0f, 2.0f));
+            return 0;
+        }
+    """,
+
+    "the_rest_of_math_h": r"""
+        #include <stdio.h>
+        #include <math.h>
+        /* The C23 names that had no implementation until the `f` and `l`
+           families were written out: the gamma pair, the error function,
+           the exponent ones and `nextafter`, which is bit arithmetic. */
+        int main(void) {
+            int q;
+            double r;
+            printf("%.6f %.6f %.6f\n", erf(0.5), erfc(0.5), tgamma(5.0));
+            printf("%.6f %.6f\n", lgamma(10.0), logb(8.0));
+            printf("%d %d\n", ilogb(8.0), (int)llrint(2.5));
+            printf("%.17g %.17g\n", nextafter(1.0, 2.0), nextafter(1.0, 0.0));
+            printf("%.6f %.6f\n", (double)sinf(1.0f), (double)hypotf(3.0f, 4.0f));
+            r = remquo(7.0, 3.0, &q);
+            printf("%.6f %d\n", r, q);
+            printf("%.6f %.6f\n", (double)asinf(0.5f), (double)asinl(0.5L));
+            printf("%.6f %.6f\n", (double)truncf(2.7f), (double)roundf(-2.5f));
+            printf("%.6f %.6f\n", (double)fmaxf(1.0f, 2.0f), fmin(1.0, 2.0));
+            return 0;
+        }
+    """,
+
     "sscanf_conversions": r"""
         #include <stdio.h>
         #include <string.h>

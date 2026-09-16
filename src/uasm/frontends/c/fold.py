@@ -173,13 +173,26 @@ def _convert(value: Const, source: C.CType, target: C.CType) -> Const:
         # be a truncation nothing can represent, so that case gives up.
         return value if target.size >= 8 or target.is_pointer else None
     if target.is_bool:
+        # BOTH HALVES DECIDE. `(_Bool)z` is 0 only when the whole value is,
+        # which is why this is before the imaginary part is dropped.
         return 1 if value else 0
+    if isinstance(value, complex) and not target.is_complex:
+        # 6.3.1.7p2: a complex converts to a real by discarding the
+        # imaginary part. Every branch below works on a real number.
+        value = value.real
     if target.is_integer:
         if isinstance(value, float):
             if value != value or value in (float("inf"), float("-inf")):
                 return None         # undefined; leave it to run time
             value = int(value)      # C truncates toward zero, as int() does
         return wrap(value, target)
+    if target.is_complex:
+        # A REAL VALUE WIDENS WITH A ZERO IMAGINARY PART, and each half is
+        # rounded to the element type -- `(float _Complex)0.1` has the same
+        # two floats however it was written.
+        v = complex(value)
+        return complex(_convert(v.real, target.of, target.of),
+                       _convert(v.imag, target.of, target.of))
     if target.is_float:
         v = float(value)
         if target.kind is C.K.FLOAT:
@@ -201,6 +214,13 @@ def _unary(e: S.Unary) -> Const:
         return None
     if e.op == "-":
         return wrap(-v, e.type) if isinstance(v, int) else -v
+    if e.op == "~" and isinstance(v, complex):
+        return complex(v.real, -v.imag)         # gcc's conjugate
+    if e.op in ("__real__", "__imag__"):
+        w = complex(v) if not isinstance(v, Address) else None
+        if w is None:
+            return None
+        return w.imag if e.op == "__imag__" else w.real
     if e.op == "+":
         return v
     if e.op == "~":
@@ -251,7 +271,7 @@ def _binary(e: S.Binary) -> Const:
         r = {"==": a == b, "!=": a != b, "<": a < b,
              ">": a > b, "<=": a <= b, ">=": a >= b}[op]
         return 1 if r else 0
-    if e.type.is_float:
+    if e.type.is_float or e.type.is_complex:
         try:
             v = {"+": lambda: a + b, "-": lambda: a - b, "*": lambda: a * b,
                  "/": lambda: a / b}[op]()

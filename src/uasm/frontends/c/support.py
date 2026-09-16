@@ -156,9 +156,185 @@ long __c_args_count(void)
 }
 """
 
+COMPLEX_SOURCE = r"""
+/* uasm C frontend: complex multiplication and division. See support.py.
+
+   THESE TWO AND NOT THE OTHER TWO. Complex addition is two adds and the
+   lowering emits them; multiplication and division have a formula each, and
+   the formula is not the hard part -- what an infinity times a zero has to
+   produce is. C's Annex G says exactly that, libgcc's `__muldc3` and
+   `__divdc3` implement it, and this is the same algorithm: without the
+   recovery step, `(inf + 0i) * (2 + 3i)` is `nan + nan i` instead of
+   `inf + inf i`, and a program cannot tell an overflow from a mistake.
+
+   THE FLOAT VERSION COMPUTES IN FLOAT, and that is not fussiness either:
+   doing it in double and rounding once at the end gives a different last bit
+   from every other compiler, which is exactly the kind of difference the
+   three-way test exists to catch. */
+#include <math.h>
+
+void __c_cmul(double a, double b, double c, double d, double *out)
+{
+    double ac = a * c, bd = b * d, ad = a * d, bc = b * c;
+    double x = ac - bd, y = ad + bc;
+    if (isnan(x) && isnan(y)) {
+        int recalc = 0;
+        /* AN INFINITY THAT BECAME A NAN. `inf * 0` is a nan, and a product
+           with an infinity in it must be an infinity -- so the infinite
+           operand becomes a signed one or zero and the product is redone at
+           infinite scale, which is Annex G's rule written out. */
+        if (isinf(a) || isinf(b)) {
+            a = copysign(isinf(a) ? 1.0 : 0.0, a);
+            b = copysign(isinf(b) ? 1.0 : 0.0, b);
+            if (isnan(c)) c = copysign(0.0, c);
+            if (isnan(d)) d = copysign(0.0, d);
+            recalc = 1;
+        }
+        if (isinf(c) || isinf(d)) {
+            c = copysign(isinf(c) ? 1.0 : 0.0, c);
+            d = copysign(isinf(d) ? 1.0 : 0.0, d);
+            if (isnan(a)) a = copysign(0.0, a);
+            if (isnan(b)) b = copysign(0.0, b);
+            recalc = 1;
+        }
+        if (!recalc && (isinf(ac) || isinf(bd) || isinf(ad) || isinf(bc))) {
+            if (isnan(a)) a = copysign(0.0, a);
+            if (isnan(b)) b = copysign(0.0, b);
+            if (isnan(c)) c = copysign(0.0, c);
+            if (isnan(d)) d = copysign(0.0, d);
+            recalc = 1;
+        }
+        if (recalc) {
+            x = INFINITY * (a * c - b * d);
+            y = INFINITY * (a * d + b * c);
+        }
+    }
+    out[0] = x;
+    out[1] = y;
+}
+
+void __c_cmulf(float a, float b, float c, float d, float *out)
+{
+    float ac = a * c, bd = b * d, ad = a * d, bc = b * c;
+    float x = ac - bd, y = ad + bc;
+    if (isnan(x) && isnan(y)) {
+        int recalc = 0;
+        if (isinf(a) || isinf(b)) {
+            a = (float)copysign(isinf(a) ? 1.0 : 0.0, a);
+            b = (float)copysign(isinf(b) ? 1.0 : 0.0, b);
+            if (isnan(c)) c = (float)copysign(0.0, c);
+            if (isnan(d)) d = (float)copysign(0.0, d);
+            recalc = 1;
+        }
+        if (isinf(c) || isinf(d)) {
+            c = (float)copysign(isinf(c) ? 1.0 : 0.0, c);
+            d = (float)copysign(isinf(d) ? 1.0 : 0.0, d);
+            if (isnan(a)) a = (float)copysign(0.0, a);
+            if (isnan(b)) b = (float)copysign(0.0, b);
+            recalc = 1;
+        }
+        if (!recalc && (isinf(ac) || isinf(bd) || isinf(ad) || isinf(bc))) {
+            if (isnan(a)) a = (float)copysign(0.0, a);
+            if (isnan(b)) b = (float)copysign(0.0, b);
+            if (isnan(c)) c = (float)copysign(0.0, c);
+            if (isnan(d)) d = (float)copysign(0.0, d);
+            recalc = 1;
+        }
+        if (recalc) {
+            x = (float)INFINITY * (a * c - b * d);
+            y = (float)INFINITY * (a * d + b * c);
+        }
+    }
+    out[0] = x;
+    out[1] = y;
+}
+
+/* THE SCALING IS WHAT MAKES THE DIVISION USABLE. `(1e300 + 1e300i) /
+   (1e300 + 1e300i)` is 1, and the obvious formula computes `c*c + d*d` on
+   the way -- which overflows. Dividing both by a power of two first costs
+   nothing and cannot lose a bit. */
+static int __c_ilogb2(double x)
+{
+    int e = 0;
+    if (x == 0.0 || isnan(x) || isinf(x)) return 0;
+    frexp(x, &e);
+    return e - 1;
+}
+
+void __c_cdiv(double a, double b, double c, double d, double *out)
+{
+    double denom, x, y, big = fabs(c) > fabs(d) ? fabs(c) : fabs(d);
+    int ilogbw = 0;
+    if (big != 0.0 && !isinf(big) && !isnan(big)) {
+        ilogbw = __c_ilogb2(big);
+        c = scalbn(c, -ilogbw);
+        d = scalbn(d, -ilogbw);
+    }
+    denom = c * c + d * d;
+    x = scalbn((a * c + b * d) / denom, -ilogbw);
+    y = scalbn((b * c - a * d) / denom, -ilogbw);
+    if (isnan(x) && isnan(y)) {
+        if (denom == 0.0 && (!isnan(a) || !isnan(b))) {
+            /* DIVISION BY ZERO IS AN INFINITY, not a nan, and it keeps the
+               sign of the zero it was divided by. */
+            x = copysign(INFINITY, c) * a;
+            y = copysign(INFINITY, c) * b;
+        } else if ((isinf(a) || isinf(b)) && !isinf(c) && !isnan(c)
+                   && !isinf(d) && !isnan(d)) {
+            a = copysign(isinf(a) ? 1.0 : 0.0, a);
+            b = copysign(isinf(b) ? 1.0 : 0.0, b);
+            x = INFINITY * (a * c + b * d);
+            y = INFINITY * (b * c - a * d);
+        } else if ((isinf(big)) && !isinf(a) && !isnan(a)
+                   && !isinf(b) && !isnan(b)) {
+            c = copysign(isinf(c) ? 1.0 : 0.0, c);
+            d = copysign(isinf(d) ? 1.0 : 0.0, d);
+            x = 0.0 * (a * c + b * d);
+            y = 0.0 * (b * c - a * d);
+        }
+    }
+    out[0] = x;
+    out[1] = y;
+}
+
+void __c_cdivf(float a, float b, float c, float d, float *out)
+{
+    float denom, x, y, big = fabsf(c) > fabsf(d) ? fabsf(c) : fabsf(d);
+    int ilogbw = 0;
+    if (big != 0.0f && !isinf(big) && !isnan(big)) {
+        ilogbw = __c_ilogb2((double)big);
+        c = (float)scalbn((double)c, -ilogbw);
+        d = (float)scalbn((double)d, -ilogbw);
+    }
+    denom = c * c + d * d;
+    x = (float)scalbn((double)((a * c + b * d) / denom), -ilogbw);
+    y = (float)scalbn((double)((b * c - a * d) / denom), -ilogbw);
+    if (isnan(x) && isnan(y)) {
+        if (denom == 0.0f && (!isnan(a) || !isnan(b))) {
+            x = (float)copysign(INFINITY, c) * a;
+            y = (float)copysign(INFINITY, c) * b;
+        } else if ((isinf(a) || isinf(b)) && !isinf(c) && !isnan(c)
+                   && !isinf(d) && !isnan(d)) {
+            a = (float)copysign(isinf(a) ? 1.0 : 0.0, a);
+            b = (float)copysign(isinf(b) ? 1.0 : 0.0, b);
+            x = (float)INFINITY * (a * c + b * d);
+            y = (float)INFINITY * (b * c - a * d);
+        } else if (isinf(big) && !isinf(a) && !isnan(a)
+                   && !isinf(b) && !isnan(b)) {
+            c = (float)copysign(isinf(c) ? 1.0 : 0.0, c);
+            d = (float)copysign(isinf(d) ? 1.0 : 0.0, d);
+            x = 0.0f * (a * c + b * d);
+            y = 0.0f * (b * c - a * d);
+        }
+    }
+    out[0] = x;
+    out[1] = y;
+}
+"""
+
 #: The units, by the name `lower.py` asks for. See the module docstring for
 #: why they are separate rather than one file with everything in it.
-UNITS = {"vla": SOURCE, "args": ARGS_SOURCE}
+UNITS = {"vla": SOURCE, "args": ARGS_SOURCE, "complex": COMPLEX_SOURCE}
 
 
 @lru_cache(maxsize=None)
@@ -171,7 +347,11 @@ def _compiled(name: str) -> tuple[tuple[Function, ...], tuple[Global, ...]]:
     sink = DiagnosticSink()
     source = SourceFile(UNITS[name], f"<uasm C support: {name}>")
     tokens = Preprocessor(sink).run(source)
-    unit, parser = parse(tokens, sink)
+    # A PREFIX OF ITS OWN, so that a `static` helper in here cannot collide
+    # with one in the program this is spliced into. The bundled headers it
+    # includes keep the shared `c.` prefix and merge with the program's copy
+    # of them, which is the whole point of that rule -- see `parser._merge`.
+    unit, parser = parse(tokens, sink, "cs.")
     if sink.failed:
         raise AssertionError(
             f"the C frontend's own support code ({name}) does not compile: "

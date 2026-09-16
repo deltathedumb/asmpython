@@ -100,6 +100,11 @@ class Lowerer:
         self.globals: set[str] = set()
         self.needs_vla = False
         self.needs_args = False
+        self.needs_complex = False
+        #: Complex temporaries, by position in the expression being lowered.
+        #: See `_cx_temp` for why they are pooled and where they live.
+        self._cx_pool: list[dict[int, int]] = []
+        self._cx_used = 0
         #: This unit's initialiser, named with its own prefix so that two
         #: units' initialisers are two functions.
         self._init_name = parser.sema.prefix + "init"
@@ -122,7 +127,7 @@ class Lowerer:
         self._declare_externals()
         self._emit_init()
         self._emit_entry()
-        if self.needs_vla or self.needs_args:
+        if self.needs_vla or self.needs_args or self.needs_complex:
             self._splice_support()
         self._prune()
         return self.module
@@ -239,6 +244,13 @@ class Lowerer:
             unit = (unit & ~mask) | ((int(value) << bit_offset) & mask)
             out[offset:offset + size] = unit.to_bytes(size, "little")
             return
+        if ty.is_complex:
+            # TWO NUMBERS IN THE BYTES, real part first, which is the layout
+            # every rule about complex assumes and what `creal` reads.
+            v = complex(value)
+            self._pack(out, offset, ty.of, v.real, None, 0)
+            self._pack(out, offset + ty.of.size, ty.of, v.imag, None, 0)
+            return
         if ty.is_float:
             raw = _struct.pack("<f" if size == 4 else "<d", float(value))
         else:
@@ -315,6 +327,11 @@ class Lowerer:
         self.module.functions.append(fn)
         self.declared[name] = fn
         self.fn = fn
+        # THE TEMPORARY POOL IS PER FUNCTION: its slots are allocas in THIS
+        # function's entry block, and a register from the last one means
+        # nothing here.
+        self._cx_pool = []
+        self._cx_used = 0
         entry = Block("entry")
         fn.blocks.append(entry)
         self.b = Builder(fn)
@@ -334,7 +351,7 @@ class Lowerer:
             # holds an ADDRESS and not a value -- which is precisely what a
             # non-register symbol's `slot` means. Marking it as living in a
             # register would make `p.a` ask for the address of a register.
-            psym.in_register = not (psym.type.is_record or psym.type.is_array)
+            psym.in_register = not psym.type.in_memory
             psym.slot = reg
         if node.variadic:
             self.va_area = fn.new_register(IR.PTR)
@@ -385,7 +402,7 @@ class Lowerer:
             sym.slot = self.b.alloca(8)     # holds the arena address
             self.needs_vla = True
             return
-        if sym.type.is_record or sym.type.is_array or sym.addressed:
+        if sym.type.in_memory or sym.addressed:
             sym.in_register = False
             sym.slot = self.b.alloca(max(1, sym.type.size))
             return
@@ -642,7 +659,7 @@ class Lowerer:
             self._store_value(e.type, e.value, target)
 
     def _store_value(self, ty: CType, value: S.Expr, addr: int) -> None:
-        if ty.is_record or ty.is_array:
+        if ty.in_memory:
             src = self._value(value)
             self._copy(addr, src, ty.size, ty.align)
             return
@@ -656,6 +673,10 @@ class Lowerer:
     def _stmt(self, node) -> None:
         if node is None:
             return
+        # THE COMPLEX TEMPORARIES ARE DEAD AT A STATEMENT BOUNDARY, so the
+        # pool starts again here and a loop reuses one set rather than
+        # allocating a set per turn. See `_cx_temp`.
+        self._cx_used = 0
         self.b.span = node.span
         match node:
             case S.Compound():
@@ -860,8 +881,13 @@ class Lowerer:
 
     def _rvalue(self, e: S.Expr, want: CType) -> int:
         """A value converted to `want`. Only the scalar case needs anything."""
+        if want.is_complex:
+            # A REAL VALUE WIDENS INTO A COMPLEX ONE with a zero imaginary
+            # part. Sema usually inserts the conversion node, but an
+            # initialiser reaches here with the operand as written.
+            return self._cx_convert(e, want)
         got = self._value(e)
-        if want.is_record or want.is_array:
+        if want.in_memory:
             return got
         return self._ir_convert(got, e.type, C.to_ir(want))
 
@@ -872,6 +898,11 @@ class Lowerer:
                 return self.b.const(C.to_ir(e.type), wrap(e.value, e.type)
                                     if e.type.is_integer else e.value)
             case S.FloatLit():
+                if e.type.is_complex:
+                    elem = C.to_ir(e.type.of)
+                    return self._cx_make(
+                        e.type, self.b.const(elem, e.value.real),
+                        self.b.const(elem, e.value.imag))
                 return self.b.const(C.to_ir(e.type), e.value)
             case S.StringLit():
                 return self._global_addr(e.symbol)
@@ -928,7 +959,7 @@ class Lowerer:
                 return d
             if sym.in_register:
                 return sym.slot
-        if e.type.is_record or e.type.is_array:
+        if e.type.in_memory:
             return self._address(e)
         if isinstance(e, S.MemberAccess) and e.path and e.path[-1].is_bitfield:
             member = e.path[-1]
@@ -1019,6 +1050,8 @@ class Lowerer:
             # evaluates to its address.
             return self._value(src) if src.type.is_function else \
                 self._address(src) if _addressable(src) else self._value(src)
+        if e.type.is_complex or src.type.is_complex:
+            return self._cx_convert(src, e.type)
         if e.type.is_record or e.type.is_array:
             return self._value(src)
         return self._ir_convert(self._value(src), src.type, C.to_ir(e.type),
@@ -1098,6 +1131,20 @@ class Lowerer:
             return self._load_lvalue(e)
         if op in ("++", "--"):
             return self._incdec(e)
+        if op in ("__real__", "__imag__"):
+            return self._cx_part(e.operand, op == "__imag__")
+        if op == "!":
+            # BEFORE THE OPERAND IS EVALUATED BELOW, because `_truth_of`
+            # evaluates it itself -- and evaluating it twice would call
+            # `!f()`'s function twice.
+            got = self._truth_of(e.operand)
+            one = self.b.const(IR.I1, 1)
+            flipped = self.b.reg(IR.I1)
+            self.b.emit(Instruction(Op.XOR, IR.I1, dst=flipped,
+                                    args=[got, one]))
+            return self._int_convert(flipped, IR.I1, C.to_ir(e.type))
+        if e.type.is_complex:
+            return self._cx_unary(e)
         value = self._value(e.operand)
         ir = C.to_ir(e.type)
         if op == "+":
@@ -1110,13 +1157,6 @@ class Lowerer:
             d = self.b.reg(ir)
             self.b.emit(Instruction(Op.NOT, ir, dst=d, args=[value]))
             return d
-        if op == "!":
-            got = self._truthy(value, C.to_ir(e.operand.type))
-            one = self.b.const(IR.I1, 1)
-            flipped = self.b.reg(IR.I1)
-            self.b.emit(Instruction(Op.XOR, IR.I1, dst=flipped,
-                                    args=[got, one]))
-            return self._int_convert(flipped, IR.I1, ir)
         raise AssertionError(op)
 
     def _incdec(self, e: S.Unary) -> int:
@@ -1170,6 +1210,9 @@ class Lowerer:
 
     def _binary(self, e: S.Binary) -> int:
         op = e.op
+        if e.type.is_complex or e.left.type.is_complex \
+                or e.right.type.is_complex:
+            return self._cx_binary(e)
         if op == "-p":
             left = self._value(e.left)
             right = self._value(e.right)
@@ -1220,14 +1263,14 @@ class Lowerer:
         result = self.b.reg(IR.I1)
         other = self.b.new_block("sc")
         after = self.b.new_block("scend")
-        left = self._truthy(self._value(e.left), C.to_ir(e.left.type))
+        left = self._truth_of(e.left)
         self.b.copy(result, left)
         if e.op == "&&":
             self.b.branch(left, other, after)
         else:
             self.b.branch(left, after, other)
         self._open(other)
-        right = self._truthy(self._value(e.right), C.to_ir(e.right.type))
+        right = self._truth_of(e.right)
         self.b.copy(result, right)
         self.b.jump(after)
         self._open(after)
@@ -1250,13 +1293,11 @@ class Lowerer:
         if isinstance(cond, S.Unary) and cond.op == "!":
             self._branch(cond.operand, other, then)
             return
-        value = self._value(cond)
-        self.b.branch(self._truthy(value, C.to_ir(cond.type)), then, other)
+        self.b.branch(self._truth_of(cond), then, other)
         self._open(self.b.new_block("dead"))
 
     def _conditional(self, e: S.Conditional, *, address: bool = False) -> int:
-        ir = IR.PTR if address or e.type.is_record or e.type.is_array \
-            else C.to_ir(e.type)
+        ir = IR.PTR if address or e.type.in_memory else C.to_ir(e.type)
         result = None if e.type.is_void and not address else self.b.reg(ir)
         then = self.b.new_block("cond")
         other = self.b.new_block("condelse")
@@ -1281,7 +1322,7 @@ class Lowerer:
         target = e.target
         ty = target.type.unqualified()
         if e.op == "=":
-            if ty.is_record or ty.is_array:
+            if ty.in_memory:
                 dst = self._address(target)
                 src = self._value(e.value)
                 self._copy(dst, src, ty.size, ty.align)
@@ -1307,6 +1348,17 @@ class Lowerer:
             self._write_through(target, addr, new)
             return new
         compute = e.compute or ty
+        if compute.is_complex or ty.is_complex:
+            # `z *= w` COMPUTES IN THE COMMON COMPLEX TYPE and converts back,
+            # exactly as `c += 1` computes in `int`. The target of a complex
+            # assignment always has an address -- `in_memory` says so -- so
+            # there is no register case to keep in step.
+            got = self._cx_arith(e.op[:-1], compute,
+                                 self._cx_pair(target, compute),
+                                 self._cx_pair(e.value, compute))
+            dst = self._address(target)
+            self._cx_assign(dst, ty, got, compute)
+            return dst
         cir = C.to_ir(compute)
         addr = None if _in_register(target) else self._address(target)
         old = self._read_through(target, addr)
@@ -1341,6 +1393,206 @@ class Lowerer:
                                  member.bit_offset, value)
             return
         self.b.store(C.to_ir(target.type), value, addr)
+
+    # ── complex ─────────────────────────────────────────────────────────────
+    #
+    # TWO FLOATS SIDE BY SIDE, real part first, and nothing else: that is what
+    # C says a complex value is (6.2.5p13, "an array of two elements"), what
+    # every ABI does, and what `<complex.h>`'s `creal` reads. The IR has no
+    # complex type and does not need one -- a value in memory with an address
+    # is exactly what an aggregate already is here, so `in_memory` covers the
+    # passing, returning, copying and storing, and what is left is the
+    # arithmetic.
+    #
+    # THE TEMPORARIES COME FROM THE ENTRY BLOCK, pooled and reused, because
+    # `Op.ALLOCA` inside a loop allocates once per turn -- and a complex
+    # expression makes one per operator. A statement's temporaries are dead
+    # at its end (nothing can hold the address of one past that), so the pool
+    # resets there and a function ends up with as many as its deepest
+    # expression needed rather than as many as it evaluated.
+
+    def _cx_temp(self, ty: CType) -> int:
+        want = ty.size
+        index = self._cx_used
+        self._cx_used += 1
+        while len(self._cx_pool) <= index:
+            self._cx_pool.append({})
+        slot = self._cx_pool[index]
+        if want not in slot:
+            slot[want] = self._entry_alloca(want)
+        return slot[want]
+
+    def _entry_alloca(self, size: int) -> int:
+        """An ALLOCA in the entry block, wherever we are now.
+
+        The entry block has no predecessors (the verifier's rule 9), so a
+        register defined there is written on every path -- which is what
+        makes a temporary allocated once usable from inside a loop.
+        """
+        d = self.b.reg(IR.PTR)
+        entry = self.fn.blocks[0]
+        at = len(entry.instructions) - (1 if entry.terminator is not None
+                                        else 0)
+        entry.instructions.insert(
+            at, Instruction(Op.ALLOCA, IR.PTR, dst=d, imm=max(1, size),
+                            span=self.b.span))
+        return d
+
+    def _cx_parts(self, addr: int, ty: CType) -> tuple[int, int]:
+        """The two halves of the complex value at `addr`."""
+        elem = C.to_ir(ty.of)
+        return (self.b.load(elem, addr),
+                self.b.load(elem, self._offset(addr, ty.of.size)))
+
+    def _cx_make(self, ty: CType, re: int, im: int) -> int:
+        addr = self._cx_temp(ty)
+        elem = C.to_ir(ty.of)
+        self.b.store(elem, re, addr)
+        self.b.store(elem, im, self._offset(addr, ty.of.size))
+        return addr
+
+    def _cx_pair(self, e: S.Expr, ty: CType) -> tuple[int, int]:
+        """`e` as (real, imaginary) in `ty`'s element type, whatever `e` is."""
+        elem = C.to_ir(ty.of)
+        if e.type.is_complex:
+            re, im = self._cx_parts(self._value(e), e.type)
+            return (self._ir_convert(re, e.type.of, elem),
+                    self._ir_convert(im, e.type.of, elem))
+        got = self._ir_convert(self._value(e), e.type, elem)
+        return got, self.b.const(elem, 0.0)
+
+    def _cx_part(self, e: S.Expr, imaginary: bool) -> int:
+        """`__imag__ z` and `__real__ z`, which real headers use.
+
+        A REAL OPERAND HAS AN IMAGINARY PART OF ZERO, which is gcc's rule and
+        what makes `__real__ x` work on an ordinary double rather than being
+        an error a macro has to avoid.
+        """
+        if not e.type.is_complex:
+            got = self._value(e)
+            if not imaginary:
+                return got
+            self._discard(e)
+            return self.b.const(C.to_ir(e.type), 0.0)
+        re, im = self._cx_parts(self._value(e), e.type)
+        return im if imaginary else re
+
+    def _cx_convert(self, src: S.Expr, want: CType) -> int:
+        """Between complex and everything else, in either direction."""
+        if want.is_complex:
+            re, im = self._cx_pair(src, want)
+            return self._cx_make(want, re, im)
+        # COMPLEX TO REAL DISCARDS THE IMAGINARY PART, 6.3.1.7p2 -- except
+        # for `_Bool`, where the question is whether the value is zero and
+        # BOTH parts answer it.
+        re, im = self._cx_parts(self._value(src), src.type)
+        if want.is_bool:
+            return self._int_convert(self._cx_nonzero(re, im, src.type),
+                                     IR.I1, C.to_ir(want))
+        return self._ir_convert(re, src.type.of, C.to_ir(want), target=want)
+
+    def _cx_nonzero(self, re: int, im: int, ty: CType) -> int:
+        elem = C.to_ir(ty.of)
+        zero = self.b.const(elem, 0.0)
+        a = self.b.cmp(Op.NE, elem, re, zero)
+        b = self.b.cmp(Op.NE, elem, im, zero)
+        d = self.b.reg(IR.I1)
+        self.b.emit(Instruction(Op.OR, IR.I1, dst=d, args=[a, b]))
+        return d
+
+    def _truth_of(self, e: S.Expr) -> int:
+        """`e != 0` as an i1. The one place that knows a complex has two."""
+        if e.type.is_complex:
+            re, im = self._cx_parts(self._value(e), e.type)
+            return self._cx_nonzero(re, im, e.type)
+        return self._truthy(self._value(e), C.to_ir(e.type))
+
+    def _cx_unary(self, e: S.Unary) -> int:
+        op = e.op
+        if op == "+":
+            return self._value(e.operand)
+        if op == "-":
+            ty = e.type
+            elem = C.to_ir(ty.of)
+            re, im = self._cx_pair(e.operand, ty)
+            out = []
+            for half in (re, im):
+                d = self.b.reg(elem)
+                self.b.emit(Instruction(Op.NEG, elem, dst=d, args=[half]))
+                out.append(d)
+            return self._cx_make(ty, out[0], out[1])
+        if op == "~":
+            # gcc's CONJUGATE, which `<complex.h>`'s `conj` is written with.
+            ty = e.type
+            elem = C.to_ir(ty.of)
+            re, im = self._cx_pair(e.operand, ty)
+            d = self.b.reg(elem)
+            self.b.emit(Instruction(Op.NEG, elem, dst=d, args=[im]))
+            return self._cx_make(ty, re, d)
+        raise Unsupported(f"complex unary {op}")
+
+    def _cx_binary(self, e: S.Binary) -> int:
+        op = e.op
+        if op in ("==", "!="):
+            ty = C.usual_arithmetic(e.left.type, e.right.type)
+            elem = C.to_ir(ty.of)
+            a = self._cx_pair(e.left, ty)
+            b = self._cx_pair(e.right, ty)
+            want = Op.EQ if op == "==" else Op.NE
+            re = self.b.cmp(want, elem, a[0], b[0])
+            im = self.b.cmp(want, elem, a[1], b[1])
+            d = self.b.reg(IR.I1)
+            # BOTH HALVES FOR `==`, EITHER FOR `!=`, which is the same test
+            # written the two ways round.
+            self.b.emit(Instruction(Op.AND if op == "==" else Op.OR, IR.I1,
+                                    dst=d, args=[re, im]))
+            return self._int_convert(d, IR.I1, C.to_ir(e.type))
+        got = self._cx_arith(op, e.type, self._cx_pair(e.left, e.type),
+                             self._cx_pair(e.right, e.type))
+        return self._cx_make(e.type, got[0], got[1])
+
+    def _cx_arith(self, op: str, ty: CType, a: tuple[int, int],
+                  b: tuple[int, int]) -> tuple[int, int]:
+        """(re, im) of `a op b`, both already in `ty`'s element type.
+
+        ADDITION AND SUBTRACTION ARE INLINE and multiplication and division
+        are CALLS, and the split is not about how long the formula is.
+        `(a+bi)(c+di)` is four multiplies and two adds -- but Annex G says
+        what an infinity times a zero has to produce, and getting that right
+        takes the recovery step libgcc's `__muldc3` has. Division needs
+        scaling to avoid an overflow that the mathematics does not have.
+        Both are in `support.py`'s `complex` unit, written in C, which is
+        also what makes them agree with gcc's answers rather than nearly.
+        """
+        elem = C.to_ir(ty.of)
+        if op in ("+", "-"):
+            out = []
+            for x, y in ((a[0], b[0]), (a[1], b[1])):
+                d = self.b.reg(elem)
+                self.b.emit(Instruction(Op.ADD if op == "+" else Op.SUB, elem,
+                                        dst=d, args=[x, y]))
+                out.append(d)
+            return out[0], out[1]
+        if op not in ("*", "/"):
+            raise Unsupported(f"complex operator {op}")
+        self.needs_complex = True
+        wide = elem is IR.F64
+        name = ("__c_cmul" if op == "*" else "__c_cdiv") + ("" if wide else "f")
+        self._ensure_extern(name, IR.VOID,
+                            [elem, elem, elem, elem, IR.PTR])
+        out = self._cx_temp(ty)
+        self.b.call(IR.VOID, name, [a[0], a[1], b[0], b[1], out])
+        return self._cx_parts(out, ty)
+
+    def _cx_assign(self, dst: int, ty: CType, got: tuple[int, int],
+                   compute: CType) -> None:
+        """Store a computed pair into a complex object, converting if the
+        object is narrower than the type the arithmetic happened in."""
+        elem = C.to_ir(ty.of)
+        re = self._ir_convert(got[0], compute.of, elem)
+        im = self._ir_convert(got[1], compute.of, elem)
+        self.b.store(elem, re, dst)
+        self.b.store(elem, im, self._offset(dst, ty.of.size))
 
     # ── bit-fields ──────────────────────────────────────────────────────────
     def _load_bitfield(self, addr: int, ty: CType, bits: int,
@@ -1394,7 +1646,7 @@ class Lowerer:
         ret = sig.ret
         sret = None
         args: list[int] = []
-        if ret.is_record:
+        if ret.is_record or ret.is_complex:
             sret = self.b.alloca(max(1, ret.size))
             args.append(sret)
         for arg in e.args:
@@ -1416,7 +1668,7 @@ class Lowerer:
         return got if got is not None else self.b.const(IR.I64, 0)
 
     def _argument(self, arg: S.Expr) -> int:
-        if arg.type.is_record:
+        if arg.type.is_record or arg.type.is_complex:
             # BY VALUE MEANS A FRESH COPY. The callee receives a pointer and
             # is entitled to write through it, so handing it the caller's own
             # object would make `f(s)` able to change `s`.
@@ -1432,7 +1684,7 @@ class Lowerer:
         area = self.b.alloca(VA_SLOT * len(varargs))
         for i, arg in enumerate(varargs):
             slot = self._offset(area, i * VA_SLOT)
-            if arg.type.is_record:
+            if arg.type.is_record or arg.type.is_complex:
                 copy = self.b.alloca(max(1, arg.type.size))
                 self._copy(copy, self._value(arg), arg.type.size,
                            arg.type.align)
@@ -1457,7 +1709,7 @@ class Lowerer:
         nxt = self.b.offset(cursor, self.b.const(IR.I64, VA_SLOT))
         self.b.store(IR.PTR, nxt, addr)
         ty = e.type
-        if ty.is_record:
+        if ty.is_record or ty.is_complex:
             return self.b.load(IR.PTR, cursor)
         ir = C.to_ir(ty)
         if ir.is_float:
@@ -1690,8 +1942,9 @@ class Lowerer:
     def _splice_support(self) -> None:
         """Compile `support.c` into this module. See the module docstring."""
         from .support import compile_support
-        units = (("vla",) if self.needs_vla else ()) + (
-            ("args",) if self.needs_args else ())
+        units = ((("vla",) if self.needs_vla else ())
+                 + (("args",) if self.needs_args else ())
+                 + (("complex",) if self.needs_complex else ()))
         functions, globals_ = compile_support(self.sink, units)
         for fn in functions:
             existing = self.module.function(fn.name)
@@ -1807,7 +2060,7 @@ def _chunks(size: int, align: int):
 
 def _signature(ty: CType) -> tuple[IR.Type, list[IR.Type], bool]:
     """The IR signature of a C function type. See the module docstring."""
-    sret = ty.ret.is_record
+    sret = ty.ret.is_record or ty.ret.is_complex
     ret = IR.VOID if (sret or ty.ret.is_void) else C.to_ir(ty.ret)
     params: list[IR.Type] = [IR.PTR] if sret else []
     for p in (ty.params or ()):
@@ -1818,7 +2071,7 @@ def _signature(ty: CType) -> tuple[IR.Type, list[IR.Type], bool]:
 
 
 def _param_ir(ty: CType) -> IR.Type:
-    return IR.PTR if (ty.is_record or ty.is_array) else C.to_ir(ty)
+    return IR.PTR if ty.in_memory else C.to_ir(ty)
 
 
 def _direct_target(func: S.Expr) -> str | None:

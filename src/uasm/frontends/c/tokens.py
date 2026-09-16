@@ -92,7 +92,8 @@ KEYWORDS: frozenset[str] = frozenset({
     # spells them without the underscores -- and the reason the underscores
     # exist is that the plain names are not reserved, so a header cannot use
     # them. Folded to the standard spelling by `KEYWORD_ALIASES` below.
-    "__typeof__", "__typeof", "__inline__", "__inline", "__const__",
+    "__typeof__", "__typeof", "__real__", "__real", "__imag__", "__imag",
+    "__inline__", "__inline", "__const__",
     "__const", "__restrict__", "__restrict", "__volatile__", "__volatile",
     "__signed__", "__signed", "__alignof__", "__alignof", "__complex__",
 })
@@ -112,6 +113,7 @@ KEYWORD_ALIASES: dict[str, str] = {
     "__signed__": "signed", "__signed": "signed",
     "__alignof__": "_Alignof", "__alignof": "_Alignof",
     "__complex__": "_Complex",
+    "__real": "__real__", "__imag": "__imag__",
 }
 
 
