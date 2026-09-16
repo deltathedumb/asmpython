@@ -5905,11 +5905,22 @@ class DynamicLowering:
             # two-way shape; a program with no such class still pays nothing.
             if prelowered is not None:
                 spelled, names, lowered_kw, spreads = prelowered
-                return self._dyn_method_either(
+                either = self._dyn_method_either(
                     receiver, attr, args, sym, spelled,
                     fold=(names, lowered_kw, spreads))
-            return self._dyn_method_either(receiver, attr, args, sym,
-                                           node.keywords)
+            else:
+                either = self._dyn_method_either(receiver, attr, args, sym,
+                                                 node.keywords)
+            # AND THE RE-TAG ON THIS PATH TOO, which it did not have. The
+            # builtin half of the two-way dispatch is the same call the
+            # ordinary path makes, so it answers a str for a bytes receiver
+            # in the same way -- and a module that defines ONE class
+            # extending a builtin sends every method name down here. So
+            # `b",".join(...)` came back a str, and so did `split`,
+            # `replace`, `partition`, `strip`, `upper` and the rest: a wrong
+            # TYPE, with nothing to announce it until something later wrote
+            # the result to a descriptor or compared it against a literal.
+            return self._dyn_str_like(receiver, attr, either)
         if sym is None:
             # Not a built-in method name: look the attribute up on the
             # receiver and call what comes back. This is the only path a user
@@ -5926,22 +5937,34 @@ class DynamicLowering:
         out = self._dyn_builtin_method(
             receiver, attr, args, sym,
             prelowered[0] if prelowered is not None else node.keywords)
-        # A STR METHOD ON A BYTES RECEIVER answers bytes. The two share a
-        # layout, so the operation is the same one -- only the tag on the
-        # result differs, and doing it here covers every method at once rather
-        # than changing each of the fifty-odd.
-        #
-        # Not gated on the symbol spelling: several of the shared methods
-        # have symbols of their own (`apy_split_of`), and gating on
-        # `apy_str_*` missed exactly those. `apy_str_like` returns its
-        # argument untouched for any receiver that is not bytes.
-        #
-        # EXCEPT THE CONVERSIONS. `b.hex()` and `b.decode()` answer a str FROM
-        # bytes -- that is what they are for -- so re-tagging their result
-        # would undo the conversion the program asked for.
-        if attr not in _BYTES_TO_TEXT:
-            out = self.b.call(T.PTR, "apy_str_like", [receiver, out])
-            self._dyn_check()
+        return self._dyn_str_like(receiver, attr, out)
+
+    def _dyn_str_like(self, receiver: int, attr: str, out: int) -> int:
+        """`out` re-tagged to match its receiver, for a str method reached on
+        BYTES.
+
+        The two share a layout, so the operation is the same one -- only the
+        tag on the result differs, and doing it in one place covers every
+        method at once rather than changing each of the fifty-odd.
+
+        Not gated on the symbol spelling: several of the shared methods have
+        symbols of their own (`apy_split_of`), and gating on `apy_str_*`
+        missed exactly those. `apy_str_like` returns its argument untouched
+        for any receiver that is not bytes, which is also what makes this
+        safe on the two-way dispatch -- the user-class half hands it an
+        instance and gets the instance back.
+
+        EXCEPT THE CONVERSIONS. `b.hex()` and `b.decode()` answer a str FROM
+        bytes -- that is what they are for -- so re-tagging their result
+        would undo the conversion the program asked for.
+
+        A FUNCTION RATHER THAN TWO COPIES because it was one copy and one
+        MISSING copy: the collision path returned without it.
+        """
+        if attr in _BYTES_TO_TEXT:
+            return out
+        out = self.b.call(T.PTR, "apy_str_like", [receiver, out])
+        self._dyn_check()
         return out
 
     def _dyn_lower_call(self, positional: list, keywords: list) -> tuple:

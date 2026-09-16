@@ -8548,6 +8548,72 @@ PROGRAMS = {
         show("builtins", lambda: (bin(n), oct(n), hex(n), hex(-n)))
         show("floats", lambda: (format(1.5, ".2f"), format(1e21, ".3e")))
     """,
+    "a_bytes_method_keeps_its_tag_through_the_two_way_dispatch": """
+        # `b",".join([b"a", b"b"])` ANSWERED A str. A str method on a bytes
+        # receiver answers bytes -- the two share a layout, so the operation
+        # is the same one and only the TAG on the result differs, which
+        # `apy_str_like` puts back. The ordinary path applied it; the
+        # COLLISION path returned without it.
+        #
+        # WHICH MAKES THE TRIGGER A CLASS, not the method. A module defining
+        # ONE class that extends a builtin puts every method name on the
+        # two-way dispatch -- see `a_bound_builtin_method_takes_its_keywords`
+        # for the same mechanism biting keywords -- so `SubList` below is
+        # what turns every line here from right to wrong. Without it they all
+        # answer correctly, which is why this went unnoticed.
+        #
+        # A WRONG TYPE, NOT AN ERROR, with nothing to announce it until
+        # something later writes the result to a descriptor or compares it
+        # against a literal. `split`, `replace`, `partition`, `strip`,
+        # `upper` and the rest were all in scope, not just `join`.
+        class SubList(list):
+            pass
+
+        class Own:
+            def split(self, sep):
+                return "OWN split " + repr(sep)
+
+            def upper(self):
+                return "OWN upper"
+
+        def show(label, f):
+            try:
+                print(label, repr(f()))
+            except Exception as e:
+                print(label, type(e).__name__ + ":", e)
+
+        b = b"a-b-c"
+        ba = bytearray(b"a-b-c")
+        show("split", lambda: b.split(b"-"))
+        show("rsplit", lambda: b.rsplit(b"-", 1))
+        show("splitlines", lambda: b"x\\ny".splitlines())
+        show("partition", lambda: b.partition(b"-"))
+        show("rpartition", lambda: b.rpartition(b"-"))
+        show("strip", lambda: b"  x  ".strip())
+        show("lstrip", lambda: b"..x".lstrip(b"."))
+        show("replace", lambda: b.replace(b"-", b"+"))
+        show("case", lambda: (b.upper(), b"AB".lower(), b"aB".swapcase()))
+        show("pad", lambda: (b"a".ljust(3, b"."), b"a".rjust(3, b"."),
+                             b"a".center(5, b"*"), b"7".zfill(3)))
+        show("join", lambda: b",".join([b"q", b"r"]))
+        show("expandtabs", lambda: b"a\\tb".expandtabs(2))
+        show("affix", lambda: (b"abc".removeprefix(b"a"),
+                               b"abc".removesuffix(b"c")))
+        show("bytearray", lambda: (ba.split(b"-"), ba.upper()))
+        # THE CONVERSIONS ANSWER A str ON PURPOSE and must not be re-tagged.
+        show("hex and decode", lambda: (b"ab".hex(), b"ab".decode()))
+        # AND A RESULT THAT IS NOT TEXT is left alone either way.
+        show("not text", lambda: (b.find(b"-"), b.count(b"-"),
+                                  b.startswith(b"a")))
+        # A str RECEIVER STAYS str.
+        show("str", lambda: ("a-b-c".split("-"), "A".lower(),
+                             "a-b".partition("-")))
+        # AND THE USER-CLASS HALF of the very same dispatch still reaches the
+        # class: `apy_str_like` hands an instance straight back.
+        show("own split", lambda: Own().split("-"))
+        show("own upper", lambda: Own().upper())
+        show("inherited", lambda: SubList([3, 1]).pop(0))
+    """,
     "fstrings": """
         n = 42
         s = 'ab'
