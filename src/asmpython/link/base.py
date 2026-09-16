@@ -76,6 +76,19 @@ class Toolchain(abc.ABC):
     name: str = ""
     description: str = ""
 
+    #: THE EXTENSIONS THE PROGRAM THIS PRODUCES CARRIES, most specific first.
+    #:
+    #: WHAT THE USER NAMES WITH `-o` is this and not the backend's artifact:
+    #: `-o thing.so` is asking for an extension module, which is the `cpyext`
+    #: toolchain over the `cpyext` backend, and the `.c` in between is an
+    #: implementation detail neither of them was asked about. So the output
+    #: spelling picks the LINKER, and the linker is what implies the backend.
+    #:
+    #: EMPTY MEANS THE PROGRAM HAS NO EXTENSION OF ITS OWN -- a native
+    #: executable on a Unix, which is what `-o thing` with nothing after the
+    #: dot means and cannot be told apart by spelling from any other.
+    artifacts: tuple[str, ...] = ()
+
     @abc.abstractmethod
     def link(self, request: LinkRequest) -> Path:
         """Produce the program. Returns the path actually written.

@@ -19,6 +19,8 @@ from ...ir import Module
 
 class Arm32Backend(Backend):
     name = "arm32"
+    #: An ELF32 object, or the assembly it came from.
+    artifacts = (".o", ".s")
     description = "ARMv7-A machine code (ELF32)"
     kind = "binary"
     #: The whole point of this module. See the docstring.

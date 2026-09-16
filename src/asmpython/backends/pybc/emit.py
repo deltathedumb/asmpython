@@ -61,6 +61,8 @@ from ...ir import Module
 
 class PycBackend(Backend):
     name = "pybc"
+    #: CPython bytecode, ready for the host interpreter.
+    artifacts = (".pyc",)
     description = "CPython bytecode (.pyc) executable by the host interpreter"
     kind = "binary"
     ready = True

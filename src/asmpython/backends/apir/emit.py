@@ -67,6 +67,9 @@ from ...ir import Module
 
 class ApirBackend(Backend):
     name = "apir"
+    #: The container and the text form it holds. `--binary` and
+    #: `--text` choose between them; see this backend's options.
+    artifacts = (".apirc", ".ir")
     description = "APIR containers (.apirc): the IR itself, versioned and integrity-checked"
     #: Bytes with a checksum. See the note above on why this said "language".
     kind = "binary"

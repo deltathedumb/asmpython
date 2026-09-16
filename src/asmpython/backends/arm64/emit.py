@@ -363,6 +363,8 @@ def _emit_parallel_moves(e: _Emitter, moves: list[tuple[str, str]]) -> None:
 
 class Arm64Backend(Backend):
     name = "arm64"
+    #: An ELF or Mach-O object, or the assembly it came from.
+    artifacts = (".o", ".s")
     description = "AArch64 machine code (AAPCS64): ELF and Mach-O objects"
     default_target = "aarch64-none"
 

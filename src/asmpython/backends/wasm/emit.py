@@ -23,6 +23,8 @@ from ...ir import Module
 
 class WasmBackend(Backend):
     name = "wasm"
+    #: A WebAssembly binary module.
+    artifacts = (".wasm",)
     description = "WebAssembly binary modules (.wasm) for WASI and the browser"
     kind = "binary"
     #: The whole point of this module. See the docstring.

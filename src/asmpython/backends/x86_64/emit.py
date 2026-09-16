@@ -556,6 +556,8 @@ class _Emitter:
 
 class X86_64Backend(Backend):
     name = "x86-64"
+    #: An ELF, COFF or Mach-O object, or its assembly.
+    artifacts = (".o", ".s")
     description = "x86-64 machine code: ELF, COFF and Mach-O objects"
     # The machine this is running on, not a platform fixed at
     # authoring time: `asmpython build --backend x86-64` on Windows used to

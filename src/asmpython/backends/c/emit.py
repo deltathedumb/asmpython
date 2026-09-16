@@ -165,6 +165,9 @@ _PROVIDED = (set(_HOST_NAMES) | set(_OBJECT_NAMES) | {"putchar"}
 
 class CBackend(Backend):
     name = "c"
+    #: C99 source. Shared with `cpyext`, which is what makes
+    #: `-o out.c` ambiguous and worth saying so.
+    artifacts = (".c",)
     description = "portable C99 source; one local per register, no allocation"
     #: SOURCE IN ANOTHER LANGUAGE, so text is the artifact rather than a
     #: stage short of one. A C compiler does the encoding.

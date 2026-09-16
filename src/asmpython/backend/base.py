@@ -212,6 +212,23 @@ class Backend(abc.ABC):
             f"not provide: {listed}. See objects/hostsvc.py for what each group "
             f"is, and `Backend.host_services` for how a backend declares one.")
 
+    #: THE EXTENSIONS THIS BACKEND'S OWN ARTIFACTS CARRY, most specific
+    #: first -- what `emit` writes, BEFORE any linker has run.
+    #:
+    #: THE SYMMETRIC HALF OF `Frontend.extensions`, which has always let the
+    #: source's spelling choose a frontend. A backend had no such declaration,
+    #: so the driver could only default to one name and make every other
+    #: choice the user's to type: `-o foo.wasm` still built C.
+    #:
+    #: NOT WHAT THE PROGRAM ENDS UP AS. `cpyext` writes `.c` here and the
+    #: toolchain of the same name turns it into `.so` -- so an output named
+    #: `.so` is the LINKER's artifact and chooses the backend only through it.
+    #: See `Toolchain.artifacts`.
+    #:
+    #: EMPTY MEANS "NEVER CHOSEN BY SPELLING", which is honest for a backend
+    #: whose artifact has no extension of its own to claim.
+    artifacts: tuple[str, ...] = ()
+
     @abc.abstractmethod
     def emit(self, module: Module, target: Target) -> dict[str, bytes]:
         """Compile `module`. Returns {filename: contents}.

@@ -33,6 +33,11 @@ class CcToolchain(Toolchain):
     """
 
     name = "cc"
+    #: A native executable, which on a Unix has no extension at all --
+    #: so this is what `-o thing` means and what nothing else can be
+    #: told apart from by spelling. Windows names it `.exe`, and that
+    #: belongs here once the target decides the answer.
+    artifacts = ()
     description = "assemble and link with the system C compiler driver"
 
     #: Tried in order. `cc` last: it is usually a symlink to one of the others,
@@ -115,6 +120,8 @@ class JarToolchain(Toolchain):
     """
 
     name = "jar"
+    #: A runnable jar.
+    artifacts = (".jar",)
     description = "package class files into a runnable jar (no JDK needed)"
 
     def supports(self, target: Target) -> bool:
@@ -175,6 +182,9 @@ class CPyExtToolchain(Toolchain):
     """
 
     name = "cpyext"
+    #: The extension module itself. `-o thing.so` asks for this and
+    #: reaches the `cpyext` backend only through it.
+    artifacts = (".so", ".pyd")
     description = "compile and link a CPython extension module (.so/.pyd)"
 
     def supports(self, target: Target) -> bool:
@@ -240,6 +250,8 @@ class PycToolchain(Toolchain):
     """
 
     name = "pyc"
+    #: The bytecode file, written where it was asked for.
+    artifacts = (".pyc",)
     description = "write the pybc backend's .pyc artifact to the output path"
 
     def supports(self, target: Target) -> bool:
@@ -275,6 +287,10 @@ class NoToolchain(Toolchain):
     """
 
     name = "none"
+    #: NOTHING OF ITS OWN. This writes the backend's artifacts under
+    #: whatever names the backend gave them, so the output spelling is
+    #: the BACKEND's to claim and never this toolchain's.
+    artifacts = ()
     description = "write backend artifacts to disk; do not assemble or link"
 
     def link(self, request: LinkRequest) -> Path:
