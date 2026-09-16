@@ -9136,6 +9136,101 @@ PROGRAMS = {
         show("not callable", lambda: list(iter(5, 1)))
         show("through next", lambda: next(iter(feed, 4)))
     """,
+    "a_written_def_beats_the_builtin_of_the_same_name": """
+        # `def len(a)` WAS COMPILED, BOUND, AND NEVER CALLED. `len(x)`
+        # reached the runtime's `apy_len` and answered the builtin's answer,
+        # with nothing said about it -- and the same for `min`, `sorted`,
+        # `sum`, `repr`, `hex`, `isinstance` and every other name the
+        # frontend dispatches on.
+        #
+        # THE BRANCHES DISPATCH ON THE NAME and ran before the module's own
+        # functions were consulted at all. Shadowing a builtin at module
+        # level is ordinary, legal Python -- a `def id(...)` over a record
+        # key, a `def input(...)` over a prompt -- and a program that does it
+        # got a wrong answer here with no diagnostic.
+        #
+        # AN ASSIGNMENT ALREADY WORKED. `len = f` binds a name, and a bound
+        # name is a local, which those branches did ask about. Only the `def`
+        # spelling was missed, which is why it lasted.
+        # PRINTED AND NOT `repr`-ed, because `repr` is one of the names
+        # shadowed below and the program's own would be what ran -- which is
+        # right, and would leave every line here reading "my repr".
+        def show(label, f):
+            try:
+                print(label, f())
+            except Exception as e:
+                print(label, e.__class__.__name__ + ":", e)
+
+        def len(a):
+            return "my len"
+
+        def min(a, b):
+            return "my min"
+
+        def sorted(a):
+            return "my sorted"
+
+        def sum(a):
+            return "my sum"
+
+        def repr(a):
+            return "my repr"
+
+        def hex(a):
+            return "my hex"
+
+        def isinstance(a, b):
+            return "my isinstance"
+
+        def dict(*a, **k):
+            return "my dict"
+
+        def type(a):
+            return "my type"
+
+        def next(a, b=None):
+            return "my next"
+
+        def zip(*a):
+            return "my zip"
+
+        def enumerate(a):
+            return "my enumerate"
+
+        def getattr(a, b):
+            return "my getattr"
+
+        class K:
+            pass
+
+        # THE ONE-CALL BUILTINS.
+        show("len", lambda: len([1, 2]))
+        show("min", lambda: min(1, 2))
+        show("sorted", lambda: sorted([2, 1]))
+        show("sum", lambda: sum([1]))
+        show("repr", lambda: repr(1))
+        show("hex", lambda: hex(9))
+        # NOT `abs`, though it is the same branch as `len` and `sum`: a
+        # program that writes `def abs` does not BUILD under the C runtime at
+        # all, because an emitted function takes its Python name as a
+        # top-level C symbol and libc already has that one. A separate fault
+        # with a separate fix; `len` and the rest cover this rule.
+        # THE ONES WITH BRANCHES OF THEIR OWN.
+        show("isinstance", lambda: isinstance(K(), K))
+        show("type", lambda: type(1))
+        show("next", lambda: next(1))
+        show("zip", lambda: zip([1]))
+        show("enumerate", lambda: enumerate([1]))
+        show("getattr", lambda: getattr(1, "x"))
+        # AND THE CONSTRUCTOR SHAPES, whose keywords and empty call are
+        # folded at compile time.
+        show("dict with keywords", lambda: dict(a=1))
+        show("dict empty", lambda: dict())
+        show("dict from pairs", lambda: dict([(1, 2)]))
+        # A SPLAT STILL REACHES IT.
+        show("splatted", lambda: min(*[1, 2]))
+        show("keyword splatted", lambda: sorted(*[[2, 1]]))
+    """,
     "fstrings": """
         n = 42
         s = 'ab'

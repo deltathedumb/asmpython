@@ -1945,7 +1945,8 @@ class DynamicLowering:
         if native is not None:
             return self._dyn_ctypes_call(node, native)
         if isinstance(node.func, ast.Name) and node.func.id in _HOSTSVC_NAMES \
-                and self.info.locals.get(node.func.id) is None:
+                and self.info.locals.get(node.func.id) is None \
+                and node.func.id not in self.infos:
             # A HOST SERVICE. Recognised by NAME rather than recorded by the
             # analyser, because the set is closed and known at import -- there
             # is nothing per-call to remember, which is the difference from
@@ -1954,14 +1955,17 @@ class DynamicLowering:
             return self._dyn_hostsvc_call(node, node.func.id)
         if isinstance(node.func, ast.Name) \
                 and node.func.id in _OBJRT_DYNAMIC_NAMES \
-                and self.info.locals.get(node.func.id) is None:
+                and self.info.locals.get(node.func.id) is None \
+                and node.func.id not in self.infos:
             # See `_OBJRT_DYNAMIC_NAMES`'s own comment -- the small,
             # explicit set of object-runtime primitives safe to reach by
             # bare name from dynamic code, recognised the same way a host
             # service is.
             return self._dyn_objrt_call(node, node.func.id)
         if (isinstance(node.func, ast.Name) and node.func.id == "dict"
-                and node.keywords and "dict" not in self.info.locals):
+                and node.keywords and "dict" not in self.info.locals
+                and ("dict" not in self.infos
+                     or self._raw_builtin == "dict")):
             # `dict(a=1, **other)` IS THE KEYWORD MAPPING, built here.
             #
             # There is no thunk shape for a builtin that takes `**kw`: the
@@ -2023,7 +2027,9 @@ class DynamicLowering:
             if (isinstance(node.func, ast.Name)
                     and node.func.id in ("max", "min")
                     and len(node.args) == 1 and not node.keywords
-                    and self.info.locals.get(node.func.id) is None):
+                    and self.info.locals.get(node.func.id) is None
+                    and (node.func.id not in self.infos
+                         or node.func.id == self._raw_builtin)):
                 # `max(*xs)` IS `max(xs)`: both ask for the largest of these,
                 # and the answer cannot differ, because `max(a, b, c)` is
                 # defined as the largest of `[a, b, c]`.
@@ -2041,7 +2047,8 @@ class DynamicLowering:
         if isinstance(node.func, ast.Attribute) \
                 and isinstance(node.func.value, ast.Name) \
                 and (node.func.value.id, node.func.attr) in _TYPE_STATICS \
-                and self.info.locals.get(node.func.value.id) is None:
+                and self.info.locals.get(node.func.value.id) is None \
+                and node.func.value.id not in self.infos:
             # `dict.fromkeys(...)` -- a constructor on the TYPE, with no
             # receiver. See `_TYPE_STATICS`.
             symbol, arity, defaults = _TYPE_STATICS[
@@ -2223,6 +2230,31 @@ class DynamicLowering:
                       else self._dyn_load(name))
             return self._dyn_indirect(callee, self._dyn_operands(node.args),
                                       node.keywords)
+        # THE PROGRAM'S OWN `def` BEATS THE BUILTIN OF THE SAME NAME. Every
+        # branch below dispatches on the NAME, and none of them asked whether
+        # the module had bound it -- so `def len(a)` was compiled, bound, and
+        # never called. `len(x)` reached `apy_len`; `min`, `sorted`, `sum`,
+        # `repr`, `hex` and `isinstance` the same, all of them a wrong answer
+        # with nothing said about it.
+        #
+        # ONLY A TOP-LEVEL `def`, which is what `infos` is keyed by NAME for;
+        # a nested one is keyed by its qualified name and shadows nothing out
+        # here. An ASSIGNMENT (`len = f`) already worked, because a bound
+        # name is a local and the branches below do ask about those.
+        #
+        # AFTER the decorated, `**`-splat and rebound cases above, which
+        # reach the same function through its NAME rather than its symbol and
+        # are right to keep doing so.
+        # UNLESS THIS IS THAT BUILTIN'S OWN THUNK. `_dyn_load` gives a global
+        # that shadows a builtin an `apy_name_or` fallback -- the last step of
+        # Python's name resolution, so `del len` leaves `len(xs)` working --
+        # and the thunk it falls back to has a body of exactly this shape.
+        # Diverting that body to the module's `def` made the thunk for `min`
+        # call the program's two-parameter `min` with one argument and reach
+        # for a default that does not exist. `_raw_builtin` is what says "we
+        # are lowering the way out of that recursion".
+        if name in self.infos and name != self._raw_builtin:
+            return self._dyn_written_call(node, name)
         if name == "print":
             return self._dyn_print(node)
         if name in _EXC_NAMES or name in self.exc_classes:
@@ -2504,6 +2536,18 @@ class DynamicLowering:
                               [self._dyn_expr(node.args[0])])
             self._dyn_check()
             return out
+        return self._dyn_written_call(node, name)
+
+    def _dyn_written_call(self, node: ast.Call, name: str) -> int:
+        """A call to a module-level `def` of this module, by name.
+
+        SPLIT OUT SO IT CAN BE REACHED FIRST. Every builtin branch in
+        `_dyn_call` dispatches on the NAME, and they all used to run before
+        this did -- so a program that wrote `def len(a)` had it compiled,
+        bound, and never called: `len(x)` reached `apy_len` and answered the
+        builtin's answer, with no diagnostic. Shadowing a builtin at module
+        level is ordinary Python.
+        """
         info = self.infos[name]
         args = (self._dyn_arguments(node, info) if info.dynamic
                 else self._dyn_operands(node.args))
