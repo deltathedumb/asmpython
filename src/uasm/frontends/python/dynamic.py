@@ -18,6 +18,8 @@ machine type it declared and wraps the result back. Nothing else crosses.
 from __future__ import annotations
 
 import ast
+import operator
+import struct
 
 from ...ir import types as T
 from ...ir import Builder, Function
@@ -61,6 +63,103 @@ DYN_CMP = {
     ast.LtE: "apy_le", ast.Gt: "apy_gt", ast.GtE: "apy_ge",
     ast.Is: "apy_is",
 }
+
+#: WHAT CONSTANT FOLDING ANSWERS WHEN AN EXPRESSION IS NOT ONE. A sentinel
+#: and not None, because `None` is a perfectly good constant.
+_NOT_CONST = object()
+
+#: THE OPERATORS CPython FOLDS, and `@` is not one of them: no builtin kind
+#: implements it, so `2 @ 3` is a TypeError CPython leaves for run time.
+#: Everything else in `DYN_BINOP` is here, which is what makes this a
+#: transcription rather than a second opinion.
+_FOLD_BINOP = {
+    ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+    ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod, ast.Pow: operator.pow,
+    ast.BitAnd: operator.and_, ast.BitOr: operator.or_,
+    ast.BitXor: operator.xor, ast.LShift: operator.lshift,
+    ast.RShift: operator.rshift,
+}
+_FOLD_UNARY = {
+    ast.UAdd: operator.pos, ast.USub: operator.neg,
+    ast.Invert: operator.invert, ast.Not: operator.not_,
+}
+
+#: HOW BIG A FOLDED RESULT MAY BE. CPython refuses to fold what would be
+#: large -- the constant would be carried in the binary whether or not the
+#: program ever reaches the line -- and the three ceilings are `MAX_INT_SIZE`,
+#: `MAX_STR_SIZE` and `MAX_COLLECTION_SIZE` in its own optimiser. They are
+#: exact rather than approximate because a program can SEE the boundary:
+#: `2 ** 64` twice is one object and `2 ** 65` twice is two.
+_MAX_INT_BITS = 128
+_MAX_TEXT = 4096
+_MAX_TUPLE = 256
+
+
+def _const_bits(v: int) -> int:
+    """How many bits an integer is, as CPython's `_PyLong_NumBits` counts
+    them: the magnitude's, with the sign ignored."""
+    return abs(v).bit_length()
+
+
+def _fold_is_safe(op, a, b) -> bool:
+    """May this pair be folded at all, before the result is worked out?
+
+    THE GUARD IS ON THE OPERANDS and not on the answer, because the answer is
+    what would be expensive to have: `2 ** 100000` must not be computed in
+    order to find out that it is too big to keep. CPython guards exactly
+    these four operators and nothing else, so `huge + 1` folds and
+    `huge * 1` does not.
+    """
+    if op is ast.Mod:
+        # `'%s' % x` IS FORMATTING, not arithmetic, and CPython leaves it
+        # alone -- the mini-language has its own failures and a fold would
+        # move them from run time to compile time.
+        return not isinstance(a, (str, bytes))
+    if op is ast.Mult:
+        if isinstance(a, int) and isinstance(b, int):
+            if not a or not b:
+                return True
+            return _const_bits(a) + _const_bits(b) <= _MAX_INT_BITS
+        seq, n = (a, b) if isinstance(b, int) else (b, a)
+        if isinstance(seq, (str, bytes, tuple)) and isinstance(n, int):
+            if not len(seq):
+                return True
+            # A NEGATIVE COUNT IS AN EMPTY RESULT and CPython still refuses
+            # it, so the boundary is where CPython puts it.
+            if n < 0:
+                return False
+            cap = _MAX_TUPLE if isinstance(seq, tuple) else _MAX_TEXT
+            return len(seq) * n <= cap
+        return True
+    if op is ast.Pow:
+        if isinstance(a, int) and isinstance(b, int) and a and b > 0:
+            if b > _MAX_INT_BITS:
+                return False
+            bits = _const_bits(a)
+            return bits <= _MAX_INT_BITS and bits * b <= _MAX_INT_BITS
+        return True
+    if op is ast.LShift:
+        if isinstance(a, int) and isinstance(b, int) and a and b >= 0:
+            if b > _MAX_INT_BITS:
+                return False
+            return _const_bits(a) + b <= _MAX_INT_BITS
+        return True
+    return True
+
+
+def _is_const_value(v) -> bool:
+    """Is this something a module-wide constant slot may hold?
+
+    IMMUTABLE AND ONE OBJECT PER VALUE. A list or a set could never get here
+    -- neither is ever a `Constant` -- but a fold that somehow produced one
+    would be sharing a container two mentions must not share.
+    """
+    if v is None or v is Ellipsis:
+        return True
+    if isinstance(v, (bool, int, float, complex, str, bytes)):
+        return True
+    return isinstance(v, tuple) and all(_is_const_value(x) for x in v)
 
 
 class _Synthetic:
@@ -366,38 +465,148 @@ class DynamicLowering:
     _SMALL_LO = -5
     _SMALL_HI = 256
 
-    def _const_tuple(self, node):
-        """This tuple display AS A KEY, or None if it is not a constant.
+    def _const_of(self, node):
+        """The Python value this expression IS, or `_NOT_CONST`.
 
         A tuple of constants is a constant in Python -- `(1, 2) is (1, 2)`
         and `() is ()` are both True -- and a NESTED one is too. Anything
         else in it, a name or a call or a star, makes the display ordinary:
         it is built where it is written and is its own object.
 
-        THE KEY CARRIES THE TYPES, for the reason `_dyn_interned` gives:
-        `(1,)` and `(1.0,)` are equal tuples of different constants.
+        AND AN EXPRESSION OVER CONSTANTS IS ONE, which is what `_const_fold`
+        decides. The two call each other because the nesting is real:
+        `(-2) ** 64` is a power whose base is a negation whose operand is a
+        literal, and CPython folds all three.
         """
-        if not isinstance(node, ast.Tuple):
-            return None
-        out = []
-        for element in node.elts:
-            if isinstance(element, ast.Tuple):
-                inner = self._const_tuple(element)
-                if inner is None:
-                    return None
-                out.append(inner)
-                continue
-            if not isinstance(element, ast.Constant):
-                return None
-            v = element.value
-            if v is Ellipsis:
-                out.append(("ellipsis", None))
-                continue
-            out.append((type(v).__name__, v))
-        return ("tuple", tuple(out))
+        match node:
+            case ast.Constant(value=v):
+                return v
+            case ast.Tuple(elts=elts):
+                out = []
+                for element in elts:
+                    got = self._const_of(element)
+                    if got is _NOT_CONST:
+                        return _NOT_CONST
+                    out.append(got)
+                return tuple(out)
+            case ast.UnaryOp() | ast.BinOp() | ast.Subscript():
+                return self._const_fold(node)
+        return _NOT_CONST
 
-    def _dyn_interned(self, kind: str, value, build):
-        """The ONE object this literal evaluates to, module-wide.
+    def _const_key(self, v):
+        """A constant AS A SLOT KEY: hashable, and one key per object.
+
+        THE TYPE IS IN IT, because `1 == 1.0 == True` and the three are
+        different constants -- an int and a float that compare equal would
+        otherwise share a slot and one of them would come out the wrong kind.
+
+        AND A FLOAT IS KEYED BY ITS BITS. `-0.0 == 0.0` and they hash alike,
+        so a dict makes them one key -- and `0.0 is -0.0` is False in
+        CPython. A NaN is the same problem from the other side: it is equal
+        to nothing, so two of them would take two slots where CPython's
+        constant table gives one. The eight bytes answer both.
+        """
+        if isinstance(v, tuple):
+            return ("tuple", tuple(self._const_key(x) for x in v))
+        if v is Ellipsis:
+            return ("ellipsis", None)
+        if isinstance(v, float):
+            return ("float", struct.pack("<d", v))
+        if isinstance(v, complex):
+            return ("complex", struct.pack("<dd", v.real, v.imag))
+        return (type(v).__name__, v)
+
+    def _const_fold(self, node):
+        """What this expression evaluates to AT COMPILE TIME, or
+        `_NOT_CONST`.
+
+        `10 ** 20` written twice is ONE object in CPython and was two here:
+        its compiler folds an expression whose operands are all constants
+        into a single constant, and the module's table then shares it the way
+        it shares a literal. Everything that decides WHETHER is CPython's own
+        line, measured: which operators (`@` is not one), how big a result
+        may be (`_fold_is_safe`), and that nothing which raises is ever
+        folded -- `1 / 0` keeps its operator and fails where it is written.
+
+        A SLICE TAKES LITERALS ONLY, which is CPython's behaviour rather than
+        its intention: `'abcd'[:3]` folds and `'abcd'[:-1]` does not, because
+        the bound is a negation rather than a literal and the passes run in
+        that order. It is visible -- the first is one object at both
+        mentions and the second is two -- so it is transcribed rather than
+        tidied up.
+        """
+        match node:
+            case ast.UnaryOp(op=op, operand=operand):
+                fn = _FOLD_UNARY.get(type(op))
+                if fn is None:
+                    return _NOT_CONST
+                v = self._const_of(operand)
+                if v is _NOT_CONST:
+                    return _NOT_CONST
+                return self._fold_call(fn, v)
+            case ast.BinOp(left=left, op=op, right=right):
+                fn = _FOLD_BINOP.get(type(op))
+                if fn is None:
+                    return _NOT_CONST
+                a = self._const_of(left)
+                if a is _NOT_CONST:
+                    return _NOT_CONST
+                b = self._const_of(right)
+                if b is _NOT_CONST:
+                    return _NOT_CONST
+                if not _fold_is_safe(type(op), a, b):
+                    return _NOT_CONST
+                return self._fold_call(fn, a, b)
+            case ast.Subscript(value=base, slice=key):
+                a = self._const_of(base)
+                # ONLY THE THREE IMMUTABLE SEQUENCES. A dict constant does
+                # not exist and a list one is not a constant, so this is the
+                # whole set a subscript of constants can read.
+                if not isinstance(a, (str, bytes, tuple)):
+                    return _NOT_CONST
+                k = self._const_index(key)
+                if k is _NOT_CONST:
+                    return _NOT_CONST
+                return self._fold_call(operator.getitem, a, k)
+        return _NOT_CONST
+
+    def _const_index(self, key):
+        """What a constant subscript reads WITH, or `_NOT_CONST`.
+
+        AN INDEX IS ANY FOLDED CONSTANT -- `'abc'[1 + 1]` folds -- and a
+        SLICE's three bounds are literals or nothing. See `_const_fold` for
+        why the two are not the same rule.
+        """
+        if not isinstance(key, ast.Slice):
+            return self._const_of(key)
+        parts = []
+        for part in (key.lower, key.upper, key.step):
+            if part is None:
+                parts.append(None)
+                continue
+            if not isinstance(part, ast.Constant):
+                return _NOT_CONST
+            if part.value is not None and not isinstance(part.value, int):
+                return _NOT_CONST
+            parts.append(part.value)
+        return slice(*parts)
+
+    def _fold_call(self, fn, *args):
+        """Work the fold out, and refuse anything that goes wrong.
+
+        NOTHING THAT RAISES IS EVER FOLDED. `1 / 0` is a ZeroDivisionError
+        the program is entitled to reach at the line that wrote it -- moving
+        it to compile time would turn a running program into one that does
+        not build.
+        """
+        try:
+            got = fn(*args)
+        except Exception:
+            return _NOT_CONST
+        return got if _is_const_value(got) else _NOT_CONST
+
+    def _dyn_interned(self, key, build):
+        """The ONE object this constant evaluates to, module-wide.
 
         `"hello" is "hello"` is True in CPython and was False here, and so
         was every other pair of equal literals -- two names bound to the same
@@ -412,10 +621,8 @@ class DynamicLowering:
         integer built in two different functions. Not only the
         identifier-like strings, and not only within one code object.
 
-        KEYED BY TYPE AS WELL AS VALUE, because `1 == 1.0 == True` and the
-        three are different constants. A bool never reaches here -- it is a
-        singleton already -- but an int and a float that compare equal would
-        otherwise share a slot and one of them would come out the wrong kind.
+        KEYED BY TYPE AS WELL AS VALUE -- see `_const_key`, which is where
+        the key comes from and why a signed zero needs more than equality.
 
         A SLOT FILLED ONCE AT THE TOP OF THE ENTRY, not lazily on first use:
         a branch per mention would cost more than the load, and the entry
@@ -428,7 +635,6 @@ class DynamicLowering:
         is the other one, under the kind `gensig`. See
         `_dyn_gen_signature`.
         """
-        key = (kind, value)
         found = self._const_slots.get(key)
         if found is None:
             slot = f"__const{len(self._const_slots)}"
@@ -445,6 +651,60 @@ class DynamicLowering:
         addr = self.b.reg(T.PTR)
         self.b.emit(Instruction(Op.GLOBAL_ADDR, T.PTR, dst=addr, sym=slot))
         return self.b.load(T.PTR, addr)
+
+    def _dyn_const_value(self, v) -> int:
+        """The ONE object a constant VALUE evaluates to, written or folded.
+
+        THE SINGLETONS ARE NOT INTERNED because they are already one object:
+        None, `...` and the two bools are each fetched rather than built, and
+        the small integers are tagged rather than allocated -- the runtime
+        keeps one cell per value in -5..256, so `5 is 5` was True before any
+        of this and a slot for one would be a load where an immediate does.
+        Everything else is allocated, and everything allocated is shared.
+        """
+        if v is None:
+            return self.b.call(T.PTR, "apy_none", [])
+        if v is Ellipsis:
+            # `...` -- a SINGLETON, so `... is Ellipsis` is True and a fresh
+            # cell per literal would answer False.
+            return self.b.call(T.PTR, "apy_ellipsis", [])
+        if isinstance(v, bool):
+            return self.b.call(T.PTR, "apy_from_bool",
+                               [self.b.const(T.I64, int(v))])
+        if isinstance(v, int) and self._SMALL_LO <= v <= self._SMALL_HI:
+            return self._dyn_int_literal(v)
+        return self._dyn_interned(self._const_key(v),
+                                  lambda: self._dyn_const_build(v))
+
+    def _dyn_const_build(self, v) -> int:
+        """Build a constant's value, for the slot that will hold it.
+
+        A TUPLE BUILDS ITS ELEMENTS, and those are constants too -- so each
+        gets its own slot and `(1000, 2)[0] is 1000` holds. `_dyn_interned`
+        fills a nested slot before it is read; see the note there.
+        """
+        if isinstance(v, int):
+            return self._dyn_int_literal(v)
+        if isinstance(v, float):
+            return self.b.call(T.PTR, "apy_from_float",
+                               [self.b.const(T.F64, v)])
+        if isinstance(v, str):
+            return self._dyn_str_literal(v)
+        if isinstance(v, bytes):
+            return self._dyn_bytes_literal(v)
+        if isinstance(v, complex):
+            # `2j` is a Constant whose value is a Python complex, so both
+            # halves are known here and neither needs the runtime to parse
+            # anything.
+            return self.b.call(T.PTR, "apy_from_complex",
+                               [self.b.const(T.F64, v.real),
+                                self.b.const(T.F64, v.imag)])
+        out = self.b.call(T.PTR, "apy_tuple_new",
+                          [self.b.const(T.I64, max(1, len(v)))])
+        for item in v:
+            self.b.call(T.PTR, "apy_seq_push",
+                        [out, self._dyn_const_value(item)])
+        return out
 
     def _dyn_fill_const(self, key) -> None:
         """Emit the store that puts this literal's value in its slot, once.
@@ -712,47 +972,24 @@ class DynamicLowering:
                 value = self._dyn_expr(node.value)
                 self._dyn_store(name, value)
                 return value
-            case ast.Constant(value=None):
-                return self.b.call(T.PTR, "apy_none", [])
-            case ast.Constant() if node.value is Ellipsis:
-                # `...` -- a SINGLETON, so `... is Ellipsis` is True and a
-                # fresh cell per literal would answer False.
-                return self.b.call(T.PTR, "apy_ellipsis", [])
-            case ast.Constant(value=bool() as v):
-                return self.b.call(T.PTR, "apy_from_bool",
-                                   [self.b.const(T.I64, int(v))])
-            # EVERY ALLOCATED CONSTANT IS INTERNED, so two mentions of one
-            # literal are one object and `"a" is "a"` answers True as it
-            # does in CPython. The small integers below are tagged rather
-            # than allocated and were already the same object; a bool, None
-            # and `...` are singletons. See `_dyn_interned`.
-            case ast.Constant(value=int() as v):
-                if self._SMALL_LO <= v <= self._SMALL_HI:
-                    return self._dyn_int_literal(v)
-                return self._dyn_interned(
-                    "int", v, lambda: self._dyn_int_literal(v))
-            case ast.Constant(value=float() as v):
-                return self._dyn_interned(
-                    "float", v,
-                    lambda: self.b.call(T.PTR, "apy_from_float",
-                                        [self.b.const(T.F64, v)]))
-            case ast.Constant(value=str() as v):
-                return self._dyn_interned(
-                    "str", v, lambda: self._dyn_str_literal(v))
-            case ast.Constant(value=complex() as v):
-                # `2j` is a Constant whose value is a Python complex, so both
-                # halves are known here and neither needs the runtime to
-                # parse anything.
-                return self._dyn_interned(
-                    "complex", v,
-                    lambda: self.b.call(T.PTR, "apy_from_complex",
-                                        [self.b.const(T.F64, v.real),
-                                         self.b.const(T.F64, v.imag)]))
-            case ast.Constant(value=bytes() as v):
-                return self._dyn_interned(
-                    "bytes", v, lambda: self._dyn_bytes_literal(v))
-            case ast.Constant(value=None):
-                return self.b.call(T.PTR, "apy_none", [])
+            # EVERY CONSTANT THROUGH ONE PLACE, written or worked out.
+            #
+            # An allocated one is INTERNED, so two mentions of a literal are
+            # one object and `"a" is "a"` answers True as it does in CPython.
+            # A bool, None and `...` are singletons already and the small
+            # integers are tagged rather than allocated; see
+            # `_dyn_const_value`.
+            #
+            # AND AN EXPRESSION OVER CONSTANTS IS A CONSTANT: `10 ** 20`
+            # written twice is one object in CPython, because its compiler
+            # folds the expression and the table then shares the answer. A
+            # tuple display of constants is one for the same reason, and a
+            # LIST display never is -- it is mutable, so two of them must be
+            # two objects however equal they look. See `_const_fold`.
+            case (ast.Constant() | ast.Tuple() | ast.UnaryOp() | ast.BinOp()
+                  | ast.Subscript()) if (
+                      (made := self._const_of(node)) is not _NOT_CONST):
+                return self._dyn_const_value(made)
             case ast.Attribute(value=ast.Name(id=base), attr=attr) if (
                     base in _BUILTIN_TYPES and base not in self.info.locals
                     and base not in self.infos
@@ -816,14 +1053,6 @@ class DynamicLowering:
                 return self._dyn_ifexp(node)
             case ast.Call():
                 return self._dyn_call(node)
-            case ast.Tuple(elts=elts) if self._const_tuple(node) is not None:
-                # A TUPLE OF CONSTANTS IS ITSELF A CONSTANT, which is why
-                # `(1, 2) is (1, 2)` and `() is ()` are True in CPython. A
-                # LIST display never is -- it is mutable, so two of them
-                # must be two objects however equal they look.
-                made = self._const_tuple(node)
-                return self._dyn_interned(
-                    "tuple", made, lambda: self._dyn_sequence(node, elts))
             case ast.List(elts=elts) | ast.Tuple(elts=elts):
                 return self._dyn_sequence(node, elts)
             case ast.GeneratorExp():
@@ -4713,7 +4942,7 @@ class DynamicLowering:
                             [made, self._dyn_str_literal(qual)])
             return made
 
-        return self._dyn_interned("gensig", step_sym, build)
+        return self._dyn_interned(("gensig", step_sym), build)
 
     def _gen_temp(self) -> int | None:
         """A frame slot for a COMPILER TEMPORARY, or None outside a generator.

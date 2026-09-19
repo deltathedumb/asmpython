@@ -3531,6 +3531,99 @@ PROGRAMS = {
         print(type(co.__del__).__name__, type(a.__del__).__name__)
         co.close()
     """,
+    # AND AN EXPRESSION OVER CONSTANTS IS A CONSTANT. `10 ** 20` written
+    # twice is ONE object in CPython -- its compiler folds the expression
+    # and the table above then shares the answer -- and was two here,
+    # because every operator was lowered as a call and the value was built
+    # where it was written. Everything that decides WHETHER is CPython's
+    # own line, measured: see `_const_fold`.
+    #
+    # ONE NAME PER LINE, never `a, b = x, y`: reading an element back out of
+    # a tuple loses the handle on the interpreter, which is #145 and would
+    # answer False here for a reason that is not this.
+    "a_constant_expression_is_a_constant": """
+        a1 = 10 ** 20
+        a2 = 10 ** 20
+        print("10**20:", a1 is a2, a1)
+        # THE CEILINGS ARE EXACT, because a program can see the boundary.
+        b1 = 2 ** 64
+        b2 = 2 ** 64
+        c1 = 2 ** 65
+        c2 = 2 ** 65
+        print("2**64:", b1 is b2, "| 2**65:", c1 is c2, b1, c1)
+        e1 = "a" * 4096
+        e2 = "a" * 4096
+        f1 = "a" * 4097
+        f2 = "a" * 4097
+        print("text:", e1 is e2, f1 is f2, len(e1), len(f1))
+        h1 = (1,) * 256
+        h2 = (1,) * 256
+        i1 = (1,) * 257
+        i2 = (1,) * 257
+        print("tuple:", h1 is h2, i1 is i2, len(h1), len(i1))
+        p1 = 1 << 127
+        p2 = 1 << 127
+        q1 = 1 << 128
+        q2 = 1 << 128
+        print("shift:", p1 is p2, q1 is q2, p1 == q1 >> 1)
+        # A GUARD IS ON THE OPERANDS, so `10 ** 40` is refused and the add
+        # above it goes with it -- while two huge LITERALS still fold.
+        r1 = 10 ** 40 + 1
+        r2 = 10 ** 40 + 1
+        s1 = 10000000000000000000000000000000000000000 + 1
+        s2 = 10000000000000000000000000000000000000000 + 1
+        print("compose:", r1 is r2, s1 is s2, r1 == s1)
+        d1 = "a" * 3
+        d2 = "a" * 3
+        g1 = (1, 2) + (3,)
+        g2 = (1, 2) + (3,)
+        l1 = b"ab" * 3
+        l2 = b"ab" * 3
+        print("built:", d1 is d2, g1 is g2, l1 is l2, d1, g1, l1)
+        j1 = 1.5 * 2
+        j2 = 1.5 * 2
+        k1 = 1j * 2
+        k2 = 1j * 2
+        print("numbers:", j1 is j2, k1 is k2, j1, k1)
+        print("unary:", -5, ~7, not 0, +5, -(2 ** 3))
+        print("odds:", 2 ** -1, 0 ** 100000, (-2) ** 64, 3 & 5, 3 | 5,
+              3 ^ 5, 7 >> 1, 7 // 2, 7 % 3, 1 / 2)
+        # A SUBSCRIPT OF CONSTANTS FOLDS, and a SLICE takes literal bounds
+        # only -- which is CPython's behaviour rather than its intention,
+        # and visible, so it is transcribed rather than tidied up.
+        m1 = "abc"[1]
+        m2 = "abc"[1]
+        n1 = "abcd"[:3]
+        n2 = "abcd"[:3]
+        o1 = "abcd"[:-1]
+        o2 = "abcd"[:-1]
+        print("read:", m1 is m2, n1 is n2, o1 is o2, m1, n1, o1)
+        print("slices:", (1, 2, 3)[1:], "abc"[::2], (1, 2, 3)[::2],
+              "abc"[:], (1, 2)[0], b"a"[0], "abc"[1 + 1])
+        # A MUTABLE RESULT IS NEVER SHARED, however equal two of them look.
+        t1 = [1] * 2
+        t2 = [1] * 2
+        print("mutable:", t1 is t2, t1)
+        # AND A SIGNED ZERO IS TWO CONSTANTS, not one: they compare equal
+        # and hash alike, so the slot key cannot be the value alone.
+        pz = 0.0
+        nz = -0.0
+        print("zero:", pz is nz, pz, nz, pz == nz)
+        # NOTHING THAT RAISES IS FOLDED -- it fails where it is written.
+        try:
+            print(1 / 0)
+        except ZeroDivisionError as e:
+            print("raises:", e)
+        try:
+            print("abc"[10])
+        except IndexError as e:
+            print("raises:", e)
+        try:
+            print(1 % 0)
+        except ZeroDivisionError as e:
+            print("raises:", e)
+        print("left alone:", "%s!" % 1, 5 % 3)
+    """,
     # A LITERAL IS ONE OBJECT, module-wide. `"hello" is "hello"` is True in
     # CPython and was False here, and so was every other pair of equal
     # literals: two names bound to the same text, `b"ab" is b"ab"`, `1.5 is
