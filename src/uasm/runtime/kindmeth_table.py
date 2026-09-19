@@ -479,6 +479,50 @@ def apy_kind_dir_of(kind: ptr) -> ptr:
         return rodata(b"__abs__\0__add__\0__and__\0__bool__\0__ceil__\0__class__\0__delattr__\0__dir__\0__divmod__\0__doc__\0__eq__\0__float__\0__floor__\0__floordiv__\0__format__\0__ge__\0__getattribute__\0__getnewargs__\0__getstate__\0__gt__\0__hash__\0__index__\0__init__\0__init_subclass__\0__int__\0__invert__\0__le__\0__lshift__\0__lt__\0__mod__\0__mul__\0__ne__\0__neg__\0__new__\0__or__\0__pos__\0__pow__\0__radd__\0__rand__\0__rdivmod__\0__reduce__\0__reduce_ex__\0__repr__\0__rfloordiv__\0__rlshift__\0__rmod__\0__rmul__\0__ror__\0__round__\0__rpow__\0__rrshift__\0__rshift__\0__rsub__\0__rtruediv__\0__rxor__\0__setattr__\0__sizeof__\0__str__\0__sub__\0__subclasshook__\0__truediv__\0__trunc__\0__xor__\0as_integer_ratio\0bit_count\0bit_length\0conjugate\0denominator\0from_bytes\0imag\0is_integer\0numerator\0real\0to_bytes\0\0")
     if apy_cstr_eq(kind, rodata(b"NoneType\0")):
         return rodata(b"__bool__\0__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__le__\0__lt__\0__ne__\0__new__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"list_iterator\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__length_hint__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__setstate__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"list_reverseiterator\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__length_hint__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__setstate__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"tuple_iterator\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__length_hint__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__setstate__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"reversed\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__length_hint__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__setstate__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"str_iterator\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__length_hint__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__setstate__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"str_ascii_iterator\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__length_hint__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__setstate__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"bytes_iterator\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__length_hint__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__setstate__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"bytearray_iterator\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__length_hint__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__setstate__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"range_iterator\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__length_hint__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__setstate__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"set_iterator\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__length_hint__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"dict_keyiterator\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__length_hint__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"dict_valueiterator\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__length_hint__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"dict_itemiterator\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__length_hint__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"dict_reversekeyiterator\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__length_hint__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"dict_reversevalueiterator\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__length_hint__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"dict_reverseitemiterator\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__length_hint__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"callable_iterator\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"memory_iterator\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"enumerate\0")):
+        return rodata(b"__class__\0__class_getitem__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"zip\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__setstate__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"map\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__setstate__\0__sizeof__\0__str__\0__subclasshook__\0\0")
+    if apy_cstr_eq(kind, rodata(b"filter\0")):
+        return rodata(b"__class__\0__delattr__\0__dir__\0__doc__\0__eq__\0__format__\0__ge__\0__getattribute__\0__getstate__\0__gt__\0__hash__\0__init__\0__init_subclass__\0__iter__\0__le__\0__lt__\0__ne__\0__new__\0__next__\0__reduce__\0__reduce_ex__\0__repr__\0__setattr__\0__sizeof__\0__str__\0__subclasshook__\0\0")
     return ptr(0)
 
 

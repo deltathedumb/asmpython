@@ -174,6 +174,12 @@ static int apy_slot_declares(apy_value cls, apy_value name) {
 
 /* Generated, and spliced into a LATER part -- see `_gen_kindmeth.py`. */
 static const char *apy_kind_doc(const char *kind);
+/* AND THE `dir()` TABLE BESIDE IT, read here for ONE bit of information: is
+   this a kind the generated pair knows about at all? A cursor's type has no
+   docstring in CPython and `iter([]).__doc__` is None rather than an
+   AttributeError, so "no text" and "no such kind" have to be told apart and
+   only the dir table can tell them. */
+static const char *apy_kind_dir(const char *kind);
 
 /* WHICH OF A VIEW'S NAMES IS A FIELD rather than a method. Only these are
    read off the cell, and only these are refused once the view is released:
@@ -201,8 +207,14 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
     if (strcmp(want, "__doc__") == 0
             && O(obj)->kind != APY_INST_K && O(obj)->kind != APY_FUNC_K
             && O(obj)->kind != APY_TYPE_K && O(obj)->kind != APY_EXC_K) {
-        const char *doc = apy_kind_doc(apy_kind_name(obj));
+        const char *kn = apy_kind_name(obj);
+        const char *doc = apy_kind_doc(kn);
         if (doc) return apy_lit(doc);
+        /* A KIND WE MODEL WHOSE TYPE HAS NO DOCSTRING ANSWERS None, which is
+           what CPython does: `iter([]).__doc__` is None and `__doc__` is on
+           the list `dir()` gives, so refusing it would be a list that lies.
+           Told apart from a kind nothing knows by the dir table. */
+        if (apy_kind_dir(kn)) return apy_none();
     }
     /* AND A TYPE OBJECT REACHED THROUGH `type(x)` IS A CELL, not the thunk
        the program's own `bytes` names -- `apy_type_for` mints one keyed by
@@ -214,8 +226,10 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
     if (strcmp(want, "__doc__") == 0 && O(obj)->kind == APY_TYPE_K
             && O(obj)->v.t.dict
             && !apy_dict_get_or(O(obj)->v.t.dict, name, 0)) {
-        const char *doc = apy_kind_doc(APY_CSTR(O(obj)->v.t.name));
+        const char *tn = APY_CSTR(O(obj)->v.t.name);
+        const char *doc = apy_kind_doc(tn);
         if (doc) return apy_lit(doc);
+        if (apy_kind_dir(tn)) return apy_none();
     }
     switch (O(obj)->kind) {
     case APY_INST_K: {

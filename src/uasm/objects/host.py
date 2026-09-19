@@ -7740,15 +7740,6 @@ class Native:
         return self.body(*args)
 
 
-#: The kinds a VALUE can be whose TYPE carries a docstring. Wider than the
-#: method table's twelve, because `True.__doc__`, `None.__doc__` and a view's
-#: are the same question. `_gen_kindmeth.py`'s `DOC_KINDS` is the same list,
-#: written for the compiled halves.
-_DOC_KINDS = (str, bytes, bytearray, list, tuple, dict, set, frozenset,
-              int, float, range, complex, bool, type(None), memoryview)
-
-#: The same list keyed by NAME, for a type object rather than a value.
-_DOC_TYPES = {one.__name__: one for one in _DOC_KINDS}
 
 #: An EMPTY VALUE of the kind a builtin type names, so `_kind_attr` can
 #: answer for the type without a second copy of it. Nothing is done with the
@@ -7884,7 +7875,7 @@ from uasm.frontends.python.methods import (  # noqa: E402
     DYN_METHOD_TABLE, METHOD_PARAMS, REQUIRED, KeywordError, _suggest,
     fold_ctor_keywords, method_symbol)
 from uasm.objects.c.kindmeth_table import (  # noqa: E402
-    KINDMETH_WORDS)
+    KINDMETH_WORDS, KIND_DIR, KIND_DOC)
 
 #: What kind a value COUNTS AS when a builtin method is looked up on it.
 #: `True` is an `int` here, exactly as `apy_kind_bit` folds the bool kind
@@ -8309,6 +8300,39 @@ def _cursor_left(it) -> int:
     return max(0, len(it.src) - it.i)
 
 
+def _cursor_setstate(h, it, where):
+    """`it.__setstate__(i)` -- WHERE THE WALK IS, written rather than read.
+    The other half of `__reduce__`: pickle remakes a partly consumed
+    iterator and then says how far it had got.
+
+    THE CLAMPING IS CPYTHON'S, measured rather than derived. A forward
+    cursor takes 0..len and anything outside that -- above OR BELOW -- leaves
+    it exhausted, so `iter([1,2,3]).__setstate__(-1)` yields nothing. A
+    reversed one counts down from `i` and -1 is already its exhaustion, so a
+    position past the end is pulled back to the last element and a negative
+    one stays the end of the walk.
+
+    `zip` AND `map` KEEP NO POSITION OF THEIR OWN -- what CPython pickles for
+    them is their sub-iterators -- so theirs takes the argument and changes
+    nothing, which is what the same call does there. The C twin is
+    `apy_cursor_setstate`.
+    """
+    if isinstance(where, bool) or not isinstance(where, int):
+        return h._fail("TypeError", "an integer is required")
+    if it.mode in (Iterator.MAP, Iterator.ZIP):
+        return h._none
+    n = (len(it.src)
+         if isinstance(it.src, (list, tuple, str, bytes, bytearray, dict,
+                                set, frozenset, range))
+         else 0)
+    if it.mode == Iterator.REV:
+        at = min(where, n - 1)
+        it.i = -1 if at < 0 else at
+        return h._none
+    it.i = n if (where < 0 or where > n) else where
+    return h._none
+
+
 def _unwrap(h, got):
     """A handle an `_apy_*` entry point answered, as a value -- or the
     failure it left pending, re-raised so the caller sees it."""
@@ -8364,8 +8388,12 @@ def _kind_attr(h, obj, want: str):
     # AttributeError on every builtin value there is. The COMPILED halves
     # read a generated table for it, because the text is CPython's and not a
     # fact this compiler could derive; here CPython is in the room.
-    if want == "__doc__" and isinstance(obj, _DOC_KINDS):
-        return h._value(type(obj).__doc__)
+    if want == "__doc__" and h.kind_name(obj) in KIND_DOC:
+        # None FOR A KIND WHOSE TYPE HAS NO DOCSTRING, and not a refusal:
+        # `iter([]).__doc__` is None in CPython and `__doc__` is on the list
+        # `dir()` gives, so refusing it would be a list that lies. The table
+        # holds the None, which is what tells it from a kind nothing knows.
+        return h._value(KIND_DOC[h.kind_name(obj)])
 
     if want == "__hash__":
         # THE ATTRIBUTE EXISTS EITHER WAY. `[].__hash__ is None` is how a
@@ -8460,6 +8488,22 @@ def _kind_attr(h, obj, want: str):
     if want == "__length_hint__" and isinstance(obj, Iterator) \
             and obj.mode in (Iterator.PLAIN, Iterator.REV):
         return made("__length_hint__", lambda: _cursor_left(obj))
+    # `it.__setstate__(i)` AND `enumerate[int]`. WHICH CURSORS CARRY EACH is
+    # read straight out of the generated `dir()` table rather than restated:
+    # the list is CPython's own, and a name this answers that the list omits
+    # -- or the other way about -- is the one mistake nobody would see. The
+    # compiled halves draw the same line by mode and source kind; see
+    # `apy_cursor_setstate_p`.
+    if isinstance(obj, Iterator) and want in ("__setstate__",
+                                              "__class_getitem__"):
+        if want in KIND_DIR.get(h.kind_name(obj), ()):
+            if want == "__setstate__":
+                return made("__setstate__",
+                            lambda i: _unwrap(h, _cursor_setstate(h, obj, i)))
+            return made("__class_getitem__", lambda k: Alias(
+                h._get(_apy_type_object(h, [h._new(obj)]),
+                       "__class_getitem__"),
+                k if isinstance(k, tuple) else (k,)))
     if want == "__contains__" and walks:
         return made("__contains__", lambda x: x in obj)
     if want == "__getitem__" and (seq or text or dict_):
@@ -9474,9 +9518,11 @@ def _apy_default_getattr(h, a):
         # wrote that shares a builtin's name is excluded by its own `__doc__`,
         # which its body bound and which is found first.
         if name == "__doc__" and "__doc__" not in obj.dict:
-            kind = _DOC_TYPES.get(obj.name)
-            if kind is not None:
-                return h._value(kind.__doc__)
+            # THROUGH THE GENERATED TABLE, which holds a None for a kind
+            # whose type has no docstring -- a cursor's. `in` and not `get`,
+            # because None is an ANSWER here and not an absence.
+            if obj.name in KIND_DOC:
+                return h._value(KIND_DOC[obj.name])
         # `C.__class__` IS THE METACLASS, which is `type` unless the class
         # named one. Every other kind answers this and a class did not, so
         # `C.__class__` was an AttributeError about a class that plainly has
@@ -9886,9 +9932,8 @@ def _apy_default_getattr(h, a):
             # are the same text in Python, and this is the half that reaches
             # it through the name the type carries.
             if obj.doc is None and getattr(obj, "is_type", False):
-                kind = _DOC_TYPES.get(obj.name)
-                if kind is not None:
-                    return h._value(kind.__doc__)
+                if obj.name in KIND_DOC:
+                    return h._value(KIND_DOC[obj.name])
             return h._value(obj.doc)
         # PEP 649: `__annotations__` is BUILT ON ACCESS, by the thunk the
         # `def` recorded. Evaluating them at the `def` would make
@@ -11247,18 +11292,20 @@ def _apy_dir(h, a):
         while isinstance(cls, Class):
             add(cls.dict)
             cls = cls.base
-    elif isinstance(v, _DOC_KINDS):
-        # A BUILT-IN KIND. CPython's own `dir()` over the same value, which
-        # is exactly what the compiled runtimes read out of a generated
-        # table -- see `apy_kind_dir`. This answered an EMPTY LIST, so
-        # `dir(5)` and `dir("")` were both `[]` where CPython lists eighty
-        # names.
-        add(dir(v))
+    elif h.kind_name(v) in KIND_DIR:
+        # A BUILT-IN KIND, READ OUT OF THE GENERATED TABLE -- the same one
+        # the compiled runtimes read, rather than live CPython. Asking
+        # CPython worked while the only kinds were the fifteen this
+        # interpreter represents with real Python values, and stopped
+        # working at the first CURSOR: `iter([])` here is an object of this
+        # compiler's own, and `dir()` over one lists that object's members
+        # rather than a `list_iterator`'s. See `apy_kind_dir`.
+        add(KIND_DIR[h.kind_name(v)])
     elif (isinstance(v, Func) and getattr(v, "is_type", False)
-            and v.name in _DOC_TYPES):
+            and v.name in KIND_DIR):
         # A BUILTIN TYPE IS A FUNC WEARING `is_type`, and `dir(str)` is the
-        # same list as `dir("")`.
-        add(dir(_DOC_TYPES[v.name]))
+        # same list as `dir("")` -- so it is the same table row.
+        add(KIND_DIR[v.name])
     return h._new(sorted(names))
 
 

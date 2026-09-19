@@ -729,6 +729,39 @@ static const char *apy_kind_doc(const char *kind) {
                "The class bool is a subclass of the class int, and cannot be subclassed.";
     if (strcmp(kind, "NoneType") == 0)
         return "The type of the None singleton.";
+    if (strcmp(kind, "reversed") == 0)
+        return "Return a reverse iterator over the values of the given sequence.";
+    if (strcmp(kind, "enumerate") == 0)
+        return "Return an enumerate object.\n"
+               "\n"
+               "  iterable\n"
+               "    an object supporting iteration\n"
+               "\n"
+               "The enumerate object yields pairs containing a count (from start, which\n"
+               "defaults to zero) and a value yielded by the iterable argument.\n"
+               "\n"
+               "enumerate is useful for obtaining an indexed list:\n"
+               "    (0, seq[0]), (1, seq[1]), (2, seq[2]), ...";
+    if (strcmp(kind, "zip") == 0)
+        return "The zip object yields n-length tuples, where n is the number of iterables\n"
+               "passed as positional arguments to zip().  The i-th element in every tuple\n"
+               "comes from the i-th iterable argument to zip().  This continues until the\n"
+               "shortest argument is exhausted.\n"
+               "\n"
+               "If strict is true and one of the arguments is exhausted before the others,\n"
+               "raise a ValueError.\n"
+               "\n"
+               "   >>> list(zip('abcdefg', range(3), range(4)))\n"
+               "   [('a', 0, 0), ('b', 1, 1), ('c', 2, 2)]";
+    if (strcmp(kind, "map") == 0)
+        return "Make an iterator that computes the function using arguments from\n"
+               "each of the iterables.  Stops when the shortest iterable is exhausted.\n"
+               "\n"
+               "If strict is true and one of the arguments is exhausted before the others,\n"
+               "raise a ValueError.";
+    if (strcmp(kind, "filter") == 0)
+        return "Return an iterator yielding those items of iterable for which function(item)\n"
+               "is true. If function is None, return the items that are true.";
     return 0;
 }
 /* EVERY NAME `dir(x)` ANSWERS for a value of this kind, by the
@@ -953,6 +986,191 @@ static const char *apy_kind_dir(const char *kind) {
                "__eq__\0""__format__\0""__ge__\0""__getattribute__\0"
                "__getstate__\0""__gt__\0""__hash__\0""__init__\0"
                "__init_subclass__\0""__le__\0""__lt__\0""__ne__\0""__new__\0"
+               "__reduce__\0""__reduce_ex__\0""__repr__\0""__setattr__\0"
+               "__sizeof__\0""__str__\0""__subclasshook__\0"
+               "";
+    if (strcmp(kind, "list_iterator") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__length_hint__\0""__lt__\0""__ne__\0"
+               "__new__\0""__next__\0""__reduce__\0""__reduce_ex__\0""__repr__\0"
+               "__setattr__\0""__setstate__\0""__sizeof__\0""__str__\0"
+               "__subclasshook__\0"
+               "";
+    if (strcmp(kind, "list_reverseiterator") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__length_hint__\0""__lt__\0""__ne__\0"
+               "__new__\0""__next__\0""__reduce__\0""__reduce_ex__\0""__repr__\0"
+               "__setattr__\0""__setstate__\0""__sizeof__\0""__str__\0"
+               "__subclasshook__\0"
+               "";
+    if (strcmp(kind, "tuple_iterator") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__length_hint__\0""__lt__\0""__ne__\0"
+               "__new__\0""__next__\0""__reduce__\0""__reduce_ex__\0""__repr__\0"
+               "__setattr__\0""__setstate__\0""__sizeof__\0""__str__\0"
+               "__subclasshook__\0"
+               "";
+    if (strcmp(kind, "reversed") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__length_hint__\0""__lt__\0""__ne__\0"
+               "__new__\0""__next__\0""__reduce__\0""__reduce_ex__\0""__repr__\0"
+               "__setattr__\0""__setstate__\0""__sizeof__\0""__str__\0"
+               "__subclasshook__\0"
+               "";
+    if (strcmp(kind, "str_iterator") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__length_hint__\0""__lt__\0""__ne__\0"
+               "__new__\0""__next__\0""__reduce__\0""__reduce_ex__\0""__repr__\0"
+               "__setattr__\0""__setstate__\0""__sizeof__\0""__str__\0"
+               "__subclasshook__\0"
+               "";
+    if (strcmp(kind, "str_ascii_iterator") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__length_hint__\0""__lt__\0""__ne__\0"
+               "__new__\0""__next__\0""__reduce__\0""__reduce_ex__\0""__repr__\0"
+               "__setattr__\0""__setstate__\0""__sizeof__\0""__str__\0"
+               "__subclasshook__\0"
+               "";
+    if (strcmp(kind, "bytes_iterator") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__length_hint__\0""__lt__\0""__ne__\0"
+               "__new__\0""__next__\0""__reduce__\0""__reduce_ex__\0""__repr__\0"
+               "__setattr__\0""__setstate__\0""__sizeof__\0""__str__\0"
+               "__subclasshook__\0"
+               "";
+    if (strcmp(kind, "bytearray_iterator") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__length_hint__\0""__lt__\0""__ne__\0"
+               "__new__\0""__next__\0""__reduce__\0""__reduce_ex__\0""__repr__\0"
+               "__setattr__\0""__setstate__\0""__sizeof__\0""__str__\0"
+               "__subclasshook__\0"
+               "";
+    if (strcmp(kind, "range_iterator") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__length_hint__\0""__lt__\0""__ne__\0"
+               "__new__\0""__next__\0""__reduce__\0""__reduce_ex__\0""__repr__\0"
+               "__setattr__\0""__setstate__\0""__sizeof__\0""__str__\0"
+               "__subclasshook__\0"
+               "";
+    if (strcmp(kind, "set_iterator") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__length_hint__\0""__lt__\0""__ne__\0"
+               "__new__\0""__next__\0""__reduce__\0""__reduce_ex__\0""__repr__\0"
+               "__setattr__\0""__sizeof__\0""__str__\0""__subclasshook__\0"
+               "";
+    if (strcmp(kind, "dict_keyiterator") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__length_hint__\0""__lt__\0""__ne__\0"
+               "__new__\0""__next__\0""__reduce__\0""__reduce_ex__\0""__repr__\0"
+               "__setattr__\0""__sizeof__\0""__str__\0""__subclasshook__\0"
+               "";
+    if (strcmp(kind, "dict_valueiterator") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__length_hint__\0""__lt__\0""__ne__\0"
+               "__new__\0""__next__\0""__reduce__\0""__reduce_ex__\0""__repr__\0"
+               "__setattr__\0""__sizeof__\0""__str__\0""__subclasshook__\0"
+               "";
+    if (strcmp(kind, "dict_itemiterator") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__length_hint__\0""__lt__\0""__ne__\0"
+               "__new__\0""__next__\0""__reduce__\0""__reduce_ex__\0""__repr__\0"
+               "__setattr__\0""__sizeof__\0""__str__\0""__subclasshook__\0"
+               "";
+    if (strcmp(kind, "dict_reversekeyiterator") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__length_hint__\0""__lt__\0""__ne__\0"
+               "__new__\0""__next__\0""__reduce__\0""__reduce_ex__\0""__repr__\0"
+               "__setattr__\0""__sizeof__\0""__str__\0""__subclasshook__\0"
+               "";
+    if (strcmp(kind, "dict_reversevalueiterator") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__length_hint__\0""__lt__\0""__ne__\0"
+               "__new__\0""__next__\0""__reduce__\0""__reduce_ex__\0""__repr__\0"
+               "__setattr__\0""__sizeof__\0""__str__\0""__subclasshook__\0"
+               "";
+    if (strcmp(kind, "dict_reverseitemiterator") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__length_hint__\0""__lt__\0""__ne__\0"
+               "__new__\0""__next__\0""__reduce__\0""__reduce_ex__\0""__repr__\0"
+               "__setattr__\0""__sizeof__\0""__str__\0""__subclasshook__\0"
+               "";
+    if (strcmp(kind, "callable_iterator") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__lt__\0""__ne__\0""__new__\0""__next__\0"
+               "__reduce__\0""__reduce_ex__\0""__repr__\0""__setattr__\0"
+               "__sizeof__\0""__str__\0""__subclasshook__\0"
+               "";
+    if (strcmp(kind, "memory_iterator") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__lt__\0""__ne__\0""__new__\0""__next__\0"
+               "__reduce__\0""__reduce_ex__\0""__repr__\0""__setattr__\0"
+               "__sizeof__\0""__str__\0""__subclasshook__\0"
+               "";
+    if (strcmp(kind, "enumerate") == 0)
+        return "__class__\0""__class_getitem__\0""__delattr__\0""__dir__\0"
+               "__doc__\0""__eq__\0""__format__\0""__ge__\0""__getattribute__\0"
+               "__getstate__\0""__gt__\0""__hash__\0""__init__\0"
+               "__init_subclass__\0""__iter__\0""__le__\0""__lt__\0""__ne__\0"
+               "__new__\0""__next__\0""__reduce__\0""__reduce_ex__\0""__repr__\0"
+               "__setattr__\0""__sizeof__\0""__str__\0""__subclasshook__\0"
+               "";
+    if (strcmp(kind, "zip") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__lt__\0""__ne__\0""__new__\0""__next__\0"
+               "__reduce__\0""__reduce_ex__\0""__repr__\0""__setattr__\0"
+               "__setstate__\0""__sizeof__\0""__str__\0""__subclasshook__\0"
+               "";
+    if (strcmp(kind, "map") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__lt__\0""__ne__\0""__new__\0""__next__\0"
+               "__reduce__\0""__reduce_ex__\0""__repr__\0""__setattr__\0"
+               "__setstate__\0""__sizeof__\0""__str__\0""__subclasshook__\0"
+               "";
+    if (strcmp(kind, "filter") == 0)
+        return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0"
+               "__iter__\0""__le__\0""__lt__\0""__ne__\0""__new__\0""__next__\0"
                "__reduce__\0""__reduce_ex__\0""__repr__\0""__setattr__\0"
                "__sizeof__\0""__str__\0""__subclasshook__\0"
                "";
@@ -1513,3 +1731,87 @@ KINDMETH_WORDS = {
     ("zfill", "str"): 17895697,
 }
 
+
+
+#: What `dir(x)` answers for a value of each kind.
+KIND_DIR = {
+    'str': ['__add__', '__class__', '__contains__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getitem__', '__getnewargs__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__len__', '__lt__', '__mod__', '__mul__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', '__rmod__', '__rmul__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__', 'capitalize', 'casefold', 'center', 'count', 'encode', 'endswith', 'expandtabs', 'find', 'format', 'format_map', 'index', 'isalnum', 'isalpha', 'isascii', 'isdecimal', 'isdigit', 'isidentifier', 'islower', 'isnumeric', 'isprintable', 'isspace', 'istitle', 'isupper', 'join', 'ljust', 'lower', 'lstrip', 'maketrans', 'partition', 'removeprefix', 'removesuffix', 'replace', 'rfind', 'rindex', 'rjust', 'rpartition', 'rsplit', 'rstrip', 'split', 'splitlines', 'startswith', 'strip', 'swapcase', 'title', 'translate', 'upper', 'zfill'],
+    'bytes': ['__add__', '__buffer__', '__bytes__', '__class__', '__contains__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getitem__', '__getnewargs__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__len__', '__lt__', '__mod__', '__mul__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', '__rmod__', '__rmul__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__', 'capitalize', 'center', 'count', 'decode', 'endswith', 'expandtabs', 'find', 'fromhex', 'hex', 'index', 'isalnum', 'isalpha', 'isascii', 'isdigit', 'islower', 'isspace', 'istitle', 'isupper', 'join', 'ljust', 'lower', 'lstrip', 'maketrans', 'partition', 'removeprefix', 'removesuffix', 'replace', 'rfind', 'rindex', 'rjust', 'rpartition', 'rsplit', 'rstrip', 'split', 'splitlines', 'startswith', 'strip', 'swapcase', 'title', 'translate', 'upper', 'zfill'],
+    'bytearray': ['__add__', '__alloc__', '__buffer__', '__class__', '__contains__', '__delattr__', '__delitem__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getitem__', '__getstate__', '__gt__', '__hash__', '__iadd__', '__imul__', '__init__', '__init_subclass__', '__iter__', '__le__', '__len__', '__lt__', '__mod__', '__mul__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__release_buffer__', '__repr__', '__rmod__', '__rmul__', '__setattr__', '__setitem__', '__sizeof__', '__str__', '__subclasshook__', 'append', 'capitalize', 'center', 'clear', 'copy', 'count', 'decode', 'endswith', 'expandtabs', 'extend', 'find', 'fromhex', 'hex', 'index', 'insert', 'isalnum', 'isalpha', 'isascii', 'isdigit', 'islower', 'isspace', 'istitle', 'isupper', 'join', 'ljust', 'lower', 'lstrip', 'maketrans', 'partition', 'pop', 'remove', 'removeprefix', 'removesuffix', 'replace', 'resize', 'reverse', 'rfind', 'rindex', 'rjust', 'rpartition', 'rsplit', 'rstrip', 'split', 'splitlines', 'startswith', 'strip', 'swapcase', 'title', 'translate', 'upper', 'zfill'],
+    'list': ['__add__', '__class__', '__class_getitem__', '__contains__', '__delattr__', '__delitem__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getitem__', '__getstate__', '__gt__', '__hash__', '__iadd__', '__imul__', '__init__', '__init_subclass__', '__iter__', '__le__', '__len__', '__lt__', '__mul__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', '__reversed__', '__rmul__', '__setattr__', '__setitem__', '__sizeof__', '__str__', '__subclasshook__', 'append', 'clear', 'copy', 'count', 'extend', 'index', 'insert', 'pop', 'remove', 'reverse', 'sort'],
+    'tuple': ['__add__', '__class__', '__class_getitem__', '__contains__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getitem__', '__getnewargs__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__len__', '__lt__', '__mul__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', '__rmul__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__', 'count', 'index'],
+    'dict': ['__class__', '__class_getitem__', '__contains__', '__delattr__', '__delitem__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getitem__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__ior__', '__iter__', '__le__', '__len__', '__lt__', '__ne__', '__new__', '__or__', '__reduce__', '__reduce_ex__', '__repr__', '__reversed__', '__ror__', '__setattr__', '__setitem__', '__sizeof__', '__str__', '__subclasshook__', 'clear', 'copy', 'fromkeys', 'get', 'items', 'keys', 'pop', 'popitem', 'setdefault', 'update', 'values'],
+    'set': ['__and__', '__class__', '__class_getitem__', '__contains__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__iand__', '__init__', '__init_subclass__', '__ior__', '__isub__', '__iter__', '__ixor__', '__le__', '__len__', '__lt__', '__ne__', '__new__', '__or__', '__rand__', '__reduce__', '__reduce_ex__', '__repr__', '__ror__', '__rsub__', '__rxor__', '__setattr__', '__sizeof__', '__str__', '__sub__', '__subclasshook__', '__xor__', 'add', 'clear', 'copy', 'difference', 'difference_update', 'discard', 'intersection', 'intersection_update', 'isdisjoint', 'issubset', 'issuperset', 'pop', 'remove', 'symmetric_difference', 'symmetric_difference_update', 'union', 'update'],
+    'frozenset': ['__and__', '__class__', '__class_getitem__', '__contains__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__len__', '__lt__', '__ne__', '__new__', '__or__', '__rand__', '__reduce__', '__reduce_ex__', '__repr__', '__ror__', '__rsub__', '__rxor__', '__setattr__', '__sizeof__', '__str__', '__sub__', '__subclasshook__', '__xor__', 'copy', 'difference', 'intersection', 'isdisjoint', 'issubset', 'issuperset', 'symmetric_difference', 'union'],
+    'int': ['__abs__', '__add__', '__and__', '__bool__', '__ceil__', '__class__', '__delattr__', '__dir__', '__divmod__', '__doc__', '__eq__', '__float__', '__floor__', '__floordiv__', '__format__', '__ge__', '__getattribute__', '__getnewargs__', '__getstate__', '__gt__', '__hash__', '__index__', '__init__', '__init_subclass__', '__int__', '__invert__', '__le__', '__lshift__', '__lt__', '__mod__', '__mul__', '__ne__', '__neg__', '__new__', '__or__', '__pos__', '__pow__', '__radd__', '__rand__', '__rdivmod__', '__reduce__', '__reduce_ex__', '__repr__', '__rfloordiv__', '__rlshift__', '__rmod__', '__rmul__', '__ror__', '__round__', '__rpow__', '__rrshift__', '__rshift__', '__rsub__', '__rtruediv__', '__rxor__', '__setattr__', '__sizeof__', '__str__', '__sub__', '__subclasshook__', '__truediv__', '__trunc__', '__xor__', 'as_integer_ratio', 'bit_count', 'bit_length', 'conjugate', 'denominator', 'from_bytes', 'imag', 'is_integer', 'numerator', 'real', 'to_bytes'],
+    'float': ['__abs__', '__add__', '__bool__', '__ceil__', '__class__', '__delattr__', '__dir__', '__divmod__', '__doc__', '__eq__', '__float__', '__floor__', '__floordiv__', '__format__', '__ge__', '__getattribute__', '__getformat__', '__getnewargs__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__int__', '__le__', '__lt__', '__mod__', '__mul__', '__ne__', '__neg__', '__new__', '__pos__', '__pow__', '__radd__', '__rdivmod__', '__reduce__', '__reduce_ex__', '__repr__', '__rfloordiv__', '__rmod__', '__rmul__', '__round__', '__rpow__', '__rsub__', '__rtruediv__', '__setattr__', '__sizeof__', '__str__', '__sub__', '__subclasshook__', '__truediv__', '__trunc__', 'as_integer_ratio', 'conjugate', 'from_number', 'fromhex', 'hex', 'imag', 'is_integer', 'real'],
+    'range': ['__bool__', '__class__', '__contains__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getitem__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__len__', '__lt__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', '__reversed__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__', 'count', 'index', 'start', 'step', 'stop'],
+    'complex': ['__abs__', '__add__', '__bool__', '__class__', '__complex__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getnewargs__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__le__', '__lt__', '__mul__', '__ne__', '__neg__', '__new__', '__pos__', '__pow__', '__radd__', '__reduce__', '__reduce_ex__', '__repr__', '__rmul__', '__rpow__', '__rsub__', '__rtruediv__', '__setattr__', '__sizeof__', '__str__', '__sub__', '__subclasshook__', '__truediv__', 'conjugate', 'from_number', 'imag', 'real'],
+    'memoryview': ['__buffer__', '__class__', '__class_getitem__', '__delattr__', '__delitem__', '__dir__', '__doc__', '__enter__', '__eq__', '__exit__', '__format__', '__ge__', '__getattribute__', '__getitem__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__len__', '__lt__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__release_buffer__', '__repr__', '__setattr__', '__setitem__', '__sizeof__', '__str__', '__subclasshook__', '_from_flags', 'c_contiguous', 'cast', 'contiguous', 'count', 'f_contiguous', 'format', 'hex', 'index', 'itemsize', 'nbytes', 'ndim', 'obj', 'readonly', 'release', 'shape', 'strides', 'suboffsets', 'tobytes', 'tolist', 'toreadonly'],
+    'bool': ['__abs__', '__add__', '__and__', '__bool__', '__ceil__', '__class__', '__delattr__', '__dir__', '__divmod__', '__doc__', '__eq__', '__float__', '__floor__', '__floordiv__', '__format__', '__ge__', '__getattribute__', '__getnewargs__', '__getstate__', '__gt__', '__hash__', '__index__', '__init__', '__init_subclass__', '__int__', '__invert__', '__le__', '__lshift__', '__lt__', '__mod__', '__mul__', '__ne__', '__neg__', '__new__', '__or__', '__pos__', '__pow__', '__radd__', '__rand__', '__rdivmod__', '__reduce__', '__reduce_ex__', '__repr__', '__rfloordiv__', '__rlshift__', '__rmod__', '__rmul__', '__ror__', '__round__', '__rpow__', '__rrshift__', '__rshift__', '__rsub__', '__rtruediv__', '__rxor__', '__setattr__', '__sizeof__', '__str__', '__sub__', '__subclasshook__', '__truediv__', '__trunc__', '__xor__', 'as_integer_ratio', 'bit_count', 'bit_length', 'conjugate', 'denominator', 'from_bytes', 'imag', 'is_integer', 'numerator', 'real', 'to_bytes'],
+    'NoneType': ['__bool__', '__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__le__', '__lt__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__'],
+    'list_iterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__setstate__', '__sizeof__', '__str__', '__subclasshook__'],
+    'list_reverseiterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__setstate__', '__sizeof__', '__str__', '__subclasshook__'],
+    'tuple_iterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__setstate__', '__sizeof__', '__str__', '__subclasshook__'],
+    'reversed': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__setstate__', '__sizeof__', '__str__', '__subclasshook__'],
+    'str_iterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__setstate__', '__sizeof__', '__str__', '__subclasshook__'],
+    'str_ascii_iterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__setstate__', '__sizeof__', '__str__', '__subclasshook__'],
+    'bytes_iterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__setstate__', '__sizeof__', '__str__', '__subclasshook__'],
+    'bytearray_iterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__setstate__', '__sizeof__', '__str__', '__subclasshook__'],
+    'range_iterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__setstate__', '__sizeof__', '__str__', '__subclasshook__'],
+    'set_iterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__'],
+    'dict_keyiterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__'],
+    'dict_valueiterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__'],
+    'dict_itemiterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__'],
+    'dict_reversekeyiterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__'],
+    'dict_reversevalueiterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__'],
+    'dict_reverseitemiterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__'],
+    'callable_iterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__'],
+    'memory_iterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__'],
+    'enumerate': ['__class__', '__class_getitem__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__'],
+    'zip': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__setstate__', '__sizeof__', '__str__', '__subclasshook__'],
+    'map': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__setstate__', '__sizeof__', '__str__', '__subclasshook__'],
+    'filter': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__'],
+}
+
+
+#: The docstring of the type a value is, or None.
+KIND_DOC = {
+    'str': "str(object='') -> str\nstr(bytes_or_buffer[, encoding[, errors]]) -> str\n\nCreate a new string object from the given object. If encoding or\nerrors is specified, then the object must expose a data buffer\nthat will be decoded using the given encoding and error handler.\nOtherwise, returns the result of object.__str__() (if defined)\nor repr(object).\nencoding defaults to 'utf-8'.\nerrors defaults to 'strict'.",
+    'bytes': 'bytes(iterable_of_ints) -> bytes\nbytes(string, encoding[, errors]) -> bytes\nbytes(bytes_or_buffer) -> immutable copy of bytes_or_buffer\nbytes(int) -> bytes object of size given by the parameter initialized with null bytes\nbytes() -> empty bytes object\n\nConstruct an immutable array of bytes from:\n  - an iterable yielding integers in range(256)\n  - a text string encoded using the specified encoding\n  - any object implementing the buffer API.\n  - an integer',
+    'bytearray': 'bytearray(iterable_of_ints) -> bytearray\nbytearray(string, encoding[, errors]) -> bytearray\nbytearray(bytes_or_buffer) -> mutable copy of bytes_or_buffer\nbytearray(int) -> bytes array of size given by the parameter initialized with null bytes\nbytearray() -> empty bytes array\n\nConstruct a mutable bytearray object from:\n  - an iterable yielding integers in range(256)\n  - a text string encoded using the specified encoding\n  - a bytes or a buffer object\n  - any object implementing the buffer API.\n  - an integer',
+    'list': 'Built-in mutable sequence.\n\nIf no argument is given, the constructor creates a new empty list.\nThe argument must be an iterable if specified.',
+    'tuple': "Built-in immutable sequence.\n\nIf no argument is given, the constructor returns an empty tuple.\nIf iterable is specified the tuple is initialized from iterable's items.\n\nIf the argument is a tuple, the return value is the same object.",
+    'dict': "dict() -> new empty dictionary\ndict(mapping) -> new dictionary initialized from a mapping object's\n    (key, value) pairs\ndict(iterable) -> new dictionary initialized as if via:\n    d = {}\n    for k, v in iterable:\n        d[k] = v\ndict(**kwargs) -> new dictionary initialized with the name=value pairs\n    in the keyword argument list.  For example:  dict(one=1, two=2)",
+    'set': 'Build an unordered collection of unique elements.',
+    'frozenset': 'Build an immutable unordered collection of unique elements.',
+    'int': "int([x]) -> integer\nint(x, base=10) -> integer\n\nConvert a number or string to an integer, or return 0 if no arguments\nare given.  If x is a number, return x.__int__().  For floating-point\nnumbers, this truncates towards zero.\n\nIf x is not a number or if base is given, then x must be a string,\nbytes, or bytearray instance representing an integer literal in the\ngiven base.  The literal can be preceded by '+' or '-' and be surrounded\nby whitespace.  The base defaults to 10.  Valid bases are 0 and 2-36.\nBase 0 means to interpret the base from the string as an integer literal.\n>>> int('0b100', base=0)\n4",
+    'float': 'Convert a string or number to a floating-point number, if possible.',
+    'range': 'range(stop) -> range object\nrange(start, stop[, step]) -> range object\n\nReturn an object that produces a sequence of integers from start (inclusive)\nto stop (exclusive) by step.  range(i, j) produces i, i+1, i+2, ..., j-1.\nstart defaults to 0, and stop is omitted!  range(4) produces 0, 1, 2, 3.\nThese are exactly the valid indices for a list of 4 elements.\nWhen step is given, it specifies the increment (or decrement).',
+    'complex': "Create a complex number from a string or numbers.\n\nIf a string is given, parse it as a complex number.\nIf a single number is given, convert it to a complex number.\nIf the 'real' or 'imag' arguments are given, create a complex number\nwith the specified real and imaginary components.",
+    'memoryview': 'Create a new memoryview object which references the given object.',
+    'bool': 'Returns True when the argument is true, False otherwise.\nThe builtins True and False are the only two instances of the class bool.\nThe class bool is a subclass of the class int, and cannot be subclassed.',
+    'NoneType': 'The type of the None singleton.',
+    'list_iterator': None,
+    'list_reverseiterator': None,
+    'tuple_iterator': None,
+    'reversed': 'Return a reverse iterator over the values of the given sequence.',
+    'str_iterator': None,
+    'str_ascii_iterator': None,
+    'bytes_iterator': None,
+    'bytearray_iterator': None,
+    'range_iterator': None,
+    'set_iterator': None,
+    'dict_keyiterator': None,
+    'dict_valueiterator': None,
+    'dict_itemiterator': None,
+    'dict_reversekeyiterator': None,
+    'dict_reversevalueiterator': None,
+    'dict_reverseitemiterator': None,
+    'callable_iterator': None,
+    'memory_iterator': None,
+    'enumerate': 'Return an enumerate object.\n\n  iterable\n    an object supporting iteration\n\nThe enumerate object yields pairs containing a count (from start, which\ndefaults to zero) and a value yielded by the iterable argument.\n\nenumerate is useful for obtaining an indexed list:\n    (0, seq[0]), (1, seq[1]), (2, seq[2]), ...',
+    'zip': "The zip object yields n-length tuples, where n is the number of iterables\npassed as positional arguments to zip().  The i-th element in every tuple\ncomes from the i-th iterable argument to zip().  This continues until the\nshortest argument is exhausted.\n\nIf strict is true and one of the arguments is exhausted before the others,\nraise a ValueError.\n\n   >>> list(zip('abcdefg', range(3), range(4)))\n   [('a', 0, 0), ('b', 1, 1), ('c', 2, 2)]",
+    'map': 'Make an iterator that computes the function using arguments from\neach of the iterables.  Stops when the shortest iterable is exhausted.\n\nIf strict is true and one of the arguments is exhausted before the others,\nraise a ValueError.',
+    'filter': 'Return an iterator yielding those items of iterable for which function(item)\nis true. If function is None, return the items that are true.',
+}

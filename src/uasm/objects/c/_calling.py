@@ -459,6 +459,65 @@ static int64_t apy_cursor_left(apy_value it) {
     return at >= n ? 0 : n - at;
 }
 
+/* Does this cursor carry `__setstate__`, and which ones do?
+
+   READ OUT OF CPYTHON'S OWN `dir()` and transcribed here rather than
+   reasoned about: the sequence walks have it -- a list, tuple, str, bytes or
+   range, forward or reversed, and a reversed memoryview, which CPython calls
+   a plain `reversed` -- and so do `zip` and `map`. A set, a dict's three
+   walks, a `callable_iterator`, a forward `memory_iterator`, `enumerate` and
+   `filter` do NOT, and a `dir()` that claimed otherwise would be a list that
+   lies. The same line is drawn in `_gen_kindmeth.py`'s table, which is where
+   the claim comes from. */
+static int apy_cursor_setstate_p(apy_value it) {
+    int rev, base;
+    if (O(it)->kind != APY_ITER_K) return 0;
+    if (O(it)->v.it.mode == APY_IT_MAP || O(it)->v.it.mode == APY_IT_ZIP)
+        return 1;
+    if (O(it)->v.it.mode != APY_IT_PLAIN && O(it)->v.it.mode != APY_IT_REV)
+        return 0;
+    rev = O(it)->v.it.named >= APY_IT_REVOF;
+    base = O(it)->v.it.named - (rev ? APY_IT_REVOF : 0);
+    if (rev && base == APY_MVIEW_K) return 1;
+    return base == APY_LIST_K || base == APY_TUPLE_K || base == APY_STR_K
+        || base == APY_BYTES_K || base == APY_RANGE_K;
+}
+
+/* `it.__setstate__(i)` -- WHERE THE WALK IS, written rather than read. The
+   other half of `__reduce__`: pickle remakes a partly consumed iterator and
+   then says how far it had got.
+
+   THE CLAMPING IS CPYTHON'S, measured rather than derived. A forward cursor
+   takes 0..len and anything outside that -- above OR BELOW -- leaves it
+   exhausted, so `iter([1,2,3]).__setstate__(-1)` yields nothing. A reversed
+   one counts down from `i` and -1 is already its exhaustion, so a position
+   past the end is pulled back to the last element and a negative one stays
+   the end of the walk.
+
+   `zip` AND `map` KEEP NO POSITION OF THEIR OWN -- what CPython pickles for
+   them is their sub-iterators -- so theirs takes the argument and changes
+   nothing, which is what the same call does there. */
+static apy_value apy_cursor_setstate(apy_value it, apy_value where) {
+    int64_t at, n;
+    if (!apy_is_int_like(where))
+        return apy_fail("TypeError", "an integer is required");
+    at = apy_index(where);
+    if (apy_err_type) return 0;
+    if (O(it)->v.it.mode == APY_IT_MAP || O(it)->v.it.mode == APY_IT_ZIP)
+        return apy_none();
+    n = apy_raw_len(O(it)->v.it.src);
+    /* A SOURCE WITH NO LENGTH counts as empty rather than failing, which is
+       the reading `apy_cursor_left` takes of the same question. */
+    if (apy_error_occurred()) { apy_error_clear(); n = 0; }
+    if (O(it)->v.it.mode == APY_IT_REV) {
+        if (at >= n) at = n - 1;
+        O(it)->v.it.i = at < 0 ? -1 : at;
+        return apy_none();
+    }
+    O(it)->v.it.i = (at < 0 || at > n) ? n : at;
+    return apy_none();
+}
+
 static apy_value apy_kind_method(apy_value obj, int64_t arity,
                                  const char *name, int bind) {
     return apy_kind_method_of(obj, arity,
@@ -1108,6 +1167,15 @@ APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
        is a TypeError in Python and the attribute is absent. */
     if (strcmp(want, "__class_getitem__") == 0 && (seq || dict || set))
         return apy_kind_method(obj, 2, want, bind);
+    /* AND `enumerate[int]`, which is the one CURSOR CPython gives one to:
+       `zip`, `map` and `filter` have none, and `dir()` over each says so. */
+    if (strcmp(want, "__class_getitem__") == 0
+            && k == APY_ITER_K && O(obj)->v.it.mode == APY_IT_ENUMERATE)
+        return apy_kind_method(obj, 2, want, bind);
+    /* WHERE A WALK IS, written. See `apy_cursor_setstate_p` for which
+       cursors carry it. */
+    if (strcmp(want, "__setstate__") == 0 && apy_cursor_setstate_p(obj))
+        return apy_kind_method(obj, 2, want, bind);
     /* WHICH FLOATING-POINT FORMAT THIS BUILD USES. One answer, and a float
        is the only kind ever asked. */
     if (strcmp(want, "__getformat__") == 0 && k == APY_FLOAT_K)
@@ -1657,6 +1725,8 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
         if (strcmp(w, "__next__") == 0) return apy_next(a[0], 0, 0);
         if (strcmp(w, "__length_hint__") == 0)
             return apy_from_int(apy_cursor_left(a[0]));
+        if (strcmp(w, "__setstate__") == 0 && n >= 2)
+            return apy_cursor_setstate(a[0], a[1]);
         if (strcmp(w, "keys") == 0)
             return apy_dict_parts(a[0], APY_PART_KEYS);
         if (strcmp(w, "values") == 0)

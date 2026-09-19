@@ -3259,6 +3259,97 @@ PROGRAMS = {
             def __dir__(self): return ["b", "a", "a"]
         print(dir(Proxy()))
     """,
+    # A CURSOR IS A KIND TOO, and `dir()` over one answered the empty list
+    # that `dir(5)` used to -- for every walk there is: `iter([])`,
+    # `reversed(xs)`, a dict's three, a set's, `map`, `filter`, `enumerate`,
+    # `zip` and `iter(f, sentinel)`.
+    #
+    # THE NAME IS THE KEY and the names were already right: `type(iter([]))`
+    # has said `list_iterator` here for a while. What was missing was a row
+    # per name in the generated table, which is CPython's own `dir()` read at
+    # generation time -- so this asks for the LENGTH of each list rather than
+    # its contents, which would be ninety lines of dunder.
+    #
+    # AND THE SAME HONESTY RULE the builtin values are held to: a list that
+    # advertises a name `getattr` then refuses is worse than the empty one it
+    # replaces. Two names made that real work -- `__setstate__`, which is
+    # where a walk IS and which only some cursors carry, and `enumerate`'s
+    # `__class_getitem__`.
+    #
+    # A GENERATOR IS DELIBERATELY ABSENT from the table: seven of its
+    # thirty-eight names are frame introspection this runtime does not have,
+    # and listing them would be the lying list the rule exists to prevent.
+    #
+    # `memory_iterator` IS IN THE TABLE AND NOT IN THIS PROGRAM, because
+    # `iter(memoryview(b"a"))` is refused here at all -- a divergence of its
+    # own, and not this one.
+    "dir_over_a_cursor_lists_what_cpython_lists": """
+        def named():
+            return [
+                ("list_iterator", iter([1])),
+                ("list_reverseiterator", reversed([1])),
+                ("tuple_iterator", iter((1,))),
+                ("reversed", reversed((1,))),
+                ("str_ascii_iterator", iter("a")),
+                ("bytes_iterator", iter(b"a")),
+                ("bytearray_iterator", iter(bytearray(b"a"))),
+                ("range_iterator", iter(range(1))),
+                ("set_iterator", iter({1})),
+                ("frozen_iterator", iter(frozenset({1}))),
+                ("dict_keyiterator", iter({1: 2}.keys())),
+                ("dict_valueiterator", iter({1: 2}.values())),
+                ("dict_itemiterator", iter({1: 2}.items())),
+                ("dict_reversekeyiterator", reversed({1: 2}.keys())),
+                ("callable_iterator", iter(lambda: None, None)),
+                ("enumerate", enumerate([1])),
+                ("zip", zip([1])),
+                ("map", map(str, [1])),
+                ("filter", filter(None, [1])),
+            ]
+        for want, it in named():
+            print(want, type(it).__name__, len(dir(it)))
+        # THE LIST IS ONLY HONEST IF EVERY NAME ON IT ANSWERS.
+        missing = []
+        for want, it in named():
+            for n in dir(it):
+                try:
+                    getattr(it, n)
+                except Exception as e:
+                    missing.append((want, n, type(e).__name__))
+        print("refused:", missing)
+        # `__doc__` IS None FOR MOST OF THEM and real text for four, and
+        # None is an ANSWER rather than a refusal -- it is on the list.
+        for want, it in named():
+            d = it.__doc__
+            print(want, "doc",
+                  "None" if d is None else d.split(chr(10))[0][:40])
+        # `it.__setstate__(i)` -- WHERE THE WALK IS, written. The clamping is
+        # CPython's: a forward cursor takes 0..len and anything outside it,
+        # above or below, is exhausted; a reversed one counts down from `i`.
+        def at(make, n):
+            it = make()
+            it.__setstate__(n)
+            return list(it)
+        print("fwd:", [at(lambda: iter([1, 2, 3]), n)
+                       for n in (0, 1, 3, 9, -1)])
+        print("rev:", [at(lambda: reversed([1, 2, 3]), n)
+                       for n in (0, 1, 2, -1, 9)])
+        print("tuple:", at(lambda: iter((1, 2, 3)), 1))
+        print("str:", at(lambda: iter("abc"), 1))
+        print("bytes:", at(lambda: iter(b"abc"), 1))
+        print("range:", at(lambda: iter(range(3)), 1))
+        # `zip` AND `map` KEEP NO POSITION OF THEIR OWN.
+        print("zip:", at(lambda: zip([1, 2]), 1))
+        print("map:", at(lambda: map(str, [1, 2]), 1))
+        try:
+            iter([1]).__setstate__("x")
+        except Exception as e:
+            print("bad arg:", type(e).__name__, e)
+        # AND `enumerate` IS THE ONE CURSOR WITH A `__class_getitem__`.
+        e = enumerate([1])
+        print("subscript:", e.__class_getitem__(int),
+              type(e.__class_getitem__(int)).__name__)
+    """,
     "a_builtin_type_is_an_ordinary_value": """
         # A BUILTIN TYPE IS AN ORDINARY VALUE, and `memoryview` was the last one that was
         # not: naming it at all was `'memoryview' is a builtin that cannot be used as a

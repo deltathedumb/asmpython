@@ -404,10 +404,91 @@ def emit_dir_ir() -> str:
     return "\n".join(lines) + "\n"
 
 
+#: ONE VALUE OF EVERY KIND A CURSOR CAN BE, keyed by the name
+#: `apy_kind_name` gives it -- `apy_cursor_name` for a plain or reversed
+#: walk, the mode for the four lazy ones, and `v.g` for a generator.
+#:
+#: WRITTEN OUT AND NOT DERIVED, because the name is the interesting part:
+#: `iter("")` is a `str_ascii_iterator` and `iter("\u00e9")` a `str_iterator`,
+#: and only a sample with the right contents lands on the right one. The
+#: table is held to that by `cursor_types`, which asks CPython what each
+#: sample actually is and refuses to generate anything if one is misfiled.
+#:
+#: `iterator` IS DELIBERATELY ABSENT. It is this compiler's fallback name for
+#: a cursor whose source it no longer knows, and CPython has no type by that
+#: name to ask -- so there is nothing to transcribe and `dir()` over one
+#: stays as empty as it was.
+#:
+#: SO IS `generator`, and for a different reason. Its `dir()` is thirty-eight
+#: names and seven of them -- `gi_code`, `gi_frame`, `gi_running`,
+#: `gi_suspended`, `gi_yieldfrom`, `__del__` and `__class_getitem__` -- are
+#: frame introspection this runtime does not have, so listing them would be a
+#: list that lies. An empty `dir()` is wrong and a lying one is worse.
+CURSOR_SAMPLES = {
+    "list_iterator":             "iter([])",
+    "list_reverseiterator":      "reversed([])",
+    "tuple_iterator":            "iter(())",
+    "reversed":                  "reversed(())",
+    "str_iterator":              'iter("\u00e9")',
+    "str_ascii_iterator":        'iter("")',
+    "bytes_iterator":            'iter(b"")',
+    "bytearray_iterator":        "iter(bytearray())",
+    "range_iterator":            "iter(range(0))",
+    "set_iterator":              "iter(set())",
+    "dict_keyiterator":          "iter({}.keys())",
+    "dict_valueiterator":        "iter({}.values())",
+    "dict_itemiterator":         "iter({}.items())",
+    "dict_reversekeyiterator":   "reversed({}.keys())",
+    "dict_reversevalueiterator": "reversed({}.values())",
+    "dict_reverseitemiterator":  "reversed({}.items())",
+    "callable_iterator":         "iter(lambda: None, None)",
+    "memory_iterator":           'iter(memoryview(b"a"))',
+    "enumerate":                 "enumerate([])",
+    "zip":                       "zip()",
+    "map":                       "map(str, [])",
+    "filter":                    "filter(None, [])",
+}
+
+
+def cursor_types() -> dict:
+    """The TYPE of each sample, checked against the name it is filed under.
+
+    A SAMPLE UNDER THE WRONG NAME would transcribe one type's `dir()` as
+    another's, which is the one mistake this table can make and the one a
+    reader cannot see. CPython is asked rather than trusted.
+    """
+    out = {}
+    for name, expr in CURSOR_SAMPLES.items():
+        got = type(eval(expr))
+        if got.__name__ != name:
+            raise SystemExit(
+                f"{expr} is a {got.__name__}, filed under {name}")
+        out[name] = got
+    return out
+
+
 #: The kinds a VALUE can be whose type carries a docstring. Wider than
 #: `KINDS`, because `True.__doc__`, `None.__doc__` and a view's are the same
 #: question and none of the three is in the method table.
-DOC_KINDS = KINDS + ["bool", "NoneType"]
+#:
+#: AND EVERY CURSOR, because `iter([]).__doc__` is a question too. Most of
+#: them answer None, which is a row this table does not carry -- see
+#: `apy_kind_doc`'s caller for how "a kind we model, with no docstring" is
+#: told from "a kind we do not model".
+DOC_KINDS = KINDS + ["bool", "NoneType"] + list(CURSOR_SAMPLES)
+
+
+def kind_types() -> dict:
+    """Every kind this file asks CPython about, by the name the runtime gives
+    it. The builtin types longhand, and the cursors through their samples --
+    one map, because `__doc__` and `dir()` are the same question asked twice
+    and two copies of it would drift."""
+    types = {"str": str, "bytes": bytes, "bytearray": bytearray, "list": list,
+             "tuple": tuple, "dict": dict, "set": set, "frozenset": frozenset,
+             "int": int, "float": float, "range": range, "complex": complex,
+             "bool": bool, "NoneType": type(None), "memoryview": memoryview}
+    types.update(cursor_types())
+    return types
 
 
 def c_string(text: str) -> str:
@@ -434,10 +515,7 @@ def emit_doc() -> str:
     builtin value has one and reading it was an AttributeError about the
     attribute `help` is built on.
     """
-    types = {"str": str, "bytes": bytes, "bytearray": bytearray, "list": list,
-             "tuple": tuple, "dict": dict, "set": set, "frozenset": frozenset,
-             "int": int, "float": float, "range": range, "complex": complex,
-             "bool": bool, "NoneType": type(None), "memoryview": memoryview}
+    types = kind_types()
     lines = [
         "/* THE DOCSTRING OF THE TYPE A VALUE IS, by that type's name.",
         "",
@@ -482,10 +560,7 @@ def dir_rows():
     -- by the `dir_lists_every_name_getattr_answers` program in
     `test_dynamic_python.py`.
     """
-    types = {"str": str, "bytes": bytes, "bytearray": bytearray, "list": list,
-             "tuple": tuple, "dict": dict, "set": set, "frozenset": frozenset,
-             "int": int, "float": float, "range": range, "complex": complex,
-             "bool": bool, "NoneType": type(None), "memoryview": memoryview}
+    types = kind_types()
     return [(k, sorted(dir(types[k]))) for k in DIR_KINDS]
 
 
@@ -772,6 +847,31 @@ def emit_words_py() -> str:
     return "\n".join(lines) + "\n"
 
 
+def emit_tables_py() -> str:
+    """`KIND_DIR` and `KIND_DOC`, for the host.
+
+    THE THIRD READER OF THE SAME TABLE. The C reads `apy_kind_dir`, the
+    subset reads `apy_kind_dir_of`, and the interpreter used to ask live
+    CPython -- which worked for the fifteen builtin types, whose values it
+    represents with real Python ones, and could not work for a cursor: its
+    cursor is an object of this compiler's own and `dir()` over one says so.
+    Reading the generated pair here is what keeps the three answers one
+    answer.
+    """
+    lines = ["", "", "#: What `dir(x)` answers for a value of each kind.",
+             "KIND_DIR = {"]
+    for kind, names in dir_rows():
+        lines.append(f"    {kind!r}: {names!r},")
+    lines.append("}")
+    lines += ["", "", "#: The docstring of the type a value is, or None.",
+              "KIND_DOC = {"]
+    types = kind_types()
+    for kind in DOC_KINDS:
+        lines.append(f"    {kind!r}: {types[kind].__doc__!r},")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
 def main() -> None:
     here = pathlib.Path(__file__).resolve().parent
     sys.path.insert(0, str(here.parent.parent.parent))
@@ -782,7 +882,7 @@ def main() -> None:
         "reason `unicode_table.py` is: it is a table, and `objects.py` is\n"
         'meant to be read.\n"""\n\n'
         'KINDMETH_C = r"""' + emit_c(rows) + emit_doc() + emit_dir() + emit_words() + '"""\n\n'
-        + emit_words_py(),
+        + emit_words_py() + emit_tables_py(),
         encoding="utf-8")
     (here.parent.parent / "runtime" / "kindmeth_table.py").write_text(
         emit_ir(rows) + emit_dir_ir() + emit_words_ir(),

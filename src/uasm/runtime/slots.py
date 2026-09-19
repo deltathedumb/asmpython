@@ -1419,6 +1419,46 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
     if apy_name_is(want, rodata(b"__class_getitem__\0")):
         if seq or is_dict or sset:
             return apy_kind_method_of(obj, 2, want, bind)
+        # AND `enumerate[int]`, which is the one CURSOR CPython gives one
+        # to: `zip`, `map` and `filter` have none, and `dir()` over each
+        # says so.
+        if is_iter:
+            emode: i64 = i64(load(i32, offset(obj, apy_it_mode_offset())))
+            if emode == apy_it_enumerate():
+                return apy_kind_method_of(obj, 2, want, bind)
+    # `it.__setstate__(i)` -- WHERE THE WALK IS, written rather than read.
+    # WHICH CURSORS CARRY IT is CPython's own `dir()`, transcribed: the
+    # sequence walks -- a list, tuple, str, bytes or range, forward or
+    # reversed, and a reversed memoryview, which CPython calls a plain
+    # `reversed` -- and `zip` and `map`. A set, a dict's three walks, a
+    # `callable_iterator`, a forward `memory_iterator`, `enumerate` and
+    # `filter` do NOT. See the C's `apy_cursor_setstate_p`, which draws the
+    # same line.
+    if apy_name_is(want, rodata(b"__setstate__\0")):
+        if is_iter:
+            smode: i64 = i64(load(i32, offset(obj, apy_it_mode_offset())))
+            if smode == apy_it_map() or smode == apy_it_zip():
+                return apy_kind_method_of(obj, 2, want, bind)
+            if smode == apy_it_plain() or smode == apy_it_rev():
+                named: i64 = i64(load(i32,
+                                      offset(obj, apy_it_named_offset())))
+                rev: i64 = 0
+                if named >= apy_it_revof():
+                    rev = 1
+                    named = named - apy_it_revof()
+                if rev:
+                    if named == apy_mview_kind():
+                        return apy_kind_method_of(obj, 2, want, bind)
+                if named == apy_list_kind():
+                    return apy_kind_method_of(obj, 2, want, bind)
+                if named == apy_tuple_kind():
+                    return apy_kind_method_of(obj, 2, want, bind)
+                if named == apy_str_kind():
+                    return apy_kind_method_of(obj, 2, want, bind)
+                if named == apy_bytes_kind():
+                    return apy_kind_method_of(obj, 2, want, bind)
+                if named == apy_range_kind():
+                    return apy_kind_method_of(obj, 2, want, bind)
     # WHICH FLOATING-POINT FORMAT THIS BUILD USES. One answer, and a float is
     # the only kind ever asked.
     if is_float:
