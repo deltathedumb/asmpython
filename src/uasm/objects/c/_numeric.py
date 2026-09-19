@@ -247,6 +247,11 @@ APY_API apy_value apy_complex_of(apy_value re, apy_value im) {
         if (apy_error_occurred()) return 0;
         if (got) return got;
     }
+    /* AND `complex(z)` ON A COMPLEX IS `z`. One argument and nothing to
+       convert, which CPython answers by handing the receiver back -- as
+       `str`, `bytes`, `float` and `frozenset` already did here. */
+    if (O(re)->kind == APY_COMPLEX_K && O(im)->kind == APY_NONE_K)
+        return re;
     /* `complex("1+2j")` -- THE STRING FORM, which is a parse rather than an
        arithmetic conversion, and only exists for the one-argument shape. The
        message above already promised a string was acceptable. */

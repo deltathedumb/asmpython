@@ -430,6 +430,18 @@ static apy_value apy_set_from(int kind, apy_value src) {
 }
 
 APY_API apy_value apy_to_set(apy_value v) { return apy_set_from(APY_SET_K, v); }
+/* `t` IF IT IS ALREADY A TUPLE, and 0 otherwise.
+
+   `tuple(t)` on a tuple IS `t` in CPython -- an immutable container has
+   nothing to copy -- and the written form is lowered to a walk that builds a
+   fresh one. A predicate rather than a whole conversion, because the walk is
+   the frontend's and only the question is the runtime's; see
+   `_dyn_convert_sequence`. EXACTLY a tuple: a class extending one is an
+   instance holding a tuple, and `tuple(sub)` is a plain tuple in CPython. */
+APY_API apy_value apy_same_tuple(apy_value v) {
+    return O(v)->kind == APY_TUPLE_K ? v : 0;
+}
+
 APY_API apy_value apy_to_frozenset(apy_value v) {
     /* `frozenset(f)` is allowed to hand back the same object, and CPython
         does; there is nothing to copy because nothing can change it. */

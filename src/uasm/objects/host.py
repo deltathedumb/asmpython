@@ -2028,6 +2028,10 @@ def _ctor_make(h, tn, vals):
                 raise _UserFailed
             return _ctor_run(h, _BY_SYMBOL[tn], vals)
         if tn in ("list", "tuple"):
+            # `tuple(t)` ON A TUPLE IS `t`, as the written form already
+            # answers -- see `_dyn_convert_sequence`.
+            if tn == "tuple" and type(vals[0]) is tuple:
+                return vals[0]
             # ONLY A LIST ASKS FOR A LENGTH HINT. `tuple(x)` does not, in
             # CPython, and the difference is measurable from inside the
             # program -- see `_apy_length_hint`.
@@ -3678,7 +3682,11 @@ def _apy_repr(h, a):
 
 
 def _apy_str(h, a):
-    return _user(h, lambda: h._new(h._text(h._get(a[0], "apy_str"), False)))
+    # THROUGH `_value`, not `_new`. `str(s)` on a str IS `s` -- CPython hands
+    # the receiver back and so do both compiled runtimes -- and `_text`
+    # already returns the same object, so a fresh handle for it was the
+    # whole of the difference. See `_value` for why one handle per object.
+    return _user(h, lambda: h._value(h._text(h._get(a[0], "apy_str"), False)))
 
 
 def _apy_print_with(h, a):
@@ -7030,7 +7038,9 @@ def _apy_to_float(h, a):
                        f"float() argument must be a string or a real number, "
                        f"not '{h.kind_name(v)}'")
     try:
-        return h._new(float(v))
+        # THROUGH `_value`: `float(x)` on a float is `x`, which is what
+        # Python's own `float` answers and what both compiled runtimes do.
+        return h._value(float(v))
     except ValueError as e:
         return h._fail_like(e)
 
@@ -13175,6 +13185,12 @@ def _apy_set_discard(h, a):
     return h._none
 
 
+def _apy_same_tuple(h, a):
+    """`t` IF IT IS ALREADY A TUPLE, and 0 otherwise. See the C twin."""
+    v = h._get(a[0], "apy_same_tuple")
+    return a[0] if type(v) is tuple else 0
+
+
 def _to_set(h, a, frozen: bool):
     v = h._get(a[0], "apy_to_set")
     if not isinstance(v, (list, tuple, set, frozenset, dict, str, range)):
@@ -13199,7 +13215,10 @@ def _to_set(h, a, frozen: bool):
             return 0
         v = items
     try:
-        return h._new(frozenset(v) if frozen else set(v))
+        # A FROZENSET OF A FROZENSET IS THE SAME OBJECT, which Python's own
+        # `frozenset` already answers -- `_value` is what keeps it one handle
+        # here. `set()` always copies, because a set is mutable.
+        return h._value(frozenset(v) if frozen else set(v))
     except TypeError as exc:
         return h._fail_like(exc)
 
@@ -13212,6 +13231,7 @@ _TABLE.update({
     "apy_set_discard": _apy_set_discard,
     "apy_to_set": lambda h, a: _to_set(h, a, False),
     "apy_to_frozenset": lambda h, a: _to_set(h, a, True),
+    "apy_same_tuple": _apy_same_tuple,
 })
 
 
@@ -14080,6 +14100,10 @@ def _apy_complex_of(h, a):
             return h._value(_got)
         if h.err is not None:
             return 0
+    # AND `complex(z)` ON A COMPLEX IS `z`. One argument and nothing to
+    # convert, which CPython answers by handing the receiver back.
+    if isinstance(_re, complex) and _im is None:
+        return h._value(_re)
     # `complex("1+2j")` -- THE STRING FORM, which is a parse rather than an
     # arithmetic conversion, and only exists for the one-argument shape.
     if isinstance(_re, str) and _im is None:
@@ -16451,7 +16475,10 @@ def _apy_to_bytes(h, a):
         # written to.
         return h._new(bytes(src))
     if isinstance(src, bytes):
-        return h._new(src)
+        # THE RECEIVER ITSELF. `bytes(b)` on a bytes IS `b` in CPython and in
+        # both compiled runtimes, and `_value` is what hands one handle back
+        # per object -- `_new` minted a second and the two compared unequal.
+        return h._value(src)
     if isinstance(src, str):
         return h._fail("TypeError", "string argument without an encoding")
     # `bytes(3)` is THREE ZERO BYTES, not the digit three -- the same rule

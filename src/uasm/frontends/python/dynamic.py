@@ -6326,6 +6326,21 @@ class DynamicLowering:
         with a length and a subscript.
         """
         arg = self._dyn_expr(node.args[0])
+        # `tuple(t)` ON A TUPLE IS `t`. An immutable container has nothing to
+        # copy, which is why CPython hands the receiver back -- and the walk
+        # below built a fresh one, so `tuple(t) is t` was False on every path.
+        # A LIST IS NEVER SHARED: two mentions must be two objects, because
+        # one of them may be written to.
+        result = self.b.alloca(8)
+        join = None
+        if name == "tuple":
+            same = self.b.call(T.PTR, "apy_same_tuple", [arg])
+            self.b.store(T.PTR, same, result)
+            join = self.b.new_block("convjoin")
+            build = self.b.new_block("convbuild")
+            self.b.branch(self.b.cmp(Op.NE, T.PTR, same,
+                                     self.b.const(T.PTR, 0)), join, build)
+            self.b.switch_to(build)
         if name == "list":
             # `list(x)` ASKS FOR A LENGTH HINT and `tuple(x)` does not.
             # CPython sizes the result from `__len__`, or `__length_hint__`
@@ -6370,7 +6385,13 @@ class DynamicLowering:
         self.b.emit(Instruction(Op.COPY, T.I64, dst=index, args=[nxt]))
         self.b.jump(test)
         self.b.switch_to(done)
-        return self.b.load(T.PTR, out_slot)
+        built = self.b.load(T.PTR, out_slot)
+        if join is None:
+            return built
+        self.b.store(T.PTR, built, result)
+        self.b.jump(join)
+        self.b.switch_to(join)
+        return self.b.load(T.PTR, result)
 
     # ── methods and slicing ─────────────────────────────────────────────────
     def _dyn_method(self, node: ast.Call, recv: int | None = None) -> int:

@@ -2528,11 +2528,23 @@ static apy_value apy_ctor_make(const char *tn, apy_value *argv, int64_t argc) {
         if (!strcmp(tn, "bytearray")) return apy_to_bytearray(argv[0]);
         if (!strcmp(tn, "frozenset")) return apy_to_frozenset(argv[0]);
         if (!strcmp(tn, "list")) return apy_call_kind(APY_LIST_K, argv[0]);
-        if (!strcmp(tn, "tuple")) return apy_call_kind(APY_TUPLE_K, argv[0]);
+        if (!strcmp(tn, "tuple")) {
+            /* `tuple(t)` ON A TUPLE IS `t`, as the written form already
+               answers -- see `_dyn_convert_sequence`. */
+            apy_value same = apy_same_tuple(argv[0]);
+            if (same) return same;
+            return apy_call_kind(APY_TUPLE_K, argv[0]);
+        }
         if (!strcmp(tn, "dict")) return apy_call_kind(APY_DICT_K, argv[0]);
         if (!strcmp(tn, "set")) return apy_call_kind(APY_SET_K, argv[0]);
+        /* NONE FOR "NOT GIVEN", not the number 0. `complex(x)` asks the
+           class through `__complex__`, parses a string and hands a complex
+           straight back, and all three are the ONE-argument shape --
+           `complex(x, 0)` is building from parts and has nothing to ask.
+           The written form already passes None; this is the same
+           constructor reached through the name as a value. */
         if (!strcmp(tn, "complex"))
-            return apy_complex_of(argv[0], apy_from_float(0.0));
+            return apy_complex_of(argv[0], apy_none());
         if (!strcmp(tn, "memoryview")) return apy_memoryview(argv[0]);
     }
     if (argc >= 1 && argc <= 3

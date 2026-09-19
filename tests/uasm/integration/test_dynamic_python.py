@@ -3874,6 +3874,53 @@ PROGRAMS = {
 
         print("variadic:", list(gen_both(1, 2, 3, z=4)))
     """,
+    # AND A CONVERSION THAT HAS NOTHING TO DO HANDS THE RECEIVER BACK.
+    # `str(s)`, `bytes(b)`, `tuple(t)`, `frozenset(f)`, `float(x)`,
+    # `complex(z)` and `int(n)` are each their own receiver in CPython when
+    # it is already exactly that type -- there is nothing to copy about an
+    # immutable object. The interpreter built a second one of every kind;
+    # the compiled halves did for a tuple and a complex.
+    "a_no_op_conversion_hands_the_receiver_back": """
+        s = "spam here"
+        b = b"spam here"
+        t = (1, 2, 3)
+        f = frozenset({1, 2})
+        n = 10 ** 20
+        x = 1.5
+        z = 2j
+        print("str:", str(s) is s)
+        print("bytes:", bytes(b) is b)
+        print("tuple:", tuple(t) is t)
+        print("frozenset:", frozenset(f) is f)
+        print("int:", int(n) is n)
+        print("float:", float(x) is x)
+        print("complex:", complex(z) is z)
+        # AND THE MUTABLE ONES STILL COPY, because two mentions of a list
+        # must be two objects however equal they look.
+        xs = [1]
+        d = {1: 2}
+        print("mutable:", list(xs) is xs, dict(d) is d,
+              type(set({1})).__name__, type(bytearray(b)).__name__)
+        # A SUBCLASS IS CONVERTED, not handed back.
+
+        class T(tuple):
+            pass
+
+        sub = T((1, 2))
+        print("subclass:", type(tuple(sub)).__name__, tuple(sub) is sub,
+              tuple(sub) == (1, 2))
+        print("bool through int:", int(True), int(True) is True)
+        # AND THE SAME THROUGH THE NAME AS A VALUE, which is a different
+        # constructor path from the written form.
+
+        def through(fn, v):
+            return fn(v)
+
+        print("as a value:", through(tuple, t) is t, through(str, s) is s,
+              through(float, x) is x, through(frozenset, f) is f)
+        print("values:", str(s), bytes(b), tuple(t), sorted(frozenset(f)),
+              int(n), float(x), complex(z))
+    """,
     # A LITERAL IS ONE OBJECT, module-wide. `"hello" is "hello"` is True in
     # CPython and was False here, and so was every other pair of equal
     # literals: two names bound to the same text, `b"ab" is b"ab"`, `1.5 is
