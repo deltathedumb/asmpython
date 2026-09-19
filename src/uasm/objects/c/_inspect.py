@@ -935,6 +935,21 @@ APY_API apy_value apy_text_of(apy_value v, int64_t quoted) {
         apy_value r = quoted ? 0 : apy_unary_dunder(v, "__str__");
         if (r || apy_error_occurred())
             return r ? apy_text_result(r, "__str__") : r;
+        /* STR, BYTES AND BYTEARRAY WRITE A `__str__` OF THEIR OWN, and it
+           beats a subclass's `__repr__` the way any inherited method beats a
+           fallback: `class S(str)` with only a `__repr__` still prints its
+           TEXT under `str()`, because `str.__str__` is what `str()` finds
+           first and it answers the value. Every other builtin leaves
+           `tp_str` at object's, which reaches `tp_repr` and so the written
+           `__repr__` -- which is why `class D(dict)` with a `__repr__` does
+           print with it. Without this, `str(S("text"))` was `"'text'"`:
+           SIX characters where the program wrote four, so the text no longer
+           compared equal to itself. A bytearray reaches here too, since one
+           is a BYTES_K with `mut` set. */
+        if (!quoted && O(v)->v.o.held
+            && (O(O(v)->v.o.held)->kind == APY_STR_K
+                || O(O(v)->v.o.held)->kind == APY_BYTES_K))
+            return apy_text_of(O(v)->v.o.held, 0);
         r = apy_unary_dunder(v, "__repr__");
         if (r || apy_error_occurred())
             return r ? apy_text_result(r, "__repr__") : r;

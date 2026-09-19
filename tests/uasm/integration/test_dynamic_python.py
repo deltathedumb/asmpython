@@ -3874,6 +3874,71 @@ PROGRAMS = {
 
         print("variadic:", list(gen_both(1, 2, 3, z=4)))
     """,
+    # STR, BYTES AND BYTEARRAY WRITE A `__str__`, so it beats a subclass's
+    # `__repr__`. `str(S("text"))` on a `class S(str)` answered `"'text'"` --
+    # the REPR, quotes and all: six characters where the program wrote four,
+    # and a text that no longer compared equal to itself. Every other builtin
+    # leaves `tp_str` at object's, which reaches `tp_repr`, so `class
+    # D(dict)` with a written `__repr__` does print with it.
+    "a_builtin_extending_class_prints_the_builtins_text": """
+        class S(str):
+            pass
+
+        class Mid(S):
+            pass
+
+        class SR(str):
+            def __repr__(self):
+                return "<SR>"
+
+        class SS(str):
+            def __str__(self):
+                return "<SS>"
+
+            def __repr__(self):
+                return "<SS repr>"
+
+        class D(dict):
+            pass
+
+        class DR(dict):
+            def __repr__(self):
+                return "<DR>"
+
+        class L(list):
+            pass
+
+        class T(tuple):
+            pass
+
+        s = S("text")
+        print("str:", str(s), "| len:", len(str(s)), "| eq:", str(s) == "text")
+        print("repr:", repr(s))
+        # THE TEXT REACHES EVERY FUNNEL, not just the written `str()`.
+        print("print:", s)
+        print("fstring:", f"{s}")
+        print("percent:", "%s" % (s,))
+        print("format:", "{}".format(s))
+        # AN INHERITED `__str__` IS STILL THE BUILTIN'S, two levels down.
+        print("mid:", str(Mid("mid")), repr(Mid("mid")))
+        # A WRITTEN `__repr__` DOES NOT WIN under `str()` for a str
+        # subclass, because `str.__str__` is found first...
+        print("sr:", str(SR("text")), repr(SR("text")))
+        # ...but a written `__str__` wins over both.
+        print("ss:", str(SS("text")), repr(SS("text")))
+        # AND EVERY OTHER BUILTIN KEEPS THE OLD RULE: str falls back to
+        # repr, so a written one is what prints.
+        d = D()
+        d["a"] = 1
+        print("dict:", str(d), repr(d))
+        print("dict repr:", str(DR()), repr(DR()))
+        print("list:", str(L([1, 2])), repr(L([1, 2])))
+        print("tuple:", str(T((1,))), repr(T((1,))))
+        # THE EMPTY CASE, where the repr is two characters and the text none.
+        print("empty:", repr(str(S(""))), len(str(S(""))))
+        # AND A CONTAINER SHOWS ITS ELEMENTS WITH REPR, which is unchanged.
+        print("nested:", str([s]), str({"k": s}))
+    """,
     # AND A CONVERSION THAT HAS NOTHING TO DO HANDS THE RECEIVER BACK.
     # `str(s)`, `bytes(b)`, `tuple(t)`, `frozenset(f)`, `float(x)`,
     # `complex(z)` and `int(n)` are each their own receiver in CPython when

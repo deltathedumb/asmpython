@@ -7443,6 +7443,18 @@ class Instance:
     def __str__(self):
         out = self._send("__str__")
         if out is NotImplemented:
+            # STR, BYTES AND BYTEARRAY WRITE A `__str__` OF THEIR OWN, and
+            # it beats a subclass's `__repr__` the way any inherited method
+            # beats a fallback: `class S(str)` with only a `__repr__` still
+            # prints its TEXT under `str()`. Every other builtin leaves
+            # `tp_str` at object's, which reaches `tp_repr` and so the
+            # written `__repr__` -- which is why `class D(dict)` with a
+            # `__repr__` does print with it. Without this, `str(S("text"))`
+            # was `"'text'"`: six characters where the program wrote four,
+            # so the text no longer compared equal to itself. Mirrors the
+            # C's `apy_text_of`.
+            if isinstance(self.held, (str, bytes, bytearray)):
+                return str(self.held)
             return self.__repr__()
         return self.h._require_str(out, "__str__")
 
