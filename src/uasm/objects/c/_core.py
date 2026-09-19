@@ -267,6 +267,26 @@ struct apy_obj {
                suspension point, which is where a `try` around the `await`
                inside it can catch it. */
             int cancel;
+            /* THE SUB-ITERATOR A `yield from` IS DELEGATING TO, or 0 when
+               this generator is not inside one. `g.gi_yieldfrom` is the only
+               way a program can see the delegation from outside -- an
+               `asyncio`-shaped scheduler reads it to find what a coroutine is
+               really waiting on -- and the delegate otherwise lives in a
+               frame slot the outside cannot name. Set and cleared by the
+               lowered loop; see `_dyn_yield_from`. */
+            apy_value yieldfrom;
+            /* THE `def`'S OWN SIGNATURE, as a FUNC that describes it and is
+               never called. `g.gi_code` is the code of the function the
+               generator came from -- in CPython literally the same object --
+               and the STEP cannot carry it: the step is an ordinary compiled
+               function of one argument and `apy_gen_step_of` reaches it
+               through `apy_call`, so its arity is the number of arguments
+               that call passes and not the number the `def` declared.
+
+               ONE PER `def` AND SHARED, built by the module's literal filler
+               and handed over here, so constructing a generator is a load
+               rather than a second function object. See `_dyn_generator`. */
+            apy_value sig;
         } g;
         /* list, tuple, set and frozenset share ONE layout. They differ in
            what is allowed -- a tuple never grows, a set never holds two

@@ -196,6 +196,85 @@ static int apy_mview_field(const char *want) {
         || strcmp(want, "contiguous") == 0;
 }
 
+/* `f.__code__` -- ENOUGH OF ONE to answer what a program asks a function
+   about its own signature. Not a real code object: there is no bytecode here
+   to describe, and `co_argcount` and `co_varnames` are what introspection
+   actually reads.
+
+   TWO CALLERS AND ONE BODY. A generator's `gi_code` is the code of the `def`
+   it came from -- in CPython literally the same object -- and the generator
+   carries a FUNC describing that `def`, so both questions are this one. */
+static apy_value apy_func_code(apy_value fn) {
+    static apy_value cls = 0;
+    apy_value code, names;
+    int64_t declared = O(fn)->v.fn.arity
+        - (O(fn)->v.fn.vararg ? 1 : 0)
+        - (O(fn)->v.fn.kwarg ? 1 : 0);
+    int64_t i;
+    if (!cls) cls = apy_type_new(apy_lit("code"), 0);
+    code = apy_instance_new(cls);
+    if (!code) return 0;
+    names = apy_tuple_new(declared + 3);
+    for (i = 0; i < declared; i++)
+        if (O(fn)->v.fn.pnames && O(fn)->v.fn.pnames[i])
+            apy_seq_push(names, O(fn)->v.fn.pnames[i]);
+    /* `*rest` AND `**kw` COME LAST, after every declared parameter -- which
+       is where CPython puts them and where `inspect` expects to find them.
+       Omitted entirely before, so a signature rebuilt from `co_varnames` had
+       no variadic parts at all. */
+    for (i = declared; i < O(fn)->v.fn.arity; i++)
+        if (O(fn)->v.fn.pnames && O(fn)->v.fn.pnames[i])
+            apy_seq_push(names, O(fn)->v.fn.pnames[i]);
+    apy_setattr(code, apy_lit("co_argcount"),
+                apy_from_int(declared - O(fn)->v.fn.kwonly));
+    apy_setattr(code, apy_lit("co_posonlyargcount"),
+                apy_from_int(O(fn)->v.fn.posonly));
+    apy_setattr(code, apy_lit("co_kwonlyargcount"),
+                apy_from_int(O(fn)->v.fn.kwonly));
+    /* THE FLAGS `inspect` READS: 0x04 is `*rest` and 0x08 is `**kw`, which is
+       how a signature knows the variadic parts exist without a second field
+       to carry them. */
+    apy_setattr(code, apy_lit("co_flags"),
+                apy_from_int((O(fn)->v.fn.vararg ? 4 : 0)
+                             | (O(fn)->v.fn.kwarg ? 8 : 0)));
+    apy_setattr(code, apy_lit("co_varnames"), names);
+    apy_setattr(code, apy_lit("co_name"), O(fn)->v.fn.name);
+    apy_setattr(code, apy_lit("co_qualname"),
+                O(fn)->v.fn.qualname ? O(fn)->v.fn.qualname
+                                     : O(fn)->v.fn.name);
+    if (apy_error_occurred()) return 0;
+    return code;
+}
+
+/* THE FRAME A SUSPENDED GENERATOR IS SITTING IN -- enough of one, for the
+   reason the code object above is enough of one. `gi_frame` is read to ask
+   where a generator is and what it can still see, and the two things a
+   program reads off it are its code and whether it is there at all. */
+static apy_value apy_gen_frame(apy_value g) {
+    static apy_value cls = 0;
+    apy_value frame, code, from;
+    if (!cls) cls = apy_type_new(apy_lit("frame"), 0);
+    from = O(g)->v.g.sig ? O(g)->v.g.sig : O(g)->v.g.step;
+    code = from && O(from)->kind == APY_FUNC_K ? apy_func_code(from) : 0;
+    if (!code) return 0;
+    frame = apy_instance_new(cls);
+    if (!frame) return 0;
+    apy_setattr(frame, apy_lit("f_code"), code);
+    apy_setattr(frame, apy_lit("f_back"), apy_none());
+    apy_setattr(frame, apy_lit("f_lineno"), apy_from_int(0));
+    /* WHERE THE BODY IS, as far as this runtime can say it: the resume state
+       a `yield` left behind, and -1 before the first step -- which is the
+       number CPython uses for "has not run an instruction yet". */
+    apy_setattr(frame, apy_lit("f_lasti"),
+                apy_from_int(O(g)->v.g.state > 0 ? O(g)->v.g.state : -1));
+    apy_setattr(frame, apy_lit("f_globals"), apy_dict_new(1));
+    apy_setattr(frame, apy_lit("f_locals"), apy_dict_new(1));
+    apy_setattr(frame, apy_lit("f_builtins"), apy_dict_new(1));
+    apy_setattr(frame, apy_lit("f_trace"), apy_none());
+    if (apy_error_occurred()) return 0;
+    return frame;
+}
+
 APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
     const char *want = APY_CSTR(name);
     /* PEP 257 FOR THE BUILTINS. `"".__doc__` IS `str.__doc__` -- the text
@@ -619,48 +698,7 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
             if (at >= 0) return O(O(obj)->v.fn.dict)->v.d.vals[at];
         }
         if (strcmp(want, "__name__") == 0) return O(obj)->v.fn.name;
-        /* `f.__code__` -- ENOUGH OF ONE to answer what a program asks a
-           function about its own signature. Not a real code object: there is
-           no bytecode here to describe, and `co_argcount` and `co_varnames`
-           are what introspection actually reads. */
-        if (strcmp(want, "__code__") == 0) {
-            static apy_value cls = 0;
-            apy_value code, names;
-            int64_t declared = O(obj)->v.fn.arity
-                - (O(obj)->v.fn.vararg ? 1 : 0)
-                - (O(obj)->v.fn.kwarg ? 1 : 0);
-            int64_t i;
-            if (!cls) cls = apy_type_new(apy_lit("code"), 0);
-            code = apy_instance_new(cls);
-            if (!code) return 0;
-            names = apy_tuple_new(declared + 3);
-            for (i = 0; i < declared; i++)
-                if (O(obj)->v.fn.pnames && O(obj)->v.fn.pnames[i])
-                    apy_seq_push(names, O(obj)->v.fn.pnames[i]);
-            /* `*rest` AND `**kw` COME LAST, after every declared parameter --
-               which is where CPython puts them and where `inspect` expects to
-               find them. Omitted entirely before, so a signature rebuilt from
-               `co_varnames` had no variadic parts at all. */
-            for (i = declared; i < O(obj)->v.fn.arity; i++)
-                if (O(obj)->v.fn.pnames && O(obj)->v.fn.pnames[i])
-                    apy_seq_push(names, O(obj)->v.fn.pnames[i]);
-            apy_setattr(code, apy_lit("co_argcount"),
-                        apy_from_int(declared - O(obj)->v.fn.kwonly));
-            apy_setattr(code, apy_lit("co_posonlyargcount"),
-                        apy_from_int(O(obj)->v.fn.posonly));
-            apy_setattr(code, apy_lit("co_kwonlyargcount"),
-                        apy_from_int(O(obj)->v.fn.kwonly));
-            /* THE FLAGS `inspect` READS: 0x04 is `*rest` and 0x08 is `**kw`,
-               which is how a signature knows the variadic parts exist without
-               a second field to carry them. */
-            apy_setattr(code, apy_lit("co_flags"),
-                        apy_from_int((O(obj)->v.fn.vararg ? 4 : 0)
-                                     | (O(obj)->v.fn.kwarg ? 8 : 0)));
-            apy_setattr(code, apy_lit("co_varnames"), names);
-            apy_setattr(code, apy_lit("co_name"), O(obj)->v.fn.name);
-            if (apy_error_occurred()) return 0;
-            return code;
-        }
+        if (strcmp(want, "__code__") == 0) return apy_func_code(obj);
         /* `f.__defaults__` is the POSITIONAL defaults as a tuple and
            `__kwdefaults__` the keyword-only ones as a dict -- and each is
            None rather than empty when there are none, which is how a program
@@ -830,6 +868,52 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
             if (strcmp(want, "__qualname__") == 0 && O(step)->v.fn.qualname)
                 return O(step)->v.fn.qualname;
             return O(step)->v.fn.name;
+        }
+        /* WHERE THE BODY IS, which is the whole of a generator's
+           introspection and was missing entirely -- so `dir(g)` could not
+           honestly list a single one of these and did not list anything.
+
+           `gi_running` is True only WHILE the frame is executing, which a
+           program outside it can only see through a callback the body made;
+           `gi_suspended` is True between the first `next` and the last, and
+           False both before it has started and after it has finished. The
+           state is 0, k and -1 for those three, and the two questions are
+           different halves of it.
+
+           A PLAIN GENERATOR ONLY, which is why every one of the five is
+           gated. A coroutine and an async generator are this same cell --
+           see `apy_coro_mark` -- and CPython gives them the same facts under
+           `cr_` and `ag_`, which are not these names: `c().gi_code` is an
+           AttributeError where `c().cr_code` is the code. `!coro` is what
+           `apy_inspect_isgenerator` already reads, because an async
+           generator carries both flags. */
+        if (strcmp(want, "gi_running") == 0 && !O(obj)->v.g.coro)
+            return apy_from_bool(O(obj)->v.g.running);
+        if (strcmp(want, "gi_suspended") == 0 && !O(obj)->v.g.coro)
+            return apy_from_bool(O(obj)->v.g.state > 0);
+        /* WHAT A `yield from` IS DELEGATING TO, or None. Recorded by the
+           lowered loop, because the delegate otherwise lives in a frame slot
+           nothing outside the generator can name. */
+        if (strcmp(want, "gi_yieldfrom") == 0 && !O(obj)->v.g.coro)
+            return O(obj)->v.g.yieldfrom ? O(obj)->v.g.yieldfrom
+                                         : apy_none();
+        /* THE CODE OF THE `def` IT CAME FROM. The step function IS that code
+           here -- the generator cell is the frame and the step is what the
+           frame runs -- so this is `step.__code__` under the name a
+           generator gives it. */
+        if (strcmp(want, "gi_code") == 0 && !O(obj)->v.g.coro) {
+            apy_value from = O(obj)->v.g.sig ? O(obj)->v.g.sig
+                                             : O(obj)->v.g.step;
+            if (!from || O(from)->kind != APY_FUNC_K)
+                return apy_no_attribute(obj, name);
+            return apy_func_code(from);
+        }
+        /* AND THE FRAME ITSELF, which is None once the body has finished:
+           CPython drops the frame at that point, and `g.gi_frame is None` is
+           how a program asks whether a generator is spent. */
+        if (strcmp(want, "gi_frame") == 0 && !O(obj)->v.g.coro) {
+            if (O(obj)->v.g.state < 0) return apy_none();
+            return apy_gen_frame(obj);
         }
         /* THE THREE METHODS, AS VALUES. They are dispatched by name at the
            call site, so nothing needed a value for them -- until a program

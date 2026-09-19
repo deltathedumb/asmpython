@@ -241,6 +241,8 @@ class ObjectHost:
         self._member_class = None
         #: `code`, the class `f.__code__` answers -- see `_code_class`.
         self._code_cls = None
+        #: `frame`, the class `g.gi_frame` answers -- see `_gen_frame_class`.
+        self._gen_frame_cls = None
         #: `asyncio.TaskGroup` -- see `_taskgroup_class`.
         self._taskgroup_cls = None
         #: PEP 657's three classes, and the code objects made from them.
@@ -1370,6 +1372,13 @@ class ObjectHost:
         if self._code_cls is None:
             self._code_cls = Class("code")
         return self._code_cls
+
+    def _gen_frame_class(self):
+        """`frame`, the class `g.gi_frame` answers, interned so two suspended
+        generators share a type the way CPython has it."""
+        if self._gen_frame_cls is None:
+            self._gen_frame_cls = Class("frame")
+        return self._gen_frame_cls
 
     def _member_descriptor_class(self):
         """The class a slot read through its own class answers, interned so
@@ -7784,6 +7793,11 @@ def _kind_prototype(name: str):
     found = _KIND_PROTOTYPES.get(name)
     if found is not None:
         return found
+    # A GENERATOR PROTOTYPE IS A GENERATOR WITH NO STEP, for the reason a
+    # cursor prototype has no source: nothing is ever run, and what the type
+    # carries is all that is asked of it.
+    if name == "generator":
+        return Gen(None, 0)
     mode = _CURSOR_PROTO_MODES.get(name)
     if mode is None:
         return None
@@ -8703,10 +8717,21 @@ def _kind_attr(h, obj, want: str):
     # frontend lowers; this is the method behind it, which `typing` calls
     # directly when it parameterises a container. TEXT HAS NONE: `str[int]`
     # is a TypeError in Python and the attribute is absent.
-    if want == "__class_getitem__" and (seq or dict_ or set_):
+    # AND `generator[int]` BESIDE THEM, which a generic annotation on an
+    # `async def` or a `Generator[...]`-shaped alias reaches by name.
+    if want == "__class_getitem__" and (seq or dict_ or set_
+                                        or isinstance(obj, Gen)):
         return made("__class_getitem__", lambda k: Alias(
             h._get(_apy_type_object(h, [h._new(obj)]), "__class_getitem__"),
             k if isinstance(k, tuple) else (k,)))
+    # A GENERATOR HAS A FINALISER and is the only builtin value here that
+    # does: closing an abandoned one runs its `finally` blocks, which is why
+    # CPython gives the type a `__del__` where a list has none. CALLING IT
+    # DOES NOTHING, which is what CPython's does for a generator that has
+    # already finished -- and one that has not is closed by the runtime
+    # rather than by the program.
+    if want == "__del__" and isinstance(obj, Gen):
+        return made("__del__", lambda: None)
     # WHICH FLOATING-POINT FORMAT THIS BUILD USES. One answer, and a float is
     # the only kind ever asked.
     if want == "__getformat__" and isinstance(obj, float):
@@ -9423,6 +9448,61 @@ def _apy_getattr_default(h, a):
     return 0
 
 
+def _func_code(h, obj):
+    """`f.__code__` -- ENOUGH OF ONE to answer what a program asks a function
+    about its own signature. Not a real code object: there is no bytecode
+    here to describe, and `co_argcount` and `co_varnames` are what
+    introspection actually reads.
+
+    TWO CALLERS AND ONE BODY. A generator's `gi_code` is the code of the `def`
+    it came from -- in CPython literally the same object -- and the generator
+    carries a Func describing that `def`, so both questions are this one.
+    """
+    declared = obj.arity - (1 if obj.vararg else 0) - (1 if obj.kwarg else 0)
+    code = Instance(h._code_class(), h)
+    code.dict["co_argcount"] = declared - obj.kwonly
+    code.dict["co_posonlyargcount"] = obj.posonly
+    code.dict["co_kwonlyargcount"] = obj.kwonly
+    # `*rest` AND `**kw` COME LAST, after every declared parameter -- where
+    # CPython puts them and where a signature rebuilt from this expects to
+    # find them. Omitted before, so the rebuilt signature had no variadic
+    # parts at all.
+    code.dict["co_varnames"] = tuple(
+        n for n in (obj.pnames or ())[:obj.arity] if n)
+    # 0x04 is `*rest` and 0x08 is `**kw`, which is how a signature knows the
+    # variadic parts exist without a second field.
+    code.dict["co_flags"] = ((4 if obj.vararg else 0)
+                             | (8 if obj.kwarg else 0))
+    code.dict["co_name"] = obj.name
+    code.dict["co_qualname"] = (obj.qualname if obj.qualname is not None
+                                else obj.name)
+    return code
+
+
+def _gen_frame(h, g):
+    """THE FRAME A SUSPENDED GENERATOR IS SITTING IN -- enough of one, for
+    the reason the code object above is enough of one. `gi_frame` is read to
+    ask where a generator is and what it can still see, and the two things a
+    program reads off it are its code and whether it is there at all.
+    """
+    came = g.sig if g.sig is not None else g.step
+    if not isinstance(came, Func):
+        return None
+    frame = Instance(h._gen_frame_class(), h)
+    frame.dict["f_code"] = _func_code(h, came)
+    frame.dict["f_back"] = None
+    frame.dict["f_lineno"] = 0
+    # WHERE THE BODY IS, as far as this runtime can say it: the resume state
+    # a `yield` left behind, and -1 before the first step -- which is the
+    # number CPython uses for "has not run an instruction yet".
+    frame.dict["f_lasti"] = g.state if g.state > 0 else -1
+    frame.dict["f_globals"] = {}
+    frame.dict["f_locals"] = {}
+    frame.dict["f_builtins"] = {}
+    frame.dict["f_trace"] = None
+    return frame
+
+
 def _apy_default_getattr(h, a):
     """The DEFAULT lookup: instance dict, then class, then `__getattr__`.
 
@@ -9802,6 +9882,51 @@ def _apy_default_getattr(h, a):
             if name == "__qualname__" and step.qualname is not None:
                 return h._new(step.qualname)
             return h._new(step.name)
+        # WHERE THE BODY IS, which is the whole of a generator's
+        # introspection and was missing entirely -- so `dir(g)` could not
+        # honestly list a single one of these and did not list anything.
+        #
+        # `gi_running` is True only WHILE the frame is executing, which a
+        # program outside it can only see through a callback the body made;
+        # `gi_suspended` is True between the first `next` and the last, and
+        # False both before it has started and after it has finished. The
+        # state is 0, k and -1 for those three, and the two questions are
+        # different halves of it.
+        #
+        # A PLAIN GENERATOR ONLY, which is why all five are gated. A
+        # coroutine and an async generator are this same cell, and CPython
+        # gives them the same facts under `cr_` and `ag_`, which are not
+        # these names: `c().gi_code` is an AttributeError where `c().cr_code`
+        # is the code. `not coro` is what `_apy_inspect_isgenerator` already
+        # reads, because an async generator carries both flags.
+        if not obj.coro:
+            if name == "gi_running":
+                return h._bool(obj.running)
+            if name == "gi_suspended":
+                return h._bool(obj.state > 0)
+            # WHAT A `yield from` IS DELEGATING TO, or None. Recorded by the
+            # lowered loop, because the delegate otherwise lives in a frame
+            # slot nothing outside the generator can name.
+            if name == "gi_yieldfrom":
+                return h._value(obj.yieldfrom)
+            # THE CODE OF THE `def` IT CAME FROM. The step function IS that
+            # code here -- the generator cell is the frame and the step is
+            # what the frame runs -- so this is `step.__code__` under the
+            # name a generator gives it.
+            if name == "gi_code":
+                came = obj.sig if obj.sig is not None else obj.step
+                if not isinstance(came, Func):
+                    return h._no_attr(obj, name)
+                return h._new(_func_code(h, came))
+            # AND THE FRAME ITSELF, which is None once the body has
+            # finished: CPython drops the frame at that point, and
+            # `g.gi_frame is None` is how a program asks whether a generator
+            # is spent.
+            if name == "gi_frame":
+                if obj.state < 0:
+                    return h._none
+                made = _gen_frame(h, obj)
+                return h._none if made is None else h._new(made)
         # THE THREE METHODS, AS VALUES. They are dispatched by name at the
         # call site, so nothing needed a value for them -- until a program
         # asked `hasattr(g, "close")`, which every duck-typed consumer does,
@@ -9923,28 +10048,8 @@ def _apy_default_getattr(h, a):
         # was written, not as the function was defined.
         if obj.dict is not None and name in obj.dict:
             return h._value(obj.dict[name])
-        # `f.__code__` -- ENOUGH OF ONE to answer what a program asks a
-        # function about its own signature. Not a real code object: there is
-        # no bytecode here to describe, and `co_argcount` and `co_varnames`
-        # are what introspection actually reads.
         if name == "__code__":
-            declared = obj.arity - (1 if obj.vararg else 0)                 - (1 if obj.kwarg else 0)
-            code = Instance(h._code_class(), h)
-            code.dict["co_argcount"] = declared - obj.kwonly
-            code.dict["co_posonlyargcount"] = obj.posonly
-            code.dict["co_kwonlyargcount"] = obj.kwonly
-            # `*rest` AND `**kw` COME LAST, after every declared parameter --
-            # where CPython puts them and where a signature rebuilt from this
-            # expects to find them. Omitted before, so the rebuilt signature
-            # had no variadic parts at all.
-            code.dict["co_varnames"] = tuple(
-                n for n in (obj.pnames or ())[:obj.arity] if n)
-            # 0x04 is `*rest` and 0x08 is `**kw`, which is how a signature
-            # knows the variadic parts exist without a second field.
-            code.dict["co_flags"] = ((4 if obj.vararg else 0)
-                                     | (8 if obj.kwarg else 0))
-            code.dict["co_name"] = obj.name
-            return h._new(code)
+            return h._new(_func_code(h, obj))
         # `f.__defaults__` is the POSITIONAL defaults as a tuple and
         # `__kwdefaults__` the keyword-only ones as a dict -- each None rather
         # than empty when there are none, which is how a program tells "no
@@ -14317,7 +14422,7 @@ class Gen:
 
     __slots__ = ("step", "slots", "state", "sent", "running", "cache",
                  "pending", "result", "coro", "builtin", "deadline",
-                 "agen", "cancel")
+                 "agen", "cancel", "yieldfrom", "sig")
 
     def __init__(self, step, nslots: int) -> None:
         self.step = step
@@ -14344,6 +14449,20 @@ class Gen:
         self.agen = False
         self.sent = None
         self.running = False
+        #: THE SUB-ITERATOR A `yield from` IS DELEGATING TO, or None when
+        #: this generator is not inside one. `g.gi_yieldfrom` is the only way
+        #: a program can see the delegation from outside, and the delegate
+        #: otherwise lives in a frame slot the outside cannot name. Set and
+        #: cleared by the lowered loop; see `_dyn_yield_from`.
+        self.yieldfrom = None
+        #: THE `def`'S OWN SIGNATURE, as a Func that describes it and is
+        #: never called. `g.gi_code` is the code of the function the
+        #: generator came from, and the STEP cannot carry it: the step is an
+        #: ordinary compiled function of one argument and `_gen_step` reaches
+        #: it through the ordinary call machinery, so its arity is the number
+        #: of arguments that call passes and not the number the `def`
+        #: declared. One per `def` and shared; see `_dyn_generator`.
+        self.sig = None
         #: What a LENGTH QUERY drained. `sum(g)` walks by index and an index
         #: walk needs a length, so the first one to ask consumes the generator
         #: and every later index reads from the same list.
@@ -14362,6 +14481,29 @@ class Gen:
 
 def _apy_gen_new(h, a):
     return h._new(Gen(h._get(a[0], "apy_gen_new"), int(a[1])))
+
+
+def _apy_gen_sig(h, a):
+    """WHICH `def` THIS GENERATOR CAME FROM, as a Func that describes its
+    signature and is never called. See the `sig` slot for why the step
+    cannot be it."""
+    g = h._get(a[0], "apy_gen_sig")
+    if isinstance(g, Gen):
+        g.sig = h._get(a[1], "apy_gen_sig")
+    return h._none
+
+
+def _apy_gen_delegate(h, a):
+    """WHAT A `yield from` IS DELEGATING TO, recorded while the loop runs.
+
+    Cleared with None when the loop ends, which is why this takes whatever it
+    is handed rather than asking for a generator.
+    """
+    g = h._get(a[0], "apy_gen_delegate")
+    it = h._get(a[1], "apy_gen_delegate")
+    if isinstance(g, Gen):
+        g.yieldfrom = None if it is None else it
+    return h._none
 
 
 class _Slot:
@@ -16150,6 +16292,8 @@ _TABLE.update({
     "apy_gen_result": _apy_gen_result,
     "apy_gen_taken": _apy_gen_taken,
     "apy_gen_goto": _apy_gen_goto,
+    "apy_gen_delegate": _apy_gen_delegate,
+    "apy_gen_sig": _apy_gen_sig,
     "apy_gen_sent": _apy_gen_sent,
     "apy_gen_next": _apy_gen_next,
     "apy_gen_send": _apy_gen_send,

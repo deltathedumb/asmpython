@@ -422,6 +422,11 @@ class DynamicLowering:
         already has a place for work that must happen before any statement --
         see `_dyn_register_builtin_types`, which is there for the same
         reason.
+
+        AND NOT ONLY LITERALS. Anything that is one object per module and is
+        built rather than written belongs here: a generator `def`'s signature
+        is the other one, under the kind `gensig`. See
+        `_dyn_gen_signature`.
         """
         key = (kind, value)
         found = self._const_slots.get(key)
@@ -4622,6 +4627,18 @@ class DynamicLowering:
                         [step, self._dyn_str_literal(qual)])
         gen = self.b.call(T.PTR, "apy_gen_new",
                           [step, self.b.const(T.I64, len(info.slots))])
+        # AND WHICH `def` IT CAME FROM, for `g.gi_code`. The STEP cannot
+        # carry that: it is an ordinary compiled function of one argument and
+        # `apy_gen_step_of` reaches it through `apy_call`, so its arity is
+        # the one argument that call passes rather than the two `gen(a, b=2)`
+        # declares -- and `co_argcount` read the wrong number off it.
+        #
+        # ONE PER `def` AND SHARED, through the same module-wide slot a
+        # literal gets: a signature is one object per `def` whatever it is
+        # read from, so building one per construction would be a second
+        # function object per `gen(1)` for a value that never changes.
+        self.b.call(T.PTR, "apy_gen_sig",
+                    [gen, self._dyn_gen_signature(step_sym, info)])
         if info.is_async_generator:
             # `async def` WITH `yield` -- driven by `async for`, not awaited.
             self.b.call(T.PTR, "apy_agen_mark", [gen])
@@ -4642,6 +4659,61 @@ class DynamicLowering:
                                 [gen, self.b.const(T.I64, info.slots[extra]),
                                  got.register])
         self.b.ret(gen)
+
+    def _dyn_gen_signature(self, step_sym: str, info) -> int:
+        """The FUNC that DESCRIBES a generator `def`, one per module.
+
+        Never called: it carries the parameter names and the four counts
+        `apy_func_code` reads and nothing else -- no code pointer, no cells,
+        no defaults. `g.gi_code` is built from it, which is the one question
+        a generator is asked about its own signature.
+
+        THROUGH THE LITERAL SLOTS, because it is the same kind of thing: one
+        object per `def`, module-wide, built once before anything runs. See
+        `_dyn_interned`.
+        """
+        declared = len(info.params)
+        arity = (declared + (1 if info.vararg else 0)
+                 + (1 if info.kwarg else 0))
+
+        def build() -> int:
+            # NO CODE POINTER. Nothing calls this: it exists to be asked
+            # what the `def` declared, and a null is the truthful answer to
+            # "where is its body" for a value that has none.
+            made = self.b.call(T.PTR, "apy_func_new",
+                               [self.b.const(T.PTR, 0),
+                                self.b.const(T.I64, arity),
+                                self._dyn_str_literal(info.node.name),
+                                self.b.const(T.I64, 0),
+                                self.b.const(T.I64, 0),
+                                self.b.const(T.I64, 1 if info.vararg else 0)])
+            for i, param in enumerate(info.params):
+                self.b.call(T.PTR, "apy_func_param",
+                            [made, self.b.const(T.I64, i),
+                             self._dyn_str_literal(param.name)])
+            # `*rest` AND `**kw` HAVE NAMES TOO, after every declared
+            # parameter, which is where CPython puts them in `co_varnames`.
+            extra = [one for one in (info.vararg, info.kwarg) if one]
+            for at, one in enumerate(extra):
+                self.b.call(T.PTR, "apy_func_param",
+                            [made, self.b.const(T.I64, declared + at),
+                             self._dyn_str_literal(one)])
+            if info.posonly:
+                self.b.call(T.PTR, "apy_func_posonly",
+                            [made, self.b.const(T.I64, info.posonly)])
+            if info.kwonly:
+                self.b.call(T.PTR, "apy_func_kwonly",
+                            [made, self.b.const(T.I64, info.kwonly)])
+            if info.kwarg:
+                self.b.call(T.PTR, "apy_func_kwarg",
+                            [made, self.b.const(T.I64, 1)])
+            qual = info.qualname or info.node.name
+            if qual != info.node.name:
+                self.b.call(T.PTR, "apy_func_qualname",
+                            [made, self._dyn_str_literal(qual)])
+            return made
+
+        return self._dyn_interned("gensig", step_sym, build)
 
     def _gen_temp(self) -> int | None:
         """A frame slot for a COMPILER TEMPORARY, or None outside a generator.
@@ -4728,6 +4800,11 @@ class DynamicLowering:
         walk = self.b.call(T.PTR, "apy_getiter", [source])
         self._dyn_check()
         self._gen_put(at_src, walk)
+        # AND ON THE GENERATOR ITSELF, because `g.gi_yieldfrom` is the only
+        # way the delegation is visible from outside: the delegate lives in a
+        # frame slot nothing but this loop can name, and a scheduler reads it
+        # to find what a coroutine is really waiting on.
+        self.b.call(T.PTR, "apy_gen_delegate", [self._gen[0], walk])
         self._gen_put(at_sent, self.b.call(T.PTR, "apy_none", []))
         test = self.b.new_block("yftest")
         body = self.b.new_block("yfbody")
@@ -4753,6 +4830,11 @@ class DynamicLowering:
         self.b.jump(test)
 
         self.b.switch_to(done)
+        # AND CLEARED WHEN THE LOOP ENDS. A generator suspended at an
+        # ordinary `yield` after a `yield from` has finished is not
+        # delegating to anything, and CPython answers None there.
+        self.b.call(T.PTR, "apy_gen_delegate",
+                    [self._gen[0], self.b.call(T.PTR, "apy_none", [])])
         return self.b.call(T.PTR, "apy_gen_taken", [self._gen_get(at_src)])
 
     def _held_accumulator(self, value: int, parts):

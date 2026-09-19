@@ -419,12 +419,14 @@ def emit_dir_ir() -> str:
 #: name to ask -- so there is nothing to transcribe and `dir()` over one
 #: stays as empty as it was.
 #:
-#: SO IS `generator`, and for a different reason. Its `dir()` is thirty-eight
-#: names and seven of them -- `gi_code`, `gi_frame`, `gi_running`,
-#: `gi_suspended`, `gi_yieldfrom`, `__del__` and `__class_getitem__` -- are
-#: frame introspection this runtime does not have, so listing them would be a
-#: list that lies. An empty `dir()` is wrong and a lying one is worse.
+#: `generator` IS HERE, and was not until the seven names that made a lying
+#: list out of an honest one could all answer: `gi_code`, `gi_frame`,
+#: `gi_running`, `gi_suspended`, `gi_yieldfrom`, `__del__` and
+#: `__class_getitem__`. A generator is not a cursor -- it is a frame -- but
+#: `dir()` and `__doc__` ask the same question of it, so it is filed here
+#: with the rest of them.
 CURSOR_SAMPLES = {
+    "generator":                 "(_ for _ in ())",
     "list_iterator":             "iter([])",
     "list_reverseiterator":      "reversed([])",
     "tuple_iterator":            "iter(())",

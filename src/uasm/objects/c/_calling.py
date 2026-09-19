@@ -593,6 +593,10 @@ APY_API apy_value apy_kind_prototype(apy_value type_namev) {
             if (it) O(it)->v.it.named = apy_cursor_protos[ci].named;
             return it;
         }
+    /* A GENERATOR PROTOTYPE IS A GENERATOR WITH NO STEP, for the reason a
+       cursor prototype has no source: nothing is ever run, and what the type
+       carries is all that is asked of it. */
+    if (strcmp(type_name, "generator") == 0) return apy_gen_new(0, 0);
     if (strcmp(type_name, "list") == 0)  return apy_list_new(1);
     if (strcmp(type_name, "tuple") == 0) return apy_tuple_new(1);
     if (strcmp(type_name, "dict") == 0)  return apy_dict_new(1);
@@ -1228,6 +1232,18 @@ APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
     if (strcmp(want, "__class_getitem__") == 0
             && k == APY_ITER_K && O(obj)->v.it.mode == APY_IT_ENUMERATE)
         return apy_kind_method(obj, 2, want, bind);
+    /* AND `generator[int]`, which a generic annotation on an `async def` or
+       a `Generator[...]`-shaped alias reaches by name. */
+    if (strcmp(want, "__class_getitem__") == 0 && k == APY_GEN_K)
+        return apy_kind_method(obj, 2, want, bind);
+    /* A GENERATOR HAS A FINALISER and is the only builtin value here that
+       does: closing an abandoned one runs its `finally` blocks, which is why
+       CPython gives the type a `__del__` where a list has none. Answerable
+       rather than useful -- there is nothing for a program to do by calling
+       it -- but `dir(g)` lists it and a list that lies is worse than the
+       empty one this replaced. */
+    if (strcmp(want, "__del__") == 0 && k == APY_GEN_K)
+        return apy_kind_method(obj, 1, want, bind);
     /* WHERE A WALK IS, written. See `apy_cursor_setstate_p` for which
        cursors carry it. */
     if (strcmp(want, "__setstate__") == 0 && apy_cursor_setstate_p(obj))
@@ -1782,6 +1798,10 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
                 return apy_alias_new(a[0], args);
             return apy_alias_new(apy_type_for(a[0]), args);
         }
+        /* CALLING IT DOES NOTHING, which is what CPython's does for a
+           generator that has already finished -- and one that has not is
+           closed by the runtime rather than by the program. */
+        if (strcmp(w, "__del__") == 0) return apy_none();
         if (strcmp(w, "__hash__") == 0) return apy_hash(a[0]);
         if (strcmp(w, "__len__") == 0) return apy_len(a[0]);
         if (strcmp(w, "__iter__") == 0) return apy_iter(a[0]);

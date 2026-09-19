@@ -1437,6 +1437,19 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
             emode: i64 = i64(load(i32, offset(obj, apy_it_mode_offset())))
             if emode == apy_it_enumerate():
                 return apy_kind_method_of(obj, 2, want, bind)
+        # AND `generator[int]`, which a generic annotation on an `async def`
+        # or a `Generator[...]`-shaped alias reaches by name.
+        if is_gen:
+            return apy_kind_method_of(obj, 2, want, bind)
+    # A GENERATOR HAS A FINALISER and is the only builtin value here that
+    # does: closing an abandoned one runs its `finally` blocks, which is why
+    # CPython gives the type a `__del__` where a list has none. Answerable
+    # rather than useful -- there is nothing for a program to do by calling
+    # it -- but `dir(g)` lists it and a list that lies is worse than the
+    # empty one this replaced.
+    if apy_name_is(want, rodata(b"__del__\0")):
+        if is_gen:
+            return apy_kind_method_of(obj, 1, want, bind)
     # `it.__setstate__(i)` -- WHERE THE WALK IS, written rather than read.
     # WHICH CURSORS CARRY IT is CPython's own `dir()`, transcribed: the
     # sequence walks -- a list, tuple, str, bytes or range, forward or
@@ -1660,6 +1673,11 @@ def apy_kind_prototype(type_name: ptr) -> ptr:
         return apy_cursor_proto_of(apy_it_map(), apy_list_kind())
     if apy_name_is(type_name, rodata(b"filter\0")):
         return apy_cursor_proto_of(apy_it_filter(), apy_list_kind())
+    # A GENERATOR PROTOTYPE IS A GENERATOR WITH NO STEP, for the reason a
+    # cursor prototype has no source: nothing is ever run, and what the type
+    # carries is all that is asked of it.
+    if apy_name_is(type_name, rodata(b"generator\0")):
+        return apy_gen_new(ptr(0), 0)
     return ptr(0)
 
 

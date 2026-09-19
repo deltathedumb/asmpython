@@ -48,6 +48,8 @@ APY_API apy_value apy_gen_new(apy_value step, int64_t nslots) {
     o->v.g.agen = 0;
     o->v.g.deadline = 0.0;
     o->v.g.cancel = 0;
+    o->v.g.yieldfrom = 0;
+    o->v.g.sig = 0;
     return V(o);
 }
 
@@ -242,6 +244,26 @@ APY_API apy_value apy_gen_result(apy_value g, apy_value v) {
 APY_API apy_value apy_gen_taken(apy_value g) {
     if (O(g)->kind != APY_GEN_K || !O(g)->v.g.result) return apy_none();
     return O(g)->v.g.result;
+}
+
+/* WHICH `def` THIS GENERATOR CAME FROM, as a FUNC that describes its
+   signature and is never called. Set once by the constructor, from a value
+   the module built once; see the `sig` field for why the step cannot be it. */
+APY_API apy_value apy_gen_sig(apy_value g, apy_value f) {
+    if (O(g)->kind == APY_GEN_K) O(g)->v.g.sig = f;
+    return apy_none();
+}
+
+/* WHAT A `yield from` IS DELEGATING TO, recorded while the loop runs.
+
+   `g.gi_yieldfrom` is the only way the delegation is visible from outside the
+   generator -- the delegate otherwise lives in a frame slot nothing but the
+   lowered loop can name -- and a scheduler reads it to find what a coroutine
+   is really waiting on. Cleared with a null when the loop ends, which is why
+   this takes a raw value rather than asking for a generator. */
+APY_API apy_value apy_gen_delegate(apy_value g, apy_value it) {
+    if (O(g)->kind == APY_GEN_K) O(g)->v.g.yieldfrom = it;
+    return apy_none();
 }
 
 APY_API apy_value apy_gen_goto(apy_value g, int64_t k) {

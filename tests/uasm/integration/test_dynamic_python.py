@@ -3463,6 +3463,74 @@ PROGRAMS = {
         print("cursor:", type(e).__class_getitem__(int),
               type(type(e).__class_getitem__).__name__)
     """,
+    # A GENERATOR KNOWS WHERE ITS BODY IS. `dir(g)` answered the empty list
+    # where CPython lists thirty-eight names, because seven of them had
+    # nothing to answer with: `gi_running`, `gi_suspended`, `gi_yieldfrom`,
+    # `gi_code`, `gi_frame`, `__del__` and `__class_getitem__`. The first
+    # five are the frame, which the generator cell IS and the step function
+    # is the code of; `gi_yieldfrom` is the one with nowhere to live, so the
+    # lowered `yield from` records it.
+    "a_generator_knows_where_its_body_is": """
+        def gen(a, b=2):
+            x = a + b
+            yield x
+            yield from [7, 8]
+            return 99
+
+        g = gen(1)
+        d = dir(g)
+        print(len(d), type(g).__name__)
+        print([n for n in d if not n.startswith("_")])
+        # THE LIST IS ONLY HONEST IF EVERY NAME ON IT ANSWERS.
+        refused = []
+        for n in d:
+            try:
+                getattr(g, n)
+            except Exception as e:
+                refused.append((n, type(e).__name__))
+        print("refused:", refused)
+        # WHERE THE BODY IS, before it has started. The code object is the
+        # "enough of one" the `__code__` arm builds, so only what that one
+        # carries is read off it -- `co_varnames` holds the parameters and
+        # not the locals, and `co_flags` has neither `CO_GENERATOR` nor the
+        # two every function sets.
+        print(g.gi_running, g.gi_suspended, g.gi_yieldfrom)
+        print(g.gi_code.co_name, g.gi_code.co_argcount,
+              g.gi_code.co_kwonlyargcount, g.gi_code.co_posonlyargcount)
+        print(g.gi_frame is None, g.gi_frame.f_code.co_name, g.gi_frame.f_back)
+        print(type(g.__del__).__name__, type(g).__class_getitem__(int))
+        # AND AFTER EACH STEP. `gi_suspended` is True between the first
+        # `next` and the last; `gi_yieldfrom` is the sub-iterator only while
+        # the `yield from` is running, and None on either side of it.
+        print(next(g), g.gi_suspended, g.gi_running, g.gi_yieldfrom)
+        print(next(g), type(g.gi_yieldfrom).__name__)
+        print(next(g), type(g.gi_yieldfrom).__name__)
+        for _ in g:
+            pass
+        print(g.gi_suspended, g.gi_yieldfrom, g.gi_frame is None)
+        # A GENERATOR EXPRESSION IS ONE TOO, named for the scope it was
+        # written in.
+        q = (i for i in [1])
+        print(q.gi_code.co_name, q.gi_suspended, q.gi_frame is None)
+        # A COROUTINE AND AN ASYNC GENERATOR ARE THE SAME CELL HERE, and
+        # CPython gives them these facts under `cr_` and `ag_` -- so `gi_` is
+        # an AttributeError on both, and the two dunders every one of them
+        # has are not.
+        async def c():
+            return 1
+        async def ag():
+            yield 1
+        co = c()
+        a = ag()
+        for v in (co, a):
+            try:
+                v.gi_code
+                print("answered")
+            except AttributeError as e:
+                print(type(v).__name__, "|", e)
+        print(type(co.__del__).__name__, type(a.__del__).__name__)
+        co.close()
+    """,
     # A LITERAL IS ONE OBJECT, module-wide. `"hello" is "hello"` is True in
     # CPython and was False here, and so was every other pair of equal
     # literals: two names bound to the same text, `b"ab" is b"ab"`, `1.5 is
