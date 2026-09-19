@@ -57,6 +57,12 @@ enum {
     APY_NAT_TASK_CANCEL, APY_NAT_TASK_RESULT, APY_NAT_TASK_DONE,
     APY_NAT_TASK_CANCELLED, APY_NAT_TG_ENTER, APY_NAT_TG_EXIT,
     APY_NAT_TG_CREATE,
+    /* AND AN ASYNC GENERATOR'S THREE, which are not the same three: CPython
+       gives `asend`, `athrow` and `aclose` to an async generator and `send`,
+       `throw` and `close` to a coroutine and a plain one, and `dir()` over
+       each says exactly that. Each answers an AWAITABLE rather than doing
+       the work, which is what makes `await a.aclose()` the spelling. */
+    APY_NAT_AGEN_SEND, APY_NAT_AGEN_THROW, APY_NAT_AGEN_CLOSE,
     APY_NAT_GEN_CLOSE
 };
 

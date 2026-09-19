@@ -3685,6 +3685,74 @@ PROGRAMS = {
 
         print("method:", D().m(name) is name)
     """,
+    # AND A COROUTINE AND AN ASYNC GENERATOR KNOW WHERE THEIR BODIES ARE.
+    # They are the same cell as a generator here and three different types
+    # in CPython, which gives each of them the same five facts under its own
+    # prefix -- `gi_`, `cr_`, `ag_` -- and its own three methods. `dir()`
+    # over either was the empty list, for the reason `dir(g)` was: seven
+    # names apiece had nothing to answer with.
+    "a_coroutine_and_an_async_generator_know_where_they_are": """
+        import asyncio
+
+        async def co(a, b=2):
+            x = a + b
+            await asyncio.sleep(0)
+            return x
+
+        async def ag(a, b=2):
+            yield a
+            yield b
+
+        c = co(1)
+        g = ag(1)
+        print("kinds:", type(c).__name__, type(g).__name__)
+        print("dir:", len(dir(c)), len(dir(g)))
+        print("c named:", [n for n in dir(c) if not n.startswith("_")])
+        print("g named:", [n for n in dir(g) if not n.startswith("_")])
+        # THE LIST IS ONLY HONEST IF EVERY NAME ON IT ANSWERS.
+        print("refused:", [(n, k) for k, v in (("c", c), ("g", g))
+                           for n in dir(v) if not hasattr(v, n)])
+        print("c where:", c.cr_running, c.cr_suspended, c.cr_await,
+              c.cr_origin, c.cr_code.co_name, c.cr_code.co_argcount,
+              c.cr_frame is None)
+        print("g where:", g.ag_running, g.ag_suspended, g.ag_await,
+              g.ag_code.co_name, g.ag_code.co_argcount, g.ag_frame is None)
+        # AND `gi_` IS NOT THEIRS, which is the other half of the same rule.
+        for v in (c, g):
+            try:
+                v.gi_code
+                print("answered")
+            except AttributeError as e:
+                print(type(v).__name__, "|", e)
+        # NOR IS EACH OTHER'S SET OF METHODS.
+        print("crossed:", hasattr(c, "asend"), hasattr(g, "send"),
+              hasattr(c, "send"), hasattr(g, "asend"))
+        print("dunders:", type(c.__del__).__name__, type(g.__del__).__name__,
+              type(c).__class_getitem__(int),
+              type(g).__class_getitem__(int))
+
+        async def drive():
+            a = ag(1)
+            print("aiter is self:", a.__aiter__() is a)
+            print("asend:", await a.asend(None))
+            print("mid:", a.ag_suspended, a.ag_running)
+            print("anext:", await a.__anext__())
+            try:
+                await a.asend(None)
+            except StopAsyncIteration:
+                print("exhausted")
+            print("spent:", a.ag_frame is None)
+            b = ag(1)
+            print("aclose:", await b.aclose())
+            print("closed:", b.ag_frame is None)
+            total = []
+            async for v in ag(1):
+                total.append(v)
+            print("async for still works:", total)
+
+        asyncio.run(drive())
+        c.close()
+    """,
     # A LITERAL IS ONE OBJECT, module-wide. `"hello" is "hello"` is True in
     # CPython and was False here, and so was every other pair of equal
     # literals: two names bound to the same text, `b"ab" is b"ab"`, `1.5 is

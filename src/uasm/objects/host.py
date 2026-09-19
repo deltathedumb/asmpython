@@ -7825,8 +7825,11 @@ def _kind_prototype(name: str):
     # A GENERATOR PROTOTYPE IS A GENERATOR WITH NO STEP, for the reason a
     # cursor prototype has no source: nothing is ever run, and what the type
     # carries is all that is asked of it.
-    if name == "generator":
-        return Gen(None, 0)
+    if name in ("generator", "coroutine", "async_generator"):
+        made = Gen(None, 0)
+        made.coro = name != "generator"
+        made.agen = name == "async_generator"
+        return made
     mode = _CURSOR_PROTO_MODES.get(name)
     if mode is None:
         return None
@@ -7961,7 +7964,11 @@ from uasm.frontends.python.methods import (  # noqa: E402
     DYN_METHOD_TABLE, METHOD_PARAMS, REQUIRED, KeywordError, _suggest,
     fold_ctor_keywords, method_symbol)
 from uasm.objects.c.kindmeth_table import (  # noqa: E402
-    KINDMETH_WORDS, KIND_DIR, KIND_DOC, CURSOR_SAMPLES)
+    KINDMETH_WORDS, KIND_DIR, KIND_DOC, CURSOR_SAMPLES,
+    # THE TWO SAMPLES THAT ARE NOT EXPRESSIONS. The table names them
+    # and the `eval` below needs them in scope; see the generated
+    # file, which carries both.
+    _sample_coroutine, _sample_async_generator)
 
 #: EVERY CURSOR TYPE JOINS THE ORACLE, through the same sample expressions
 #: the generated tables were built from. `type(iter([])).__next__` is a
@@ -8761,6 +8768,23 @@ def _kind_attr(h, obj, want: str):
     # rather than by the program.
     if want == "__del__" and isinstance(obj, Gen):
         return made("__del__", lambda: None)
+    # AND THE PROTOCOL EACH OF THE THREE ANSWERS TO. A coroutine is what
+    # `await` walks and carries `__await__`; an async generator is what
+    # `async for` walks and carries the two halves of that protocol; a plain
+    # generator has neither, which is what `dir()` over each says.
+    #
+    # `__await__` AND `__aiter__` HAND THE RECEIVER BACK: there is no second
+    # object between the two here, and `iter(x)` answers the same way for a
+    # generator. `__anext__` is `asend(None)`, which is what CPython's is.
+    if isinstance(obj, Gen) and obj.coro and not obj.agen:
+        if want == "__await__":
+            return made("__await__", lambda: obj)
+    if isinstance(obj, Gen) and obj.agen:
+        if want == "__aiter__":
+            return made("__aiter__", lambda: obj)
+        if want == "__anext__":
+            return made("__anext__", lambda: h._get(
+                _apy_agen_asend(h, [h._value(obj), h._none]), "__anext__"))
     # WHICH FLOATING-POINT FORMAT THIS BUILD USES. One answer, and a float is
     # the only kind ever asked.
     if want == "__getformat__" and isinstance(obj, float):
@@ -9956,6 +9980,39 @@ def _apy_default_getattr(h, a):
                     return h._none
                 made = _gen_frame(h, obj)
                 return h._none if made is None else h._new(made)
+        # AND THE SAME FIVE UNDER TWO OTHER PREFIXES. A coroutine and an
+        # async generator are this same cell, and CPython gives each of the
+        # three its own spelling: `gi_` for a generator, `cr_` for a
+        # coroutine, `ag_` for an async generator, and `dir()` over each
+        # lists only its own.
+        #
+        # `cr_await` AND `ag_await` ARE THE DELEGATE, which is the same slot
+        # a `yield from` records: what the frame is waiting on is what it is
+        # waiting on, whichever keyword put it there.
+        #
+        # `cr_origin` IS ALWAYS None -- it is filled by coroutine origin
+        # tracking, which nothing here turns on, and None is what CPython
+        # answers by default.
+        elif name[:3] == ("ag_" if obj.agen else "cr_"):
+            rest = name[3:]
+            if rest == "running":
+                return h._bool(obj.running)
+            if rest == "suspended":
+                return h._bool(obj.state > 0)
+            if rest == "await":
+                return h._value(obj.yieldfrom)
+            if rest == "origin" and not obj.agen:
+                return h._none
+            if rest == "code":
+                came = obj.sig if obj.sig is not None else obj.step
+                if not isinstance(came, Func):
+                    return h._no_attr(obj, name)
+                return h._new(_func_code(h, came))
+            if rest == "frame":
+                if obj.state < 0:
+                    return h._none
+                made = _gen_frame(h, obj)
+                return h._none if made is None else h._new(made)
         # THE THREE METHODS, AS VALUES. They are dispatched by name at the
         # call site, so nothing needed a value for them -- until a program
         # asked `hasattr(g, "close")`, which every duck-typed consumer does,
@@ -9971,6 +10028,23 @@ def _apy_default_getattr(h, a):
             return h._new(Native(
                 name, lambda g, _fn=fn: h._get(_fn(h, [h._value(g)]), name)
             ).bind(obj))
+        # AN ASYNC GENERATOR HAS THE OTHER THREE. CPython gives `asend`,
+        # `athrow` and `aclose` to one and `send`, `throw` and `close` to a
+        # coroutine and a plain generator, and neither has the other's --
+        # `hasattr(a, "send")` is False. Each answers an AWAITABLE; see
+        # `_apy_agen_asend`.
+        if obj.agen:
+            if name in ("asend", "athrow", "aclose"):
+                body = {"asend": lambda g, v: h._get(
+                            _apy_agen_asend(h, [h._value(g), h._value(v)]),
+                            name),
+                        "athrow": lambda g, e: h._get(
+                            _apy_agen_athrow(h, [h._value(g), h._value(e)]),
+                            name),
+                        "aclose": lambda g: h._get(
+                            _apy_agen_aclose(h, [h._value(g)]), name)}[name]
+                return h._new(Native(name, body).bind(obj))
+            return h._no_attr(obj, name)
         if name in ("send", "throw", "close"):
             body = {"send": lambda g, v: h._get(
                         _apy_gen_send(h, [h._value(g), h._value(v)]), name),
@@ -14702,6 +14776,14 @@ _CORO_TASK = 4
 _CORO_WAITFOR = 5
 _CORO_VALUE = 6
 _CORO_TGWAIT = 7
+#: WHAT `a.asend(v)`, `a.athrow(e)` AND `a.aclose()` HAND BACK. An async
+#: generator's three methods answer an AWAITABLE rather than doing the work,
+#: which is the whole reason they are spelled with the `a` -- so each is a
+#: built-in coroutine holding the generator and what to do to it, and the
+#: work happens when it is awaited.
+_CORO_ASEND = 8
+_CORO_ATHROW = 9
+_CORO_ACLOSE = 10
 
 #: THE VIRTUAL CLOCK. Not a real one -- nothing here waits, and `sleep(10)`
 #: returns as fast as `sleep(0)`. What it buys is ORDER: two coroutines
@@ -15092,6 +15174,84 @@ def _apy_agen_step(h, a):
     return h._stop if done else h._value(value)
 
 
+def _asend_step(h, g):
+    """ONE STEP OF `asend`, `athrow` OR `aclose`, whichever built this
+    awaitable.
+
+    THE WORK HAPPENS HERE and not where the method was called, which is what
+    makes `a.asend(1)` without an `await` do nothing -- as CPython's does.
+    The generator is in slot 0 and the argument in slot 1; the builtin says
+    which of the three this is.
+
+    SUSPENSION PASSES THROUGH: an `await` inside the async generator's own
+    body suspends it, and the token travels out to whoever is awaiting this,
+    which re-enters here and steps the generator again.
+
+    EXHAUSTION IS `StopAsyncIteration`, the protocol's own end marker.
+    """
+    agen, arg = g.slots[0], g.slots[1]
+    if g.builtin == _CORO_ACLOSE:
+        if not _apy_gen_close(h, [h._value(agen)]):
+            return 0
+        g.result = None
+        return h._stop
+    if g.builtin == _CORO_ATHROW and arg is not None:
+        # THE EXCEPTION IS DELIVERED ONCE: a second entry after a suspension
+        # must not raise it again.
+        g.slots[1] = None
+        got = _apy_gen_throw(h, [h._value(agen), h._value(arg)])
+        if not got:
+            return 0
+        out = h._get(got, "athrow")
+        if out is _SUSPEND:
+            return got
+        g.result = out
+        return h._stop
+    if agen.state < 0:
+        return h._fail("StopAsyncIteration", "")
+    value, done = _gen_step(h, agen, arg)
+    if done is None:
+        return 0
+    if value is _SUSPEND:
+        return h._suspend
+    if done:
+        return h._fail("StopAsyncIteration", "")
+    # SENT ONCE. A resumption after a suspension carries None, exactly as a
+    # plain generator's does.
+    g.slots[1] = None
+    g.result = value
+    return h._stop
+
+
+def _agen_await(h, agen, arg, which):
+    """THE THREE METHODS THEMSELVES, as the awaitables they answer."""
+    if not isinstance(agen, Gen) or not agen.agen:
+        return h._fail("TypeError",
+                       f"'{h.kind_name(agen)}' object is not an async "
+                       f"generator")
+    g = Gen(None, 2)
+    g.coro = True
+    g.builtin = which
+    g.slots[0] = agen
+    g.slots[1] = arg
+    return h._new(g)
+
+
+def _apy_agen_asend(h, a):
+    return _agen_await(h, h._get(a[0], "apy_agen_asend"),
+                       h._get(a[1], "apy_agen_asend"), _CORO_ASEND)
+
+
+def _apy_agen_athrow(h, a):
+    return _agen_await(h, h._get(a[0], "apy_agen_athrow"),
+                       h._get(a[1], "apy_agen_athrow"), _CORO_ATHROW)
+
+
+def _apy_agen_aclose(h, a):
+    return _agen_await(h, h._get(a[0], "apy_agen_aclose"), None,
+                       _CORO_ACLOSE)
+
+
 def _apy_await_step(h, a):
     """`await x`, one step of it.
 
@@ -15117,6 +15277,8 @@ def _apy_await_step(h, a):
         if awaited.builtin == _CORO_VALUE:
             awaited.result = awaited.slots[0]
             return h._stop
+        if awaited.builtin in (_CORO_ASEND, _CORO_ATHROW, _CORO_ACLOSE):
+            return _asend_step(h, awaited)
         # A `sleep` ALWAYS SUSPENDS AT LEAST ONCE, before the clock is even
         # consulted: `sleep(0)` is how a program hands control to the loop on
         # purpose. Returning immediately when the deadline had passed ran each
@@ -16323,6 +16485,9 @@ _TABLE.update({
     "apy_gen_goto": _apy_gen_goto,
     "apy_gen_delegate": _apy_gen_delegate,
     "apy_gen_sig": _apy_gen_sig,
+    "apy_agen_asend": _apy_agen_asend,
+    "apy_agen_athrow": _apy_agen_athrow,
+    "apy_agen_aclose": _apy_agen_aclose,
     "apy_gen_sent": _apy_gen_sent,
     "apy_gen_next": _apy_gen_next,
     "apy_gen_send": _apy_gen_send,

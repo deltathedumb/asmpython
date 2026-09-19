@@ -915,10 +915,69 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
             if (O(obj)->v.g.state < 0) return apy_none();
             return apy_gen_frame(obj);
         }
+        /* AND THE SAME FIVE UNDER TWO OTHER PREFIXES. A coroutine and an
+           async generator are this same cell -- see `apy_coro_mark` -- and
+           CPython gives each of the three its own spelling: `gi_` for a
+           generator, `cr_` for a coroutine, `ag_` for an async generator,
+           and `dir()` over each lists only its own.
+
+           `cr_await` AND `ag_await` ARE THE DELEGATE, which is the same
+           field a `yield from` records: what the frame is waiting on is what
+           the frame is waiting on, whichever keyword put it there. See
+           `_dyn_await`, which writes it.
+
+           `cr_origin` IS ALWAYS None. It is filled by coroutine origin
+           tracking, which CPython turns on with `sys.set_coroutine_origin_
+           tracking_depth` and nothing here turns on -- so None is the
+           answer, and the same one CPython gives by default. */
+        if (O(obj)->v.g.coro) {
+            const char *pre = O(obj)->v.g.agen ? "ag_" : "cr_";
+            if (strncmp(want, pre, 3) == 0) {
+                const char *rest = want + 3;
+                if (strcmp(rest, "running") == 0)
+                    return apy_from_bool(O(obj)->v.g.running);
+                if (strcmp(rest, "suspended") == 0)
+                    return apy_from_bool(O(obj)->v.g.state > 0);
+                if (strcmp(rest, "await") == 0)
+                    return O(obj)->v.g.yieldfrom ? O(obj)->v.g.yieldfrom
+                                                 : apy_none();
+                if (strcmp(rest, "origin") == 0 && !O(obj)->v.g.agen)
+                    return apy_none();
+                if (strcmp(rest, "code") == 0) {
+                    apy_value from = O(obj)->v.g.sig ? O(obj)->v.g.sig
+                                                     : O(obj)->v.g.step;
+                    if (!from || O(from)->kind != APY_FUNC_K)
+                        return apy_no_attribute(obj, name);
+                    return apy_func_code(from);
+                }
+                if (strcmp(rest, "frame") == 0) {
+                    if (O(obj)->v.g.state < 0) return apy_none();
+                    return apy_gen_frame(obj);
+                }
+            }
+        }
         /* THE THREE METHODS, AS VALUES. They are dispatched by name at the
            call site, so nothing needed a value for them -- until a program
            asked `hasattr(g, "close")`, which every duck-typed consumer does,
-           and got False for a method it can plainly call. */
+           and got False for a method it can plainly call.
+
+           AN ASYNC GENERATOR HAS THE OTHER THREE. CPython gives `asend`,
+           `athrow` and `aclose` to one and `send`, `throw` and `close` to a
+           coroutine and a plain generator, and neither has the other's --
+           `hasattr(a, "send")` is False. Each of these answers an AWAITABLE;
+           see `apy_agen_await`. */
+        if (O(obj)->v.g.agen) {
+            if (strcmp(want, "asend") == 0)
+                return apy_bind(apy_native(APY_NAT_AGEN_SEND, 2, "asend"),
+                                obj);
+            if (strcmp(want, "athrow") == 0)
+                return apy_bind(apy_native(APY_NAT_AGEN_THROW, 2, "athrow"),
+                                obj);
+            if (strcmp(want, "aclose") == 0)
+                return apy_bind(apy_native(APY_NAT_AGEN_CLOSE, 1, "aclose"),
+                                obj);
+            return apy_no_attribute(obj, name);
+        }
         if (strcmp(want, "send") == 0)
             return apy_bind(apy_native(APY_NAT_GEN_SEND, 2, "send"), obj);
         if (strcmp(want, "throw") == 0)

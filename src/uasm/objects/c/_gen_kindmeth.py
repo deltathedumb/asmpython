@@ -425,8 +425,17 @@ def emit_dir_ir() -> str:
 #: `__class_getitem__`. A generator is not a cursor -- it is a frame -- but
 #: `dir()` and `__doc__` ask the same question of it, so it is filed here
 #: with the rest of them.
+#:
+#: AND SO ARE ITS TWO SIBLINGS, which are the same cell in this runtime and
+#: three different types in CPython: a coroutine names the same five facts
+#: `cr_`, an async generator names them `ag_`, and each has its own three
+#: methods. The samples are built by a helper because a coroutine cannot be
+#: written as an expression -- and an unawaited one warns at collection, so
+#: the sample is closed before it is dropped.
 CURSOR_SAMPLES = {
     "generator":                 "(_ for _ in ())",
+    "coroutine":                 "_sample_coroutine()",
+    "async_generator":           "_sample_async_generator()",
     "list_iterator":             "iter([])",
     "list_reverseiterator":      "reversed([])",
     "tuple_iterator":            "iter(())",
@@ -450,6 +459,31 @@ CURSOR_SAMPLES = {
     "map":                       "map(str, [])",
     "filter":                    "filter(None, [])",
 }
+
+
+def _sample_coroutine():
+    """One coroutine, closed rather than awaited.
+
+    `dir()` and `__doc__` are asked of the TYPE, so the object only has to
+    exist -- and an unawaited coroutine that is collected prints a
+    RuntimeWarning, which a generator step this file never takes would be a
+    strange thing to emit while generating a table.
+    """
+    async def one():
+        return None
+
+    made = one()
+    made.close()
+    return made
+
+
+def _sample_async_generator():
+    """One async generator. Nothing has to drive it: see
+    `_sample_coroutine`."""
+    async def one():
+        yield None
+
+    return one()
 
 
 def cursor_types() -> dict:
@@ -899,6 +933,30 @@ def emit_tables_py() -> str:
     answer.
     """
     lines = ["", "",
+             "# THE TWO SAMPLES THAT ARE NOT EXPRESSIONS. A coroutine and an",
+             "# async generator cannot be written inline, so the table's",
+             "# entries for them name these -- and every reader that evals",
+             "# the table needs them in scope. Copied out of",
+             "# `objects/c/_gen_kindmeth.py`, which is where they are",
+             "# written; see `_sample_coroutine` there for why the coroutine",
+             "# is closed rather than awaited.",
+             "",
+             "",
+             "def _sample_coroutine():",
+             "    async def one():",
+             "        return None",
+             "",
+             "    made = one()",
+             "    made.close()",
+             "    return made",
+             "",
+             "",
+             "def _sample_async_generator():",
+             "    async def one():",
+             "        yield None",
+             "",
+             "    return one()",
+             "", "",
              "#: The sample expression behind every cursor row, so the host",
              "#: can ask CPython about the same types this file asked.",
              "CURSOR_SAMPLES = {"]

@@ -1450,6 +1450,22 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
     if apy_name_is(want, rodata(b"__del__\0")):
         if is_gen:
             return apy_kind_method_of(obj, 1, want, bind)
+    # AND THE PROTOCOL EACH OF THE THREE ANSWERS TO. A coroutine is what
+    # `await` walks and carries `__await__`; an async generator is what
+    # `async for` walks and carries the two halves of that protocol; a plain
+    # generator has neither, which is what `dir()` over each says.
+    if is_gen:
+        gcoro: i64 = i64(load(i32, offset(obj, apy_g_coro_offset())))
+        gagen: i64 = i64(load(i32, offset(obj, apy_g_agen_offset())))
+        if apy_name_is(want, rodata(b"__await__\0")):
+            if gcoro:
+                if not gagen:
+                    return apy_kind_method_of(obj, 1, want, bind)
+        if gagen:
+            if apy_name_is(want, rodata(b"__aiter__\0")):
+                return apy_kind_method_of(obj, 1, want, bind)
+            if apy_name_is(want, rodata(b"__anext__\0")):
+                return apy_kind_method_of(obj, 1, want, bind)
     # `it.__setstate__(i)` -- WHERE THE WALK IS, written rather than read.
     # WHICH CURSORS CARRY IT is CPython's own `dir()`, transcribed: the
     # sequence walks -- a list, tuple, str, bytes or range, forward or
@@ -1678,6 +1694,10 @@ def apy_kind_prototype(type_name: ptr) -> ptr:
     # carries is all that is asked of it.
     if apy_name_is(type_name, rodata(b"generator\0")):
         return apy_gen_new(ptr(0), 0)
+    if apy_name_is(type_name, rodata(b"coroutine\0")):
+        return apy_coro_mark(apy_gen_new(ptr(0), 0))
+    if apy_name_is(type_name, rodata(b"async_generator\0")):
+        return apy_agen_mark(apy_gen_new(ptr(0), 0))
     return ptr(0)
 
 

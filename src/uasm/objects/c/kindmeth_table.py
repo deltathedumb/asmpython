@@ -1000,6 +1000,28 @@ static const char *apy_kind_dir(const char *kind) {
                "gi_frame\0""gi_running\0""gi_suspended\0""gi_yieldfrom\0""send\0"
                "throw\0"
                "";
+    if (strcmp(kind, "coroutine") == 0)
+        return "__await__\0""__class__\0""__class_getitem__\0""__del__\0"
+               "__delattr__\0""__dir__\0""__doc__\0""__eq__\0""__format__\0"
+               "__ge__\0""__getattribute__\0""__getstate__\0""__gt__\0"
+               "__hash__\0""__init__\0""__init_subclass__\0""__le__\0""__lt__\0"
+               "__name__\0""__ne__\0""__new__\0""__qualname__\0""__reduce__\0"
+               "__reduce_ex__\0""__repr__\0""__setattr__\0""__sizeof__\0"
+               "__str__\0""__subclasshook__\0""close\0""cr_await\0""cr_code\0"
+               "cr_frame\0""cr_origin\0""cr_running\0""cr_suspended\0""send\0"
+               "throw\0"
+               "";
+    if (strcmp(kind, "async_generator") == 0)
+        return "__aiter__\0""__anext__\0""__class__\0""__class_getitem__\0"
+               "__del__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
+               "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
+               "__gt__\0""__hash__\0""__init__\0""__init_subclass__\0""__le__\0"
+               "__lt__\0""__name__\0""__ne__\0""__new__\0""__qualname__\0"
+               "__reduce__\0""__reduce_ex__\0""__repr__\0""__setattr__\0"
+               "__sizeof__\0""__str__\0""__subclasshook__\0""aclose\0"
+               "ag_await\0""ag_code\0""ag_frame\0""ag_running\0""ag_suspended\0"
+               "asend\0""athrow\0"
+               "";
     if (strcmp(kind, "list_iterator") == 0)
         return "__class__\0""__delattr__\0""__dir__\0""__doc__\0""__eq__\0"
                "__format__\0""__ge__\0""__getattribute__\0""__getstate__\0"
@@ -1762,10 +1784,37 @@ KINDMETH_WORDS = {
 
 
 
+# THE TWO SAMPLES THAT ARE NOT EXPRESSIONS. A coroutine and an
+# async generator cannot be written inline, so the table's
+# entries for them name these -- and every reader that evals
+# the table needs them in scope. Copied out of
+# `objects/c/_gen_kindmeth.py`, which is where they are
+# written; see `_sample_coroutine` there for why the coroutine
+# is closed rather than awaited.
+
+
+def _sample_coroutine():
+    async def one():
+        return None
+
+    made = one()
+    made.close()
+    return made
+
+
+def _sample_async_generator():
+    async def one():
+        yield None
+
+    return one()
+
+
 #: The sample expression behind every cursor row, so the host
 #: can ask CPython about the same types this file asked.
 CURSOR_SAMPLES = {
     'generator': '(_ for _ in ())',
+    'coroutine': '_sample_coroutine()',
+    'async_generator': '_sample_async_generator()',
     'list_iterator': 'iter([])',
     'list_reverseiterator': 'reversed([])',
     'tuple_iterator': 'iter(())',
@@ -1809,6 +1858,8 @@ KIND_DIR = {
     'bool': ['__abs__', '__add__', '__and__', '__bool__', '__ceil__', '__class__', '__delattr__', '__dir__', '__divmod__', '__doc__', '__eq__', '__float__', '__floor__', '__floordiv__', '__format__', '__ge__', '__getattribute__', '__getnewargs__', '__getstate__', '__gt__', '__hash__', '__index__', '__init__', '__init_subclass__', '__int__', '__invert__', '__le__', '__lshift__', '__lt__', '__mod__', '__mul__', '__ne__', '__neg__', '__new__', '__or__', '__pos__', '__pow__', '__radd__', '__rand__', '__rdivmod__', '__reduce__', '__reduce_ex__', '__repr__', '__rfloordiv__', '__rlshift__', '__rmod__', '__rmul__', '__ror__', '__round__', '__rpow__', '__rrshift__', '__rshift__', '__rsub__', '__rtruediv__', '__rxor__', '__setattr__', '__sizeof__', '__str__', '__sub__', '__subclasshook__', '__truediv__', '__trunc__', '__xor__', 'as_integer_ratio', 'bit_count', 'bit_length', 'conjugate', 'denominator', 'from_bytes', 'imag', 'is_integer', 'numerator', 'real', 'to_bytes'],
     'NoneType': ['__bool__', '__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__le__', '__lt__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__'],
     'generator': ['__class__', '__class_getitem__', '__del__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__lt__', '__name__', '__ne__', '__new__', '__next__', '__qualname__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__', 'close', 'gi_code', 'gi_frame', 'gi_running', 'gi_suspended', 'gi_yieldfrom', 'send', 'throw'],
+    'coroutine': ['__await__', '__class__', '__class_getitem__', '__del__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__le__', '__lt__', '__name__', '__ne__', '__new__', '__qualname__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__', 'close', 'cr_await', 'cr_code', 'cr_frame', 'cr_origin', 'cr_running', 'cr_suspended', 'send', 'throw'],
+    'async_generator': ['__aiter__', '__anext__', '__class__', '__class_getitem__', '__del__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__le__', '__lt__', '__name__', '__ne__', '__new__', '__qualname__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__', 'aclose', 'ag_await', 'ag_code', 'ag_frame', 'ag_running', 'ag_suspended', 'asend', 'athrow'],
     'list_iterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__setstate__', '__sizeof__', '__str__', '__subclasshook__'],
     'list_reverseiterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__setstate__', '__sizeof__', '__str__', '__subclasshook__'],
     'tuple_iterator': ['__class__', '__delattr__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__getstate__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__iter__', '__le__', '__length_hint__', '__lt__', '__ne__', '__new__', '__next__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__setstate__', '__sizeof__', '__str__', '__subclasshook__'],
@@ -1852,6 +1903,8 @@ KIND_DOC = {
     'bool': 'Returns True when the argument is true, False otherwise.\nThe builtins True and False are the only two instances of the class bool.\nThe class bool is a subclass of the class int, and cannot be subclassed.',
     'NoneType': 'The type of the None singleton.',
     'generator': None,
+    'coroutine': None,
+    'async_generator': None,
     'list_iterator': None,
     'list_reverseiterator': None,
     'tuple_iterator': None,

@@ -5174,6 +5174,13 @@ class DynamicLowering:
         # register does not survive the return that a suspension compiles to.
         at_awaited = self._gen_temp()
         self._gen_put(at_awaited, awaited)
+        # AND ON THE COROUTINE ITSELF, because `c.cr_await` is the only way
+        # what a frame is waiting on is visible from outside -- the awaited
+        # value otherwise lives in a frame slot nothing but this loop can
+        # name. The same field a `yield from` records its delegate in: what
+        # the frame is waiting on is what it is waiting on, whichever
+        # keyword put it there.
+        self.b.call(T.PTR, "apy_gen_delegate", [self._gen[0], awaited])
         at_result = self._gen_temp()
         self._gen_put(at_result, self.b.call(T.PTR, "apy_none", []))
 
@@ -5200,6 +5207,11 @@ class DynamicLowering:
         self.b.jump(test)
 
         self.b.switch_to(after)
+        # AND CLEARED WHEN THE AWAIT ENDS, for the reason `_dyn_yield_from`
+        # clears its own: a coroutine suspended somewhere else is not
+        # waiting on this any more, and CPython answers None there.
+        self.b.call(T.PTR, "apy_gen_delegate",
+                    [self._gen[0], self.b.call(T.PTR, "apy_none", [])])
         self._gen_put(at_result, self.b.call(
             T.PTR, "apy_gen_taken", [self._gen_get(at_awaited)]))
         return self._gen_get(at_result)

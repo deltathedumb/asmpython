@@ -597,6 +597,10 @@ APY_API apy_value apy_kind_prototype(apy_value type_namev) {
        cursor prototype has no source: nothing is ever run, and what the type
        carries is all that is asked of it. */
     if (strcmp(type_name, "generator") == 0) return apy_gen_new(0, 0);
+    if (strcmp(type_name, "coroutine") == 0)
+        return apy_coro_mark(apy_gen_new(0, 0));
+    if (strcmp(type_name, "async_generator") == 0)
+        return apy_agen_mark(apy_gen_new(0, 0));
     if (strcmp(type_name, "list") == 0)  return apy_list_new(1);
     if (strcmp(type_name, "tuple") == 0) return apy_tuple_new(1);
     if (strcmp(type_name, "dict") == 0)  return apy_dict_new(1);
@@ -1244,6 +1248,17 @@ APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
        empty one this replaced. */
     if (strcmp(want, "__del__") == 0 && k == APY_GEN_K)
         return apy_kind_method(obj, 1, want, bind);
+    /* AND THE PROTOCOL EACH OF THE THREE ANSWERS TO. A coroutine is what
+       `await` walks and carries `__await__`; an async generator is what
+       `async for` walks and carries the two halves of that protocol; a plain
+       generator has neither, which is what `dir()` over each says. */
+    if (k == APY_GEN_K && O(obj)->v.g.coro && !O(obj)->v.g.agen
+            && strcmp(want, "__await__") == 0)
+        return apy_kind_method(obj, 1, want, bind);
+    if (k == APY_GEN_K && O(obj)->v.g.agen
+            && (strcmp(want, "__aiter__") == 0
+                || strcmp(want, "__anext__") == 0))
+        return apy_kind_method(obj, 1, want, bind);
     /* WHERE A WALK IS, written. See `apy_cursor_setstate_p` for which
        cursors carry it. */
     if (strcmp(want, "__setstate__") == 0 && apy_cursor_setstate_p(obj))
@@ -1805,6 +1820,14 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
         if (strcmp(w, "__hash__") == 0) return apy_hash(a[0]);
         if (strcmp(w, "__len__") == 0) return apy_len(a[0]);
         if (strcmp(w, "__iter__") == 0) return apy_iter(a[0]);
+        /* `await c` WALKS THE COROUTINE ITSELF, so `__await__` hands it
+           back: there is no second object between the two here, and
+           `iter(x)` answers the same way for a generator. */
+        if (strcmp(w, "__await__") == 0 || strcmp(w, "__aiter__") == 0)
+            return a[0];
+        /* AND `__anext__` IS `asend(None)`, which is what CPython's is. */
+        if (strcmp(w, "__anext__") == 0)
+            return apy_agen_asend(a[0], apy_none());
         if (strcmp(w, "__next__") == 0) return apy_next(a[0], 0, 0);
         if (strcmp(w, "__length_hint__") == 0)
             return apy_from_int(apy_cursor_left(a[0]));
@@ -1953,6 +1976,14 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
         return n < 2 ? 0 : apy_gen_throw(a[0], a[1]);
     case APY_NAT_GEN_CLOSE:
         return n < 1 ? 0 : apy_gen_close(a[0]);
+    /* AND AN ASYNC GENERATOR'S THREE, each of which answers an AWAITABLE
+       rather than doing the work -- see `apy_agen_await`. */
+    case APY_NAT_AGEN_SEND:
+        return n < 2 ? 0 : apy_agen_asend(a[0], a[1]);
+    case APY_NAT_AGEN_THROW:
+        return n < 2 ? 0 : apy_agen_athrow(a[0], a[1]);
+    case APY_NAT_AGEN_CLOSE:
+        return n < 1 ? 0 : apy_agen_aclose(a[0]);
     default:
         return apy_fail("TypeError", "not callable");
     }

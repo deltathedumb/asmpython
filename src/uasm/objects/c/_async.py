@@ -474,7 +474,13 @@ APY_API apy_value apy_gen_drain(apy_value g) {
 
 enum { APY_CORO_SLEEP = 1, APY_CORO_GATHER = 2, APY_CORO_ANEXT = 3,
        APY_CORO_TASK = 4, APY_CORO_WAITFOR = 5, APY_CORO_VALUE = 6,
-       APY_CORO_TGWAIT = 7 };
+       APY_CORO_TGWAIT = 7,
+       /* WHAT `a.asend(v)`, `a.athrow(e)` AND `a.aclose()` HAND BACK. An
+          async generator's three methods answer an AWAITABLE rather than
+          doing the work, which is the whole reason they are spelled with
+          the `a` -- so each is a built-in coroutine holding the generator
+          and what to do to it, and the work happens when it is awaited. */
+       APY_CORO_ASEND = 8, APY_CORO_ATHROW = 9, APY_CORO_ACLOSE = 10 };
 
 /* The steps for the kinds above. Declared here because `apy_await_step` --
    which dispatches on the kind -- comes before the task layer that defines
@@ -482,6 +488,7 @@ enum { APY_CORO_SLEEP = 1, APY_CORO_GATHER = 2, APY_CORO_ANEXT = 3,
 static apy_value apy_task_step(apy_value t);
 static apy_value apy_waitfor_step(apy_value w);
 static apy_value apy_tgwait_step(apy_value w);
+static apy_value apy_asend_step(apy_value g);
 APY_API apy_value apy_type_set(apy_value cls, apy_value name, apy_value value);
 static apy_value apy_native(int sel, int64_t arity, const char *name);
 static apy_value apy_gather_step(apy_value g);
@@ -560,6 +567,10 @@ APY_API apy_value apy_await_step(apy_value awaited, apy_value sent) {
             apy_gen_result(awaited, O(awaited)->v.g.slots[0]);
             return apy_stop();
         }
+        if (O(awaited)->v.g.builtin == APY_CORO_ASEND
+                || O(awaited)->v.g.builtin == APY_CORO_ATHROW
+                || O(awaited)->v.g.builtin == APY_CORO_ACLOSE)
+            return apy_asend_step(awaited);
         /* `sleep` ALWAYS SUSPENDS AT LEAST ONCE, before the clock is even
            consulted. `sleep(0)` is how a program hands control to the loop on
            purpose, and a version that returned immediately when the deadline
@@ -693,6 +704,85 @@ APY_API apy_value apy_agen_step(apy_value g) {
     out = apy_gen_step(g, apy_none(), &fin);
     if (!out) return 0;
     return fin ? apy_stop() : out;
+}
+
+/* ONE STEP OF `asend`, `athrow` OR `aclose`, whichever built this awaitable.
+
+   THE WORK HAPPENS HERE and not where the method was called, which is what
+   makes `a.asend(1)` without an `await` do nothing -- as CPython's does. The
+   generator is in slot 0 and the argument in slot 1; the builtin says which
+   of the three this is.
+
+   SUSPENSION PASSES THROUGH. An `await` inside the async generator's own
+   body suspends it, and the token travels out to whoever is awaiting this --
+   which is re-entered here and steps the generator again, exactly as
+   `apy_anext_step` does for a class-based `__anext__`.
+
+   EXHAUSTION IS `StopAsyncIteration`, which is the protocol's own end
+   marker: `asend` on a finished generator raises it, and a `for` over the
+   generator never sees it because `async for` reads `apy_agen_step`
+   directly. */
+static apy_value apy_asend_step(apy_value g) {
+    apy_value agen = O(g)->v.g.slots[0];
+    apy_value arg = O(g)->v.g.slots[1];
+    apy_value out;
+    int done = 0;
+    if (O(g)->v.g.builtin == APY_CORO_ACLOSE) {
+        if (!apy_gen_close(agen)) return 0;
+        apy_gen_result(g, apy_none());
+        return apy_stop();
+    }
+    if (O(g)->v.g.builtin == APY_CORO_ATHROW) {
+        /* THE EXCEPTION IS DELIVERED ONCE. `apy_gen_throw` leaves it pending
+           and steps, and a second entry after a suspension must not raise it
+           again -- which is why the slot is cleared the moment it is used. */
+        if (arg) {
+            O(g)->v.g.slots[1] = 0;
+            out = apy_gen_throw(agen, arg);
+            if (!out) return 0;
+            if (out == apy_suspend_token()) return out;
+            apy_gen_result(g, out);
+            return apy_stop();
+        }
+    }
+    if (O(agen)->v.g.state < 0) return apy_fail("StopAsyncIteration", "");
+    out = apy_gen_step(agen, arg ? arg : apy_none(), &done);
+    if (!out) return 0;
+    if (out == apy_suspend_token()) return out;
+    if (done) return apy_fail("StopAsyncIteration", "");
+    /* SENT ONCE. A resumption after a suspension carries None, exactly as a
+       plain generator's does -- the value belongs to the `yield` that was
+       waiting for it, not to every step of the same await. */
+    O(g)->v.g.slots[1] = 0;
+    apy_gen_result(g, out);
+    return apy_stop();
+}
+
+/* THE THREE METHODS THEMSELVES, as the awaitables they answer. */
+static apy_value apy_agen_await(apy_value agen, apy_value arg, int which) {
+    apy_value g;
+    if (O(agen)->kind != APY_GEN_K || !O(agen)->v.g.agen)
+        return apy_fail2("TypeError", "'%s' object is not an async "
+                                      "generator%s", apy_kind_name(agen), "");
+    g = apy_gen_new(0, 2);
+    if (!g) return 0;
+    O(g)->v.g.coro = 1;
+    O(g)->v.g.builtin = which;
+    O(g)->v.g.slots[0] = agen;
+    O(g)->v.g.slots[1] = arg;
+    return g;
+}
+
+APY_API apy_value apy_agen_asend(apy_value agen, apy_value v) {
+    return apy_agen_await(agen, v, APY_CORO_ASEND);
+}
+
+APY_API apy_value apy_agen_athrow(apy_value agen, apy_value exc) {
+    return apy_agen_await(agen, exc, APY_CORO_ATHROW);
+}
+
+APY_API apy_value apy_agen_aclose(apy_value agen) {
+    return apy_agen_await(agen, 0, APY_CORO_ACLOSE);
 }
 
 /* `asyncio.sleep(delay)`. A coroutine that suspends once and returns None.

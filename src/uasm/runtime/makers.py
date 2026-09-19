@@ -550,7 +550,7 @@ def apy_nat_type_call() -> i64:
 
 
 def apy_nat_count() -> i64:
-    return 34
+    return 37
 
 
 def apy_fn_native_offset() -> i64:
