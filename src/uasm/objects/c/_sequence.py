@@ -169,6 +169,7 @@ static int64_t apy_utf8_at(const unsigned char *p, int64_t n, int64_t i,
 /* Subscripting a CLASS builds a generic alias, far above where aliases are
    defined. */
 APY_API apy_value apy_alias_new(apy_value origin, apy_value args);
+APY_API apy_value apy_alias_unpack(apy_value v);
 /* Subscripting with a slice OBJECT resolves its bounds and slices, far above
    where the slicing itself is defined. */
 APY_API apy_value apy_slice(apy_value seq, int64_t start, int64_t stop,

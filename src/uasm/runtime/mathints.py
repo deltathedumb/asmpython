@@ -596,6 +596,14 @@ def apy_getiter(v: ptr) -> ptr:
         return v
     if k == apy_iter_kind():
         return v
+    # AN ALIAS YIELDS ONE ITEM -- itself, starred. Here as well as in
+    # `apy_iterable` because this is the LAZY entry a `for` uses; fixing only
+    # the eager one left `for x in list[int]` reporting the alias as not
+    # iterable while `list(list[int])` worked.
+    if k == apy_alias_kind():
+        one: ptr = apy_tuple_new(1)
+        apy_q_append_of(one, apy_alias_unpack(v))
+        return apy_getiter(one)
     if k == apy_type_kind():
         meta: ptr = ptr(load(u64, offset(v, apy_t_meta_offset())))
         if meta:

@@ -1023,6 +1023,23 @@ APY_API apy_value apy_alias_new(apy_value origin, apy_value args) {
     apy_obj *o = apy_alloc(APY_ALIAS_K);
     o->v.ga.origin = origin;
     o->v.ga.args = args;
+    /* NOT INHERITED FROM THE UNION. A stale flag here would make a fresh
+       `list[int]` print as `*list[int]`. */
+    o->v.ga.unpacked = 0;
+    return V(o);
+}
+
+/* `*list[int]` -- the form PEP 646 spells with a star, and the one item
+   iterating `list[int]` yields. A COPY rather than a flag flipped in place:
+   the alias being iterated is the program's own value, and marking it would
+   change what the program holds. */
+APY_API apy_value apy_alias_unpack(apy_value v) {
+    apy_obj *o;
+    if (O(v)->kind != APY_ALIAS_K || O(v)->v.ga.unpacked) return v;
+    o = apy_alloc(APY_ALIAS_K);
+    o->v.ga.origin = O(v)->v.ga.origin;
+    o->v.ga.args = O(v)->v.ga.args;
+    o->v.ga.unpacked = 1;
     return V(o);
 }
 

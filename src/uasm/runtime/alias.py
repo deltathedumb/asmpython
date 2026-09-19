@@ -31,6 +31,10 @@ def apy_ga_args_offset() -> i64:
     return 16
 
 
+def apy_ga_unpacked_offset() -> i64:
+    return 24
+
+
 def apy_t_builtin_offset() -> i64:
     return 56
 
@@ -42,6 +46,36 @@ def apy_alias_new(origin: ptr, args: ptr) -> ptr:
         return cell
     store(u64, u64(origin), offset(cell, apy_ga_origin_offset()))
     store(u64, u64(args), offset(cell, apy_ga_args_offset()))
+    return cell
+
+
+def apy_alias_unpack(v: ptr) -> ptr:
+    """`*list[int]` -- the form PEP 646 spells with a star.
+
+    WHY IT EXISTS AT ALL: iterating an alias is what CPython does with one,
+    and `iter(list[int])` yields exactly this, once. That is the whole reason
+    `1 in list[int]` answers False rather than raising -- membership walks
+    the one item and does not match it.
+
+    A COPY rather than a flag flipped in place: the alias being iterated is
+    the program's own value, and marking it would change what the program
+    holds. Anything that is not an alias, and an alias that is already
+    starred, comes back untouched -- which is what lets the callers write
+    this without a kind test of their own.
+    """
+    k: i64 = i64(load(i32, offset(v, 0)))
+    if k != apy_alias_kind():
+        return v
+    if i64(load(i32, offset(v, apy_ga_unpacked_offset()))):
+        return v
+    cell: ptr = apy_obj_alloc(apy_alias_kind())
+    if not cell:
+        return cell
+    store(u64, load(u64, offset(v, apy_ga_origin_offset())),
+          offset(cell, apy_ga_origin_offset()))
+    store(u64, load(u64, offset(v, apy_ga_args_offset())),
+          offset(cell, apy_ga_args_offset()))
+    store(i32, i32(1), offset(cell, apy_ga_unpacked_offset()))
     return cell
 
 

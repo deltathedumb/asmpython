@@ -128,6 +128,18 @@ APY_API apy_value apy_getiter(apy_value v) {
         if (!apy_class_find(O(v)->v.o.cls, apy_name("__getitem__")))
             return apy_fail2("TypeError", "'%s' object is not iterable%s",
                              apy_kind_name(v), "");
+    } else if (O(v)->kind == APY_ALIAS_K) {
+        /* AN ALIAS IS ITERABLE, and yields ONE item: itself with the star
+           PEP 646 spells unpacking with. That is not a curiosity -- it is
+           why `1 in list[int]` answers False in CPython instead of raising,
+           because `in` walks exactly this and matches nothing.
+
+           A ONE-ITEM TUPLE is the cursor's source, so every consumer that
+           already walks a tuple -- `list()`, `in`, a `for` -- gets the right
+           answer without a branch of its own. */
+        apy_value one = apy_tuple_new(1);
+        apy_q_append_of(one, apy_alias_unpack(v));
+        return apy_cursor(one, 0, APY_IT_PLAIN, 0);
     } else if (!apy_is_seq(v) && !apy_is_set(v) && O(v)->kind != APY_STR_K
                && O(v)->kind != APY_BYTES_K && O(v)->kind != APY_DICT_K
                && O(v)->kind != APY_RANGE_K) {
@@ -386,7 +398,11 @@ static int64_t apy_hash_raw(apy_value v) {
            hashes by address because that is what `apy_eq_raw` compares it
            by, and a UNION'S ARMS are combined order-free so `int | str` and
            `str | int` land in one bucket the way they compare equal. */
-        h = (int64_t)O(v)->v.ga.origin;
+        /* THE FLAG IS IN THE HASH because it is in the equality: two
+           aliases that differ only by the star compare unequal, and a hash
+           that ignored it would put them in one bucket and make a set of
+           both keep only one. */
+        h = (int64_t)O(v)->v.ga.origin + (O(v)->v.ga.unpacked ? 1 : 0);
         if (apy_is_union(v)) {
             apy_value args = O(v)->v.ga.args;
             for (i = 0; i < O(args)->v.q.n; i++)

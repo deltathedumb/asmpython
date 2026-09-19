@@ -823,6 +823,10 @@ APY_API apy_value apy_text_of(apy_value v, int64_t quoted) {
                     : apy_text(one, 1);
             room += O(parts[i])->v.s.n + 2;
         }
+        /* ROOM FOR THE STAR that an unpacked alias prints with. Counted
+           here rather than at the memcpy, because `room` is what the
+           allocation is sized by. */
+        room += 1;
         out = (char *)malloc((size_t)room + 1);
         /* A UNION PRINTS WITH BARS, not as `Union[...]`: PEP 604 made `int |
            str` the spelling, and that is what CPython's repr answers. It is
@@ -839,8 +843,12 @@ APY_API apy_value apy_text_of(apy_value v, int64_t quoted) {
             free(parts);
             return apy_str_take(out, at);
         }
-        memcpy(out, O(head)->v.s.p, (size_t)O(head)->v.s.n);
-        at = O(head)->v.s.n;
+        at = 0;
+        /* `*list[int]`, which is what CPython prints for the unpacked form
+           and the one item iterating `list[int]` hands out. */
+        if (O(v)->v.ga.unpacked) out[at++] = '*';
+        memcpy(out + at, O(head)->v.s.p, (size_t)O(head)->v.s.n);
+        at += O(head)->v.s.n;
         out[at++] = '[';
         for (i = 0; i < n; i++) {
             if (i) { out[at++] = ','; out[at++] = ' '; }

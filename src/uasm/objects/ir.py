@@ -471,8 +471,8 @@ REPLACES: dict[str, tuple[str, ...]] = {
                 "apy_gen_pending", "apy_gen_slot"),
     # PARAMETERISED TYPES -- `list[int]` as a value a program holds, prints
     # and passes to an annotation, and nothing else. Two fields.
-    "alias.py": ("apy_alias_new", "apy_get_origin", "apy_get_args",
-                 "apy_type_builtin"),
+    "alias.py": ("apy_alias_new", "apy_alias_unpack", "apy_get_origin",
+                 "apy_get_args", "apy_type_builtin"),
     # THE ERROR PATH'S OWN STATE -- the first shared state to move since the
     # singleton cells, and the same argument: the subset cannot read a C
     # static, so the storage crosses before anything that reads it can. The

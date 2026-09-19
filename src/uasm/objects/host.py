@@ -6827,6 +6827,12 @@ def _apy_contains(h, a):
                 return h._new(False)
             if item == needle or item is needle:
                 return h._new(True)
+    # AN ALIAS IS ITERABLE and yields one item, so membership is that one
+    # comparison. Written out rather than left to the fallback below, which
+    # would ask PYTHON about a class of this file's and be told it is not a
+    # container.
+    if isinstance(hay, Alias):
+        return h._new(needle == Alias(hay.origin, hay.args, True))
     if isinstance(hay, Class) and hay.meta is not None:
         # MEMBERSHIP IN A CLASS IS THE METACLASS'S BUSINESS, as iterating and
         # measuring one are: `Colour.RED in Colour` is
@@ -11534,11 +11540,17 @@ class Alias:
     origin and the arguments so the repr can be rebuilt exactly.
     """
 
-    __slots__ = ("origin", "args")
+    __slots__ = ("origin", "args", "unpacked")
 
-    def __init__(self, origin, args) -> None:
+    def __init__(self, origin, args, unpacked: bool = False) -> None:
         self.origin = origin
         self.args = args
+        #: PEP 646's `*list[int]`, and the reason it exists here: ITERATING
+        #: an alias is what CPython does with one -- `iter(list[int])` yields
+        #: exactly this, once. That is why `1 in list[int]` answers False
+        #: rather than raising, and why the flag has to take part in equality:
+        #: without it the starred form would equal the plain one.
+        self.unpacked = unpacked
 
     def __eq__(self, other):
         """`list[int] == list[int]` -- SAME ORIGIN, SAME ARGUMENTS.
@@ -11564,6 +11576,10 @@ class Alias:
         """
         if not isinstance(other, Alias):
             return NotImplemented
+        # `*list[int] != list[int]`, which is what lets membership walk the
+        # one item iteration yields and correctly not match it.
+        if self.unpacked != other.unpacked:
+            return False
         if self.origin is not other.origin:
             return False
         if _form_name(self.origin) == "Union":
@@ -11577,8 +11593,9 @@ class Alias:
         # above; an unhashable argument (`list[[]]`) raises TypeError from
         # here, which is what CPython does too.
         if _form_name(self.origin) == "Union":
-            return hash((id(self.origin), _arm_key(self.args)))
-        return hash((id(self.origin), self.args))
+            return hash((id(self.origin), self.unpacked,
+                         _arm_key(self.args)))
+        return hash((id(self.origin), self.unpacked, self.args))
 
 
 def _alias_text(v) -> str:
@@ -11598,7 +11615,10 @@ def _alias_text(v) -> str:
     # `list[int]`, not `list[<class 'int'>]` -- see `_alias_part`.
     inner = ", ".join(_alias_part(x) for x in v.args) \
         if isinstance(v.args, (list, tuple)) else _alias_part(v.args)
-    return f"{_alias_part(v.origin)}[{inner}]"
+    # `*list[int]` for the unpacked form, which is what CPython prints and
+    # what iterating an alias hands out.
+    star = "*" if getattr(v, "unpacked", False) else ""
+    return f"{star}{_alias_part(v.origin)}[{inner}]"
 
 
 def _alias_part(x) -> str:
@@ -11626,6 +11646,20 @@ def _alias_part(x) -> str:
 def _apy_alias_new(h, a):
     return h._new(Alias(h._get(a[0], "apy_alias_new"),
                         h._get(a[1], "apy_alias_new")))
+
+
+def _apy_alias_unpack(h, a):
+    """`*list[int]` -- what iterating `list[int]` yields, once.
+
+    A COPY rather than a flag flipped in place: the alias being iterated is
+    the program's own value, and marking it would change what the program
+    holds. Anything that is not an alias comes back untouched, which is what
+    lets the callers write this without a kind test of their own.
+    """
+    v = h._get(a[0], "apy_alias_unpack")
+    if not isinstance(v, Alias) or v.unpacked:
+        return a[0]
+    return h._new(Alias(v.origin, v.args, True))
 
 
 def _apy_func_descr(h, a):
@@ -13840,6 +13874,13 @@ def _apy_iterable(h, a):
         # A VIEW IS READ WHEN IT IS WALKED. The index walk below cannot step
         # one, and materialising here is the moment the liveness happens.
         return h._new(list(v))
+    if isinstance(v, Alias):
+        # AN ALIAS YIELDS ONE ITEM -- itself, starred. That is what CPython
+        # does with `iter(list[int])`, and it is why `1 in list[int]` answers
+        # False rather than raising: membership walks this one item and does
+        # not match it. A one-item tuple is the container, so every eager
+        # consumer gets the answer without a branch of its own.
+        return h._new((Alias(v.origin, v.args, True),))
     if isinstance(v, Class) and v.meta is not None:
         # ITERATING A CLASS IS THE METACLASS'S BUSINESS: `for c in Color` is
         # `type(Color).__iter__(Color)`, which is how an enum lists its
@@ -15083,6 +15124,13 @@ def _apy_getiter(h, a):
     v = h._get(a[0], "apy_getiter")
     if isinstance(v, (Gen, Iterator)):
         return a[0]               # a generator IS its own cursor
+    if isinstance(v, Alias):
+        # AN ALIAS YIELDS ONE ITEM -- itself, starred. Here as well as in
+        # `_apy_iterable` because this is the LAZY entry: `for x in list[int]`
+        # comes through here and `list(list[int])` comes through there.
+        # Fixing only the eager one left the `for` reporting the alias as not
+        # iterable, which is the same loop written twice.
+        return _apy_getiter(h, [h._new((Alias(v.origin, v.args, True),))])
     if isinstance(v, Instance):
         try:
             got = v._send("__iter__")
@@ -15767,6 +15815,7 @@ _TABLE.update({
     "apy_getiter": _apy_getiter,
     "apy_step": _apy_step,
     "apy_iter": _apy_iter,
+    "apy_alias_unpack": _apy_alias_unpack,
     "apy_iterable": _apy_iterable,
     "apy_next": _apy_next,
     "apy_map": _apy_map,

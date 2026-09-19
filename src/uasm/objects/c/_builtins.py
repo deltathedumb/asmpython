@@ -894,6 +894,15 @@ APY_API apy_value apy_iterable(apy_value v) {
     /* A GENERATOR is drained: the walk below is by index and an index walk
        needs a length. See `apy_gen_drain` for what that costs. */
     if (O(v)->kind == APY_GEN_K) return apy_gen_drain(v);
+    /* AN ALIAS YIELDS ONE ITEM -- itself, starred. Here as well as in
+       `apy_getiter` because this is the EAGER funnel: `list(list[int])` and
+       `*list[int],` come through here, and the lazy `for` comes through
+       there. See `apy_getiter` for why an alias is iterable at all. */
+    if (O(v)->kind == APY_ALIAS_K) {
+        apy_value one = apy_tuple_new(1);
+        apy_q_append_of(one, apy_alias_unpack(v));
+        return one;
+    }
     /* ITERATING A CLASS IS THE METACLASS'S BUSINESS: `for c in Color` is
        `type(Color).__iter__(Color)`, which is how an enum lists its members.
        A class with no metaclass cannot be iterated, and the refusal further

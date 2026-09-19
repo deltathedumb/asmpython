@@ -9570,6 +9570,29 @@ PROGRAMS = {
         print(f'{n}', f'{s!r}', f'', f'no interp')
         print(f'{n + 1} {[1, 2]}')
     """,
+    # AN ALIAS IS ITERABLE, and yields exactly one item: itself with the star
+    # PEP 646 spells unpacking with. That one fact is the whole reason
+    # `1 in list[int]` answers False in CPython instead of raising, which is
+    # what it used to do here -- `in` walks that item and does not match it.
+    #
+    # THE STARRED FORM IS A DISTINCT VALUE, not a rendering trick: it compares
+    # unequal to the alias it came from and hashes apart from it, which is
+    # what `len({ga, starred})` holds this to. Answering False by fiat would
+    # have passed the membership line and failed every line under it.
+    "generic_alias_is_iterable": """
+        ga = list[int]
+        print(1 in ga, int in ga, ga in ga)
+        starred = list(ga)[0]
+        print(repr(starred), starred in ga, starred == list(ga)[0])
+        print(starred == ga, len({ga, starred}))
+        d = dict[str, int]
+        print(list(d), str in d)
+        print([repr(x) for x in ga])
+        got = []
+        for one in dict[str, bytes]:
+            got.append(repr(one))
+        print(got)
+    """,
 }
 
 

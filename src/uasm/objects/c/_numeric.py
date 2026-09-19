@@ -1317,6 +1317,10 @@ static int apy_eq_raw(apy_value a, apy_value b) {
        and nothing else's are, which is what `apy_is_union` is narrow for. */
     if (O(a)->kind == APY_ALIAS_K || O(b)->kind == APY_ALIAS_K) {
         if (O(a)->kind != O(b)->kind) return 0;
+        /* `*list[int] != list[int]`, which is why iterating an alias can
+           answer False to `list[int] in list[int]` and True to the unpacked
+           form -- exactly as CPython does. */
+        if (O(a)->v.ga.unpacked != O(b)->v.ga.unpacked) return 0;
         if (O(a)->v.ga.origin != O(b)->v.ga.origin) return 0;
         if (apy_is_union(a))
             return apy_arms_match(O(a)->v.ga.args, O(b)->v.ga.args);
@@ -1417,6 +1421,13 @@ APY_API apy_value apy_contains(apy_value needle, apy_value hay) {
         if (!apy_index_arg(needle, &want, APY_IDX_SIZE)) return 0;
         return apy_from_bool(apy_range_find(hay, want) >= 0);
     }
+    /* `1 in list[int]` IS FALSE, not a refusal. An alias is iterable and
+       yields one item -- itself, starred -- so membership is that one
+       comparison. Written here rather than left to a generic iteration
+       fallback because `apy_contains` has no such fallback: every kind that
+       answers `in` says so in a branch of its own. */
+    if (O(hay)->kind == APY_ALIAS_K)
+        return apy_from_bool(apy_eq_raw(needle, apy_alias_unpack(hay)) == 1);
     /* `k in d.keys()` -- read through, so a key added after the view was made
        is found. */
     if (O(hay)->kind == APY_VIEW_K)

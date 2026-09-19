@@ -539,6 +539,15 @@ def apy_iterable(v: ptr) -> ptr:
         return apy_view_items(v)
     if k == apy_gen_kind():
         return apy_gen_drain(v)
+    # AN ALIAS YIELDS ONE ITEM -- itself, starred. `iter(list[int])` hands
+    # out exactly one thing in CPython, which is why `1 in list[int]` answers
+    # False rather than raising: membership walks that one item and does not
+    # match it. A one-item tuple is the container, so every consumer that
+    # already walks a tuple needs no branch of its own.
+    if k == apy_alias_kind():
+        one: ptr = apy_tuple_new(1)
+        apy_q_append_of(one, apy_alias_unpack(v))
+        return one
     if k == apy_type_kind():
         meta: ptr = ptr(load(u64, offset(v, apy_t_meta_offset())))
         if meta:

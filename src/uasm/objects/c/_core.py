@@ -444,8 +444,16 @@ struct apy_obj {
            an omitted bound is not the same as any number, which is the whole
            reason the three are kept rather than resolved to indices here. */
         struct { apy_value start, stop, step; } sl;
-        /* `list[int]`: what was subscripted, and with what. */
-        struct { apy_value origin, args; } ga;
+        /* `list[int]`: what was subscripted, and with what.
+
+           `unpacked` IS PEP 646's `*list[int]`, and it exists because
+           ITERATING an alias is what CPython does with one: `iter(list[int])`
+           yields exactly one item, the unpacked form of itself. That is the
+           whole reason `1 in list[int]` answers False rather than raising --
+           membership walks that one item and does not match. Without the
+           flag the unpacked form would be equal to the plain one, and
+           `x in list[int]` would have had to answer False by fiat. */
+        struct { apy_value origin, args; int unpacked; } ga;
         /* What a memoryview looks at, and where. `step` is signed: -1 is
            `mv[::-1]`, which reads the same bytes backwards. */
         /* `ro` IS NOT DERIVED FROM THE SOURCE. `m.toreadonly()` hands out
