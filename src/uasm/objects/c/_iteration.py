@@ -149,6 +149,95 @@ APY_API apy_value apy_getiter(apy_value v) {
     return apy_cursor(v, 0, APY_IT_PLAIN, 0);
 }
 
+/* CAN THIS BE WALKED AT ALL, asked WITHOUT running a line of the program.
+   The structural half of `apy_getiter`'s rule, stated here because one
+   caller needs the question answered rather than attempted: `f(*x)` reports
+   a DIFFERENT TypeError from the one iteration raises, and the two cannot be
+   told apart after the fact.
+
+   WHY NOT "TRY IT AND REWORD THE FAILURE". A `__iter__` the program wrote
+   may raise a TypeError of its own, and CPython propagates that one
+   unchanged -- `f(*x)` where `x.__iter__` raises `TypeError("mine")` says
+   `mine`. Rewording every TypeError would have swallowed it.
+
+   STATIC, because its one caller is the function below it. An `APY_API`
+   name is part of the runtime's surface and owes a host binding; this is a
+   local question asked in one place.
+
+   KEPT BESIDE `apy_getiter` so the two are read together. Anything this says
+   yes to, that function accepts; what it cannot answer for is a `__iter__`
+   that exists and then fails, which is the program's business and not
+   this question's. */
+static int64_t apy_can_iterate(apy_value v) {
+    if (O(v)->kind == APY_INST_K)
+        return O(v)->v.o.held
+            || apy_class_find(O(v)->v.o.cls, apy_name("__iter__")) != 0
+            || apy_class_find(O(v)->v.o.cls, apy_name("__getitem__")) != 0;
+    if (O(v)->kind == APY_TYPE_K)
+        return O(v)->v.t.meta
+            && apy_class_find(O(v)->v.t.meta, apy_name("__iter__")) != 0;
+    if (O(v)->kind == APY_GEN_K || O(v)->kind == APY_ITER_K
+            || O(v)->kind == APY_VIEW_K || O(v)->kind == APY_ALIAS_K
+            || O(v)->kind == APY_STR_K || O(v)->kind == APY_BYTES_K
+            || O(v)->kind == APY_DICT_K || O(v)->kind == APY_RANGE_K)
+        return 1;
+    return apy_is_seq(v) || apy_is_set(v);
+}
+
+/* `f()` as CPython names a callee in a message: `__main__.C.m`, `print`.
+   THE MODULE IS PART OF THE NAME except for a builtin, which is why the
+   `builtins` test is here and not at the call site -- CPython prints
+   `print() argument after *` and `__main__.f() argument after *`, and the
+   difference is the module and nothing else. */
+static void apy_callee_str(apy_value f, char *out, size_t n) {
+    apy_value mod = 0, nm = 0;
+    int bare = 0;
+    if (O(f)->kind == APY_FUNC_K) {
+        nm = O(f)->v.fn.qualname ? O(f)->v.fn.qualname : O(f)->v.fn.name;
+        /* THE SAME RULE `__module__` ANSWERS BY, and read from here rather
+           than from the field: a program's own function usually has no
+           module recorded and reads as `__main__`, which is exactly what
+           CPython prints. Taking the field raw dropped the prefix from
+           every user function. See `_descriptors.py`'s `__module__`. */
+        if (O(f)->v.fn.builtin || O(f)->v.fn.is_type || O(f)->v.fn.native)
+            bare = 1;
+        else
+            mod = O(f)->v.fn.module ? O(f)->v.fn.module : apy_lit("__main__");
+    } else if (O(f)->kind == APY_TYPE_K) {
+        int64_t at;
+        nm = O(f)->v.t.name;
+        at = O(f)->v.t.dict ? apy_dict_find(O(f)->v.t.dict,
+                                            apy_name("__module__")) : -1;
+        mod = at >= 0 ? O(O(f)->v.t.dict)->v.d.vals[at] : apy_lit("__main__");
+    }
+    if (!nm || O(nm)->kind != APY_STR_K) {
+        snprintf(out, n, "%s", apy_kind_name(f));
+        return;
+    }
+    if (!bare && mod && O(mod)->kind == APY_STR_K
+            && strcmp(APY_CSTR(mod), "builtins") != 0)
+        snprintf(out, n, "%s.%s", APY_CSTR(mod), APY_CSTR(nm));
+    else
+        snprintf(out, n, "%s", APY_CSTR(nm));
+}
+
+/* `f(*xs)` -- the same flattening `apy_extend` does, with the refusal the
+   CALL SITE owes. `extend` can only say what the argument is (`'NI' object
+   is not iterable`); CPython names the FUNCTION and what the position
+   expected: `__main__.f() argument after * must be an iterable, not NI`.
+   The call site is the only place that knows which function was being
+   called, which is why this takes the callee rather than `extend` growing a
+   parameter nobody else could fill. */
+APY_API apy_value apy_extend_arg(apy_value into, apy_value more,
+                                 apy_value callee) {
+    char who[192];
+    if (apy_can_iterate(more)) return apy_extend(into, more);
+    apy_callee_str(callee, who, sizeof who);
+    return apy_fail2("TypeError",
+                     "%s() argument after * must be an iterable, not %s",
+                     who, apy_kind_name(more));
+}
+
 /* Walk a cursor to the end and BECOME a plain one over what it produced.
 
    Asking a lazy thing for its length is asking it to run, and the honest

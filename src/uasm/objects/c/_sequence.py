@@ -271,6 +271,8 @@ static apy_value apy_type_of(apy_value v);
 APY_API apy_value apy_copy(apy_value v);
 APY_API apy_value apy_update(apy_value target, apy_value src);
 APY_API apy_value apy_extend(apy_value seq, apy_value other);
+APY_API apy_value apy_extend_arg(apy_value into, apy_value more,
+                                 apy_value callee);
 APY_API apy_value apy_bitor(apy_value a, apy_value b);
 APY_API apy_value apy_bitand(apy_value a, apy_value b);
 APY_API apy_value apy_bitxor(apy_value a, apy_value b);

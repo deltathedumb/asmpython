@@ -9593,6 +9593,59 @@ PROGRAMS = {
             got.append(repr(one))
         print(got)
     """,
+    # `f(*x)` OWES A DIFFERENT REFUSAL from the one iteration raises. The
+    # plain `extend` says only what the argument is -- `'NI' object is not
+    # iterable` -- where CPython names the FUNCTION and what the position
+    # expected. The call site is the only place that knows which function was
+    # being called.
+    #
+    # THE MODULE IS PART OF THE NAME, and only for a function the program
+    # wrote: `__main__.f()` against `print()`. That is the same rule
+    # `__module__` answers by, which is why this checks a def, a method, a
+    # class and a builtin rather than one of them.
+    #
+    # A `__iter__` THAT RAISES TypeError IS NOT REWORDED -- CPython
+    # propagates the program's own complaint, so "try it and reword the
+    # failure" would have swallowed it. The question is asked structurally
+    # instead, which is what `apy_can_iterate` is for, and the
+    # `__getitem__`-only line holds that predicate to the older protocol.
+    "star_splat_names_the_callee": """
+        class NI:
+            pass
+        def f(*a):
+            return len(a)
+        class C:
+            def m(self, *a):
+                return len(a)
+            def __init__(self, *a):
+                pass
+        class Raises:
+            def __iter__(self):
+                raise TypeError("my own complaint")
+        class Getitem:
+            def __getitem__(self, i):
+                raise IndexError
+        def show(lbl, fn):
+            try:
+                fn()
+            except Exception as e:
+                print(lbl, "|", type(e).__name__, "|", e)
+            else:
+                print(lbl, "| ok")
+        show("plain def", lambda: f(*NI()))
+        show("method", lambda: C().m(*NI()))
+        show("class", lambda: C(*NI()))
+        show("builtin", lambda: print(*NI()))
+        show("int", lambda: f(*3))
+        show("none", lambda: f(*None))
+        show("user TypeError propagates", lambda: f(*Raises()))
+        show("old protocol is iterable", lambda: f(*Getitem()))
+        show("a real iterable still works", lambda: f(*[1, 2]))
+        show("a generator still works", lambda: f(*(x for x in [1])))
+        show("a string still works", lambda: f(*"ab"))
+        show("a range still works", lambda: f(*range(2)))
+        show("a dict still works", lambda: f(*{"a": 1}))
+    """,
 }
 
 

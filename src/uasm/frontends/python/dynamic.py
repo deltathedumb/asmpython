@@ -1404,7 +1404,7 @@ class DynamicLowering:
             self.b, self.info = saved_b, saved_info
             self.handlers, self.finallys = saved_handlers, saved_finallys
 
-    def _dyn_star_args(self, node: ast.Call) -> int:
+    def _dyn_star_args(self, node: ast.Call, callee=None) -> int:
         """The argument list of a call containing `*xs`, built at run time.
 
         Each ordinary argument is appended, and each starred one is flattened
@@ -1412,6 +1412,14 @@ class DynamicLowering:
         passes. The result is a list because the COUNT is not known here --
         that is what a star means -- and a list is the only shape that can
         carry a count decided at run time.
+
+        `callee` IS FOR THE REFUSAL AND NOTHING ELSE. `f(*1)` is reported by
+        CPython as `__main__.f() argument after * must be an iterable, not
+        int` -- it names the function, which a plain `extend` cannot: that
+        one says only what the argument is. Passed as a reader because the
+        callee was evaluated before this and may have been spilled across an
+        await. None where there is no callee value to name, which is the
+        `str.format` path below.
         """
         held = self._held_accumulator(
             self.b.call(T.PTR, "apy_list_new",
@@ -1423,7 +1431,11 @@ class DynamicLowering:
             # display here takes.
             if isinstance(arg, ast.Starred):
                 more = self._dyn_expr(arg.value)
-                self.b.call(T.PTR, "apy_extend", [held(), more])
+                if callee is None:
+                    self.b.call(T.PTR, "apy_extend", [held(), more])
+                else:
+                    self.b.call(T.PTR, "apy_extend_arg",
+                                [held(), more, callee()])
                 self._dyn_check()
             else:
                 one = self._dyn_expr(arg)
@@ -1486,8 +1498,8 @@ class DynamicLowering:
         # shape: appended to the argument list they would arrive as one more
         # positional. Dropping them made `f(*xs, **kw)` ignore every keyword.
         named = [kw.value for kw in node.keywords]
-        held_spread = self._spill_across_await(self._dyn_star_args(node),
-                                               named)
+        held_spread = self._spill_across_await(
+            self._dyn_star_args(node, held_callee), named)
         values = []
         for i, kw in enumerate(node.keywords):
             values.append(self._spill_across_await(self._dyn_expr(kw.value),

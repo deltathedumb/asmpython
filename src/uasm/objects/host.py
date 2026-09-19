@@ -11648,6 +11648,73 @@ def _apy_alias_new(h, a):
                         h._get(a[1], "apy_alias_new")))
 
 
+def _can_iterate(h, v) -> bool:
+    """CAN THIS BE WALKED AT ALL, asked without running a line of the program.
+
+    The structural half of `_apy_getiter`'s rule. One caller needs the
+    question ANSWERED rather than attempted: `f(*x)` owes a different
+    TypeError from the one iteration raises, and a `__iter__` the program
+    wrote may raise a TypeError of its own that CPython propagates unchanged.
+    Rewording every TypeError would have swallowed it.
+    """
+    if isinstance(v, Instance):
+        return (v.held is not None
+                or v.cls.find("__iter__") is not None
+                or v.cls.find("__getitem__") is not None)
+    if isinstance(v, Class):
+        return v.meta is not None and v.meta.lookup("__iter__") is not _ABSENT
+    if isinstance(v, (Gen, Iterator, Alias)):
+        return True
+    if isinstance(v, _VIEW_TYPES):
+        return True
+    # A RANGE IS A REAL `range` HERE, as a list is a real list: this file
+    # keeps a Python object for every kind it has not had to model.
+    return isinstance(v, (list, tuple, set, frozenset, dict, str, bytes,
+                          bytearray, range))
+
+
+def _callee_str(h, f) -> str:
+    """`f()` as CPython names a callee in a message.
+
+    THE MODULE IS PART OF THE NAME except for a builtin: CPython prints
+    `print() argument after *` and `__main__.f() argument after *`, and the
+    difference between them is the module and nothing else.
+    """
+    nm = getattr(f, "qualname", None) or getattr(f, "name", None)
+    # THE SAME RULE `__module__` ANSWERS BY. A program's own function usually
+    # has no module recorded and reads as `__main__`, which is what CPython
+    # prints; a builtin has no prefix at all.
+    bare = bool(getattr(f, "builtin", False) or getattr(f, "is_type", False)
+                or getattr(f, "native", False))
+    mod = getattr(f, "module", None) or ("builtins" if bare else "__main__")
+    if isinstance(f, Class):
+        nm = f.name
+        bare = False
+        mod = (f.dict.get("__module__") if isinstance(f.dict, dict)
+               else None) or "__main__"
+    if not isinstance(nm, str):
+        return h.kind_name(f)
+    if bare or not isinstance(mod, str) or mod == "builtins":
+        return nm
+    return f"{mod}.{nm}"
+
+
+def _apy_extend_arg(h, a):
+    """`f(*xs)` -- the flattening, with the refusal the CALL SITE owes.
+
+    `extend` can only say what the argument is; CPython names the FUNCTION
+    and what the position expected. The call site is the only place that
+    knows which function was being called.
+    """
+    more = h._get(a[1], "apy_extend_arg")
+    if _can_iterate(h, more):
+        return _apy_extend(h, a[:2])
+    who = _callee_str(h, h._get(a[2], "apy_extend_arg"))
+    return h._fail("TypeError",
+                   f"{who}() argument after * must be an iterable, "
+                   f"not {h.kind_name(more)}")
+
+
 def _apy_alias_unpack(h, a):
     """`*list[int]` -- what iterating `list[int]` yields, once.
 
@@ -15816,6 +15883,7 @@ _TABLE.update({
     "apy_step": _apy_step,
     "apy_iter": _apy_iter,
     "apy_alias_unpack": _apy_alias_unpack,
+    "apy_extend_arg": _apy_extend_arg,
     "apy_iterable": _apy_iterable,
     "apy_next": _apy_next,
     "apy_map": _apy_map,
