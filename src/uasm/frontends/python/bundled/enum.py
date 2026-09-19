@@ -110,7 +110,13 @@ class EnumMeta(type):
                 setattr(cls, key, found)
                 by_name[key] = found
                 continue
-            member = object.__new__(cls)
+            # THE VALUE GOES IN THE BUILTIN HALF, which is what makes a
+            # member of `class Colour(str, Enum)` a str: CPython builds one
+            # with `member_type.__new__(enum_class, value)`, and this is the
+            # spelling that reaches the same fill here. A class extending
+            # nothing ignores the argument, so there is one shape and not
+            # two.
+            member = object.__new__(cls, value)
             member._name_ = key
             member._value_ = value
             setattr(cls, key, member)
@@ -267,11 +273,17 @@ class IntEnum(Enum):
         return _as_int(other) * self._value_
 
 
-class StrEnum(Enum):
-    """An enum whose members compare and concatenate as their strings.
+class StrEnum(str, Enum):
+    """An enum whose members ARE their strings.
 
     A `ReprEnum` like `IntEnum`, so `str(Colour.RED)` is `red` and `repr` is
     what still names the member.
+
+    EXTENDS `str`, which is what CPython's does -- `class StrEnum(str,
+    ReprEnum)`. Written as a plain `Enum` it emulated the string through
+    `__str__`, `__eq__` and the orderings, which covered printing and
+    comparison and nothing else: `Name.A.upper()` was an AttributeError and
+    `"-".join([Name.A])` refused the member by kind.
     """
 
     def __str__(self):

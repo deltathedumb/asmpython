@@ -74,13 +74,15 @@ static apy_value apy_native(int sel, int64_t arity, const char *name) {
     o->v.fn.native = sel;
     o->v.fn.arity = arity;
     o->v.fn.name = apy_lit(name);
-    /* THE ARGUMENT IS OPTIONAL for the two that stand in for a builtin base's
-       constructor, because `dict.__init__` takes nought or one and
-       `super().__init__()` with nothing is the ordinary spelling. The arity
+    /* THE CONTENT ARGUMENT IS OPTIONAL for the three that can stand in for a
+       builtin base's constructor, because `dict.__init__` takes nought or one
+       and `super().__init__()` with nothing is the ordinary spelling -- as is
+       `object.__new__(cls)` beside `object.__new__(cls, content)`. The arity
        check further down fills a missing trailing slot from `defaults` and
        then insists the count matches exactly, so an omitted argument was an
        arity error naming a method the program never declared. */
-    if (sel == APY_NAT_BUILTIN_INIT || sel == APY_NAT_BUILTIN_NEW) {
+    if (sel == APY_NAT_BUILTIN_INIT || sel == APY_NAT_BUILTIN_NEW
+            || sel == APY_NAT_NEW) {
         static apy_value absent[1];
         absent[0] = apy_none();
         o->v.fn.ndefaults = 1;
@@ -171,6 +173,30 @@ static apy_value apy_c3(apy_value cls, apy_value bases) {
     return out;
 }
 
+/* THE BUILTIN A `class` STATEMENT NAMED, waiting for the class to exist.
+
+   `class Colour(str, Enum)` records its kind through `apy_type_builtin`, and
+   that runs only once `apy_class_build` has ANSWERED -- which for a class
+   with a metaclass is after the metaclass body has finished. An `EnumMeta`
+   makes every member inside that body, so the members were built against a
+   class that did not yet know it extended anything, and `isinstance(
+   Colour.RED, str)` was False, `len(Colour.RED)` a TypeError, and
+   `Colour.RED == "red"` False.
+
+   THE NAME IS PART OF THE CELL so that a `class` statement inside a
+   metaclass body cannot take the tag meant for the class being built: only a
+   creation of the same name consumes it. The lowering sets it immediately
+   before `apy_class_build` and that call clears it again, so nothing outlives
+   one statement. */
+static apy_value apy_builtin_pending_name = 0;
+static int64_t apy_builtin_pending_kind = 0;
+
+APY_API apy_value apy_type_builtin_pending(apy_value name, int64_t kind) {
+    apy_builtin_pending_name = name;
+    apy_builtin_pending_kind = kind;
+    return apy_none();
+}
+
 static apy_value apy_type_from_ns(apy_value mcls, apy_value name,
                                   apy_value bases, apy_value ns) {
     apy_value base = 0, cls;
@@ -179,6 +205,18 @@ static apy_value apy_type_from_ns(apy_value mcls, apy_value name,
         base = O(bases)->v.q.items[0];
     cls = apy_type_new(name, base ? base : apy_none());
     if (!cls) return 0;
+    /* THE KIND IS RECORDED HERE, where a metaclass's `super().__new__`
+       reaches -- see `apy_type_builtin_pending`. */
+    if (apy_builtin_pending_kind && name && apy_builtin_pending_name
+            && O(name)->kind == APY_STR_K
+            && O(apy_builtin_pending_name)->kind == APY_STR_K
+            && O(name)->v.s.n == O(apy_builtin_pending_name)->v.s.n
+            && memcmp(O(name)->v.s.p, O(apy_builtin_pending_name)->v.s.p,
+                      (size_t)O(name)->v.s.n) == 0) {
+        O(cls)->v.t.builtin = apy_builtin_pending_kind;
+        apy_builtin_pending_kind = 0;
+        apy_builtin_pending_name = 0;
+    }
     if (mcls && O(mcls)->kind == APY_TYPE_K) O(cls)->v.t.meta = mcls;
     if (bases && apy_is_seq(bases) && O(bases)->v.q.n > 0) {
         apy_value order;
@@ -311,6 +349,7 @@ APY_API apy_value apy_class_build_kw(apy_value meta, apy_value name,
     apy_value use = apy_meta_for(meta, bases);
     if (use && O(use)->kind == APY_TYPE_K) {
         apy_value argv[3];
+        apy_value built;
         argv[0] = name;
         argv[1] = bases;
         argv[2] = ns;
@@ -320,10 +359,22 @@ APY_API apy_value apy_class_build_kw(apy_value meta, apy_value name,
            the caller announces separately, and handing them to the plain
            construction would make them an arity error. */
         if (kw && O(kw)->kind == APY_DICT_K && O(kw)->v.d.n)
-            return apy_call_kw(use, (apy_value)(uintptr_t)argv, 3, kw);
-        return apy_call_n(use, argv, 3);
+            built = apy_call_kw(use, (apy_value)(uintptr_t)argv, 3, kw);
+        else
+            built = apy_call_n(use, argv, 3);
+        /* NOTHING PENDING OUTLIVES ONE STATEMENT. A metaclass that answers
+           something it did not build with `type()` leaves the cell unread,
+           and the next class of the same name would take it. */
+        apy_builtin_pending_kind = 0;
+        apy_builtin_pending_name = 0;
+        return built;
     }
-    return apy_type_from_ns(0, name, bases, ns);
+    {
+        apy_value made = apy_type_from_ns(0, name, bases, ns);
+        apy_builtin_pending_kind = 0;
+        apy_builtin_pending_name = 0;
+        return made;
+    }
 }
 
 APY_API apy_value apy_class_build(apy_value meta, apy_value name,
@@ -1563,13 +1614,31 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
         O(exc)->v.e.rendered = 0;
         return apy_none();
     }
-    case APY_NAT_NEW:
+    case APY_NAT_NEW: {
         /* `object.__new__(cls)`. The CLASS is the argument, not an instance:
            it is an implicit staticmethod, which is why a bound one still
            receives the class in `a[0]`. */
+        apy_value made;
         if (n < 1 || O(a[0])->kind != APY_TYPE_K)
             return apy_fail("TypeError", "object.__new__(): not a type");
-        return apy_instance_new(a[0]);
+        made = apy_instance_new(a[0]);
+        if (!made) return 0;
+        /* A CONTENT ARGUMENT FILLS THE BUILTIN HALF, which is the only way
+           to build an immutable one: `class P(tuple)` has to be filled here
+           or never, and an enum member of a `class Colour(str, Enum)` is its
+           VALUE rather than an empty string. The same fill
+           `super().__new__(cls, x)` already does -- see
+           `APY_NAT_BUILTIN_NEW` -- and CPython reaches it as
+           `str.__new__(cls, value)`, a spelling this runtime has no type
+           object to write. */
+        if (n > 1 && O(a[1])->kind != APY_NONE_K
+                && O(made)->kind == APY_INST_K && O(made)->v.o.held) {
+            apy_value filled = apy_call_kind(O(O(made)->v.o.held)->kind, a[1]);
+            if (!filled) return 0;
+            O(made)->v.o.held = filled;
+        }
+        return made;
+    }
     case APY_NAT_REPR:
     case APY_NAT_STR:      return n < 1 ? 0 : apy_default_repr(a[0]);
     case APY_NAT_EQ:       return n < 2 ? 0 : apy_default_eq(a[0], a[1]);
@@ -1997,7 +2066,10 @@ APY_API apy_value apy_object_default(apy_value wantv) {
     if (strcmp(want, "__init__") == 0)
         return apy_native(APY_NAT_INIT, 1, "__init__");
     if (strcmp(want, "__new__") == 0)
-        return apy_native(APY_NAT_NEW, 1, "__new__");
+        /* TWO SLOTS, THE SECOND OPTIONAL. `object.__new__(cls)` is the
+           ordinary spelling and `object.__new__(cls, content)` fills the
+           builtin half of a class that extends one -- see the native. */
+        return apy_native(APY_NAT_NEW, 2, "__new__");
     if (strcmp(want, "__repr__") == 0)
         return apy_native(APY_NAT_REPR, 1, "__repr__");
     if (strcmp(want, "__str__") == 0)

@@ -4793,6 +4793,36 @@ def _apy_type_class(h, a):
     return made
 
 
+#: The builtin a `class` statement named, waiting for the class to exist:
+#: `[name, kind]` or `[None, None]`. See `_apy_type_builtin_pending`, which
+#: is where the whole of it is explained. Mirrors the C's two statics.
+_BUILTIN_PENDING = [None, None]
+
+
+def _apy_type_builtin_pending(h, a):
+    """`class Colour(str, Enum)` -- the kind, announced before the class is
+    built rather than recorded after it.
+
+    `apy_type_builtin` runs once `apy_class_build` has ANSWERED, which for a
+    class with a metaclass is after the metaclass body has finished. An
+    `EnumMeta` makes every member inside that body, so the members were built
+    against a class that did not yet know it extended anything, and
+    `isinstance(Colour.RED, str)` was False, `len(Colour.RED)` a TypeError,
+    and `Colour.RED == "red"` False.
+
+    THE NAME IS PART OF THE CELL so that a `class` statement inside a
+    metaclass body cannot take the tag meant for the class being built: only
+    a creation of the same name consumes it. The lowering sets it immediately
+    before `apy_class_build` and that call clears it again, so nothing
+    outlives one statement.
+    """
+    # THE KIND IS A PLAIN NUMBER, not a handle -- the lowering passes the
+    # enum constant straight through, as it does to `apy_type_builtin`.
+    _BUILTIN_PENDING[0] = str(h._get(a[0], "apy_type_builtin_pending"))
+    _BUILTIN_PENDING[1] = _BUILTIN_KINDS.get(int(a[1]))
+    return h._none
+
+
 def _type_from_ns(h, mcls, name, bases, ns):
     """`type(name, bases, ns)` as an OBJECT: what `super().__new__` inside a
     metaclass's `__new__` answers."""
@@ -4800,6 +4830,12 @@ def _type_from_ns(h, mcls, name, bases, ns):
         if isinstance(bases, (list, tuple)) else []
     base = listed[0] if listed else None
     cls = Class(str(name), base, listed)
+    # THE KIND IS RECORDED HERE, where a metaclass's `super().__new__`
+    # reaches -- see `_apy_type_builtin_pending`.
+    if _BUILTIN_PENDING[1] is not None and _BUILTIN_PENDING[0] == str(name):
+        cls.builtin = _BUILTIN_PENDING[1]
+        _BUILTIN_PENDING[0] = None
+        _BUILTIN_PENDING[1] = None
     if listed:
         order = c3(cls, listed)
         if order is None:
@@ -4899,7 +4935,10 @@ def _class_build(h, a, kw):
             # THROUGH THE NAME-MATCHING PATH. `_invoke` only fills a `**kw`
             # parameter, so a keyword naming a declared one was dropped and
             # the parameter took its default.
-            return _call_kwargs(h, use, [name, bases, ns], dict(kw))
+            built = _call_kwargs(h, use, [name, bases, ns], dict(kw))
+            _BUILTIN_PENDING[0] = None
+            _BUILTIN_PENDING[1] = None
+            return built
         # `h._value`, NOT `h._new`. `is` compares HANDLES, and the class the
         # metaclass answered already has one -- it was built inside
         # `Meta.__new__`, where the body could keep it. Minting a second made
@@ -4911,8 +4950,16 @@ def _class_build(h, a, kw):
         # The same rule `_apy_exc_type` states for `OSError is OSError`. The
         # plain path below keeps `_new`, because there the class is made HERE
         # and this is the first handle it has ever had.
-        return h._value(h._invoke(use, [name, bases, ns]))
+        built = h._value(h._invoke(use, [name, bases, ns]))
+        # NOTHING PENDING OUTLIVES ONE STATEMENT. A metaclass that answers
+        # something it did not build with `type()` leaves the cell unread,
+        # and the next class of the same name would take it.
+        _BUILTIN_PENDING[0] = None
+        _BUILTIN_PENDING[1] = None
+        return built
     made = _type_from_ns(h, None, name, bases, ns)
+    _BUILTIN_PENDING[0] = None
+    _BUILTIN_PENDING[1] = None
     return h._new(made) if made is not None else 0
 
 
@@ -8892,6 +8939,19 @@ def _kind_attr(h, obj, want: str):
     return None
 
 
+def _object_new_of(h):
+    """`object.__new__(cls)`, and `object.__new__(cls, content)` for a class
+    extending a builtin. See the caller for why the second shape exists."""
+    def _new(cls, *rest):
+        made = Instance(cls, h)
+        kind = cls.builtin_kind() if isinstance(cls, Class) else None
+        if kind is not None and rest:
+            made.held = kind(*[_content_of(one) for one in rest])
+        return made
+
+    return _new
+
+
 def _object_default(h, name: str):
     """`object`'s own version of a dunder, as a callable value.
 
@@ -8905,7 +8965,15 @@ def _object_default(h, name: str):
         body = lambda *a: None
     elif name == "__new__":
         # An implicit STATICMETHOD: the argument is the class.
-        body = lambda cls, *a: Instance(cls, h)
+        #
+        # A CONTENT ARGUMENT FILLS THE BUILTIN HALF, which is the only way to
+        # build an immutable one: `class P(tuple)` has to be filled here or
+        # never, and an enum member of a `class Colour(str, Enum)` is its
+        # VALUE rather than an empty string. The same fill
+        # `super().__new__(cls, x)` already does -- see `_builtin_new` -- and
+        # CPython reaches it as `str.__new__(cls, value)`, a spelling this
+        # runtime has no type object to write.
+        body = _object_new_of(h)
     elif name in ("__repr__", "__str__"):
         body = lambda v, *a: (_inst_repr(v) if isinstance(v, Instance)
                               else h._text(v, True))
@@ -16654,6 +16722,7 @@ _TABLE.update({
     "apy_type_class": _apy_type_class,
     "apy_type_object": _apy_type_object,
     "apy_prepare": _apy_prepare,
+    "apy_type_builtin_pending": _apy_type_builtin_pending,
     "apy_class_build": _apy_class_build,
     "apy_class_build_kw": _apy_class_build_kw,
     "apy_meta_for": _apy_meta_for,

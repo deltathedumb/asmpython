@@ -598,7 +598,8 @@ def apy_native_of(sel: i64, arity: i64, name: ptr) -> ptr:
     store(i32, i32(sel), offset(o, apy_fn_native_offset()))
     store(i64, arity, offset(o, apy_fn_arity_offset()))
     store(u64, u64(apy_from_cstr(name)), offset(o, apy_fn_name_offset()))
-    if sel == apy_nat_builtin_init() or sel == apy_nat_builtin_new():
+    if (sel == apy_nat_builtin_init() or sel == apy_nat_builtin_new()
+            or sel == apy_nat_new()):
         store(u64, u64(apy_none()), apy_native_absent())
         store(i64, 1, offset(o, apy_fn_ndefaults_offset()))
         store(u64, u64(apy_native_absent()),

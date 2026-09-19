@@ -705,7 +705,10 @@ def apy_object_default(want: ptr) -> ptr:
     if apy_cstr_eq(want, rodata(b"__init__\0")):
         return apy_native_of(apy_nat_init(), 1, rodata(b"__init__\0"))
     if apy_cstr_eq(want, rodata(b"__new__\0")):
-        return apy_native_of(apy_nat_new(), 1, rodata(b"__new__\0"))
+        # TWO SLOTS, THE SECOND OPTIONAL. `object.__new__(cls)` is the
+        # ordinary spelling and `object.__new__(cls, content)` fills the
+        # builtin half of a class that extends one -- see the native.
+        return apy_native_of(apy_nat_new(), 2, rodata(b"__new__\0"))
     if apy_cstr_eq(want, rodata(b"__repr__\0")):
         return apy_native_of(apy_nat_repr(), 1, rodata(b"__repr__\0"))
     if apy_cstr_eq(want, rodata(b"__str__\0")):

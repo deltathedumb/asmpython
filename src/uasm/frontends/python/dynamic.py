@@ -5529,6 +5529,17 @@ class DynamicLowering:
             self._dyn_check()
         self._class_scope = outer_scope
         self._class_binds = outer_binds
+        # THE KIND IS ANNOUNCED BEFORE THE CLASS EXISTS, not recorded after
+        # it. The `apy_type_builtin` call further down runs once
+        # `apy_class_build` has ANSWERED, which for a class with a metaclass
+        # is after the metaclass body has finished -- and an `EnumMeta` makes
+        # every member inside that body, against a class that did not yet
+        # know it extended anything. See `apy_type_builtin_pending`.
+        if info.builtin_base:
+            self.b.call(T.PTR, "apy_type_builtin_pending",
+                        [self._dyn_str_literal(info.name),
+                         self.b.const(T.I64,
+                                      _BUILTIN_BASE_KIND[info.builtin_base])])
         # THE CLASS IS BUILT FROM THE MAPPING, through the metaclass if there
         # is one -- written here or inherited from the base.
         if info.class_keywords:

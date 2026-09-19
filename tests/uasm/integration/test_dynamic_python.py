@@ -3874,6 +3874,56 @@ PROGRAMS = {
 
         print("variadic:", list(gen_both(1, 2, 3, z=4)))
     """,
+    # AND A CLASS LEARNS ITS BUILTIN BEFORE ITS METACLASS RUNS. The kind
+    # used to be recorded once `apy_class_build` had ANSWERED, which for a
+    # class with a metaclass is after the metaclass body has finished -- and
+    # an `EnumMeta` makes every member inside that body. So a member of a
+    # `class Colour(str, Enum)` was built against a class that did not yet
+    # know it extended anything: `isinstance(Colour.RED, str)` was False,
+    # `len(Colour.RED)` a TypeError and `Colour.RED == "red"` False. And
+    # `StrEnum` was written as a plain `Enum`, so `Name.A.upper()` was an
+    # AttributeError and `"-".join([Name.A])` refused the member by kind.
+    "an_enum_member_is_the_builtin_its_enum_extends": """
+        from enum import Enum, IntEnum, StrEnum, auto
+
+        class Colour(str, Enum):
+            RED = "red"
+            BLUE = "blue"
+
+        class Name(StrEnum):
+            A = "a"
+            B = "b"
+
+        class Num(IntEnum):
+            ONE = 1
+            TWO = 2
+
+        class Plain(Enum):
+            X = auto()
+            Y = auto()
+
+        # A MIXIN MEMBER IS THE TEXT, and `Enum` writing `__str__` and
+        # `__repr__` still decides how it PRINTS.
+        print("mixin:", isinstance(Colour.RED, str), len(Colour.RED),
+              Colour.RED == "red")
+        print("mixin shows:", str(Colour.RED), repr(Colour.RED),
+              Colour.RED.value)
+        print("mixin methods:", Colour.RED.upper(), Colour.RED + "!",
+              "-".join([Colour.RED, Colour.BLUE]))
+        # A StrEnum MEMBER PRINTS AS ITS TEXT, which is what makes it one.
+        print("strenum:", str(Name.A), repr(Name.A), Name.A == "a")
+        print("strenum methods:", Name.A.upper(), "-".join([Name.A, Name.B]),
+              Name.A in "abc", f"{Name.A}")
+        # AND THE REST OF THE MODULE IS UNCHANGED.
+        print("int:", str(Num.ONE), Num.ONE + 1, Num.ONE == 1)
+        print("plain:", str(Plain.X), repr(Plain.X), Plain.X.value)
+        print("lookup:", Colour("red") is Colour.RED,
+              Colour["RED"] is Colour.RED, Name("a") is Name.A)
+        print("members:", [m.name for m in Colour], [m.value for m in Name])
+        print("keys:", {Name.A: 1}[Name.A], Colour.RED in Colour)
+        # THE CLASS THE METACLASS SAW IS THE ONE THE STATEMENT BOUND.
+        print("type:", type(Colour.RED) is Colour, type(Name.A) is Name)
+    """,
     # AND A CLASS EXTENDING str IS A str WHEREVER ONE IS EXPECTED. `class
     # S(str)` makes something CPython's `find`, `join`, `replace`, `split`,
     # `in`, `int()`, `format` and `getattr` all take without a second
