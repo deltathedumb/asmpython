@@ -4412,6 +4412,16 @@ class DynamicLowering:
             # was itself handed. Both are already in a register holding the
             # cell, which is what makes a two-level capture work without the
             # middle function mentioning the name.
+            #
+            # OR OUT OF A GENERATOR'S FRAME, where the box lives in a slot
+            # rather than a register -- see `_dyn_gen_cells`. Without this a
+            # `def` written inside a generator captured nothing and every
+            # name it closed over read as None.
+            if self._gen_boxed(free):
+                self.b.call(T.PTR, "apy_func_cell",
+                            [func, self.b.const(T.I64, i),
+                             self._gen_cell(free)])
+                continue
             sym = self.info.locals.get(free)
             if sym is None or sym.register is None:
                 continue
@@ -4875,19 +4885,95 @@ class DynamicLowering:
             # Same object, different name: `type(f()).__name__` is 'coroutine'
             # and that is how a program tells one from a generator.
             self.b.call(T.PTR, "apy_coro_mark", [gen])
+        # THE BOXES FIRST, because a captured parameter's box is filled with
+        # the argument and the loop below must then leave its slot alone.
+        self._dyn_gen_cells(info, gen)
         for sym in info.params:
             if sym.name in info.slots and sym.register is not None:
+                if sym.name in info.cellvars:
+                    continue
                 self.b.call(T.PTR, "apy_gen_set",
                             [gen, self.b.const(T.I64, info.slots[sym.name]),
                              sym.register])
         for extra in (info.vararg, info.kwarg):
             if extra and extra in info.slots:
+                if extra in info.cellvars:
+                    # BOXED ALREADY, with its own value in it -- see
+                    # `_dyn_gen_cells`, and the declared parameters above.
+                    continue
                 got = info.locals[extra]
                 if got.register is not None:
                     self.b.call(T.PTR, "apy_gen_set",
                                 [gen, self.b.const(T.I64, info.slots[extra]),
                                  got.register])
         self.b.ret(gen)
+
+    def _gen_boxed(self, name: str) -> bool:
+        """Does this generator's frame slot hold a BOX rather than a value?
+
+        A name an inner function captures, or one this generator captured
+        from its own enclosing scope. Both are cells, and both live in the
+        frame for the reason every other local does -- a register does not
+        survive the return a `yield` compiles to.
+        """
+        if self._gen is None or name not in self._gen[1]:
+            return False
+        sym = self.info.locals.get(name)
+        return sym is not None and sym.storage in (CELL, FREE)
+
+    def _gen_cell(self, name: str) -> int:
+        """The BOX a generator's frame slot holds, as a register."""
+        gen_reg, slots = self._gen
+        return self.b.call(T.PTR, "apy_gen_slot",
+                           [gen_reg, self.b.const(T.I64, slots[name])])
+
+    def _dyn_gen_cells(self, info, gen: int) -> None:
+        """Fill a generator's frame with the BOXES its body reads through.
+
+        A GENERATOR NEVER RAN `_dyn_open_cells`. That prologue makes this
+        frame's boxes and unpacks the ones it was handed, and it puts each in
+        a REGISTER -- which a generator has no use for, because a register
+        does not survive the return a `yield` compiles to. So a generator got
+        neither: what it captured from its enclosing scope read as None, and
+        an inner `def` of its own captured a box nothing had made. Both are
+        everyday Python, and both were silently wrong rather than refused.
+
+        IN THE CONSTRUCTOR, which is where this is called from and the only
+        place that can: the env holding what was captured is the
+        constructor's parameter, and the step function is a different
+        function with a different env. It runs once, where the step runs
+        once per resumption -- and a box made per resumption would be a new
+        box every time.
+        """
+        for i, free in enumerate(info.freevars):
+            if free not in info.slots:
+                continue
+            self.b.call(T.PTR, "apy_gen_set",
+                        [gen, self.b.const(T.I64, info.slots[free]),
+                         self.b.call(T.PTR, "apy_env_cell",
+                                     [self.env, self.b.const(T.I64, i)])])
+        for name in info.cellvars:
+            if name not in info.slots:
+                continue
+            sym = info.locals.get(name)
+            # A CAPTURED PARAMETER IS BOXED WITH ITS ARGUMENT IN IT, and so
+            # is a captured `*rest` or `**kw`. The loops that store them
+            # skip a boxed one afterwards, so the slot holds the box and not
+            # the value it was handed.
+            #
+            # ONLY THOSE. Any other local's register is one the ORDINARY
+            # path would have allocated and this constructor never writes,
+            # so reading it here would be a register no path has written --
+            # which is what the verifier says rather than what it means.
+            arrives = ({p.name for p in info.params}
+                       | {n for n in (info.vararg, info.kwarg) if n})
+            initial = (sym.register
+                       if sym is not None and name in arrives
+                       and sym.register is not None
+                       else self.b.call(T.PTR, "apy_none", []))
+            self.b.call(T.PTR, "apy_gen_set",
+                        [gen, self.b.const(T.I64, info.slots[name]),
+                         self.b.call(T.PTR, "apy_cell_new", [initial])])
 
     def _dyn_gen_signature(self, step_sym: str, info) -> int:
         """The FUNC that DESCRIBES a generator `def`, one per module.
@@ -5587,8 +5673,15 @@ class DynamicLowering:
             # A GENERATOR'S LOCAL lives in the object, because a register does
             # not survive the return a `yield` compiles to.
             gen_reg, slots = self._gen
-            return self.b.call(T.PTR, "apy_gen_slot",
-                               [gen_reg, self.b.const(T.I64, slots[name])])
+            got = self.b.call(T.PTR, "apy_gen_slot",
+                              [gen_reg, self.b.const(T.I64, slots[name])])
+            # AND A BOXED ONE IS THE BOX. A generator's frame holds the CELL
+            # where an ordinary frame holds it in a register, so the read
+            # goes through it exactly as `sym.storage in (CELL, FREE)` does
+            # below -- see `_dyn_gen_cells`.
+            if self._gen_boxed(name):
+                return self.b.call(T.PTR, "apy_cell_get", [got])
+            return got
         if name == "__builtins__" and name not in self.info.locals:
             # The same shape a module namespace is -- a type object carrying
             # attributes -- so `dir()` and `hasattr` reach it through paths
@@ -5802,6 +5895,13 @@ class DynamicLowering:
             return
         if self._gen is not None and name in self._gen[1]:
             gen_reg, slots = self._gen
+            if self._gen_boxed(name):
+                # INTO THE BOX, not over the slot holding it, for the reason
+                # the register path below gives: a closure is looking at the
+                # same box and must see what was written.
+                self.b.call(T.PTR, "apy_cell_set",
+                            [self._gen_cell(name), value])
+                return
             self.b.call(T.PTR, "apy_gen_set",
                         [gen_reg, self.b.const(T.I64, slots[name]), value])
             return

@@ -3753,6 +3753,127 @@ PROGRAMS = {
         asyncio.run(drive())
         c.close()
     """,
+    # AND A GENERATOR'S FRAME CAN HOLD A BOX. A generator never ran the
+    # prologue that makes this frame's boxes and unpacks the ones it was
+    # handed -- that one puts each in a REGISTER, which a generator has no
+    # use for -- so what it captured from its enclosing scope read as None
+    # and an inner `def` of its own captured a box nothing had made. Both
+    # are everyday Python and both were silently wrong rather than refused.
+    "a_generators_frame_holds_its_boxes": """
+        def captures(n):
+            def gen():
+                yield n
+                yield n + 1
+            return list(gen())
+
+        print("captured parameter:", captures(5))
+
+        def captures_local():
+            # NOT THROUGH A LAZY READ: a generator is drained where it is
+            # walked here, so anything measuring the captured value between
+            # two yields measures the eagerness rather than the capture.
+            v = [1]
+
+            def gen():
+                yield v
+                v.append(2)
+                yield v
+
+            got = list(gen())
+            return len(got), got[0] is v, got[1] is v
+
+        print("captured local:", captures_local())
+
+        def writes_back():
+            seen = []
+
+            def gen():
+                for i in range(3):
+                    seen.append(i)
+                    yield i
+
+            return list(gen()), seen
+
+        print("writes back:", writes_back())
+
+        def gen_owns_a_box():
+            v = 7
+
+            def inner():
+                return v
+
+            yield inner()
+            v = 9
+            yield inner()
+
+        print("owns a box:", list(gen_owns_a_box()))
+
+        def gen_boxed_param(n):
+            def inner():
+                return n * 2
+
+            yield inner()
+            n = 10
+            yield inner()
+
+        print("boxed parameter:", list(gen_boxed_param(3)))
+
+        def gen_siblings():
+            def inner():
+                return 7
+
+            def mid():
+                return inner()
+
+            yield mid()
+
+        print("siblings:", list(gen_siblings()))
+
+        def two_levels(a):
+            def gen():
+                def deeper():
+                    return a
+                yield deeper()
+            return list(gen())
+
+        print("two levels:", two_levels(4))
+        print("genexp:", list(x * 3 for x in range(3)))
+
+        import asyncio
+
+        async def coro_captures(n):
+            async def inner():
+                return n
+
+            async def mid():
+                return await inner()
+
+            return await mid()
+
+        print("coroutine siblings:", asyncio.run(coro_captures(6)))
+
+        async def agen_captures(n):
+            async def inner():
+                return n + 1
+            yield await inner()
+
+        async def drive():
+            out = []
+            async for v in agen_captures(1):
+                out.append(v)
+            return out
+
+        print("async generator:", asyncio.run(drive()))
+
+        # AND A CAPTURED `*rest` OR `**kw` IS BOXED WITH ITS OWN VALUE IN
+        # IT, which is the half a parameter-only fix would have left out.
+        def gen_both(a, *rest, **kw):
+            def inner():
+                return a, list(rest), sorted(kw)
+            yield inner()
+
+        print("variadic:", list(gen_both(1, 2, 3, z=4)))
+    """,
     # A LITERAL IS ONE OBJECT, module-wide. `"hello" is "hello"` is True in
     # CPython and was False here, and so was every other pair of equal
     # literals: two names bound to the same text, `b"ab" is b"ab"`, `1.5 is
