@@ -770,13 +770,23 @@ class DynamicLowering:
             self.b.call(T.PTR, sym,
                         [self.b.const(T.I64, max(1, len(elts)))]), elts)
         for element in elts:
-            seq = held()
             if isinstance(element, ast.Starred):
                 # `[*xs, y]`. The star flattens in place, so the capacity
                 # guessed above is a lower bound rather than the answer --
                 # which the container grows past on its own.
-                self.b.call(T.PTR, "apy_extend",
-                            [seq, self._dyn_expr(element.value)])
+                more = self._dyn_expr(element.value)
+                # AND THE LENGTH HINT COMES FIRST, for a tuple display as
+                # much as a list one: CPython builds `(*x,)` by extending a
+                # LIST and converting it, so both spellings run the
+                # program's `__len__`. `{*x}` does not, which is why this is
+                # here and not in `apy_extend`. See `apy_length_hint`.
+                self.b.call(T.PTR, "apy_length_hint", [more])
+                self._dyn_check()
+                # `held()` READ AFTER THE ELEMENT, as the push below
+                # reads it after its own: the element's evaluation may have
+                # suspended, and a register written before it is one the
+                # resume never wrote.
+                self.b.call(T.PTR, "apy_extend", [held(), more])
                 self._dyn_check()
                 continue
             # THE ELEMENT FIRST: `held()` above is only safe to read after
@@ -2409,8 +2419,14 @@ class DynamicLowering:
                 return self.b.call(T.PTR, "apy_to_bytes",
                                    [self.b.call(T.PTR, "apy_list_new",
                                                 [self.b.const(T.I64, 1)])])
-            out = self.b.call(T.PTR, "apy_to_bytes",
-                              [self._dyn_expr(node.args[0])])
+            source = self._dyn_expr(node.args[0])
+            # `bytes(xs)` ASKS FOR A LENGTH HINT and `bytearray(xs)` does
+            # not, which is measurable from inside the program: CPython
+            # builds the immutable one from the iterator in one allocation
+            # and grows the mutable one. See `apy_length_hint`.
+            self.b.call(T.PTR, "apy_length_hint", [source])
+            self._dyn_check()
+            out = self.b.call(T.PTR, "apy_to_bytes", [source])
             self._dyn_check()
             return out
         if name == "next":
@@ -5717,8 +5733,20 @@ class DynamicLowering:
         there is no iterator protocol yet, so the source must be something
         with a length and a subscript.
         """
-        source = self.b.call(T.PTR, "apy_iterable",
-                             [self._dyn_expr(node.args[0])])
+        arg = self._dyn_expr(node.args[0])
+        if name == "list":
+            # `list(x)` ASKS FOR A LENGTH HINT and `tuple(x)` does not.
+            # CPython sizes the result from `__len__`, or `__length_hint__`
+            # when there is none, and the answer is thrown away -- but a
+            # class that writes either SEES the call, so a program that
+            # prints from one prints a line. See `apy_length_hint`.
+            #
+            # BEFORE `apy_iterable`, and on the ARGUMENT AS WRITTEN: that is
+            # the object CPython asks, and the iterable is whatever its
+            # `__iter__` handed back.
+            self.b.call(T.PTR, "apy_length_hint", [arg])
+            self._dyn_check()
+        source = self.b.call(T.PTR, "apy_iterable", [arg])
         self._dyn_check()
         slot = self.b.alloca(8)
         self.b.store(T.PTR, source, slot)

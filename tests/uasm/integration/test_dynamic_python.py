@@ -9646,6 +9646,123 @@ PROGRAMS = {
         show("a range still works", lambda: f(*range(2)))
         show("a dict still works", lambda: f(*{"a": 1}))
     """,
+    # `list(x)` AND `sorted(x)` ASK THE ARGUMENT HOW LONG IT WILL BE before
+    # they drain it, so they can size the result in one allocation. The
+    # answer is thrown away -- and the CALL is still observable, because a
+    # class that writes `__len__` or `__length_hint__` prints from it.
+    #
+    # WHICH SPELLINGS ASK IS MEASURED, not reasoned about -- the first
+    # attempt put the ask in the shared iteration funnel and was caught
+    # running a line of the program CPython never runs. Against 3.14 the
+    # askers are: `list(x)`, `bytes(x)`, `sorted(x)` with a key or without,
+    # `xs.extend(x)` on a list and on a bytearray, `xs += x` on a list, and
+    # a starred display -- `[*x]` AND `(*x,)`, the tuple one because CPython
+    # builds a tuple display by extending a list and converting it.
+    #
+    # AND WHICH DO NOT, which is the half that makes the list above mean
+    # anything: `tuple(x)`, `set(x)`, `frozenset(x)`, `bytearray(x)`,
+    # `{*x}`, `s.update(x)`, a comprehension, `f(*x)`, unpacking, `in`,
+    # `sum`, `max`, `join` and a plain `for`.
+    #
+    # TWO VERBS, IN ORDER, AND ONLY ONE OF THEM: `__len__` first, and
+    # `__length_hint__` only when there is no `__len__`. A class with both
+    # sees exactly one call.
+    #
+    # A TypeError FROM `__len__` IS SWALLOWED and `__length_hint__` tried in
+    # its place, which is how a type says "I have no length"; any other
+    # exception is the program's own and travels.
+    #
+    # THE VALUE FORMS ARE HERE TOO. `f = list`, `g = sorted` and `h = bytes`
+    # reach the runtime by another road -- the type object's constructor and
+    # the keyword-taking thunk -- and each had to be given the ask
+    # separately.
+    "list_asks_for_a_length_hint": """
+        class Base:
+            def __init__(self):
+                self.n = 0
+            def __iter__(self):
+                return self
+            def __next__(self):
+                self.n += 1
+                if self.n > 2:
+                    raise StopIteration
+                return self.n
+        class Neither(Base):
+            pass
+        class HasLen(Base):
+            def __len__(self):
+                print("  __len__")
+                return 2
+        class HasHint(Base):
+            def __length_hint__(self):
+                print("  __length_hint__")
+                return 2
+        class HasBoth(Base):
+            def __len__(self):
+                print("  __len__")
+                return 2
+            def __length_hint__(self):
+                print("  __length_hint__")
+                return 2
+        class Refuses(Base):
+            def __len__(self):
+                print("  __len__ refuses")
+                raise TypeError("no length")
+            def __length_hint__(self):
+                print("  __length_hint__")
+                return 2
+        class Breaks(Base):
+            def __len__(self):
+                raise ValueError("broken")
+        def takes(*a):
+            return len(a)
+        for name, C in (("neither", Neither), ("len", HasLen),
+                        ("hint", HasHint), ("both", HasBoth),
+                        ("refuses", Refuses)):
+            print(name)
+            print(" list:", list(C()))
+            print(" bytes:", bytes(C()))
+            print(" sorted:", sorted(C()))
+            print(" sorted key:", sorted(C(), key=lambda v: -v))
+            print(" star list:", [*C()])
+            print(" star tuple:", (*C(),))
+            xs = []
+            xs.extend(C())
+            print(" extend:", xs)
+            ys = []
+            ys += C()
+            print(" iadd:", ys)
+            ba = bytearray()
+            ba.extend(C())
+            print(" bytearray extend:", list(ba))
+            print(" tuple:", tuple(C()))
+            print(" bytearray:", list(bytearray(C())))
+            print(" set:", len(set(C())))
+            print(" frozenset:", len(frozenset(C())))
+            print(" star set:", len({*C()}))
+            zs = set()
+            zs.update(C())
+            print(" update:", len(zs))
+            print(" comp:", [y for y in C()])
+            print(" splat call:", takes(*C()))
+            print(" sum:", sum(C()))
+            print(" max:", max(C()))
+            print(" in:", 9 in C())
+            print(" join:", "-".join(str(v) for v in C()))
+            for y in C():
+                pass
+            print(" for: done")
+        f = list
+        g = sorted
+        h = bytes
+        print("value list:", f(HasLen()))
+        print("value sorted:", g(HasLen()))
+        print("value bytes:", h(HasLen()))
+        try:
+            list(Breaks())
+        except ValueError as e:
+            print("other exception travels:", e)
+    """,
 }
 
 

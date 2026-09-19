@@ -1957,8 +1957,19 @@ def _ctor_make(h, tn, vals):
         return _BUILTIN_CTORS[tn][0]()
     if n == 1:
         if tn in _BY_SYMBOL:
+            # `bytes(xs)` ASKS FOR A LENGTH HINT and `bytearray(xs)` does
+            # not: CPython builds the immutable one from the iterator in a
+            # single allocation and grows the mutable one. None of the other
+            # names here asks. See `_apy_length_hint`.
+            if tn == "bytes" and not _apy_length_hint(h, [h._new(vals[0])]):
+                raise _UserFailed
             return _ctor_run(h, _BY_SYMBOL[tn], vals)
         if tn in ("list", "tuple"):
+            # ONLY A LIST ASKS FOR A LENGTH HINT. `tuple(x)` does not, in
+            # CPython, and the difference is measurable from inside the
+            # program -- see `_apy_length_hint`.
+            if tn == "list" and not _apy_length_hint(h, [h._new(vals[0])]):
+                raise _UserFailed
             # BUILT AND FILLED, the way `apy_call_kind` fills one: `apy_extend`
             # is the one thing that already knows how to drain every kind of
             # source -- a generator, a dict (its keys), a str, an instance.
@@ -4100,7 +4111,10 @@ def _apy_iadd(h, a):
         if got is not NotImplemented:
             return h._value(got)
     if isinstance(x, list):
-        got = _apy_extend(h, [a[0], a[1]])
+        # `xs += it` IS `list.__iadd__`, which is `list_extend` -- so it asks
+        # the argument for a length hint, exactly as `xs.extend(it)` does.
+        # A bytearray below does not, and neither does a tuple.
+        got = _apy_extend_meth(h, [a[0], a[1]])
         return a[0] if got else 0
     # A BYTEARRAY EXTENDS ITSELF TOO, and for the same reason -- it is
     # mutable, so `b += data` has to be visible through every other name for
@@ -10586,6 +10600,10 @@ def _driving(h, symbol, run):
 
 
 def _apy_sorted(h, a):
+    # ASKED FIRST, ON THE ARGUMENT, before anything drains it. See
+    # `_apy_length_hint`.
+    if not _apy_length_hint(h, a[:1]):
+        return 0
     items = _seq_items(h, h._get(a[0], "apy_sorted"), "apy_sorted")
     if items is None:
         return 0
@@ -11697,6 +11715,57 @@ def _callee_str(h, f) -> str:
     if bare or not isinstance(mod, str) or mod == "builtins":
         return nm
     return f"{mod}.{nm}"
+
+
+def _apy_length_hint(h, a):
+    """`PyObject_LengthHint` -- what `list(x)`, `sorted(x)` and the other
+    spellings below ask before they drain, so they can size the result in
+    one allocation.
+
+    OBSERVABLE, which is why it exists: the answer is thrown away, but a
+    class that writes `__len__` or `__length_hint__` sees the call, and a
+    program that prints from one prints a line.
+
+    TWO VERBS, IN ORDER, AND ONLY ONE OF THEM. `__len__` first; only when
+    there is none is `__length_hint__` asked. A TypeError from `__len__` is
+    swallowed and `__length_hint__` tried in its place -- that is how
+    CPython lets a type say "I have no length" -- and any OTHER exception is
+    the program's own and propagates.
+
+    WHICH SPELLINGS ASK IS MEASURED, not reasoned about: `list(x)`,
+    `bytes(x)`, `sorted(x)`, `xs.extend(x)` on a list and on a bytearray,
+    `xs += x` on a list, and a starred display -- `[*x]` AND `(*x,)`.
+    `tuple(x)`, `set(x)`, `frozenset(x)`, `bytearray(x)`, `{*x}`,
+    `s.update(x)`, a comprehension, `f(*x)`, unpacking, `in`, `sum`, `max`,
+    `join` and a plain `for` do NOT, which is why this is a function each of
+    them names rather than a line in the funnel they share.
+    """
+    src = h._get(a[0], "apy_length_hint")
+    if not isinstance(src, Instance):
+        return h._none
+    if src.cls.find("__len__") is not None:
+        try:
+            got = src._send("__len__")
+        except _UserFailed:
+            # THE FAILURE IS THE ANSWER HERE, not a reason to stop: `__len__`
+            # raising is how a type says "no length", and the caller below
+            # decides which raisings count. `_UserFailed` carries nothing --
+            # `h.err` is already set and is the thing to read.
+            got = None
+        if h.err is not None:
+            if not _apy_error_matches(h, [h._new("TypeError")]):
+                return 0
+            h.err = None
+        elif got is not NotImplemented:
+            return h._none
+    if src.cls.find("__length_hint__") is not None:
+        try:
+            src._send("__length_hint__")
+        except _UserFailed:
+            return 0
+        if h.err is not None:
+            return 0
+    return h._none
 
 
 def _apy_extend_arg(h, a):
@@ -13604,6 +13673,25 @@ _TABLE["apy_call_spread"] = _apy_call_spread
 _TABLE["apy_extend"] = _apy_extend
 
 
+def _apy_extend_meth(h, a):
+    """`xs.extend(other)` as the program wrote it -- `_apy_extend` with the
+    length hint CPython asks for in front of it.
+
+    A SEPARATE ENTRY POINT AND NOT A LINE INSIDE `_apy_extend`, because that
+    one is the shared drain: `f(*xs)` reaches it, and so does the temporary
+    list `set(x)` collects into, and CPython asks in NEITHER.
+
+    NO KIND TEST -- both receivers `extend` has ask, a list and a bytearray
+    alike. See the C's `apy_extend_meth`.
+    """
+    if not _apy_length_hint(h, a[1:2]):
+        return 0
+    return _apy_extend(h, a)
+
+
+_TABLE["apy_extend_meth"] = _apy_extend_meth
+
+
 def _apy_make_exc0(h, a):
     """An exception with NO argument, as distinct from one whose argument is
     None. `E().args` is `()` and `E(None).args` is `(None,)`, so the two
@@ -13793,6 +13881,13 @@ def _apy_sorted_by(h, a):
     from a restatement of it. Reversing the RESULT would reverse equal
     elements too, which is the subtle half.
     """
+    # ASKED FIRST, ON THE ARGUMENT AS WRITTEN, exactly as `apy_sorted` asks:
+    # `key=` changes what is compared and not what was drained, so a class
+    # that writes `__len__` sees the same one call either way. This is also
+    # the route the VALUE form takes -- `g = sorted; g(it)` arrives here
+    # with the keywords defaulted. See `_apy_length_hint`.
+    if not _apy_length_hint(h, a[:1]):
+        return 0
     items = _seq_items(h, h._get(a[0], "apy_sorted_by"), "apy_sorted_by")
     if items is None:
         return 0
@@ -15884,6 +15979,7 @@ _TABLE.update({
     "apy_iter": _apy_iter,
     "apy_alias_unpack": _apy_alias_unpack,
     "apy_extend_arg": _apy_extend_arg,
+    "apy_length_hint": _apy_length_hint,
     "apy_iterable": _apy_iterable,
     "apy_next": _apy_next,
     "apy_map": _apy_map,

@@ -533,7 +533,11 @@ APY_API apy_value apy_iadd(apy_value a, apy_value b) {
         if (r || apy_error_occurred()) return r;
     }
     if (O(a)->kind == APY_LIST_K) {
-        if (!apy_extend(a, b)) return 0;
+        /* `xs += it` IS `list.__iadd__`, which is `list_extend` -- so it
+           asks the argument for a length hint, exactly as `xs.extend(it)`
+           does. `b += data` on a bytearray below does not, and neither does
+           `t += (9,)` on a tuple. See `apy_extend_meth`. */
+        if (!apy_extend_meth(a, b)) return 0;
         return a;
     }
     /* A BYTEARRAY EXTENDS ITSELF TOO, and for the same reason -- it is

@@ -395,7 +395,7 @@ static apy_value apy_kind_meth_call(const char *w, apy_value *a,
         if (n >= 1) return apy_str_expandtabs(a[0], apy_from_int(8));
     }
     if (strcmp(w, "extend") == 0) {
-        if (n >= 2) return apy_extend(a[0], a[1]);
+        if (n >= 2) return apy_extend_meth(a[0], a[1]);
     }
     if (strcmp(w, "find") == 0) {
         if (n >= 4) return apy_str_find3(a[0], a[1], a[2], a[3]);

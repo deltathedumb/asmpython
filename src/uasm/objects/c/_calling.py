@@ -2108,6 +2108,14 @@ static apy_value apy_fn_arity_error(apy_value f, int64_t given, int64_t kwo) {
    so there is no second opinion about what `dict(pairs)` means. */
 static apy_value apy_call_kind(int kind, apy_value src) {
     apy_value out;
+    /* ON THE ARGUMENT AS WRITTEN, ahead of the unwrap below: `list(d)` for a
+       `class D(list)` asks D's own `__len__`, and unwrapping first would
+       have asked the held list's instead -- which is not a method the
+       program wrote and cannot print anything.
+
+       ONLY FOR A LIST. `tuple(x)`, `set(x)` and `dict(x)` do not ask in
+       CPython, and the difference is measurable from inside the program. */
+    if (kind == APY_LIST_K && !apy_length_hint(src)) return 0;
     /* AN INSTANCE ARGUMENT MEANS ITS CONTENT. `OrderedDict(other)` reaches
        here with an instance, and every branch below reads `src` as a real
        container -- see `_content_of` in the host for the same unwrap. */
@@ -2326,7 +2334,13 @@ static apy_value apy_ctor_make(const char *tn, apy_value *argv, int64_t argc) {
         if (!strcmp(tn, "bool")) return apy_from_bool(apy_truth(argv[0]));
         if (!strcmp(tn, "float")) return apy_to_float(argv[0]);
         if (!strcmp(tn, "str")) return apy_str(argv[0]);
-        if (!strcmp(tn, "bytes")) return apy_to_bytes(argv[0]);
+        /* `bytes(xs)` ASKS FOR A LENGTH HINT and `bytearray(xs)` does not:
+           CPython builds the immutable one from the iterator in a single
+           allocation and grows the mutable one. See `apy_length_hint`. */
+        if (!strcmp(tn, "bytes")) {
+            if (!apy_length_hint(argv[0])) return 0;
+            return apy_to_bytes(argv[0]);
+        }
         if (!strcmp(tn, "bytearray")) return apy_to_bytearray(argv[0]);
         if (!strcmp(tn, "frozenset")) return apy_to_frozenset(argv[0]);
         if (!strcmp(tn, "list")) return apy_call_kind(APY_LIST_K, argv[0]);
@@ -3466,6 +3480,24 @@ APY_API apy_value apy_extend(apy_value seq, apy_value other) {
     for (i = 0; i < O(other)->v.q.n; i++)
         apy_seq_push(seq, O(other)->v.q.items[i]);
     return apy_none();
+}
+
+/* `xs.extend(other)` AS THE PROGRAM WROTE IT -- `apy_extend` with the length
+   hint CPython asks for in front of it.
+
+   A SEPARATE ENTRY POINT AND NOT A LINE INSIDE `apy_extend`, because
+   `apy_extend` is the shared drain: `f(*xs)` reaches it, and so does the
+   temporary list `set(x)` collects into, and CPython asks in NEITHER. The
+   ask belongs to the spellings that MEAN extend -- the method, `+=` and a
+   starred display -- and each of those names this or asks for itself.
+
+   NO KIND TEST, because both receivers `extend` has ask: `list_extend` and
+   `bytearray.extend` each size their result from the hint. `b += data` on a
+   bytearray reaches this too and asks nothing in practice -- it only accepts
+   something bytes-like, which is never an instance. */
+APY_API apy_value apy_extend_meth(apy_value seq, apy_value other) {
+    if (!apy_length_hint(other)) return 0;
+    return apy_extend(seq, other);
 }
 
 /* Is this a user object? The frontend branches on it before a built-in method

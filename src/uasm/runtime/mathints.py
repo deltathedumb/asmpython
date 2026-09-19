@@ -740,6 +740,13 @@ def apy_iadd(a: ptr, b: ptr) -> ptr:
         if apy_error_occurred():
             return r
     if i64(load(i32, offset(a, 0))) == apy_list_kind():
+        # `xs += it` IS `list.__iadd__`, which is `list_extend` -- so it asks
+        # the argument for a length hint, exactly as `xs.extend(it)` does.
+        # ASKED HERE rather than through the C's `apy_extend_meth`, which
+        # this side may not name: a ported function reaches only the floor
+        # and the split halves.
+        if not apy_length_hint(b):
+            return ptr(0)
         if not apy_extend(a, b):
             return ptr(0)
         return a
@@ -1399,6 +1406,40 @@ def apy_extreme_by_of(seq: ptr, keyfn: ptr,
     return best
 
 
+def apy_length_hint(src: ptr) -> ptr:
+    """`PyObject_LengthHint` -- what `list(x)` and `sorted(x)` ask.
+
+    THE PORT IS HERE BECAUSE `apy_sorted` IS. The IR's `apy_sorted` replaces
+    the C's, and a replaced function cannot reach back into the C for a call
+    it made -- so the thing it asked for had to come across with it.
+    `apy_iadd`, replaced for its own reasons, then had it to hand. The C's
+    own callers reach this one, which is what replacing a name means.
+
+    TWO VERBS, IN ORDER, AND ONLY ONE OF THEM: `__len__` first, and
+    `__length_hint__` only when there is no `__len__`. A TypeError from
+    `__len__` is swallowed and `__length_hint__` tried in its place; any
+    other exception is the program's own and propagates.
+
+    ANSWERS 0 ONLY TO PROPAGATE -- the hint itself is advisory and no caller
+    reads it. See the C's `apy_length_hint` for why it is observable at all.
+    """
+    if i64(load(i32, offset(src, apy_kind_offset()))) != apy_inst_kind():
+        return apy_none()
+    cls: ptr = ptr(load(u64, offset(src, apy_o_cls_offset())))
+    if apy_class_find_of(cls, apy_name_of(rodata(b"__len__\0"))):
+        got: ptr = apy_unary_dunder_of(src, rodata(b"__len__\0"))
+        if got:
+            return apy_none()
+        if not apy_error_matches(apy_from_cstr(rodata(b"TypeError\0"))):
+            return ptr(0)
+        apy_error_clear()
+    if apy_class_find_of(cls, apy_name_of(rodata(b"__length_hint__\0"))):
+        hint: ptr = apy_unary_dunder_of(src, rodata(b"__length_hint__\0"))
+        if not hint:
+            return ptr(0)
+    return apy_none()
+
+
 def apy_sorted(seq: ptr) -> ptr:
     """`sorted(xs)`, by insertion.
 
@@ -1411,6 +1452,11 @@ def apy_sorted(seq: ptr) -> ptr:
     program's `__lt__`, and the constant factor of the sort is small beside
     one of those. The C makes the same choice.
     """
+    # ASKED FIRST, ON THE ARGUMENT, before anything unwraps or drains it:
+    # CPython sizes the result from the hint and a class that writes one sees
+    # the call. See `apy_length_hint`.
+    if not apy_length_hint(seq):
+        return ptr(0)
     # A USER ITERATOR IS DRAINED BEFORE THE WALK. The walk below is by index
     # and a class whose `__iter__` answers an object with `__next__` has no
     # index; `apy_iterable` turns one into a list, as it does a generator.

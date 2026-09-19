@@ -264,9 +264,61 @@ APY_API apy_value apy_to_int_base(apy_value v, apy_value base) {
    every other use of these is a `for` loop or a `list(...)`, which a list
    satisfies exactly. */
 
+/* `PyObject_LengthHint` -- what `list(x)`, `sorted(x)` and the other
+   spellings below ask BEFORE they drain, so they can size the result in one
+   allocation.
+
+   OBSERVABLE, which is why it is here at all: the answer is thrown away,
+   but a class that writes `__len__` or `__length_hint__` sees the call, and
+   a program that prints from one prints a line. Not asking made `list(it)`
+   differ from CPython in what it RAN, not in what it produced.
+
+   TWO VERBS, IN ORDER, AND ONLY ONE OF THEM. `__len__` first; only when
+   there is none does `__length_hint__` get asked. A class with both sees
+   exactly one call, and it is `__len__`.
+
+   A TypeError FROM `__len__` IS SWALLOWED and `__length_hint__` tried in
+   its place -- that is how CPython lets a type say "I have no length" --
+   and any OTHER exception is the program's own and propagates. Swallowing
+   all of them would hide a bug in the very method being asked.
+
+   WHICH SPELLINGS ASK IS MEASURED, not reasoned about: the first attempt at
+   this put the call in the shared iteration funnel and made every consumer
+   run a line of the program CPython never runs. Against 3.14 the askers are
+   `list(x)`, `bytes(x)`, `sorted(x)`, `xs.extend(x)` on a list and on a
+   bytearray, `xs += x` on a list, and a starred display -- `[*x]` AND
+   `(*x,)`, the tuple one because CPython builds a tuple display by
+   extending a list and converting it. `tuple(x)`, `set(x)`, `frozenset(x)`,
+   `bytearray(x)`, `{*x}`, `s.update(x)`, a comprehension, `f(*x)`,
+   unpacking, `in`, `sum`, `max`, `join` and a plain `for` do NOT ask, which
+   is why this is a function each of them names rather than a line in the
+   funnel they share.
+
+   ANSWERS 0 ONLY TO PROPAGATE. The hint itself is advisory and no caller
+   reads it; what a caller must not do is carry on with an error pending. */
+APY_API apy_value apy_length_hint(apy_value src) {
+    apy_value got;
+    if (O(src)->kind != APY_INST_K) return apy_none();
+    if (apy_class_find(O(src)->v.o.cls, apy_name("__len__"))) {
+        got = apy_unary_dunder(src, "__len__");
+        if (got) return apy_none();
+        if (!apy_error_matches(apy_lit("TypeError"))) return 0;
+        apy_error_clear();
+    }
+    if (apy_class_find(O(src)->v.o.cls, apy_name("__length_hint__"))) {
+        got = apy_unary_dunder(src, "__length_hint__");
+        if (!got) return 0;
+    }
+    return apy_none();
+}
+
 APY_API apy_value apy_sorted(apy_value seq) {
     int64_t n, i, j;
     apy_value out;
+    /* ASKED FIRST, ON THE ARGUMENT, before anything unwraps or drains it:
+       CPython sizes the result from the hint and a class that writes one
+       sees the call. See `apy_length_hint`. */
+    if (!apy_length_hint(seq)) return 0;
     /* A USER ITERATOR IS DRAINED BEFORE THE WALK. Everything below is by
        index, and a class whose `__iter__` answers an object with `__next__`
        has no index -- `apy_iterable` turns one into a list exactly as it does
@@ -1026,6 +1078,9 @@ APY_API apy_value apy_sorted_by(apy_value seq, apy_value keyfn,
                                 apy_value reverse) {
     /* `key=None` is "no key", which is what an omitted one lowers to. */
     apy_value fn = O(keyfn)->kind == APY_NONE_K ? 0 : keyfn;
+    /* `sorted(xs, key=f)` ASKS TOO. The keyword does not change what the
+       call does before it starts; see `apy_sorted`. */
+    if (!apy_length_hint(seq)) return 0;
     return apy_sort_with(seq, fn, apy_truth(reverse) != 0);
 }
 

@@ -42,7 +42,12 @@ DYN_METHOD_TABLE = {
                      "apy_str_count3"],
     "remove":       [None, "apy_list_remove"],
     "insert":       [None, None, "apy_list_insert"],
-    "extend":       [None, "apy_extend"],
+    # `apy_extend_meth` AND NOT `apy_extend`: a written `.extend` asks the
+    # argument for a length hint before it drains -- a list and a bytearray
+    # both do. The bare drain is shared with `f(*xs)` and with the temporary
+    # `set(x)` collects into, neither of which asks. See the C's
+    # `apy_extend_meth`.
+    "extend":       [None, "apy_extend_meth"],
     "reverse":      ["apy_list_reverse"],
     # 3.14's way of saying how long a bytearray is to be. Growing fills with
     # NUL and shrinking truncates, which is what makes it a buffer a program

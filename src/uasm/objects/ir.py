@@ -291,6 +291,10 @@ REPLACES: dict[str, tuple[str, ...]] = {
                       "apy_order_of",
                       "apy_extreme_n", "apy_extreme_of",
                       "apy_extreme_by_of", "apy_sorted",
+                      # AND THE HINT `apy_sorted` ASKS FOR, which had to come
+                      # with it: a replaced function cannot call back into the
+                      # C half of the one translation unit for its own helper.
+                      "apy_length_hint",
                       "apy_max", "apy_min", "apy_max_by", "apy_min_by",
                       "apy_dict_of", "apy_dir",
                       # AND TWO WHOSE ONLY LIBC WAS AN ABORT THE ARENA
