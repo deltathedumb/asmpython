@@ -3463,6 +3463,64 @@ PROGRAMS = {
         print("cursor:", type(e).__class_getitem__(int),
               type(type(e).__class_getitem__).__name__)
     """,
+    # A LITERAL IS ONE OBJECT, module-wide. `"hello" is "hello"` is True in
+    # CPython and was False here, and so was every other pair of equal
+    # literals: two names bound to the same text, `b"ab" is b"ab"`, `1.5 is
+    # 1.5`, `(1, 2) is (1, 2)`, `() is ()`. Only the integers the runtime
+    # already shares agreed -- the bytes of a literal were interned into one
+    # read-only global, and the CELL built from them was not.
+    #
+    # ACROSS THE WHOLE MODULE, which is CPython's line measured rather than
+    # assumed: two functions each returning `"a b c"` return the same object
+    # in 3.14, and so do a tuple constant and a big integer written in two
+    # different places. Not only the identifier-like strings, and not only
+    # within one code object.
+    #
+    # A TUPLE OF CONSTANTS IS ITSELF A CONSTANT, nested ones included, and a
+    # LIST display never is: it is mutable, so two of them must be two
+    # objects however equal they look.
+    #
+    # KEYED BY TYPE AS WELL AS VALUE, because `1 == 1.0 == True` and the
+    # three are different constants -- sharing a slot would hand one of them
+    # back as the wrong kind.
+    #
+    # `is` IS WRITTEN THROUGH A FUNCTION here because CPython warns about
+    # `"a" is "a"` written out, and the warning is not what this is about.
+    "literals_are_one_object_each": """
+        def two(a, b):
+            return a is b
+        print("str:", two("hello", "hello"))
+        a = "hello"
+        b = "hello"
+        print("two names:", a is b)
+        print("small ints:", two(5, 5), two(256, 256), two(257, 257))
+        print("empty str:", two("", ""))
+        print("empty tuple:", two((), ()))
+        print("bytes:", two(b"ab", b"ab"))
+        print("float:", two(1.5, 1.5))
+        print("complex:", two(2j, 2j))
+        print("tuple:", two((1, 2), (1, 2)))
+        print("nested tuple:", two(((1, 2), 3), ((1, 2), 3)))
+        def f():
+            return "a b c"
+        def g():
+            return "a b c"
+        print("across fns:", f() is g())
+        print("module vs fn:", two("a b c", f()))
+        print("built at run time:", two("abc", "".join(["a", "b", "c"])))
+        print("a list is never shared:", two([1], [1]))
+        print("kinds stay apart:", two(1000, 1000.0), 1000 == 1000.0,
+              type((1000.0,)[0]).__name__, type((1000,)[0]).__name__)
+        # AND THE VALUES STILL WORK, which is the half a sharing bug would
+        # break in silence: an operation that read a shared cell as its own
+        # to write would corrupt every other mention of that literal.
+        print("values:", "hello" + "!", (1, 2) + (3,), 1.5 * 2, b"ab" * 2,
+              "ab" * 3, (1, 2)[1], len(""), 257 + 1, 2j * 2)
+        xs = [1]
+        xs.append(2)
+        ys = [1]
+        print("mutation is local:", xs, ys)
+    """,
     "a_builtin_type_is_an_ordinary_value": """
         # A BUILTIN TYPE IS AN ORDINARY VALUE, and `memoryview` was the last one that was
         # not: naming it at all was `'memoryview' is a builtin that cannot be used as a

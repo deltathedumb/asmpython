@@ -356,6 +356,153 @@ class DynamicLowering:
     #: What a machine word holds. A literal outside it cannot be a `const`.
     _INT64_MIN, _INT64_MAX = -(2 ** 63), 2 ** 63 - 1
 
+    #: THE INTEGERS THE RUNTIME ALREADY SHARES. `apy_from_int` keeps one
+    #: cell per value in this range and hands the same one back every time,
+    #: so `5 is 5` was True before any of this and a slot for it would be a
+    #: load where an immediate does. The bounds are `APY_SMALL_LO` and
+    #: `APY_SMALL_HI` in the C, and the two are checked against each other by
+    #: `literals_are_one_object_each` -- `257 is 257` is the first that is
+    #: not shared, and it is the one the slot has to catch.
+    _SMALL_LO = -5
+    _SMALL_HI = 256
+
+    def _const_tuple(self, node):
+        """This tuple display AS A KEY, or None if it is not a constant.
+
+        A tuple of constants is a constant in Python -- `(1, 2) is (1, 2)`
+        and `() is ()` are both True -- and a NESTED one is too. Anything
+        else in it, a name or a call or a star, makes the display ordinary:
+        it is built where it is written and is its own object.
+
+        THE KEY CARRIES THE TYPES, for the reason `_dyn_interned` gives:
+        `(1,)` and `(1.0,)` are equal tuples of different constants.
+        """
+        if not isinstance(node, ast.Tuple):
+            return None
+        out = []
+        for element in node.elts:
+            if isinstance(element, ast.Tuple):
+                inner = self._const_tuple(element)
+                if inner is None:
+                    return None
+                out.append(inner)
+                continue
+            if not isinstance(element, ast.Constant):
+                return None
+            v = element.value
+            if v is Ellipsis:
+                out.append(("ellipsis", None))
+                continue
+            out.append((type(v).__name__, v))
+        return ("tuple", tuple(out))
+
+    def _dyn_interned(self, kind: str, value, build):
+        """The ONE object this literal evaluates to, module-wide.
+
+        `"hello" is "hello"` is True in CPython and was False here, and so
+        was every other pair of equal literals -- two names bound to the same
+        text, `b"ab" is b"ab"`, `1.5 is 1.5`, `(1, 2) is (1, 2)`. Only the
+        integers the runtime already shares agreed. The literal's BYTES were
+        interned into one read-only global; what was not was the cell built
+        from them, which every mention built afresh.
+
+        ACROSS THE WHOLE MODULE, which is CPython's line measured rather than
+        assumed: `def f(): return "a b c"` and `def g(): return "a b c"` give
+        `f() is g()` True in 3.14, and so do a tuple constant and a big
+        integer built in two different functions. Not only the
+        identifier-like strings, and not only within one code object.
+
+        KEYED BY TYPE AS WELL AS VALUE, because `1 == 1.0 == True` and the
+        three are different constants. A bool never reaches here -- it is a
+        singleton already -- but an int and a float that compare equal would
+        otherwise share a slot and one of them would come out the wrong kind.
+
+        A SLOT FILLED ONCE AT THE TOP OF THE ENTRY, not lazily on first use:
+        a branch per mention would cost more than the load, and the entry
+        already has a place for work that must happen before any statement --
+        see `_dyn_register_builtin_types`, which is there for the same
+        reason.
+        """
+        key = (kind, value)
+        found = self._const_slots.get(key)
+        if found is None:
+            slot = f"__const{len(self._const_slots)}"
+            found = self._const_slots[key] = (slot, build)
+            self.module.globals.append(Global(name=slot, size=8))
+            self._pending_consts.append(key)
+        slot, build = found
+        # INSIDE THE FILLER, A SLOT MUST BE FILLED BEFORE IT IS READ. A
+        # constant tuple builds its elements, and those are constants too --
+        # so `(1000, 2)[0] is 1000` needs the element's own slot, which is
+        # filled here and now rather than whenever the walk reaches it.
+        if self._in_const_filler:
+            self._dyn_fill_const(key)
+        addr = self.b.reg(T.PTR)
+        self.b.emit(Instruction(Op.GLOBAL_ADDR, T.PTR, dst=addr, sym=slot))
+        return self.b.load(T.PTR, addr)
+
+    def _dyn_fill_const(self, key) -> None:
+        """Emit the store that puts this literal's value in its slot, once.
+
+        MARKED BEFORE IT IS BUILT, so a constant that somehow reached itself
+        would read its slot rather than recurse. Constants cannot nest into
+        themselves, and a compiler that loops is worse than one that answers
+        a null.
+        """
+        if key in self._const_filled:
+            return
+        self._const_filled.add(key)
+        slot, build = self._const_slots[key]
+        value = build()
+        addr = self.b.reg(T.PTR)
+        self.b.emit(Instruction(Op.GLOBAL_ADDR, T.PTR, dst=addr, sym=slot))
+        self.b.store(T.PTR, value, addr)
+
+    def _dyn_emit_consts(self) -> None:
+        """The function that fills every literal's slot, emitted last.
+
+        A function rather than a prologue in the entry, for the reason
+        `_dyn_emit_positions` gives: the literals are discovered WHILE the
+        entry and everything else is lowered, so the entry calls this by name
+        and the definition arrives afterwards.
+
+        FIRST IN THE ENTRY, before the position table and before the
+        canonical type thunks -- both of those build literals of their own,
+        and would read a slot nothing had filled.
+        """
+        if not self._wants_consts:
+            return
+        if not self._pending_consts:
+            # NOTHING TO SHARE, so the call the entry made comes back out
+            # rather than standing as a call to an empty function at the top
+            # of every program that holds no literal.
+            if self._consts_call is not None:
+                block, ins = self._consts_call
+                if ins in block.instructions:
+                    block.instructions.remove(ins)
+            return
+        fn = Function("pyf__consts", T.VOID, linkage=Linkage.INTERNAL)
+        was_b, was_fn = self.b, self.fn
+        self.fn = fn
+        self.b = Builder(fn)
+        self.b.switch_to(self.b.new_block("entry"))
+        self._in_const_filler = True
+        try:
+            # BY INDEX, because building one can discover another -- a big
+            # integer's digits are a str, a constant tuple's elements are
+            # constants -- and appending to a list being iterated is the one
+            # thing a `for` cannot survive.
+            i = 0
+            while i < len(self._pending_consts):
+                key = self._pending_consts[i]
+                i += 1
+                self._dyn_fill_const(key)
+        finally:
+            self._in_const_filler = False
+        self.b.ret(None)
+        self.module.functions.append(fn)
+        self.b, self.fn = was_b, was_fn
+
     def _dyn_int_literal(self, value: int) -> int:
         """An integer literal, whatever its size.
 
@@ -569,22 +716,36 @@ class DynamicLowering:
             case ast.Constant(value=bool() as v):
                 return self.b.call(T.PTR, "apy_from_bool",
                                    [self.b.const(T.I64, int(v))])
+            # EVERY ALLOCATED CONSTANT IS INTERNED, so two mentions of one
+            # literal are one object and `"a" is "a"` answers True as it
+            # does in CPython. The small integers below are tagged rather
+            # than allocated and were already the same object; a bool, None
+            # and `...` are singletons. See `_dyn_interned`.
             case ast.Constant(value=int() as v):
-                return self._dyn_int_literal(v)
+                if self._SMALL_LO <= v <= self._SMALL_HI:
+                    return self._dyn_int_literal(v)
+                return self._dyn_interned(
+                    "int", v, lambda: self._dyn_int_literal(v))
             case ast.Constant(value=float() as v):
-                return self.b.call(T.PTR, "apy_from_float",
-                                   [self.b.const(T.F64, v)])
+                return self._dyn_interned(
+                    "float", v,
+                    lambda: self.b.call(T.PTR, "apy_from_float",
+                                        [self.b.const(T.F64, v)]))
             case ast.Constant(value=str() as v):
-                return self._dyn_str_literal(v)
+                return self._dyn_interned(
+                    "str", v, lambda: self._dyn_str_literal(v))
             case ast.Constant(value=complex() as v):
                 # `2j` is a Constant whose value is a Python complex, so both
                 # halves are known here and neither needs the runtime to
                 # parse anything.
-                return self.b.call(T.PTR, "apy_from_complex",
-                                   [self.b.const(T.F64, v.real),
-                                    self.b.const(T.F64, v.imag)])
+                return self._dyn_interned(
+                    "complex", v,
+                    lambda: self.b.call(T.PTR, "apy_from_complex",
+                                        [self.b.const(T.F64, v.real),
+                                         self.b.const(T.F64, v.imag)]))
             case ast.Constant(value=bytes() as v):
-                return self._dyn_bytes_literal(v)
+                return self._dyn_interned(
+                    "bytes", v, lambda: self._dyn_bytes_literal(v))
             case ast.Constant(value=None):
                 return self.b.call(T.PTR, "apy_none", [])
             case ast.Attribute(value=ast.Name(id=base), attr=attr) if (
@@ -650,6 +811,14 @@ class DynamicLowering:
                 return self._dyn_ifexp(node)
             case ast.Call():
                 return self._dyn_call(node)
+            case ast.Tuple(elts=elts) if self._const_tuple(node) is not None:
+                # A TUPLE OF CONSTANTS IS ITSELF A CONSTANT, which is why
+                # `(1, 2) is (1, 2)` and `() is ()` are True in CPython. A
+                # LIST display never is -- it is mutable, so two of them
+                # must be two objects however equal they look.
+                made = self._const_tuple(node)
+                return self._dyn_interned(
+                    "tuple", made, lambda: self._dyn_sequence(node, elts))
             case ast.List(elts=elts) | ast.Tuple(elts=elts):
                 return self._dyn_sequence(node, elts)
             case ast.GeneratorExp():

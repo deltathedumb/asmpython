@@ -261,6 +261,28 @@ class Lowerer(DynamicLowering):
         self._strings: dict[bytes, str] = {}
         #: Bytes literals, interned by content like the str ones.
         self._bytes: dict[bytes, str] = {}
+        #: WHAT A LITERAL EVALUATES TO, one object per distinct constant in
+        #: the whole module -- keyed by (type name, value), because `1`,
+        #: `1.0` and `True` are equal and are three different constants.
+        #: The value of each is a slot filled once at the top of the entry;
+        #: see `DynamicLowering._dyn_interned`.
+        self._const_slots: dict[tuple, tuple] = {}
+        #: The keys whose slot already has its store emitted.
+        self._const_filled: set = set()
+        #: The keys still to be filled, IN THE ORDER FOUND. Drained by
+        #: `_dyn_emit_consts` after every function is lowered, because that
+        #: is when the last literal has been seen.
+        self._pending_consts: list = []
+        #: Set while `pyf__consts` is being emitted, so the builders inside
+        #: it BUILD rather than reading the slot they are filling.
+        self._in_const_filler = False
+        #: Whether the entry called `pyf__consts`, which is what decides
+        #: whether the definition is emitted -- a call to a symbol nothing
+        #: defines is a link error, and an empty body is two instructions.
+        self._wants_consts = False
+        #: Where the entry's call to `pyf__consts` is, so it can be removed
+        #: again when nothing needs filling.
+        self._consts_call = None
         #: Builtin name -> the symbol of the thunk that wraps it, for builtins
         #: used as VALUES. One per builtin per module, emitted on first use.
         self._builtin_thunks: dict[str, str] = {}
@@ -385,6 +407,12 @@ class Lowerer(DynamicLowering):
         self._dyn_emit_thunks()
         self._dyn_emit_annotate_thunks()
         self._dyn_emit_natives()
+        # AND THE LITERALS LAST OF ALL. Every emitter above writes code and
+        # code holds literals -- a thunk names its builtin, an annotation
+        # thunk holds the string a `def` wrote -- so the last literal is not
+        # seen until the last of them has run. Emitted after them all and
+        # CALLED before them all, from the top of the entry.
+        self._dyn_emit_consts()
 
         # Drop runtime declarations nothing called. A module that declares an
         # import it never uses is not merely untidy: the link stage decides
@@ -503,6 +531,22 @@ class Lowerer(DynamicLowering):
             # to right it is `type(1)`. Building them here removes the order
             # rather than picking a winner, which is what an earlier attempt at
             # this got wrong.
+            # THE LITERALS FIRST OF ALL, because everything below builds
+            # some of its own and would read a slot nothing had filled. See
+            # `_dyn_emit_consts`.
+            #
+            # UNCONDITIONALLY, and the definition arrives even when it is
+            # empty: the entry is lowered before most of the module, so what
+            # literals exist is not yet known here. Asking would answer for
+            # the entry alone.
+            self._wants_consts = True
+            self.b.call(T.VOID, "pyf__consts", [])
+            # AND THE CALL IS TAKEN BACK OUT if the module turns out to have
+            # no literal worth sharing. It cannot be decided here -- the
+            # entry is lowered before the rest of the module -- so it is
+            # emitted, remembered, and removed by `_dyn_emit_consts`.
+            self._consts_call = (self.b.current,
+                                 self.b.current.instructions[-1])
             if self._wants_positions:
                 # THE POSITION TABLE IS BUILT FIRST, before any statement can
                 # fail. The function that fills it is emitted after every
