@@ -140,8 +140,13 @@ APY_API apy_value apy_getiter(apy_value v) {
         apy_value one = apy_tuple_new(1);
         apy_q_append_of(one, apy_alias_unpack(v));
         return apy_cursor(one, 0, APY_IT_PLAIN, 0);
+    /* A MEMORYVIEW IS WALKED BY INDEX, which is what it already answers to
+       everywhere else: `list(mv)`, `[*mv]`, `98 in mv` and `reversed(mv)`
+       all worked and `iter(mv)` alone said it was not iterable. The cursor
+       reads through `apy_getitem`, and `mv[i]` is the int CPython yields. */
     } else if (!apy_is_seq(v) && !apy_is_set(v) && O(v)->kind != APY_STR_K
                && O(v)->kind != APY_BYTES_K && O(v)->kind != APY_DICT_K
+               && O(v)->kind != APY_MVIEW_K
                && O(v)->kind != APY_RANGE_K) {
         return apy_fail2("TypeError", "'%s' object is not iterable%s",
                          apy_kind_name(v), "");
@@ -179,7 +184,8 @@ static int64_t apy_can_iterate(apy_value v) {
     if (O(v)->kind == APY_GEN_K || O(v)->kind == APY_ITER_K
             || O(v)->kind == APY_VIEW_K || O(v)->kind == APY_ALIAS_K
             || O(v)->kind == APY_STR_K || O(v)->kind == APY_BYTES_K
-            || O(v)->kind == APY_DICT_K || O(v)->kind == APY_RANGE_K)
+            || O(v)->kind == APY_DICT_K || O(v)->kind == APY_RANGE_K
+            || O(v)->kind == APY_MVIEW_K)
         return 1;
     return apy_is_seq(v) || apy_is_set(v);
 }

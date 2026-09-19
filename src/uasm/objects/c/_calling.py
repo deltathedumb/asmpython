@@ -1029,9 +1029,16 @@ APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value wantv,
        reversed iterator carries one, and `map`, `filter`, `enumerate`, `zip`
        and a `callable_iterator` do not. Those are the LAZY modes, and what
        they have left is not a question their source can answer. */
+    /* AND A `memory_iterator` HAS NONE, which is the one sized walk without
+       one: `iter(mv)` in CPython carries `__iter__` and `__next__` and
+       nothing else, where `reversed(mv)` -- a plain `reversed` -- does have
+       the hint. The generated `dir()` row says the same, and a name this
+       answered that the row omits would be the lying list in reverse. */
     if (strcmp(want, "__length_hint__") == 0 && k == APY_ITER_K
             && (O(obj)->v.it.mode == APY_IT_PLAIN
-                || O(obj)->v.it.mode == APY_IT_REV))
+                || O(obj)->v.it.mode == APY_IT_REV)
+            && !(O(obj)->v.it.mode == APY_IT_PLAIN
+                 && O(obj)->v.it.named == APY_MVIEW_K))
         return apy_kind_method(obj, 1, "__length_hint__", bind);
     if (strcmp(want, "__iter__") == 0
             && (walks || k == APY_GEN_K || k == APY_ITER_K))
@@ -1766,6 +1773,13 @@ static apy_value apy_native_call(apy_value f, apy_value *a, int64_t n) {
                 if (!args) return 0;
                 if (!apy_seq_push(args, a[1])) return 0;
             }
+            /* A TYPE IS ALREADY THE ORIGIN. Reached off `list` itself
+               the receiver IS the type -- CPython binds the classmethod to
+               it -- and `apy_type_for` of a type answers `type`, which
+               would make `list.__class_getitem__(int)` a `type[int]`. */
+            if ((O(a[0])->kind == APY_FUNC_K && O(a[0])->v.fn.is_type)
+                    || O(a[0])->kind == APY_TYPE_K)
+                return apy_alias_new(a[0], args);
             return apy_alias_new(apy_type_for(a[0]), args);
         }
         if (strcmp(w, "__hash__") == 0) return apy_hash(a[0]);

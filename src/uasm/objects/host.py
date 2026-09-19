@@ -988,6 +988,13 @@ class ObjectHost:
                 got = getattr(who, v.name, None)
                 if type(got).__name__ == "builtin_function_or_method":
                     return "builtin_function_or_method"
+            # A SLOT IS FILLED ON A VALUE, never on a TYPE. What binds to a
+            # type is a CLASSMETHOD -- `list.__class_getitem__` is the only
+            # one here -- and CPython calls a bound one a
+            # `builtin_function_or_method` whatever its name looks like.
+            if isinstance(who, Class) or (isinstance(who, Func)
+                                          and getattr(who, "is_type", False)):
+                return "builtin_function_or_method"
             return "method-wrapper"
         if isinstance(v, Func):
             # A BUILTIN reached as a value is not a plain function:
@@ -1384,7 +1391,25 @@ class ObjectHost:
         # and never of one.
         if isinstance(obj, Func) and getattr(obj, "is_type", False):
             proto = _kind_prototype(obj.name)
-            if proto is not None and _kind_attr(self, proto, name) is not None:
+            found = (None if proto is None
+                     else _kind_attr(self, proto, name))
+            if found is not None:
+                # `__class_getitem__` IS A CLASSMETHOD and binds the TYPE,
+                # which is why `list.__class_getitem__(int)` takes only the
+                # key where `list.append(xs, 9)` takes a receiver first --
+                # and why a bound one is a `builtin_function_or_method`
+                # rather than the `method_descriptor` the stamp below would
+                # make it.
+                if name == "__class_getitem__":
+                    # THE TYPE IS ITS OWNER, which is the receiver CPython
+                    # names: `<built-in method __class_getitem__ of type
+                    # object at ...>`. The OWNER and not `bound`, because
+                    # binding would prepend a receiver the body does not
+                    # take -- a classmethod's argument is the key alone. The
+                    # body keeps the prototype in its closure, so the
+                    # alias's origin is unchanged.
+                    return self._new(Native(
+                        name, self._get(found, name).body, owner=obj))
                 # UNBOUND, because `dict.keys` is unbound in CPython too and
                 # `dict.keys(d)` is how it is called -- binding it to the
                 # prototype would answer for an empty dict, and a mutating
@@ -8513,8 +8538,13 @@ def _kind_attr(h, obj, want: str):
     # iterator carries one, and `map`, `filter`, `enumerate`, `zip` and a
     # `callable_iterator` do not. Those are the LAZY modes, and what they
     # have left is not a question their source can answer.
+    # AND A `memory_iterator` HAS NONE, which is the one sized walk without
+    # one: `iter(mv)` in CPython carries `__iter__` and `__next__` and
+    # nothing else, where `reversed(mv)` -- a plain `reversed` -- does have
+    # the hint.
     if want == "__length_hint__" and isinstance(obj, Iterator) \
-            and obj.mode in (Iterator.PLAIN, Iterator.REV):
+            and obj.mode in (Iterator.PLAIN, Iterator.REV) \
+            and obj.named != "memory_iterator":
         return made("__length_hint__", lambda: _cursor_left(obj))
     # `it.__setstate__(i)` AND `enumerate[int]`. WHICH CURSORS CARRY EACH is
     # read straight out of the generated `dir()` table rather than restated:
@@ -9667,7 +9697,14 @@ def _apy_default_getattr(h, a):
         # in here and collect a list's methods by accident.
         if not obj.dict and obj.base is None and obj.meta is None:
             proto = _kind_prototype(obj.name)
-            if proto is not None and _kind_attr(h, proto, name) is not None:
+            found = None if proto is None else _kind_attr(h, proto, name)
+            if found is not None:
+                # `__class_getitem__` IS A CLASSMETHOD and binds the TYPE --
+                # see `_no_attr`, which draws the same line.
+                if name == "__class_getitem__":
+                    # THE TYPE IS ITS OWNER -- see `_no_attr`.
+                    return h._new(Native(
+                        name, h._get(found, name).body, owner=obj))
                 # UNBOUND, as it is off a builtin type: `type(it).__next__`
                 # takes the cursor as its argument, which is what
                 # `type(it).__next__(it)` means.
@@ -11790,7 +11827,7 @@ def _can_iterate(h, v) -> bool:
     # A RANGE IS A REAL `range` HERE, as a list is a real list: this file
     # keeps a Python object for every kind it has not had to model.
     return isinstance(v, (list, tuple, set, frozenset, dict, str, bytes,
-                          bytearray, range))
+                          bytearray, range, memoryview))
 
 
 def _callee_str(h, f) -> str:
@@ -15456,8 +15493,11 @@ def _apy_getiter(h, a):
         if v.cls.find("__getitem__") is None:
             return h._fail("TypeError",
                            f"'{h.kind_name(v)}' object is not iterable")
+    # A MEMORYVIEW IS WALKED BY INDEX, which is what it already answers to
+    # everywhere else: `list(mv)`, `[*mv]`, `98 in mv` and `reversed(mv)` all
+    # worked and `iter(mv)` alone said it was not iterable.
     elif not isinstance(v, (list, tuple, set, frozenset, dict, str, bytes,
-                            bytearray, range)):
+                            bytearray, range, memoryview)):
         return h._fail("TypeError",
                        f"'{h.kind_name(v)}' object is not iterable")
     return h._new(Iterator(v))
@@ -15702,8 +15742,11 @@ def _apy_iter(h, a):
                 else "values" if "values" in type(v).__name__ else "items")
         made.named = _CURSOR_NAMES[part][0]
         return h._new(made)
+    # A MEMORYVIEW IS WALKED BY INDEX, which is what it already answers to
+    # everywhere else: `list(mv)`, `[*mv]`, `98 in mv` and `reversed(mv)` all
+    # worked and `iter(mv)` alone said it was not iterable.
     if not isinstance(v, (list, tuple, set, frozenset, dict, str, bytes,
-                          bytearray, range)):
+                          bytearray, range, memoryview)):
         return h._fail("TypeError",
                        f"'{h.kind_name(v)}' object is not iterable")
     return h._new(Iterator(v))

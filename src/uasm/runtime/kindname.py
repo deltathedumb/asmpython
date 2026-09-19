@@ -305,6 +305,20 @@ def apy_kind_name_of(v: ptr) -> ptr:
                 if held:
                     if apy_kind_meth_written_of(named, apy_kind_bit_of(held)):
                         return rodata(b"builtin_function_or_method\0")
+                    # A SLOT IS FILLED ON A VALUE, never on a TYPE. What
+                    # binds to a type is a CLASSMETHOD --
+                    # `list.__class_getitem__` is the only one here -- and
+                    # CPython calls a bound one a
+                    # `builtin_function_or_method` whatever its name looks
+                    # like. The kind-and-name table cannot say so: a type
+                    # has no kind bit of its own.
+                    hk: i64 = i64(load(i32, offset(held, 0)))
+                    if hk == apy_type_kind():
+                        return rodata(b"builtin_function_or_method\0")
+                    if hk == apy_func_kind():
+                        if load(i32, offset(held, apy_fn_is_type_offset())):
+                            return rodata(
+                                b"builtin_function_or_method\0")
                 return rodata(b"method-wrapper\0")
             return rodata(b"builtin_function_or_method\0")
         # A BOUND ONE IS A `method`, a type of its own in CPython:

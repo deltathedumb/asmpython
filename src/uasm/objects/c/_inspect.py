@@ -384,6 +384,17 @@ static const char *apy_kind_name(apy_value v) {
                         && apy_kind_meth_written(w,
                                                  apy_kind_bit(O(v)->v.fn.bound)))
                     return "builtin_function_or_method";
+                /* A SLOT IS FILLED ON A VALUE, never on a TYPE. What binds
+                   to a type is a CLASSMETHOD -- `list.__class_getitem__` is
+                   the only one here -- and CPython calls a bound one a
+                   `builtin_function_or_method` whatever its name looks
+                   like. The kind-and-name table cannot say so: a type has no
+                   kind bit of its own. */
+                if (O(v)->v.fn.bound
+                        && ((O(O(v)->v.fn.bound)->kind == APY_FUNC_K
+                             && O(O(v)->v.fn.bound)->v.fn.is_type)
+                            || O(O(v)->v.fn.bound)->kind == APY_TYPE_K))
+                    return "builtin_function_or_method";
                 return "method-wrapper";
             }
             return "builtin_function_or_method";

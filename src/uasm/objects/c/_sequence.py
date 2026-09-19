@@ -272,7 +272,8 @@ APY_API apy_value apy_copy(apy_value v);
 APY_API apy_value apy_update(apy_value target, apy_value src);
 APY_API apy_value apy_extend(apy_value seq, apy_value other);
 APY_API apy_value apy_extend_meth(apy_value seq, apy_value other);
-static apy_value apy_type_kind_attr(apy_value owner, apy_value name);
+static apy_value apy_type_kind_attr(apy_value type_obj,
+                                    apy_value owner, apy_value name);
 APY_API apy_value apy_length_hint(apy_value src);
 APY_API apy_value apy_extend_arg(apy_value into, apy_value more,
                                  apy_value callee);

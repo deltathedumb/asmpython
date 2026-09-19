@@ -491,7 +491,7 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
         if (O(obj)->v.t.dict && !O(O(obj)->v.t.dict)->v.d.n
                 && !O(obj)->v.t.base && !O(obj)->v.t.meta) {
             found = apy_type_kind_attr(
-                (apy_value)(uintptr_t)APY_CSTR(O(obj)->v.t.name), name);
+                obj, (apy_value)(uintptr_t)APY_CSTR(O(obj)->v.t.name), name);
             if (found) return found;
         }
         /* THE HIERARCHY, as a program reads it back. `object` is the root of

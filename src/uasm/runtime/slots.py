@@ -1202,12 +1202,23 @@ def apy_kind_attr_of(obj: ptr, want: ptr, bind: i64) -> ptr:
     # `callable_iterator` do not. Those are the LAZY modes, and what they
     # have left is not a question their source can answer. The plain mode is
     # zero, which is why it is compared against and not named.
+    # AND A `memory_iterator` HAS NONE, which is the one sized walk without
+    # one: `iter(mv)` in CPython carries `__iter__` and `__next__` and
+    # nothing else, where `reversed(mv)` -- a plain `reversed` -- does have
+    # the hint.
     if apy_name_is(want, rodata(b"__length_hint__\0")):
         if is_iter:
             mode: i64 = i64(load(i32, offset(obj, apy_it_mode_offset())))
+            hnamed: i64 = i64(load(i32,
+                                   offset(obj, apy_it_named_offset())))
             if mode == 0 or mode == apy_it_rev():
-                return apy_kind_method_of(
-                    obj, 1, rodata(b"__length_hint__\0"), bind)
+                bare: i64 = 0
+                if mode == 0:
+                    if hnamed == apy_mview_kind():
+                        bare = 1
+                if not bare:
+                    return apy_kind_method_of(
+                        obj, 1, rodata(b"__length_hint__\0"), bind)
     if apy_name_is(want, rodata(b"__contains__\0")) and walks:
         return apy_kind_method_of(obj, 2, rodata(b"__contains__\0"), bind)
     if apy_name_is(want, rodata(b"__getitem__\0")):
@@ -1684,7 +1695,31 @@ def apy_no_attribute(obj: ptr, name: ptr) -> ptr:
                 ptr(load(u64, offset(obj, apy_fn_name_offset()))),
                 apy_str_ptr_offset()))))
             if proto:
+                # `__class_getitem__` IS A CLASSMETHOD and binds the TYPE,
+                # which is why `list.__class_getitem__(int)` takes only the
+                # key where `list.append(xs, 9)` takes a receiver first. The
+                # prototype's own is already bound to it and reads
+                # `type(...)` of what it was bound to, which IS the type
+                # asked. Unbound, the call was `expected 2 arguments, got 1`
+                # about a spelling CPython answers.
+                bindit: i64 = 0
+                if apy_cstr_eq(want, rodata(b"__class_getitem__\0")):
+                    bindit = 1
                 found = apy_kind_attr_of(proto, want, 0)
+                if found:
+                    if bindit:
+                        # BOUND TO THE TYPE ITSELF and not to the prototype,
+                        # because the receiver is what the repr names --
+                        # CPython's reads `of type object at ...` -- and the
+                        # body reads it too: the `__class_getitem__` arm
+                        # takes a type straight as the alias's origin.
+                        #
+                        # AND A BOUND ONE IS NOT A DESCRIPTOR:
+                        # `list.append` is a `method_descriptor` and
+                        # `list.__class_getitem__` a
+                        # `builtin_function_or_method`, so the stamp below
+                        # is not reached.
+                        return apy_bind_of(found, obj)
                 if found:
                     # REACHED OFF THE TYPE MAKES IT A DESCRIPTOR, which
                     # CPython names, reprs and qualifies differently from a

@@ -631,10 +631,16 @@ def apy_getiter(v: ptr) -> ptr:
                 apy_name_of(rodata(b"__getitem__\0"))):
             return apy_not_iterable(v)
     else:
+        # A MEMORYVIEW IS WALKED BY INDEX, which is what it already answers
+        # to everywhere else: `list(mv)`, `[*mv]`, `98 in mv` and
+        # `reversed(mv)` all worked and `iter(mv)` alone said it was not
+        # iterable. The cursor reads through `apy_getitem`, and `mv[i]` is
+        # the int CPython yields.
         if not apy_is_seq_of(v) and not apy_is_set_of(v):
             if k != apy_str_kind() and k != apy_bytes_kind():
                 if k != apy_dict_kind() and k != apy_range_kind():
-                    return apy_not_iterable(v)
+                    if k != apy_mview_kind():
+                        return apy_not_iterable(v)
     return apy_cursor_of(v, ptr(0), apy_it_plain(), 0)
 
 

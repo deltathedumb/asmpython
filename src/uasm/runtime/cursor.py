@@ -674,13 +674,17 @@ def apy_iter(v: ptr) -> ptr:
             return ptr(0)
         if made != v:
             return apy_iter(made)
+    # A MEMORYVIEW IS WALKED BY INDEX, which is what it already answers to
+    # everywhere else: `list(mv)`, `[*mv]`, `98 in mv` and `reversed(mv)` all
+    # worked and `iter(mv)` alone said it was not iterable.
     if not apy_is_seq_of(v) and not apy_is_set_of(v):
         if k != apy_str_kind() and k != apy_bytes_kind():
             if k != apy_dict_kind() and k != apy_range_kind():
-                return apy_raise_fmt(
-                    rodata(b"TypeError\0"),
-                    rodata(b"'%s' object is not iterable%s\0"),
-                    apy_kind_name_of(v), rodata(b"\0"))
+                if k != apy_mview_kind():
+                    return apy_raise_fmt(
+                        rodata(b"TypeError\0"),
+                        rodata(b"'%s' object is not iterable%s\0"),
+                        apy_kind_name_of(v), rodata(b"\0"))
     o: ptr = apy_obj_alloc(apy_iter_kind())
     if not o:
         return o

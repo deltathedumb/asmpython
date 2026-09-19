@@ -3408,6 +3408,61 @@ PROGRAMS = {
         type([]).append(xs, 9)
         print("written on a type:", xs, type("").upper("ab"))
     """,
+    # A MEMORYVIEW WAS ITERABLE EVERY WAY BUT `iter`. `list(mv)`, `[*mv]`,
+    # `98 in mv`, `reversed(mv)` and a `for` all walked one, and `iter(mv)`
+    # alone said `'memoryview' object is not iterable` -- the same view, the
+    # same walk, one spelling refused. The cursor steps through
+    # `apy_getitem`, and `mv[i]` is the int CPython yields.
+    #
+    # AND `__class_getitem__` IS A CLASSMETHOD, which is why
+    # `list.__class_getitem__(int)` takes the key alone where
+    # `list.append(xs, 9)` takes a receiver first. Reached off the type it
+    # was handed back UNBOUND and the call was `expected 2 arguments, got 1`
+    # about a spelling CPython answers. Binding the TYPE -- not the
+    # prototype -- is what makes both the call and the repr right: the alias
+    # takes a type straight as its origin, and CPython's repr reads `of type
+    # object at ...`. A bound classmethod is a `builtin_function_or_method`
+    # and not the `method_descriptor` an unbound one would be, and not the
+    # `method-wrapper` its dunder name would otherwise make it -- a slot is
+    # filled on a VALUE, never on a type.
+    "a_view_walks_and_a_classmethod_binds_its_type": """
+        mv = memoryview(b"abc")
+        it = iter(mv)
+        print("named:", type(it).__name__)
+        print("stepped:", next(it), next(it), next(it))
+        try:
+            next(it)
+        except StopIteration:
+            print("exhausted")
+        print("again:", list(iter(mv)), [x for x in iter(mv)])
+        # A `memory_iterator` CARRIES NO LENGTH HINT -- the one sized walk
+        # without one, and `reversed(mv)` does have it.
+        print("hint:", hasattr(iter(mv), "__length_hint__"),
+              reversed(mv).__length_hint__())
+        print("dir:", len(dir(iter(mv))), len(dir(type(iter(mv)))))
+        print("honest:", [n for n in dir(iter(mv))
+                          if not hasattr(iter(mv), n)])
+        print("the other ways still work:", list(mv), [*mv], 98 in mv,
+              list(reversed(mv)), len(mv))
+        # AND THE CLASSMETHOD.
+        for t in (list, tuple, dict, set, frozenset):
+            got = t.__class_getitem__(int)
+            print(" ", t.__name__, got, type(got).__name__)
+        g = list.__class_getitem__
+        print("kind:", type(g).__name__, "| name:", g.__name__)
+        print("prefix:", repr(g)[:len("<built-in method __class_getitem__")])
+        print("receiver:", repr(g).split(" of ")[1].split(" object")[0])
+        print("call:", g(str), getattr(list, "__class_getitem__")(bytes))
+        # OFF A VALUE IT BINDS THE TYPE TOO, which is what a classmethod is.
+        v = [].__class_getitem__
+        print("off a value:", type(v).__name__, v(int))
+        # AND THE UNBOUND DESCRIPTORS BESIDE IT ARE UNCHANGED.
+        print("beside it:", repr(list.append), type(list.append).__name__,
+              repr(list.__len__))
+        e = enumerate([1])
+        print("cursor:", type(e).__class_getitem__(int),
+              type(type(e).__class_getitem__).__name__)
+    """,
     "a_builtin_type_is_an_ordinary_value": """
         # A BUILTIN TYPE IS AN ORDINARY VALUE, and `memoryview` was the last one that was
         # not: naming it at all was `'memoryview' is a builtin that cannot be used as a

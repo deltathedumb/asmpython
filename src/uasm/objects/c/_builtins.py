@@ -876,9 +876,13 @@ APY_API apy_value apy_iter(apy_value v) {
         if (!got) return 0;
         if (got != v) return apy_iter(got);
     }
+    /* A MEMORYVIEW IS WALKED BY INDEX, which is what it already answers to
+       everywhere else: `list(mv)`, `[*mv]`, `98 in mv` and `reversed(mv)`
+       all worked and `iter(mv)` alone said it was not iterable. The cursor
+       steps through `apy_getitem`, and `mv[i]` is the int CPython yields. */
     if (!apy_is_seq(v) && !apy_is_set(v) && O(v)->kind != APY_STR_K
         && O(v)->kind != APY_BYTES_K && O(v)->kind != APY_DICT_K
-        && O(v)->kind != APY_RANGE_K)
+        && O(v)->kind != APY_MVIEW_K && O(v)->kind != APY_RANGE_K)
         return apy_fail2("TypeError", "'%s' object is not iterable%s",
                          apy_kind_name(v), "");
     o = apy_alloc(APY_ITER_K);

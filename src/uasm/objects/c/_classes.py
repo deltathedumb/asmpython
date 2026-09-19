@@ -662,12 +662,27 @@ APY_API apy_value apy_kind_prototype(apy_value type_name);
 /* STATIC, and declared in an earlier part so the descriptor path can reach
    it: the interpreter has its own `_kind_prototype` and does not need a
    binding for this one. */
-static apy_value apy_type_kind_attr(apy_value ownerv, apy_value name) {
+static apy_value apy_type_kind_attr(apy_value type_obj, apy_value ownerv,
+                                    apy_value name) {
     const char *owner = (const char *)ownerv;
     apy_value proto = apy_kind_prototype(ownerv);
     apy_value found;
+    int bound;
     if (!proto) return 0;
+    /* `__class_getitem__` IS A CLASSMETHOD and binds the TYPE, which is why
+       `list.__class_getitem__(int)` takes only the key where
+       `list.append(xs, 9)` takes a receiver first. Bound to the TYPE ITSELF
+       and not to the prototype, because the receiver is what the repr names
+       -- CPython's reads `of type object at ...` -- and because the body
+       reads it too: the `__class_getitem__` arm of `apy_native_call` takes a
+       type straight as the alias's origin.
+
+       AND A BOUND ONE IS NOT A DESCRIPTOR: `list.append` is a
+       `method_descriptor` and `list.__class_getitem__` a
+       `builtin_function_or_method`, so the stamp below is not reached. */
+    bound = strcmp(APY_CSTR(name), "__class_getitem__") == 0;
     found = apy_kind_attr_of(proto, (apy_value)(uintptr_t)APY_CSTR(name), 0);
+    if (found && bound) return apy_bind(found, type_obj);
     if (found && O(found)->kind == APY_FUNC_K) {
         char qual[128];
         snprintf(qual, sizeof qual, "%s.%s", owner, APY_CSTR(name));
@@ -689,7 +704,7 @@ APY_API apy_value apy_no_attribute(apy_value obj, apy_value name) {
        one. Unbound, because `dict.keys` is unbound in CPython too. */
     if (O(obj)->kind == APY_FUNC_K && O(obj)->v.fn.is_type) {
         found = apy_type_kind_attr(
-            (apy_value)(uintptr_t)APY_CSTR(O(obj)->v.fn.name), name);
+            obj, (apy_value)(uintptr_t)APY_CSTR(O(obj)->v.fn.name), name);
         if (found) return found;
     }
     /* A TYPE IS NAMED, NOT DESCRIBED. CPython says `type object 'list' has
