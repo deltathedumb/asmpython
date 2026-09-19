@@ -3624,6 +3624,67 @@ PROGRAMS = {
             print("raises:", e)
         print("left alone:", "%s!" % 1, 5 % 3)
     """,
+    # AND IDENTITY SURVIVES A READ AND A CALL. Reading a value back out of
+    # a container, and returning one through a callable reached as a VALUE,
+    # each minted a fresh handle on the interpreter -- so `xs[0] is xs[0]`
+    # and `r = lambda x: x; r(v) is v` answered False there and True in
+    # CPython and in both compiled runtimes, for every kind the interpreter
+    # did not already intern by object.
+    "identity_survives_a_read_and_a_call": """
+        name = "hello world"
+        big = 10 ** 20
+        xs = [name, 1.5, big, b"bytes here", (1, 2), [3], 2j]
+        print("elements:", [xs[i] is xs[i] for i in range(len(xs))])
+        print("by name:", xs[0] is name, xs[2] is big)
+        t = (name, 1.5)
+        print("tuple:", t[0] is t[0], t[0] is name)
+        d = {"k": name}
+        print("dict:", d["k"] is d["k"], d["k"] is name)
+
+        class C:
+            def __init__(self):
+                self.v = name
+
+        c = C()
+        print("attribute:", c.v is c.v, c.v is name)
+        for item in [name]:
+            print("loop:", item is name)
+
+        # AND THROUGH A CALL REACHED AS A VALUE, which is where a DIRECT
+        # call always agreed: the frontend lowers one to the symbol and the
+        # handle never leaves the interpreter.
+        def through(x):
+            return x
+
+        print("direct:", through(name) is name)
+        alias = through
+        print("aliased:", alias(name) is name, alias(big) is big)
+        lam = lambda x: x
+        print("lambda:", lam(name) is name, lam(big) is big)
+
+        def outer():
+            def inner(x):
+                return x
+            return inner(name) is name
+
+        print("nested:", outer())
+        made = lambda: "one object"
+        print("built inside:", made() is made())
+        print("mapped:", list(map(through, [name]))[0] is name)
+
+        def second(a, b):
+            return b
+
+        print("second:", second(1, name) is name)
+        pick = second
+        print("second aliased:", pick(1, name) is name)
+
+        class D:
+            def m(self, x):
+                return x
+
+        print("method:", D().m(name) is name)
+    """,
     # A LITERAL IS ONE OBJECT, module-wide. `"hello" is "hello"` is True in
     # CPython and was False here, and so was every other pair of equal
     # literals: two names bound to the same text, `b"ab" is b"ab"`, `1.5 is

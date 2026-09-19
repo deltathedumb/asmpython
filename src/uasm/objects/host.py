@@ -437,7 +437,17 @@ class ObjectHost:
         # RECORDED HERE, not only in `_value`. An object first handed out by
         # `_new` and later reached through `_value` got two handles and
         # compared unequal to itself.
-        if isinstance(obj, self._INTERNED) or type(obj).__name__ in (
+        if isinstance(obj, (int, str, bytes, float, complex)):
+            # IDENTITY BUT NO COUNT. An immutable value is one handle per
+            # OBJECT for the reason `_value` gives, and it is not something
+            # the shadow refcount answers questions about -- a str has no
+            # `__del__` and nothing asks what its count is. Recorded here as
+            # well as in `_value`, because a literal is minted by `apy_lit`
+            # straight through `_new`: without this the literal's handle and
+            # the one `_value` later made for the same object were two, and
+            # `alias(V) is V` was False for a call through a value.
+            self._identity.setdefault(id(obj), made)
+        elif isinstance(obj, self._INTERNED) or type(obj).__name__ in (
                 "Instance", "Class", "Exc", "Func", "Gen", "Iterator",
                 "Alias", "Cell"):
             self._identity.setdefault(id(obj), made)
@@ -858,7 +868,7 @@ class ObjectHost:
             return self._suspend
         if obj is True or obj is False:
             return self._bool(obj)
-        if isinstance(obj, int):
+        if isinstance(obj, int) and _SMALL_LO <= obj <= _SMALL_HI:
             return self._int(obj)
         # A BYTEARRAY AND A VIEW BELONG HERE TOO, and their absence was two
         # lists disagreeing: `_new` records an identity for everything in
@@ -867,7 +877,10 @@ class ObjectHost:
         # were False here and True in both compiled runtimes.
         if isinstance(obj, (Instance, Class, Exc, Func, Gen, Iterator,
                             list, dict, set, frozenset, tuple, Alias, Cell,
-                            bytearray, memoryview)):
+                            bytearray, memoryview,
+                            # AND EVERY IMMUTABLE VALUE, which is the whole
+                            # of what was left out. See below.
+                            int, str, bytes, float, complex)):
             # ONE HANDLE PER OBJECT, so `is` answers about the object and not
             # about which handle it came back through. The C compares
             # pointers, so a fresh handle for the same instance made
@@ -877,9 +890,25 @@ class ObjectHost:
             #
             # MUTABLE CONTAINERS TOO. `xs.append(xs)` then `xs[1] is xs` is
             # True in a compiled program and was False here, because reading
-            # an element minted a second handle for the same list. Only the
-            # mutable ones: a str or a tuple is compared by value everywhere
-            # that matters, and interning them would keep every one alive.
+            # an element minted a second handle for the same list.
+            #
+            # AND A STR, A BYTES, A FLOAT, A COMPLEX AND A BIG INT, which
+            # were the ones left out -- "compared by value everywhere that
+            # matters" was not true: `xs[0] is xs[0]` and `r = lambda x: x;
+            # r(v) is v` are both True in CPython and in both compiled
+            # runtimes, and both were False here for every kind that minted
+            # a fresh handle per read. THE OBJECT IS THE ANSWER: two reads of
+            # one element hand back one Python object, and two equal strings
+            # built separately hand back two -- which is exactly the line
+            # CPython draws, because the host IS CPython. Interning costs no
+            # retention either: `_cells` already holds every object a handle
+            # was ever made for, so one handle per object holds FEWER of
+            # them than one per read did.
+            #
+            # THE SMALL INTEGERS ARE NOT HERE. They are one cell per value
+            # rather than one per object -- see `_int` -- which is the range
+            # the C shares and the only part of an int's identity a program
+            # can rely on.
             #
             # AND A CELL, which no program can see but which `apy_env_cell`
             # hands back on every call into a closure. A second handle for
