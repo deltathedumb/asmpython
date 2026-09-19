@@ -1383,7 +1383,7 @@ class ObjectHost:
         # Mapping)` is a question about what a dict CAN DO, asked of `dict`
         # and never of one.
         if isinstance(obj, Func) and getattr(obj, "is_type", False):
-            proto = _KIND_PROTOTYPES.get(obj.name)
+            proto = _kind_prototype(obj.name)
             if proto is not None and _kind_attr(self, proto, name) is not None:
                 # UNBOUND, because `dict.keys` is unbound in CPython too and
                 # `dict.keys(d)` is how it is called -- binding it to the
@@ -7749,6 +7749,24 @@ _KIND_PROTOTYPES = {"list": [], "tuple": (), "dict": {}, "set": set(),
                     "int": 0, "bool": False, "float": 0.0}
 
 
+def _kind_prototype(name: str):
+    """An empty value of the kind `name` names, or None.
+
+    WHAT A TYPE ANSWERS ATTRIBUTES FROM. `list.append` has no list to ask, so
+    one is made; `type(iter([])).__next__` has no cursor, so one is made
+    here. The C twin is `apy_kind_prototype`.
+    """
+    found = _KIND_PROTOTYPES.get(name)
+    if found is not None:
+        return found
+    mode = _CURSOR_PROTO_MODES.get(name)
+    if mode is None:
+        return None
+    it = Iterator([], None, mode)
+    it.named = name
+    return it
+
+
 def _unbound_kind(h, want: str):
     """`dict.keys` as a value: the receiver is its first argument."""
     def body(recv, *rest):
@@ -7875,7 +7893,17 @@ from uasm.frontends.python.methods import (  # noqa: E402
     DYN_METHOD_TABLE, METHOD_PARAMS, REQUIRED, KeywordError, _suggest,
     fold_ctor_keywords, method_symbol)
 from uasm.objects.c.kindmeth_table import (  # noqa: E402
-    KINDMETH_WORDS, KIND_DIR, KIND_DOC)
+    KINDMETH_WORDS, KIND_DIR, KIND_DOC, CURSOR_SAMPLES)
+
+#: EVERY CURSOR TYPE JOINS THE ORACLE, through the same sample expressions
+#: the generated tables were built from. `type(iter([])).__next__` is a
+#: descriptor off `list_iterator`, and only the real type can say whether
+#: that is a `wrapper_descriptor` or a `method_descriptor` and what its repr
+#: reads. Read from the generated module rather than written again here, so
+#: all three arrangements ask CPython about the same twenty-two types.
+_KIND_BY_NAME.update(
+    (name, type(eval(expr)))            # noqa: S307 -- a generated literal
+    for name, expr in CURSOR_SAMPLES.items())
 
 #: What kind a value COUNTS AS when a builtin method is looked up on it.
 #: `True` is an `int` here, exactly as `apy_kind_bit` folds the bool kind
@@ -9626,6 +9654,25 @@ def _apy_default_getattr(h, a):
                 if isinstance(m, (Func, Native)):
                     return h._new(m.bind(obj))
                 return h._value(m)
+        # A CLASS `_type_of` MINTED ANSWERS WHAT ITS KIND CARRIES.
+        # `type(iter([]))` is not the canonical thunk a NAMED builtin gets --
+        # no program writes `list_iterator` -- so `_type_of` interns a bare
+        # `Class` under the kind's name, and every method that kind has was
+        # out of reach: `type(it).__next__` was an AttributeError about the
+        # one method an iterator is FOR.
+        #
+        # AN EMPTY DICT, NO BASE AND NO METACLASS is what identifies one. A
+        # class the program wrote is a `Class` too, and its body always
+        # leaves `__module__` behind -- so a class named `list` cannot fall
+        # in here and collect a list's methods by accident.
+        if not obj.dict and obj.base is None and obj.meta is None:
+            proto = _kind_prototype(obj.name)
+            if proto is not None and _kind_attr(h, proto, name) is not None:
+                # UNBOUND, as it is off a builtin type: `type(it).__next__`
+                # takes the cursor as its argument, which is what
+                # `type(it).__next__(it)` means.
+                return h._new(Native(name, _unbound_kind(h, name),
+                                     descr=obj.name))
         return h._fail("AttributeError",
                        f"type object '{obj.name}' has no attribute '{name}'")
     if isinstance(obj, Super):
@@ -11287,6 +11334,14 @@ def _apy_dir(h, a):
         while isinstance(cls, Class):
             add(cls.dict)
             cls = cls.base
+    elif (isinstance(v, Class) and not v.dict and v.base is None
+            and v.meta is None and v.name in KIND_DIR):
+        # A CLASS `_type_of` MINTED reads its KIND's row rather than a class
+        # chain it has none of: `dir(type(it))` and `dir(it)` are one list in
+        # CPython. The empty dict, no base and no metaclass are what tell
+        # such a cell from a class the program wrote, whose chain is walked
+        # below. See `apy_dir`.
+        add(KIND_DIR[v.name])
     elif isinstance(v, Class):
         cls = v
         while isinstance(cls, Class):
@@ -14064,6 +14119,46 @@ class Iterator:
         # silently skip or repeat entries, so CPython refuses. Only a dict:
         # a list may change under a walk and CPython allows it.
         self.n0 = len(src) if isinstance(src, dict) else -1
+
+
+#: ONE PROTOTYPE PER CURSOR, by the mode it walks in. A cursor's prototype
+#: is a cursor with no source, which is all `_kind_attr` reads of one -- the
+#: mode, and the name it goes by. Nothing here is ever stepped: a prototype
+#: exists to be asked which attributes its kind carries and is then thrown
+#: away.
+#:
+#: THE NAME IS THE `named` SLOT, written over. `Iterator.__init__` computes
+#: one from the source and there is no source here, so the KEY is the answer
+#: -- which is why this table needs only the mode beside it. The C twin is
+#: `apy_cursor_protos`, which carries a `named` integer for the same reason.
+#:
+#: BESIDE `Iterator` AND NOT BESIDE `_KIND_PROTOTYPES`, because the modes are
+#: its own constants and naming them is the whole readability of the table.
+#: `_kind_prototype` reads this at call time, as a global.
+_CURSOR_PROTO_MODES = {
+    "list_iterator":             Iterator.PLAIN,
+    "tuple_iterator":            Iterator.PLAIN,
+    "str_iterator":              Iterator.PLAIN,
+    "str_ascii_iterator":        Iterator.PLAIN,
+    "bytes_iterator":            Iterator.PLAIN,
+    "bytearray_iterator":        Iterator.PLAIN,
+    "range_iterator":            Iterator.PLAIN,
+    "set_iterator":              Iterator.PLAIN,
+    "memory_iterator":           Iterator.PLAIN,
+    "dict_keyiterator":          Iterator.PLAIN,
+    "dict_valueiterator":        Iterator.PLAIN,
+    "dict_itemiterator":         Iterator.PLAIN,
+    "list_reverseiterator":      Iterator.REV,
+    "reversed":                  Iterator.REV,
+    "dict_reversekeyiterator":   Iterator.REV,
+    "dict_reversevalueiterator": Iterator.REV,
+    "dict_reverseitemiterator":  Iterator.REV,
+    "callable_iterator":         Iterator.CALL,
+    "enumerate":                 Iterator.ENUMERATE,
+    "zip":                       Iterator.ZIP,
+    "map":                       Iterator.MAP,
+    "filter":                    Iterator.FILTER,
+}
 
 
 def _apy_iterable(h, a):

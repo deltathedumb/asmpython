@@ -1573,6 +1573,34 @@ def apy_dir_chain(out: ptr, cls: ptr) -> None:
             here = ptr(load(u64, offset(here, apy_t_base_offset())))
 
 
+def apy_type_is_minted(v: ptr) -> i64:
+    """Is this TYPE cell one `apy_type_for` minted for a kind, rather than a
+    class the program wrote?
+
+    AN EMPTY DICT, NO BASE AND NO METACLASS is what identifies one. A class
+    the program wrote is a TYPE cell too, and its body always leaves
+    `__module__` behind -- so a class named `list` cannot be mistaken for the
+    kind it shares a name with. The C draws the same line in `apy_dir`.
+    """
+    d: ptr = ptr(load(u64, offset(v, apy_t_dict_offset())))
+    if not d:
+        return 0
+    n: i64 = load(i64, offset(d, apy_d_n_offset()))
+    if n != 0:
+        return 0
+    base: ptr = ptr(load(u64, offset(v, apy_t_base_offset())))
+    if base:
+        return 0
+    meta: ptr = ptr(load(u64, offset(v, apy_t_meta_offset())))
+    if meta:
+        return 0
+    row: ptr = apy_kind_dir_of(apy_str_data(
+        ptr(load(u64, offset(v, apy_t_name_offset())))))
+    if not row:
+        return 0
+    return 1
+
+
 def apy_dir_builtin(out: ptr, v: ptr) -> None:
     """Add every name a BUILT-IN value answers to, from the generated table.
 
@@ -1587,6 +1615,12 @@ def apy_dir_builtin(out: ptr, v: ptr) -> None:
     if i64(load(i32, offset(v, 0))) == apy_func_kind():
         if load(i32, offset(v, apy_fn_is_type_offset())):
             kn = apy_str_data(ptr(load(u64, offset(v, apy_fn_name_offset()))))
+    # AND A CELL `apy_type_for` MINTED -- `type(iter([]))` -- reads the row
+    # its KIND has, for the same reason: `dir(type(it))` and `dir(it)` are
+    # one list in CPython. A class the program wrote never reaches here; the
+    # caller walks its chain instead.
+    if i64(load(i32, offset(v, 0))) == apy_type_kind():
+        kn = apy_str_data(ptr(load(u64, offset(v, apy_t_name_offset()))))
     names: ptr = apy_kind_dir_of(kn)
     if not names:
         return
@@ -1635,7 +1669,13 @@ def apy_dir(v: ptr) -> ptr:
         apy_dir_names(out, ptr(load(u64, offset(v, apy_o_dict_offset()))))
         apy_dir_chain(out, ptr(load(u64, offset(v, apy_o_cls_offset()))))
     elif k == apy_type_kind():
-        apy_dir_chain(out, v)
+        # A CELL `apy_type_for` MINTED reads its KIND's row rather than a
+        # class chain it has none of -- see `apy_dir_builtin`.
+        minted: i64 = apy_type_is_minted(v)
+        if minted:
+            apy_dir_builtin(out, v)
+        else:
+            apy_dir_chain(out, v)
     else:
         apy_dir_builtin(out, v)
     return apy_sorted(out)

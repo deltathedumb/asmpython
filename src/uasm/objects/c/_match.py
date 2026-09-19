@@ -130,7 +130,10 @@ APY_API apy_value apy_dir(apy_value v) {
                     apy_seq_push(out, O(cd)->v.d.keys[i]);
             cls = O(cls)->v.t.base;
         }
-    } else if (O(v)->kind == APY_TYPE_K) {
+    } else if (O(v)->kind == APY_TYPE_K
+               && !(O(v)->v.t.dict && !O(O(v)->v.t.dict)->v.d.n
+                    && !O(v)->v.t.base && !O(v)->v.t.meta
+                    && apy_kind_dir(APY_CSTR(O(v)->v.t.name)))) {
         apy_value cls = v;
         int64_t i;
         while (cls && O(cls)->kind == APY_TYPE_K) {
@@ -158,6 +161,13 @@ APY_API apy_value apy_dir(apy_value v) {
            same list as `dir("")` -- so the type's own name is the key. */
         if (O(v)->kind == APY_FUNC_K && O(v)->v.fn.is_type)
             kn = APY_CSTR(O(v)->v.fn.name);
+        /* AND A CELL `apy_type_for` MINTED -- `type(iter([]))` -- reads the
+           row its KIND has, for the same reason: `dir(type(it))` and
+           `dir(it)` are one list in CPython. The empty dict, no base and no
+           metaclass above are what tell such a cell from a class the
+           program wrote, whose chain is walked instead. */
+        if (O(v)->kind == APY_TYPE_K)
+            kn = APY_CSTR(O(v)->v.t.name);
         names = apy_kind_dir(kn);
         while (names && *names) {
             apy_seq_push(out, apy_lit(names));

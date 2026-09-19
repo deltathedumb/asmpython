@@ -477,6 +477,23 @@ APY_API apy_value apy_default_getattr(apy_value obj, apy_value name) {
             if (m && O(m)->kind == APY_FUNC_K) return apy_bind(m, obj);
             if (m) return m;
         }
+        /* A CELL `apy_type_for` MINTED ANSWERS WHAT ITS KIND CARRIES.
+           `type(iter([]))` is not the canonical thunk a NAMED builtin gets
+           -- no program writes `list_iterator` -- so `apy_type_for` mints a
+           cell holding the kind's name and an empty dict, and every method
+           that kind has was out of reach: `type(it).__next__` was an
+           AttributeError about the one method an iterator is FOR.
+
+           AN EMPTY DICT, NO BASE AND NO METACLASS is what identifies one. A
+           class the program wrote is a TYPE cell too, and its body always
+           leaves `__module__` behind -- so a class named `list` cannot fall
+           in here and collect a list's methods by accident. */
+        if (O(obj)->v.t.dict && !O(O(obj)->v.t.dict)->v.d.n
+                && !O(obj)->v.t.base && !O(obj)->v.t.meta) {
+            found = apy_type_kind_attr(
+                (apy_value)(uintptr_t)APY_CSTR(O(obj)->v.t.name), name);
+            if (found) return found;
+        }
         /* THE HIERARCHY, as a program reads it back. `object` is the root of
            every chain even though no class links to it -- see
            `apy_object_class`. */

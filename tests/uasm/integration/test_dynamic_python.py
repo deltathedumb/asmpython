@@ -3350,6 +3350,64 @@ PROGRAMS = {
         print("subscript:", e.__class_getitem__(int),
               type(e.__class_getitem__(int)).__name__)
     """,
+    # A CURSOR'S TYPE OBJECT CARRIED NOTHING. `type(iter([]))` says
+    # `list_iterator` and always has, and every method that name stands for
+    # was out of reach: `type(it).__next__` was an AttributeError about the
+    # one method an iterator is FOR, and `dir()` over it answered [].
+    #
+    # THE MACHINERY WAS ALREADY THERE, for the other shape of the same
+    # question: `list.append` has no list to ask, so `apy_kind_prototype`
+    # makes an empty one and `apy_no_attribute` asks THAT what the kind
+    # carries. What was missing was a prototype per cursor -- which is a
+    # cursor with NO SOURCE, because the mode and the name are all that is
+    # read of one -- and the route from a TYPE CELL to it. A cell
+    # `apy_type_for` minted is told from a class the program wrote by its
+    # empty dict, no base and no metaclass.
+    #
+    # AND THE DESCRIPTOR IT HANDS BACK IS CPYTHON'S KIND. `__next__` fills a
+    # slot and `__length_hint__` is written out, so one reprs as a `slot
+    # wrapper` and the other as a `method` -- which the bit-keyed table
+    # could not say, a cursor having no bit.
+    "a_cursor_type_object_carries_its_kinds_methods": """
+        it = iter([1, 2, 3])
+        t = type(it)
+        print("name:", t.__name__, "dir:", len(dir(t)), "doc:", t.__doc__)
+        print("same list:", dir(t) == dir(it))
+        print("next:", t.__next__(it), t.__next__(it))
+        print("hint:", t.__length_hint__(iter([1, 2, 3])))
+        print("reprs:", repr(t.__next__), "|", repr(t.__length_hint__))
+        print("qualnames:", t.__next__.__qualname__,
+              t.__length_hint__.__qualname__)
+        try:
+            t.nope
+        except Exception as e:
+            print("missing:", type(e).__name__, e)
+        # EVERY CURSOR KIND, through the same route.
+        for v in (reversed([1]), iter((1,)), iter("a"), iter(b"a"),
+                  iter(range(1)), iter({1}), iter({1: 2}.keys()),
+                  iter({1: 2}.values()), iter({1: 2}.items()),
+                  iter(lambda: None, None), enumerate([1]), zip([1]),
+                  map(str, [1]), filter(None, [1])):
+            k = type(v)
+            print(" ", k.__name__, len(dir(k)), dir(k) == dir(v),
+                  hasattr(k, "__next__"))
+        # A CLASS THE PROGRAM WROTE STILL WALKS ITS OWN CHAIN, which is what
+        # the empty-dict test is there to protect.
+        class Base:
+            def inherited(self):
+                pass
+        class Sub(Base):
+            def mine(self):
+                pass
+        print("user:", [n for n in dir(Sub) if not n.startswith("_")])
+        print("user instance:", [n for n in dir(Sub())
+                                 if not n.startswith("_")])
+        # AND A BUILTIN TYPE REACHED AS A VALUE IS UNCHANGED.
+        print("builtin:", repr(type([]).append), len(dir(type([]))))
+        xs = [1]
+        type([]).append(xs, 9)
+        print("written on a type:", xs, type("").upper("ab"))
+    """,
     "a_builtin_type_is_an_ordinary_value": """
         # A BUILTIN TYPE IS AN ORDINARY VALUE, and `memoryview` was the last one that was
         # not: naming it at all was `'memoryview' is a builtin that cannot be used as a

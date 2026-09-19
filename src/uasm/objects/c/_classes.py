@@ -644,6 +644,39 @@ APY_API apy_value apy_kind_attr_of(apy_value obj, apy_value want,
                                   int64_t bind);
 APY_API apy_value apy_kind_prototype(apy_value type_name);
 
+/* WHAT A TYPE CARRIES, asked through a PROTOTYPE of its kind. `list.append`
+   has no list to ask, so one is made -- empty, thrown away, and only ever
+   used to decide which methods that kind has. 0 for a name nothing knows.
+
+   REACHED OFF THE TYPE MAKES IT A DESCRIPTOR, which CPython names, reprs
+   and qualifies differently from a function: `list.append` is a
+   `method_descriptor`, prints as `<method 'append' of 'list' objects>` and
+   answers `list.append` to `__qualname__`. This is the only place that knows
+   WHICH type handed it over, so it is where both facts are recorded -- the
+   cell `apy_kind_attr_of` builds is fresh per call, so writing to it cannot
+   reach another type's copy.
+
+   TWO CALLERS AND ONE BODY: a builtin type reached as a VALUE is a FUNC
+   wearing `is_type`, and `type(iter([]))` is a TYPE cell `apy_type_for`
+   minted from the kind's name. Both are asking what a kind carries. */
+/* STATIC, and declared in an earlier part so the descriptor path can reach
+   it: the interpreter has its own `_kind_prototype` and does not need a
+   binding for this one. */
+static apy_value apy_type_kind_attr(apy_value ownerv, apy_value name) {
+    const char *owner = (const char *)ownerv;
+    apy_value proto = apy_kind_prototype(ownerv);
+    apy_value found;
+    if (!proto) return 0;
+    found = apy_kind_attr_of(proto, (apy_value)(uintptr_t)APY_CSTR(name), 0);
+    if (found && O(found)->kind == APY_FUNC_K) {
+        char qual[128];
+        snprintf(qual, sizeof qual, "%s.%s", owner, APY_CSTR(name));
+        O(found)->v.fn.qualname = apy_str_copy(qual, (int64_t)strlen(qual));
+        O(found)->v.fn.descr = 1;
+    }
+    return found;
+}
+
 /* Every builtin kind's lookup ends here, which is why the protocol table is
    consulted HERE rather than in each of a dozen branches: a kind that has
    `__iter__` reaches this line for it exactly as one that has nothing does. */
@@ -655,29 +688,9 @@ APY_API apy_value apy_no_attribute(apy_value obj, apy_value name) {
        is a question about what a dict CAN DO, asked of `dict` and never of
        one. Unbound, because `dict.keys` is unbound in CPython too. */
     if (O(obj)->kind == APY_FUNC_K && O(obj)->v.fn.is_type) {
-        apy_value proto = apy_kind_prototype(
-            (apy_value)(uintptr_t)APY_CSTR(O(obj)->v.fn.name));
-        if (proto) {
-            found = apy_kind_attr_of(
-                proto, (apy_value)(uintptr_t)APY_CSTR(name), 0);
-            /* REACHED OFF THE TYPE MAKES IT A DESCRIPTOR, which CPython
-               names, reprs and qualifies differently from a function:
-               `list.append` is a `method_descriptor`, prints as `<method
-               'append' of 'list' objects>` and answers `list.append` to
-               `__qualname__`. This is the only place that knows WHICH type
-               handed it over, so it is where both facts are recorded -- the
-               cell `apy_kind_attr_of` builds is fresh per call, so writing
-               to it cannot reach another type's copy. */
-            if (found && O(found)->kind == APY_FUNC_K) {
-                char qual[128];
-                snprintf(qual, sizeof qual, "%s.%s",
-                         APY_CSTR(O(obj)->v.fn.name), APY_CSTR(name));
-                O(found)->v.fn.qualname =
-                    apy_str_copy(qual, (int64_t)strlen(qual));
-                O(found)->v.fn.descr = 1;
-            }
-            if (found) return found;
-        }
+        found = apy_type_kind_attr(
+            (apy_value)(uintptr_t)APY_CSTR(O(obj)->v.fn.name), name);
+        if (found) return found;
     }
     /* A TYPE IS NAMED, NOT DESCRIBED. CPython says `type object 'list' has
        no attribute 'nope'` where a VALUE gets `'int' object has no attribute

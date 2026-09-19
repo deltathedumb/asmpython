@@ -1598,7 +1598,73 @@ def apy_kind_prototype(type_name: ptr) -> ptr:
         return apy_from_int(0)
     if apy_name_is(type_name, rodata(b"float\0")):
         return apy_from_float(f64(0))
+    if apy_name_is(type_name, rodata(b"list_iterator\0")):
+        return apy_cursor_proto_of(apy_it_plain(), apy_list_kind())
+    if apy_name_is(type_name, rodata(b"list_reverseiterator\0")):
+        return apy_cursor_proto_of(
+            apy_it_rev(), apy_list_kind() + apy_it_revof())
+    if apy_name_is(type_name, rodata(b"tuple_iterator\0")):
+        return apy_cursor_proto_of(apy_it_plain(), apy_tuple_kind())
+    if apy_name_is(type_name, rodata(b"reversed\0")):
+        return apy_cursor_proto_of(
+            apy_it_rev(), apy_tuple_kind() + apy_it_revof())
+    if apy_name_is(type_name, rodata(b"str_iterator\0")):
+        return apy_cursor_proto_of(apy_it_plain(), apy_str_kind())
+    if apy_name_is(type_name, rodata(b"str_ascii_iterator\0")):
+        return apy_cursor_proto_of(apy_it_plain(), apy_str_kind())
+    if apy_name_is(type_name, rodata(b"bytes_iterator\0")):
+        return apy_cursor_proto_of(apy_it_plain(), apy_bytes_kind())
+    if apy_name_is(type_name, rodata(b"bytearray_iterator\0")):
+        return apy_cursor_proto_of(apy_it_plain(), apy_bytes_kind())
+    if apy_name_is(type_name, rodata(b"range_iterator\0")):
+        return apy_cursor_proto_of(apy_it_plain(), apy_range_kind())
+    if apy_name_is(type_name, rodata(b"set_iterator\0")):
+        return apy_cursor_proto_of(apy_it_plain(), apy_set_kind())
+    if apy_name_is(type_name, rodata(b"memory_iterator\0")):
+        return apy_cursor_proto_of(apy_it_plain(), apy_mview_kind())
+    if apy_name_is(type_name, rodata(b"dict_keyiterator\0")):
+        return apy_cursor_proto_of(apy_it_plain(), apy_dict_kind())
+    if apy_name_is(type_name, rodata(b"dict_valueiterator\0")):
+        return apy_cursor_proto_of(
+            apy_it_plain(), apy_it_viewed() + apy_part_values())
+    if apy_name_is(type_name, rodata(b"dict_itemiterator\0")):
+        return apy_cursor_proto_of(
+            apy_it_plain(), apy_it_viewed() + apy_part_items())
+    if apy_name_is(type_name, rodata(b"dict_reversekeyiterator\0")):
+        return apy_cursor_proto_of(
+            apy_it_rev(), apy_dict_kind() + apy_it_revof())
+    if apy_name_is(type_name, rodata(b"dict_reversevalueiterator\0")):
+        return apy_cursor_proto_of(
+            apy_it_rev(), apy_it_viewed() + apy_part_values() + apy_it_revof())
+    if apy_name_is(type_name, rodata(b"dict_reverseitemiterator\0")):
+        return apy_cursor_proto_of(
+            apy_it_rev(), apy_it_viewed() + apy_part_items() + apy_it_revof())
+    if apy_name_is(type_name, rodata(b"callable_iterator\0")):
+        return apy_cursor_proto_of(apy_it_call(), apy_it_callable())
+    if apy_name_is(type_name, rodata(b"enumerate\0")):
+        return apy_cursor_proto_of(apy_it_enumerate(), apy_list_kind())
+    if apy_name_is(type_name, rodata(b"zip\0")):
+        return apy_cursor_proto_of(apy_it_zip(), apy_list_kind())
+    if apy_name_is(type_name, rodata(b"map\0")):
+        return apy_cursor_proto_of(apy_it_map(), apy_list_kind())
+    if apy_name_is(type_name, rodata(b"filter\0")):
+        return apy_cursor_proto_of(apy_it_filter(), apy_list_kind())
     return ptr(0)
+
+
+def apy_cursor_proto_of(mode: i64, named: i64) -> ptr:
+    """A CURSOR WITH NO SOURCE, which is all `apy_kind_attr_of` reads of one:
+    the kind it is, the mode it walks in and what it is named after.
+
+    Nothing here is ever stepped -- a prototype exists to be asked which
+    attributes its kind carries and is then thrown away -- so there is
+    nothing for a source to be. The C twin is `apy_cursor_protos`.
+    """
+    it: ptr = apy_cursor_of(ptr(0), ptr(0), mode, 0)
+    if not it:
+        return it
+    store(i32, i32(named), offset(it, apy_it_named_offset()))
+    return it
 
 
 def apy_no_attribute(obj: ptr, name: ptr) -> ptr:

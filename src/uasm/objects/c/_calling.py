@@ -542,8 +542,57 @@ APY_API apy_value apy_kind_method_var(apy_value obj, apy_value namev,
 /* An EMPTY VALUE of the kind a builtin type names, so the table above can
    answer for the type without a second copy of it. Nothing is done with the
    prototype but ask its kind, and the natives it yields are unbound. */
+/* A CURSOR PROTOTYPE IS A CURSOR WITH NO SOURCE, which is all
+   `apy_kind_attr_of` reads of one: the kind it is, the mode it walks in and
+   what it is named after. Nothing here is ever stepped -- a prototype exists
+   to be asked which attributes its kind carries and is then thrown away --
+   so there is nothing for a source to be.
+
+   THE PAIRS ARE THE INVERSE of `apy_cursor_name`, which turns a mode and a
+   `named` into one of these words. `str_iterator` and `str_ascii_iterator`
+   are one row's worth of behaviour under two names, because the width of
+   the string decides the name and neither changes what the type carries. */
+static const struct { const char *name; int mode, named; }
+apy_cursor_protos[] = {
+    {"list_iterator",             APY_IT_PLAIN, APY_LIST_K},
+    {"list_reverseiterator",      APY_IT_REV,   APY_LIST_K + APY_IT_REVOF},
+    {"tuple_iterator",            APY_IT_PLAIN, APY_TUPLE_K},
+    {"reversed",                  APY_IT_REV,   APY_TUPLE_K + APY_IT_REVOF},
+    {"str_iterator",              APY_IT_PLAIN, APY_STR_K},
+    {"str_ascii_iterator",        APY_IT_PLAIN, APY_STR_K},
+    {"bytes_iterator",            APY_IT_PLAIN, APY_BYTES_K},
+    {"bytearray_iterator",        APY_IT_PLAIN, APY_BYTES_K},
+    {"range_iterator",            APY_IT_PLAIN, APY_RANGE_K},
+    {"set_iterator",              APY_IT_PLAIN, APY_SET_K},
+    {"memory_iterator",           APY_IT_PLAIN, APY_MVIEW_K},
+    {"dict_keyiterator",          APY_IT_PLAIN, APY_DICT_K},
+    {"dict_valueiterator",        APY_IT_PLAIN,
+     APY_IT_VIEWED + APY_PART_VALUES},
+    {"dict_itemiterator",         APY_IT_PLAIN,
+     APY_IT_VIEWED + APY_PART_ITEMS},
+    {"dict_reversekeyiterator",   APY_IT_REV,   APY_DICT_K + APY_IT_REVOF},
+    {"dict_reversevalueiterator", APY_IT_REV,
+     APY_IT_VIEWED + APY_PART_VALUES + APY_IT_REVOF},
+    {"dict_reverseitemiterator",  APY_IT_REV,
+     APY_IT_VIEWED + APY_PART_ITEMS + APY_IT_REVOF},
+    {"callable_iterator",         APY_IT_CALL,  APY_IT_CALLABLE},
+    {"enumerate",                 APY_IT_ENUMERATE, APY_LIST_K},
+    {"zip",                       APY_IT_ZIP,   APY_LIST_K},
+    {"map",                       APY_IT_MAP,   APY_LIST_K},
+    {"filter",                    APY_IT_FILTER, APY_LIST_K},
+};
+
 APY_API apy_value apy_kind_prototype(apy_value type_namev) {
     const char *type_name = (const char *)type_namev;
+    size_t ci;
+    for (ci = 0; ci < sizeof apy_cursor_protos / sizeof *apy_cursor_protos;
+         ci++)
+        if (strcmp(apy_cursor_protos[ci].name, type_name) == 0) {
+            apy_value it = apy_cursor_of(0, 0,
+                                         apy_cursor_protos[ci].mode, 0);
+            if (it) O(it)->v.it.named = apy_cursor_protos[ci].named;
+            return it;
+        }
     if (strcmp(type_name, "list") == 0)  return apy_list_new(1);
     if (strcmp(type_name, "tuple") == 0) return apy_tuple_new(1);
     if (strcmp(type_name, "dict") == 0)  return apy_dict_new(1);

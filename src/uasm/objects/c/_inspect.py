@@ -256,9 +256,19 @@ static apy_value apy_descr_owner(apy_value v) {
    and nothing in the signature says which: `list.__getitem__` is written out
    and `tuple.__getitem__` is slotted. Read out of CPython per kind and per
    name -- see `apy_kind_meth_written`, which the bound half asks too. */
+/* Generated, and spliced into a LATER part -- see `_gen_kindmeth.py`. */
+static int apy_cursor_meth_written(const char *w);
+
 static int apy_descr_written(apy_value v) {
     apy_value proto = apy_descr_owner(v);
     if (!proto) return 0;
+    /* A CURSOR HAS NO BIT. The table above is keyed by the thirteen builtin
+       kinds' bits and `apy_kind_bit` of a cursor is 0, so every name read
+       off one came back "slotted" -- and `type(it).__length_hint__` printed
+       as a slot wrapper where CPython prints a method. One row answers for
+       every cursor; see `apy_cursor_meth_written`. */
+    if (O(proto)->kind == APY_ITER_K)
+        return apy_cursor_meth_written(APY_CSTR(O(v)->v.fn.name));
     return apy_kind_meth_written(APY_CSTR(O(v)->v.fn.name),
                                  apy_kind_bit(proto)) != 0;
 }
