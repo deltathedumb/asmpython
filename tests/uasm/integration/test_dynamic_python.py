@@ -3874,6 +3874,73 @@ PROGRAMS = {
 
         print("variadic:", list(gen_both(1, 2, 3, z=4)))
     """,
+    # AND A CLASS EXTENDING str IS A str WHEREVER ONE IS EXPECTED. `class
+    # S(str)` makes something CPython's `find`, `join`, `replace`, `split`,
+    # `in`, `int()`, `format` and `getattr` all take without a second
+    # thought -- they read the C-level layout, which a subclass has. Every
+    # one of them refused it here, by kind: `"-".join(["a", S("b")])` was
+    # `sequence item 1: expected str instance, S found`.
+    "a_builtin_extending_class_is_the_builtin_it_extends": """
+        class S(str):
+            def __str__(self):
+                return "nope"
+
+            def __repr__(self):
+                return "<nope>"
+
+        class Plain(str):
+            pass
+
+        s = S("b")
+        p = Plain("b")
+        # THE SEARCHES read the buffer and never ask what the class wrote,
+        # which is why `s` above defines `__str__` and still finds as "b".
+        print("find:", "abc".find(s), "abcb".rfind(s), "abc".index(s))
+        print("count:", "abcb".count(s))
+        print("in:", s in "abc")
+        print("join:", "-".join(["a", s]), "-".join([s, p]))
+        print("replace:", "abc".replace(s, "X"))
+        print("split:", "a-b".split(Plain("-")), "a-b".rsplit(Plain("-")))
+        print("affix:", "abc".startswith(Plain("a")),
+              "abc".endswith(Plain("c")))
+        # A TUPLE OF PREFIXES IS HELD TO THE SAME RULE, element by element.
+        print("affix tuple:", "abc".startswith((Plain("z"), Plain("a"))),
+              "abc".endswith((Plain("z"), Plain("c"))))
+        print("trim:", "xbx".strip(Plain("x")), "xbx".lstrip(Plain("x")))
+        print("pad:", "x".center(5, Plain("-")), "x".ljust(3, Plain(".")),
+              "x".rjust(3, Plain("-")))
+        print("affixes:", "abc".removeprefix(Plain("a")),
+              "abc".removesuffix(Plain("c")))
+        # THE SEPARATOR COMES BACK AS THE OBJECT IT WAS GIVEN, which for a
+        # subclass means the INSTANCE and not the text inside it.
+        parts = "a-b".partition(Plain("-"))
+        print("partition:", parts, type(parts[1]).__name__)
+        print("rpartition:", "a-b".rpartition(Plain("-")))
+        # THE CONVERSIONS read the buffer too.
+        print("int:", int(Plain("12")) + 1, int(Plain("ff"), 16))
+        print("float:", float(Plain("1.5")) + 0.5)
+        print("encode:", Plain("ab").encode(Plain("utf-8")),
+              bytes(Plain("ab"), "utf-8"))
+        print("decode:", b"ab".decode(Plain("utf-8")))
+        print("ord:", ord(Plain("a")))
+        print("maketrans:", "ab".translate(str.maketrans(Plain("a"),
+                                                         Plain("z"))))
+        # AND SO DO THE FORMAT STRING, THE SPEC AND THE SEPARATOR.
+        print("format:", Plain("{}-{}").format(1, 2))
+        print("percent:", Plain("%s!") % ("x",))
+        print("spec:", "{:>4}".format(p))
+        print("a", "b", sep=Plain("-"))
+        # AN ATTRIBUTE NAME IS TEXT, whatever class the text arrived in.
+        print("getattr:", getattr("abc", Plain("upper"))(),
+              hasattr("abc", Plain("upper")))
+        # THE UNBOUND SPELLING reaches the receiver gate without the unwrap
+        # a written `p.upper()` gets from `apy_method_self`.
+        print("unbound:", str.upper(p))
+        # AND A COMPARISON IS STILL THE INSTANCE'S, because a subclass may
+        # have written one: only the buffer readers unwrap.
+        print("compare:", s == "b", p == "b", hash(p) == hash("b"))
+        print("keys:", {p: 1}["b"], ["b"].index(p), p in ["b"])
+    """,
     # STR, BYTES AND BYTEARRAY WRITE A `__str__`, so it beats a subclass's
     # `__repr__`. `str(S("text"))` on a `class S(str)` answered `"'text'"` --
     # the REPR, quotes and all: six characters where the program wrote four,

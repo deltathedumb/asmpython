@@ -272,6 +272,10 @@ APY_API apy_value apy_str_encode(apy_value s, apy_value encoding,
         return apy_fail2("AttributeError",
                          "'%s' object has no attribute 'encode'%s",
                          apy_kind_name(s), "");
+    /* A str SUBCLASS NAMES A CODEC. `"ab".encode(S("utf-8"))` is ordinary
+       Python -- see `apy_text_like`. */
+    encoding = apy_text_like(encoding);
+    errors = apy_text_like(errors);
     if (apy_codec_given("encode", "encoding", encoding)) return 0;
     if (apy_codec_given("encode", "errors", errors)) return 0;
     codec = apy_codec_of(encoding);
@@ -455,6 +459,10 @@ APY_API apy_value apy_bytes_decode(apy_value b, apy_value encoding,
         return apy_fail2("AttributeError",
                          "'%s' object has no attribute 'decode'%s",
                          apy_kind_name(b), "");
+    /* A str SUBCLASS NAMES A CODEC. `b"ab".decode(S("utf-8"))` is ordinary
+       Python -- see `apy_text_like`. */
+    encoding = apy_text_like(encoding);
+    errors = apy_text_like(errors);
     if (apy_codec_given("decode", "encoding", encoding)) return 0;
     if (apy_codec_given("decode", "errors", errors)) return 0;
     codec = apy_codec_of(encoding);
@@ -629,8 +637,13 @@ APY_API apy_value apy_bytes_ctor(apy_value v, apy_value encoding,
                                  apy_value errors, int64_t mut) {
     apy_value made;
     const char *who = mut ? "bytearray" : "bytes";
+    encoding = apy_text_like(encoding);
+    errors = apy_text_like(errors);
     if (apy_codec_arg(who, "encoding", encoding)) return 0;
     if (apy_codec_arg(who, "errors", errors)) return 0;
+    /* A str SUBCLASS IS A str HERE TOO: `bytes(S("ab"), "utf-8")` encodes
+       the text it holds -- see `apy_text_like`. */
+    v = apy_text_like(v);
     if (O(v)->kind != APY_STR_K)
         return apy_fail("TypeError", "encoding without a string argument");
     /* A NONE SLOT IS ONE THE CALL NEVER WROTE, which is the constructor's

@@ -351,6 +351,19 @@ def apy_text_arg_of(meth: ptr, argno: i64, indexy: i64, self: ptr,
     INTEGER is a legal needle for them, and everything else says `a bytes-like
     object is required`.
     """
+    # AN INSTANCE OF A CLASS EXTENDING str OR bytes IS ONE, for anything
+    # that reads the buffer -- see the C's `apy_text_like`. Written out
+    # rather than called, because the subset has no helper for it and each
+    # site needs the same handful of lines.
+    held: ptr = ptr(0)
+    if i64(load(i32, offset(v, 0))) == apy_inst_kind():
+        held = ptr(load(u64, offset(v, apy_o_held_offset())))
+    if held:
+        hk: i64 = i64(load(i32, offset(held, 0)))
+        if hk == apy_str_kind():
+            v = held
+        if hk == apy_bytes_kind():
+            v = held
     want: i64 = apy_str_kind()
     if i64(load(i32, offset(self, 0))) == apy_bytes_kind():
         want = apy_bytes_kind()

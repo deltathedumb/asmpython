@@ -390,6 +390,18 @@ def apy_str_self_of(name: ptr, v: ptr) -> i64:
         return 1
     if k == apy_bytes_kind():
         return 1
+    # AN INSTANCE OF A CLASS EXTENDING str OR bytes IS A RECEIVER TOO. The
+    # written `s.upper()` reaches this having been unwrapped by
+    # `apy_method_self`; the unbound `str.upper(s)` does not, and reported
+    # that a str subclass had no attribute `upper`.
+    if k == apy_inst_kind():
+        held: ptr = ptr(load(u64, offset(v, apy_o_held_offset())))
+        if held:
+            hk: i64 = i64(load(i32, offset(held, 0)))
+            if hk == apy_str_kind():
+                return 1
+            if hk == apy_bytes_kind():
+                return 1
     apy_raise_fmt(
         rodata(b"AttributeError\0"),
         rodata(b"'%s' object has no attribute '%s'\0"),

@@ -252,7 +252,12 @@ APY_API apy_value apy_format(apy_value v, apy_value spec) {
         if (no) return apy_fail("ValueError", no);
     }
 
-    if (sp.type == 's' || (!sp.type && O(v)->kind == APY_STR_K)) {
+    /* AN INSTANCE OF A CLASS EXTENDING str FORMATS AS TEXT. With no type
+       character the spec takes its presentation from the VALUE, and asking
+       only the kind sent `"{:>3}".format(S("b"))` past every branch to
+       `Unknown format code 's' for object of type 'S'` -- about a value
+       CPython pads as the string it is. */
+    if (sp.type == 's' || (!sp.type && O(apy_text_like(v))->kind == APY_STR_K)) {
         apy_value s = apy_str(v);
         int64_t len;
         if (!s) return 0;
@@ -471,6 +476,10 @@ static apy_value apy_format_at(apy_value fmt, apy_value args, apy_value kw,
     const char *p;
     int64_t n, i = 0, out_cap, out_n = 0;
     char *out;
+    /* A str SUBCLASS IS THE FORMAT STRING TOO: `S("{}").format(1)` works in
+       CPython, and this reaches the instance itself because `format` is
+       compiled to a direct call rather than through `apy_method_self`. */
+    fmt = apy_text_like(fmt);
     if (O(fmt)->kind != APY_STR_K)
         return apy_fail2("AttributeError",
                          "'%s' object has no attribute 'format'%s",
@@ -1021,6 +1030,7 @@ APY_API apy_value apy_str_format(apy_value fmt, apy_value args, apy_value kw) {
    key is the mapping's KeyError rather than a formatting error of its own. */
 APY_API apy_value apy_str_format_map(apy_value fmt, apy_value mapping) {
     apy_value empty;
+    fmt = apy_text_like(fmt);
     if (O(fmt)->kind != APY_STR_K)
         return apy_fail2("AttributeError",
                          "'%s' object has no attribute 'format_map'%s",

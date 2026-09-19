@@ -42,6 +42,14 @@ C = r"""/* --- string methods --------------------------------------------------
 static int apy_str_self(const char *name, apy_value v);
 APY_API int64_t apy_str_self_of(apy_value name, apy_value v) {
     if (O(v)->kind == APY_STR_K || O(v)->kind == APY_BYTES_K) return 1;
+    /* AN INSTANCE OF A CLASS EXTENDING str OR bytes IS ONE HERE TOO. The
+       written `s.upper()` reaches this having been unwrapped by
+       `apy_method_self`; `str.upper(s)` -- the unbound spelling -- does not,
+       and reported that a str subclass had no attribute `upper`. */
+    if (O(v)->kind == APY_INST_K && O(v)->v.o.held
+            && (O(O(v)->v.o.held)->kind == APY_STR_K
+                || O(O(v)->v.o.held)->kind == APY_BYTES_K))
+        return 1;
     apy_fail2("AttributeError", "'%s' object has no attribute '%s'",
               apy_kind_name(v), (const char *)name);
     return 0;
@@ -99,6 +107,25 @@ static int apy_str_other(const char *meth, int argno, apy_value v) {
 
 APY_API apy_value apy_mview_bytes(apy_value v);
 
+/* AN INSTANCE OF A CLASS EXTENDING str OR bytes IS ONE, for anything that
+   reads the buffer. `class S(str)` makes something CPython's `find`, `join`,
+   `replace`, `split` and `in` all take without a second thought -- they read
+   the C-level layout, which a subclass has. Every one of them refused it
+   here, by kind.
+
+   UNGATED, unlike `apy_as_builtin`: a class that writes `__str__` or `__eq__`
+   changes none of this, because `str.find` never asks. `"abc".find(s)` is 1
+   for an `s` whose `__str__` answers something else entirely.
+
+   Identity for everything else, so this drops in FRONT of an existing test
+   rather than beside it. */
+static apy_value apy_text_like(apy_value v) {
+    apy_value held = O(v)->kind == APY_INST_K ? O(v)->v.o.held : 0;
+    if (held && (O(held)->kind == APY_STR_K || O(held)->kind == APY_BYTES_K))
+        return held;
+    return v;
+}
+
 /* A TEXT ARGUMENT AGAINST ITS RECEIVER: the value to use, or 0 having
    refused. The gate above asks only "is this str or bytes", which let either
    kind through for either receiver -- so `"abc".find(b"a")` answered 0 and
@@ -119,6 +146,7 @@ static apy_value apy_text_arg(const char *meth, int argno, int indexy,
                               apy_value self, apy_value v) {
     int want_bytes = O(self)->kind == APY_BYTES_K;
     char buf[160];
+    v = apy_text_like(v);
     if (want_bytes && O(v)->kind == APY_MVIEW_K) v = apy_mview_bytes(v);
     if (O(v)->kind == (want_bytes ? APY_BYTES_K : APY_STR_K)) return v;
     /* AN INTEGER IS A LEGAL NEEDLE FOR THE SEARCHES, which is what the
@@ -860,6 +888,7 @@ static apy_value apy_str_trim(apy_value s, apy_value chars, const char *meth,
        `b'abc'.strip('a')` is a TypeError in CPython as well -- which the
        kind comparison below gets by asking whether they MATCH rather than
        whether the argument is a str. */
+    if (chars) chars = apy_text_like(chars);
     if (chars && O(chars)->kind != APY_NONE_K && O(chars)->kind != O(s)->kind) {
         /* Its own wording, naming NEITHER the offending kind nor a position:
            `strip arg must be None or str`. */
@@ -1095,7 +1124,7 @@ APY_API apy_value apy_str_split_impl_of(apy_value s, apy_value sep,
     if (O(s)->kind == APY_BYTES_K) {
         sep = apy_text_arg("split", 0, 0, s, sep);
         if (!sep) return 0;
-    } else if (O(sep)->kind != APY_STR_K) {
+    } else if (O((sep = apy_text_like(sep)))->kind != APY_STR_K) {
         /* A STR RECEIVER HAS ITS OWN WORDING, and it mentions None because
            None is what a separator may also be. */
         return apy_fail2("TypeError", "must be str or None, not %s%s",
@@ -1177,7 +1206,14 @@ APY_API apy_value apy_str_splitlines_keep(apy_value s, apy_value keep) {
    which is the only asymmetry between them and is easy to get backwards. */
 static apy_value apy_partition_impl(apy_value s, apy_value sep, int from_right) {
     apy_value out = apy_seq_new(APY_TUPLE_K, 3);
+    /* THE SEPARATOR COMES BACK AS THE OBJECT IT WAS HANDED, which for a str
+       subclass means the INSTANCE and not the text inside it: CPython's
+       `partition` increfs and returns `sep` itself, so
+       `type("a-b".partition(S("-"))[1])` is `S`. The search below reads the
+       buffer, which is what `apy_text_like` is for. */
+    apy_value given = sep;
     int64_t n = O(s)->v.s.n, m, at;
+    sep = apy_text_like(sep);
     /* `must be str, not int` -- no method name at all, which is how CPython
        words this one and unlike every other method in this file.
        BYTES TOO -- `b"abc".partition(b"b")` is the same operation -- and a
@@ -1201,7 +1237,7 @@ static apy_value apy_partition_impl(apy_value s, apy_value sep, int from_right) 
         return out;
     }
     apy_q_append(out, apy_str_slice_of(s, 0, at));
-    apy_q_append(out, sep);
+    apy_q_append(out, given);
     apy_q_append(out, apy_str_slice_of(s, at + m, n));
     return out;
 }
@@ -1303,6 +1339,7 @@ APY_API apy_value apy_str_join(apy_value sep, apy_value parts) {
            two refusals differently: `expected str instance` for a str
            separator and `expected a bytes-like object` for a bytes one --
            which a MEMORYVIEW satisfies, and used to be refused. */
+        got[i] = apy_text_like(got[i]);
         if (O(sep)->kind == APY_BYTES_K && O(got[i])->kind == APY_MVIEW_K)
             got[i] = apy_mview_bytes(got[i]);
         if (O(got[i])->kind != O(sep)->kind) {
@@ -1437,7 +1474,7 @@ APY_API apy_value apy_affix_of(apy_value s, apy_value fix, apy_value start,
             if (O(s)->kind == APY_BYTES_K) {
                 one = apy_text_arg(meth, 0, 0, s, one);
                 if (!one) return 0;
-            } else if (O(one)->kind != APY_STR_K) {
+            } else if (O((one = apy_text_like(one)))->kind != APY_STR_K) {
                 return apy_fail2("TypeError",
                                  "tuple for %s must only contain str, not %s",
                                  meth, apy_kind_name(one));
@@ -1455,7 +1492,7 @@ APY_API apy_value apy_affix_of(apy_value s, apy_value fix, apy_value start,
             return apy_fail2("TypeError",
                              "%s first arg must be bytes or a tuple of "
                              "bytes, not %s", meth, apy_kind_name(fix));
-    } else if (O(fix)->kind != APY_STR_K) {
+    } else if (O((fix = apy_text_like(fix)))->kind != APY_STR_K) {
         return apy_fail2("TypeError",
                          "%s first arg must be str or a tuple of str, not %s",
                          meth, apy_kind_name(fix));
@@ -1507,6 +1544,7 @@ static int apy_fill_char(apy_value fill, const char **out, int64_t *nbytes) {
        handed. A bytes fill is one ELEMENT when it is one byte, which is the
        same rule `apy_str_chars` applies to a str -- so only the counting
        differs, not the check. */
+    fill = apy_text_like(fill);
     if (O(fill)->kind != APY_STR_K && O(fill)->kind != APY_BYTES_K) {
         apy_fail2("TypeError",
                   "The fill character must be a unicode character, not %s%s",

@@ -444,6 +444,13 @@ def apy_setattr(obj: ptr, name: ptr, value: ptr) -> ptr:
     invisible. BOTH spellings are kept, because generated code raises through
     the mangled one.
     """
+    # A str SUBCLASS IS AN ATTRIBUTE NAME -- see `apy_getattr`.
+    nheld: ptr = ptr(0)
+    if i64(load(i32, offset(name, 0))) == apy_inst_kind():
+        nheld = ptr(load(u64, offset(name, apy_o_held_offset())))
+    if nheld:
+        if i64(load(i32, offset(nheld, 0))) == apy_str_kind():
+            name = nheld
     if i64(load(i32, offset(obj, 0))) == apy_type_kind():
         if i64(load(i32, offset(name, 0))) == apy_str_kind():
             if apy_cstr_eq(
@@ -1942,6 +1949,16 @@ def apy_getattr(obj: ptr, name: ptr) -> ptr:
     handing it `obj` as well would put the object in front of its own
     argument and every name would arrive one place late.
     """
+    # A str SUBCLASS IS AN ATTRIBUTE NAME. `getattr("abc", S("upper"))` is
+    # ordinary Python; the instance reached the lookup as a name and the text
+    # read out of it was whatever lay at the instance's address. Mirrors the
+    # C's `apy_text_like`.
+    nheld: ptr = ptr(0)
+    if i64(load(i32, offset(name, 0))) == apy_inst_kind():
+        nheld = ptr(load(u64, offset(name, apy_o_held_offset())))
+    if nheld:
+        if i64(load(i32, offset(nheld, 0))) == apy_str_kind():
+            name = nheld
     if i64(load(i32, offset(obj, 0))) == apy_inst_kind():
         hook: ptr = apy_class_find_of(
             ptr(load(u64, offset(obj, apy_o_cls_offset()))),

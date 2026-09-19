@@ -358,6 +358,19 @@ def apy_str_split_impl_of(s: ptr, sep: ptr, limit: ptr,
         return apy_split_ws_of(s, maxsplit, from_right)
     if i64(load(i32, offset(sep, 0))) == apy_none_kind():
         return apy_split_ws_of(s, maxsplit, from_right)
+    # AN INSTANCE OF A CLASS EXTENDING str OR bytes IS ONE, for anything
+    # that reads the buffer -- see the C's `apy_text_like`. Written out
+    # rather than called, because the subset has no helper for it and three
+    # sites need the same six lines.
+    held: ptr = ptr(0)
+    if i64(load(i32, offset(sep, 0))) == apy_inst_kind():
+        held = ptr(load(u64, offset(sep, apy_o_held_offset())))
+    if held:
+        hk: i64 = i64(load(i32, offset(held, 0)))
+        if hk == apy_str_kind():
+            sep = held
+        if hk == apy_bytes_kind():
+            sep = held
     # THE RECEIVER DECIDES. A bytes separator used to pass for a str receiver
     # and back, so `b"a,b".split(",")` answered `[b'a', b'b']` -- a wrong
     # answer where CPython refuses.

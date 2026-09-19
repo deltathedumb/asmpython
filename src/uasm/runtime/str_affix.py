@@ -146,6 +146,17 @@ def apy_affix_of(s: ptr, fix: ptr, start: ptr, end: ptr,
         i: i64 = 0
         while i < count:
             one: ptr = ptr(load(u64, offset(items, i * apy_value_size())))
+            # AN INSTANCE OF A CLASS EXTENDING str OR bytes IS ONE, for
+            # anything that reads the buffer -- see the C's `apy_text_like`.
+            theld: ptr = ptr(0)
+            if i64(load(i32, offset(one, 0))) == apy_inst_kind():
+                theld = ptr(load(u64, offset(one, apy_o_held_offset())))
+            if theld:
+                thk: i64 = i64(load(i32, offset(theld, 0)))
+                if thk == apy_str_kind():
+                    one = theld
+                if thk == apy_bytes_kind():
+                    one = theld
             # A TUPLE ELEMENT IS HELD TO THE RECEIVER'S KIND TOO, and CPython
             # words that one differently from the whole-argument refusal
             # above it: `a bytes-like object is required` for a bytes
@@ -165,6 +176,17 @@ def apy_affix_of(s: ptr, fix: ptr, start: ptr, end: ptr,
                 return apy_from_bool(1)
             i = i + 1
         return apy_from_bool(0)
+    # AN INSTANCE OF A CLASS EXTENDING str OR bytes IS ONE, for anything
+    # that reads the buffer -- see the C's `apy_text_like`.
+    held: ptr = ptr(0)
+    if i64(load(i32, offset(fix, 0))) == apy_inst_kind():
+        held = ptr(load(u64, offset(fix, apy_o_held_offset())))
+    if held:
+        hk: i64 = i64(load(i32, offset(held, 0)))
+        if hk == apy_str_kind():
+            fix = held
+        if hk == apy_bytes_kind():
+            fix = held
     # THE RECEIVER DECIDES, and so does the wording: a bytes receiver says
     # `must be bytes or a tuple of bytes`. Either kind used to pass for
     # either receiver, so `b"abc".startswith("a")` answered True.

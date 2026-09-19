@@ -1592,6 +1592,12 @@ APY_API apy_value apy_contains(apy_value needle, apy_value hay) {
     }
     if (O(hay)->kind == APY_STR_K) {
         int64_t n, m;
+        /* A str SUBCLASS IS A str for the substring search -- see
+           `apy_text_like`. Read here rather than through it, because
+           `_strings.c` comes after this part. */
+        if (O(needle)->kind == APY_INST_K && O(needle)->v.o.held
+                && O(O(needle)->v.o.held)->kind == APY_STR_K)
+            needle = O(needle)->v.o.held;
         if (O(needle)->kind != APY_STR_K)
             return apy_fail2("TypeError",
                              "'in <string>' requires string as left operand, "
@@ -2010,6 +2016,12 @@ APY_API apy_value apy_to_int(apy_value v) {
             if (apy_error_occurred()) return 0;
         }
         if (got) return got;
+        /* AND WITH NEITHER DUNDER, THE BUILTIN IT EXTENDS ANSWERS.
+           `int(S("12"))` for a `class S(str)` parses the text in CPython and
+           `int(I(5))` for a `class I(int)` is 5 -- the conversion reads the
+           C-level layout, which a subclass has. This reported that a str
+           subclass was not a number. */
+        if (O(v)->v.o.held) return apy_to_int(O(v)->v.o.held);
     }
     if (O(v)->kind == APY_FLOAT_K) {
         /* `int(nan)` and `int(inf)` are errors, not whatever a cast gives --
@@ -2079,6 +2091,10 @@ APY_API apy_value apy_to_float(apy_value v) {
             if (got) return apy_to_float(got);
         }
         if (got) return got;
+        /* AND WITH NEITHER DUNDER, THE BUILTIN IT EXTENDS ANSWERS -- see
+           `apy_to_int`. `float(S("1.5"))` reads the text a str subclass
+           holds. */
+        if (O(v)->v.o.held) return apy_to_float(O(v)->v.o.held);
     }
     if (O(v)->kind == APY_FLOAT_K) return v;
     if (apy_is_big(v)) {

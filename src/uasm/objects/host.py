@@ -3509,6 +3509,24 @@ def _apy_is_num_of(h, a):
     return 1 if isinstance(v, (int, bool, float)) else 0
 
 
+def _held_text(v):
+    """An instance of a class extending str, bytes or bytearray, AS the value
+    it holds. Identity for everything else.
+
+    `class S(str)` makes something CPython's `find`, `join`, `replace`,
+    `split` and `in` all take without a second thought -- they read the
+    C-level layout, which a subclass has. Every one of them refused it here,
+    and the refusal named `Instance`, a class of this file's.
+
+    UNGATED BY WHAT THE CLASS WROTE, unlike the dunder routes: `"abc".find(s)`
+    is 1 for an `s` whose `__str__` answers something else entirely, because
+    `str.find` never asks. Mirrors the C's `apy_text_like`.
+    """
+    if isinstance(v, Instance) and isinstance(v.held, (str, bytes, bytearray)):
+        return v.held
+    return v
+
+
 def _apy_str_self_of(h, a):
     """Is this a str or bytes receiver? Raises naming the method if not.
 
@@ -3518,7 +3536,7 @@ def _apy_str_self_of(h, a):
     same way.
     """
     name = str(h._get(a[0], "apy_str_self_of"))
-    v = h._get(a[1], "apy_str_self_of")
+    v = _held_text(h._get(a[1], "apy_str_self_of"))
     if isinstance(v, (str, bytes, bytearray)):
         return 1
     h.err = ("AttributeError",
@@ -3694,8 +3712,9 @@ def _apy_print_with(h, a):
     the default, which is what an omitted one lowers to -- so "not given" and
     "given as None" are the same request."""
     addr, n = int(a[0]), int(a[1])
-    sep = h._get(a[2], "apy_print_with")
-    end = h._get(a[3], "apy_print_with")
+    # A str SUBCLASS IS A SEPARATOR -- see `_held_text`.
+    sep = _held_text(h._get(a[2], "apy_print_with"))
+    end = _held_text(h._get(a[3], "apy_print_with"))
     parts = []
     for i in range(n):
         handle = h._interp.mem.read(addr + i * 8, _PTR)
@@ -4359,7 +4378,8 @@ def _apy_format(h, a):
 def _apy_str_format(h, a):
     """`"{} {:>5} {name!r}".format(...)` -- the replacement-field syntax around
     the spec `apy_format` reads."""
-    fmt = h._get(a[0], "apy_str_format")
+    # A str SUBCLASS IS THE FORMAT STRING TOO -- see `_held_text`.
+    fmt = _held_text(h._get(a[0], "apy_str_format"))
     if not isinstance(fmt, str):
         return h._fail("AttributeError",
                        f"'{h.kind_name(fmt)}' object has no attribute 'format'")
@@ -4394,8 +4414,9 @@ def _codec_args(h, a, who):
     Answers None for a name no codec matches, which is a LookupError and not a
     silent fall back to UTF-8 -- the C refuses it and so must this.
     """
-    enc = h._get(a[1], who) if len(a) > 1 else None
-    err = h._get(a[2], who) if len(a) > 2 else None
+    # A str SUBCLASS NAMES A CODEC -- see `_held_text`.
+    enc = _held_text(h._get(a[1], who)) if len(a) > 1 else None
+    err = _held_text(h._get(a[2], who)) if len(a) > 2 else None
     name = _CODECS.get(str(enc).lower().replace("_", "-")) if enc is not None         else "utf-8"
     handler = str(err) if err is not None else "strict"
     # EVERY HANDLER CPYTHON ANSWERS WITHOUT A REGISTERED CALLBACK, which is
@@ -4410,7 +4431,10 @@ def _codec_args(h, a, who):
 
 
 def _apy_str_encode(h, a):
-    v = h._get(a[0], "apy_str_encode")
+    # A str SUBCLASS IS A str HERE TOO -- see `_held_text`. The method
+    # spelling arrives unwrapped through `apy_method_self`; the constructor
+    # `bytes(S("ab"), "utf-8")` reaches this with the instance itself.
+    v = _held_text(h._get(a[0], "apy_str_encode"))
     if not isinstance(v, str):
         return h._fail("AttributeError", f"'{h.kind_name(v)}' object has no "
                                          f"attribute 'encode'")
@@ -4440,7 +4464,7 @@ def _codec_arg(h, who, slot, handle):
     travels to the codec pair, and `str(b, errors="replace")` defaults the
     encoding to UTF-8 rather than refusing.
     """
-    v = h._get(handle, "apy_codec_arg")
+    v = _held_text(h._get(handle, "apy_codec_arg"))
     if v is None or isinstance(v, str):
         return 0
     h._fail("TypeError", f"{who}() argument {slot!r} must be str, "
@@ -4468,7 +4492,7 @@ def _codec_given(h, who, slot, handle):
     `not None` AND NOT `not NoneType`, because the arg clinic writes the
     VALUE for these two and the type for everything else.
     """
-    v = h._get(handle, "apy_codec_arg") if handle else None
+    v = _held_text(h._get(handle, "apy_codec_arg")) if handle else None
     if isinstance(v, str):
         return 0
     h._fail("TypeError",
@@ -4491,7 +4515,7 @@ def _apy_bytes_ctor(h, a):
         return 0
     if _codec_arg(h, who, "errors", a[2]):
         return 0
-    v = h._get(a[0], "apy_bytes_ctor")
+    v = _held_text(h._get(a[0], "apy_bytes_ctor"))
     if not isinstance(v, str):
         return h._fail("TypeError", "encoding without a string argument")
     # A NONE SLOT IS ONE THE CALL NEVER WROTE, which is the constructor's own
@@ -5168,9 +5192,10 @@ def _apy_str_maketrans(h, a):
     and hand it to `translate`. None as the third argument is the
     two-argument form; the frontend always passes three.
     """
-    first = h._get(a[0], "apy_str_maketrans")
-    second = h._get(a[1], "apy_str_maketrans")
-    drop = h._get(a[2], "apy_str_maketrans")
+    # A str SUBCLASS IS A str HERE TOO -- see `_held_text`.
+    first = _held_text(h._get(a[0], "apy_str_maketrans"))
+    second = _held_text(h._get(a[1], "apy_str_maketrans"))
+    drop = _held_text(h._get(a[2], "apy_str_maketrans"))
     if not isinstance(first, str) or not isinstance(second, str):
         return h._fail("TypeError", "maketrans() arguments must be strings")
     if len(first) != len(second):
@@ -6967,6 +6992,11 @@ def _apy_contains(h, a):
     if isinstance(hay, (list, tuple, set, frozenset, dict, str, bytes,
                         bytearray, range, memoryview, Instance)) \
             or isinstance(hay, _VIEW_TYPES):
+        # A str SUBCLASS IS A str FOR THE SUBSTRING SEARCH. Only for one:
+        # `S("b") in ["a", S("b")]` is a comparison and must stay the
+        # instance's, which `__eq__` may have been written for.
+        if isinstance(hay, (str, bytes, bytearray)):
+            needle = _held_text(needle)
         try:
             return h._bool(needle in hay)
         except _UserFailed:
@@ -7006,6 +7036,10 @@ def _apy_to_int(h, a):
         return h._value(got)
     if h.err is not None:
         return 0
+    # AND WITH NEITHER DUNDER, THE BUILTIN IT EXTENDS ANSWERS. `int(S("12"))`
+    # for a `class S(str)` parses the text in CPython -- the conversion reads
+    # the C-level layout, which a subclass has.
+    v = _held_text(v)
     if not isinstance(v, (int, float, str)):
         return h._fail("TypeError",
                        f"int() argument must be a string, a bytes-like "
@@ -7032,7 +7066,8 @@ def _apy_to_float(h, a):
         return h._value(float(_got) if isinstance(_got, int) else _got)
     if h.err is not None:
         return 0
-    v = h._get(a[0], "apy_to_float")
+    # THE BUILTIN A CLASS EXTENDS ANSWERS -- see `_apy_to_int`.
+    v = _held_text(h._get(a[0], "apy_to_float"))
     if not isinstance(v, (int, float, str)):
         return h._fail("TypeError",
                        f"float() argument must be a string or a real number, "
@@ -7173,7 +7208,8 @@ def _apy_hex(h, a):
 def _apy_to_int_base(h, a):
     """`int(s, base)` for any base from 2 to 36, and base 0 -- which means
     "read the prefix", so `int('0x1f', 0)` is 31 and `int('17', 0)` is 17."""
-    v = h._get(a[0], "apy_to_int_base")
+    # A str SUBCLASS IS A str HERE TOO -- see `_held_text`.
+    v = _held_text(h._get(a[0], "apy_to_int_base"))
     base = h._get(a[1], "apy_to_int_base")
     if not isinstance(v, str):
         return h._fail("TypeError",
@@ -12553,6 +12589,10 @@ def _apy_index_of(h, a):
     # element loop below answers for a one-character needle and silently
     # wrongly for any longer one.
     if isinstance(v, _TEXTY):
+        # A str SUBCLASS IS A str FOR A SUBSTRING SEARCH -- and only for
+        # one: the element loop below is a COMPARISON, which must stay the
+        # instance's so a written `__eq__` has its say.
+        item = _held_text(item)
         try:
             return h._int(v.index(item))
         except ValueError as exc:
@@ -12590,6 +12630,11 @@ def _index_bounded(h, a, has_end):
     if not isinstance(seq, (str, bytes, bytearray, list, tuple, memoryview)):
         return h._fail("AttributeError",
                        f"'{h.kind_name(seq)}' object has no attribute 'index'")
+    # A str SUBCLASS IS A str FOR A SUBSTRING SEARCH -- and ONLY for one:
+    # `["a"].index(S("a"))` is a comparison, and must stay the instance's so
+    # that a written `__eq__` has its say.
+    if isinstance(seq, (str, bytes, bytearray)):
+        item = _held_text(item)
     # A SEQUENCE'S `index` TAKES NO None AT ALL, where a string's does --
     # CPython leaves the `or None` out of this one, and it is the only thing
     # that tells the two messages apart. A VIEW is one of the sequences.
@@ -12641,6 +12686,8 @@ def _str_rindex(h, a, has_end):
     if not isinstance(s, (str, bytes, bytearray)):
         return h._fail("AttributeError", f"'{h.kind_name(s)}' object has no "
                                          f"attribute 'rindex'")
+    # A str SUBCLASS IS A str FOR A SUBSTRING SEARCH -- see `_held_text`.
+    sub = _held_text(sub)
     try:
         at = s.rindex(sub, 0 if lo is None else lo,
                       len(s) if hi is None else hi)
@@ -12687,7 +12734,7 @@ def _apy_count_of(h, a):
         # and take the whole interpreter down with a traceback, where a
         # compiled program raises it and a handler catches it.
         try:
-            return h._int(_v.count(h._get(a[1], "apy_count_of")))
+            return h._int(_v.count(_held_text(h._get(a[1], "apy_count_of"))))
         except TypeError as exc:
             return h._fail_like(exc)
     seq = h._get(a[0], "apy_count_of")
@@ -12697,6 +12744,8 @@ def _apy_count_of(h, a):
     # not 0. Walking a str as a list of characters answered 0 for every
     # multi-character needle.
     if isinstance(seq, _TEXTY):
+        # A str SUBCLASS IS A str FOR A SUBSTRING COUNT -- see `_held_text`.
+        item = _held_text(item)
         # A BYTEARRAY COUNTS BYTES, so `bytearray(b"a-b").count(b"-")` is an
         # ordinary call -- the needle need not be the receiver's exact type,
         # only its FAMILY.
@@ -12939,11 +12988,22 @@ def _make_str_method(symbol: str, method: str, argc: int):
         # compiled runtimes hold one as a bytes cell that admits it is
         # mutable, and answered every method. Here it was an AttributeError
         # about a method Python plainly has.
+        # AN INSTANCE OF A CLASS EXTENDING ONE OF THE THREE IS ONE, both as
+        # the receiver and as an argument -- see `_held_text`. The receiver
+        # arrives unwrapped for a written `s.upper()`, which goes through
+        # `apy_method_self`; the unbound `str.upper(s)` does not.
+        receiver = _held_text(receiver)
         if not isinstance(receiver, (str, bytes, bytearray)):
             return h._fail(
                 "AttributeError",
                 f"'{h.kind_name(receiver)}' object has no attribute '{_m}'")
-        args = [h._get(a[i + 1], _sym) for i in range(_n)]
+        given = [h._get(a[i + 1], _sym) for i in range(_n)]
+        args = [_held_text(one) for one in given]
+        # A TUPLE OF PREFIXES IS HELD TO THE SAME RULE, element by element:
+        # `"abc".startswith((S("z"), S("a")))` is True in CPython, and the
+        # whole-argument unwrap above leaves a tuple alone.
+        if _m in ("startswith", "endswith") and isinstance(args[0], tuple):
+            args[0] = tuple(_held_text(one) for one in args[0])
         # A GENERATOR OR CURSOR ARGUMENT IS DRAINED FIRST. `join` is the one
         # that takes an iterable, and once generator expressions became real
         # generators `sep.join(f(x) for x in xs)` started arriving here as a
@@ -12996,10 +13056,30 @@ def _make_str_method(symbol: str, method: str, argc: int):
             if drained is None:
                 return 0
             args[0] = drained
+        # ITS ELEMENTS ARE WHAT MUST BE str, whatever they arrived in --
+        # a written list reaches here without the drain above, and it was
+        # `"-".join(["a", S("b")])` that reported an `Instance` where
+        # CPython answered `a-b`.
+        if _m == "join" and isinstance(args[0], (list, tuple)):
+            args[0] = [_held_text(one) for one in args[0]]
         try:
-            return h._value(getattr(receiver, _m)(*args))
+            got = getattr(receiver, _m)(*args)
         except _HOST_RAISES as exc:
             return h._fail_like(exc)
+        # PARTITION HANDS THE SEPARATOR BACK AS THE OBJECT IT WAS GIVEN,
+        # which for a str subclass means the INSTANCE and not the text
+        # inside it: CPython's `partition` increfs and returns `sep` itself,
+        # so `type("a-b".partition(S("-"))[1])` is `S`.
+        #
+        # ONLY FOR AN INSTANCE, and only when the separator was FOUND. A
+        # bytearray receiver answers three BYTEARRAYS whatever it was
+        # handed, so putting a plain `b"-"` back in the middle made
+        # `bytearray(b"a-b").partition(b"-")` disagree with CPython; and a
+        # miss puts an empty str there, which is str's own.
+        if _m in ("partition", "rpartition") and got[1] \
+                and isinstance(given[0], Instance):
+            got = (got[0], given[0], got[2])
+        return h._value(got)
     return binding
 
 
@@ -13014,7 +13094,7 @@ def _apy_str_format_map(h, a):
     sees for a non-mapping is whatever the subscript refused with -- which is
     why the two messages here are a subscript's and not a signature's.
     """
-    fmt = h._get(a[0], "apy_str_format_map")
+    fmt = _held_text(h._get(a[0], "apy_str_format_map"))
     mapping = h._get(a[1], "apy_str_format_map")
     if not isinstance(fmt, str):
         return h._fail("AttributeError",
@@ -14154,7 +14234,8 @@ _TABLE["apy_complex_of"] = _apy_complex_of
 # the same program would disagree with each other -- see below.
 
 def _apy_ord(h, a):
-    v = h._get(a[0], "apy_ord")
+    # A str SUBCLASS IS A str HERE TOO -- see `_held_text`.
+    v = _held_text(h._get(a[0], "apy_ord"))
     if isinstance(v, bytes):
         if len(v) != 1:
             return h._fail("TypeError", "ord() expected a character, but "
@@ -16190,8 +16271,9 @@ def _apy_print_seq_with(h, a):
     silently.
     """
     items = h._get(a[0], "apy_print_seq_with")
-    sep = h._get(a[1], "apy_print_seq_with")
-    end = h._get(a[2], "apy_print_seq_with")
+    # A str SUBCLASS IS A SEPARATOR -- see `_held_text`.
+    sep = _held_text(h._get(a[1], "apy_print_seq_with"))
+    end = _held_text(h._get(a[2], "apy_print_seq_with"))
     text = (sep if isinstance(sep, str) else " ").join(
         h._text(v, False) for v in items)
     h._interp._emit(text + (end if isinstance(end, str) else "\n"))

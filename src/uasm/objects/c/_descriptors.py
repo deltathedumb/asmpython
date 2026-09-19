@@ -119,6 +119,10 @@ APY_API apy_value apy_getattr_default(apy_value obj, apy_value name,
 }
 
 APY_API apy_value apy_getattr(apy_value obj, apy_value name) {
+    /* A str SUBCLASS IS AN ATTRIBUTE NAME. `getattr("abc", S("upper"))` is
+       ordinary Python; the instance reached the lookup as a name and the
+       text read out of it was whatever lay at the instance's address. */
+    name = apy_text_like(name);
     /* `__getattribute__` INTERCEPTS EVERYTHING, before the instance dict is
        even looked at -- that is what distinguishes it from `__getattr__`,
        which is consulted only after a miss. Asked here rather than inside the
@@ -1226,6 +1230,8 @@ APY_API apy_value apy_id(apy_value v) {
 }
 
 APY_API apy_value apy_ord(apy_value v) {
+    /* A str SUBCLASS IS A str HERE TOO -- see `apy_text_like`. */
+    v = apy_text_like(v);
     if (O(v)->kind == APY_BYTES_K) {
         if (O(v)->v.s.n != 1)
             return apy_fail("TypeError",
@@ -1369,6 +1375,10 @@ APY_API apy_value apy_str_maketrans(apy_value a, apy_value b, apy_value drop) {
         }
         return out;
     }
+    /* A str SUBCLASS IS A str HERE TOO -- `str.maketrans(S("a"), S("z"))`
+       builds the same table CPython's does. */
+    a = apy_text_like(a);
+    b = apy_text_like(b);
     if (O(a)->kind != APY_STR_K || O(b)->kind != APY_STR_K)
         return apy_fail("TypeError",
                         "maketrans() arguments must be strings");
@@ -1599,7 +1609,9 @@ APY_API apy_value apy_callable(apy_value v) {
 }
 
 APY_API apy_value apy_hasattr(apy_value v, apy_value name) {
-    apy_value got = apy_getattr(v, name);
+    apy_value got;
+    name = apy_text_like(name);
+    got = apy_getattr(v, name);
     if (got) return apy_from_bool(1);
     /* `hasattr` ANSWERS rather than propagating: a missing attribute is False,
        not the AttributeError the lookup raised. */
@@ -1690,6 +1702,7 @@ APY_API apy_value apy_default_setattr(apy_value obj, apy_value name,
                                       apy_value value);
 
 APY_API apy_value apy_setattr(apy_value obj, apy_value name, apy_value value) {
+    name = apy_text_like(name);
     /* `__setattr__` INTERCEPTS EVERY assignment, the mirror of
        `__getattribute__`. Asked here rather than inside the default so that
        the default stays callable from within the override -- which is what

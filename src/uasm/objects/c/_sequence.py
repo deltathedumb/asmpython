@@ -12,6 +12,10 @@ C = r"""/* --- sequences -------------------------------------------------------
 static int apy_is_int_like(apy_value v);
 static int apy_eq_raw(apy_value a, apy_value b);
 static apy_value apy_text(apy_value v, int quoted);
+/* An instance of a class extending str or bytes, AS the value it holds.
+   Defined in `_strings.c`; declared here because `apy_print_with` below is
+   the first thing to need it. */
+static apy_value apy_text_like(apy_value v);
 
 static const char *apy_exc_shown(const char *name);
 APY_API apy_value apy_kind_name_of(apy_value v);
@@ -861,6 +865,11 @@ APY_API void apy_print_with(apy_value items, int64_t n, apy_value sep,
     int64_t i;
     const char *sp = " ";
     int64_t spn = 1;
+    /* A str SUBCLASS IS A SEPARATOR: `print("a", "b", sep=S("-"))` writes
+       `a-b` in CPython and the kind test alone fell back to a space --
+       a wrong answer rather than a refusal. */
+    sep = apy_text_like(sep);
+    end = apy_text_like(end);
     if (O(sep)->kind == APY_STR_K) { sp = APY_CSTR(sep); spn = O(sep)->v.s.n; }
     for (i = 0; i < n; i++) {
         apy_value s;

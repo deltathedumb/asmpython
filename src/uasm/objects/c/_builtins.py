@@ -201,6 +201,8 @@ APY_API apy_value apy_to_int_base(apy_value v, apy_value base) {
     int64_t b, i, lo, hi;
     int neg = 0;
     apy_value acc;
+    /* A str SUBCLASS IS A str HERE TOO -- see `apy_text_like`. */
+    v = apy_text_like(v);
     if (O(v)->kind != APY_STR_K)
         return apy_fail2("TypeError",
                          "int() can't convert non-string with explicit base%s%s",
